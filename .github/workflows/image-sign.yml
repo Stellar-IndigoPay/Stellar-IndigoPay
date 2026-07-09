@@ -1,0 +1,65 @@
+# .github/workflows/image-sign.yml
+#
+# Signs the backend and frontend Docker images with cosign after a
+# release. Uses keyless signing (Sigstore Fulcio + Rekor) so no
+# long-lived key material is required in CI. The signature is
+# published alongside the image and can be verified with
+#   cosign verify --certificate-identity ... --certificate-oidc-issuer ... \
+#     ghcr.io/stellar-indigopay/backend:sha-abcdef
+#
+# Triggered on release (push of a `v*.*.*` tag). Also exposes
+# workflow_dispatch for re-signing on demand.
+
+name: Image Sign
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write   # required for keyless signing (OIDC)
+
+jobs:
+  sign:
+    name: cosign sign
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Build and tag image
+        run: |
+          docker build -t ghcr.io/stellar-indigopay/${{ matrix.service }}:${{ github.sha }} \
+            ./${{ matrix.service }}
+          docker push ghcr.io/stellar-indigopay/${{ matrix.service }}:${{ github.sha }}
+
+      - name: Sign image (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign sign --yes \
+            ghcr.io/stellar-indigopay/${{ matrix.service }}:${{ github.sha }}
+
+      - name: Verify signature
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign verify \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/image-sign.yml@refs/tags/v.*" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            ghcr.io/stellar-indigopay/${{ matrix.service }}:${{ github.sha }}
