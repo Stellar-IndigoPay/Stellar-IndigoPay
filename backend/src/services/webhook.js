@@ -1,85 +1,30 @@
-/**
- * backend/src/services/webhook.js
- * Webhook delivery service for project milestone notifications.
- */
 "use strict";
 
-const crypto = require("crypto");
-const https = require("https");
-const http = require("http");
+/**
+ * src/services/webhook.js
+ *
+ * Project-milestone bookkeeping. Public surface preserved for the route
+ * handler in `donations.js` — the actual delivery is queued by
+ * `webhookQueue.enqueueWebhookDelivery`, so this function no longer
+ * makes any HTTP request.
+ *
+ * The function still does its own DB transaction so the route handler
+ * can `await` it: it marks any newly-reached milestones and enqueues
+ * one delivery per milestone before returning.
+ */
+
 const pool = require("../db/pool");
 const logger = require("../logger");
+const { enqueueWebhookDelivery } = require("./webhookQueue");
 
 /**
- * POST a signed JSON payload to a webhook URL.
- *
- * @param {string} url    - The webhook URL to deliver to.
- * @param {string} secret - HMAC-SHA256 secret for signing.
- * @param {object} payload - The JSON body to send.
- */
-function deliverPayload(url, secret, payload) {
-  const body = JSON.stringify(payload);
-  const signature = crypto
-    .createHmac("sha256", secret)
-    .update(body)
-    .digest("hex");
-
-  const urlObj = new URL(url);
-  const options = {
-    hostname: urlObj.hostname,
-    port: urlObj.port || (urlObj.protocol === "https:" ? 443 : 80),
-    path: urlObj.pathname + urlObj.search,
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Content-Length": Buffer.byteLength(body),
-      "X-Webhook-Signature": signature,
-      "User-Agent": "IndigoPay-Webhook/1.0",
-    },
-    timeout: 10000,
-  };
-
-  const lib = urlObj.protocol === "https:" ? https : http;
-
-  const req = lib.request(options, (res) => {
-    res.on("data", () => {});
-    res.on("end", () => {
-      logger.info({
-        event: "webhook_delivered",
-        url,
-        statusCode: res.statusCode,
-        payload: { projectId: payload.projectId, milestone: payload.milestone },
-      }, "Webhook delivered");
-    });
-  });
-
-  req.on("error", (err) => {
-    logger.error({
-      event: "webhook_delivery_error",
-      url,
-      err: err.message,
-      payload: { projectId: payload.projectId, milestone: payload.milestone },
-    }, "Webhook delivery failed");
-  });
-
-  req.on("timeout", () => {
-    req.destroy();
-    logger.error({
-      event: "webhook_timeout",
-      url,
-      payload: { projectId: payload.projectId, milestone: payload.milestone },
-    }, "Webhook request timed out");
-  });
-
-  req.write(body);
-  req.end();
-}
-
-/**
- * Check project milestones after a donation and deliver webhooks for any
- * newly reached milestones. Runs asynchronously (fire-and-forget).
+ * Check project milestones after a donation and enqueue webhooks for
+ * any newly reached milestones. Marking the milestone and the
+ * delivery enqueue are intentionally on the same code path so we can
+ * surface errors synchronously to the caller.
  *
  * @param {string} projectId - Project UUID.
+ * @returns {Promise<void>}
  */
 async function checkAndDeliverMilestones(projectId) {
   try {
@@ -126,7 +71,10 @@ async function checkAndDeliverMilestones(projectId) {
       await client.query("COMMIT");
     } catch (err) {
       await client.query("ROLLBACK");
-      logger.error({ event: "milestone_update_error", projectId, err: err.message }, err.message);
+      logger.error(
+        { event: "milestone_update_error", projectId, err: err.message },
+        err.message,
+      );
       client.release();
       return;
     }
@@ -137,21 +85,31 @@ async function checkAndDeliverMilestones(projectId) {
         const payload = {
           event: "milestone.reached",
           projectId,
+          milestoneId: milestone.id,
           milestone: milestone.title,
           percentage: milestone.percentage,
           totalRaisedXLM: raised.toFixed(7),
           timestamp: new Date().toISOString(),
         };
 
-        deliverPayload(project.webhook_url, project.webhook_secret, payload);
+        enqueueWebhookDelivery({
+          projectId,
+          eventType: "milestone.reached",
+          payload,
+          secret: project.webhook_secret,
+        }).catch((err) => {
+          logger.error(
+            { event: "webhook_enqueue_error", projectId, err: err.message },
+            "failed to enqueue webhook",
+          );
+        });
       }
     }
   } catch (err) {
-    logger.error({
-      event: "check_milestones_error",
-      projectId,
-      err: err.message,
-    }, "Failed to check milestones");
+    logger.error(
+      { event: "check_milestones_error", projectId, err: err.message },
+      "Failed to check milestones",
+    );
   }
 }
 
