@@ -1,0 +1,49 @@
+{{- /*
+helm/indigopay/templates/hpa.yaml
+HorizontalPodAutoscaler for the backend. Mirrors k8s/hpa-backend.yaml
+and renders only when autoscaling.enabled is true.
+*/ -}}
+{{- if .Values.autoscaling.enabled -}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "indigopay.backendName" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "indigopay.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "indigopay.backendName" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    {{- range .Values.autoscaling.metrics }}
+    - type: {{ .type }}
+      resource:
+        name: {{ .resource.name }}
+        target:
+          type: {{ .resource.target.type }}
+          {{- if eq .resource.target.type "Utilization" }}
+          averageUtilization: {{ .resource.target.averageUtilization }}
+          {{- end }}
+          {{- if eq .resource.target.type "AverageValue" }}
+          averageValue: {{ .resource.target.averageValue }}
+          {{- end }}
+    {{- end }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: {{ .Values.autoscaling.behavior.scaleDown.stabilizationWindowSeconds }}
+      policies:
+        - type: Percent
+          value: {{ .Values.autoscaling.behavior.scaleDown.percent }}
+          periodSeconds: {{ .Values.autoscaling.behavior.scaleDown.periodSeconds }}
+    scaleUp:
+      stabilizationWindowSeconds: {{ .Values.autoscaling.behavior.scaleUp.stabilizationWindowSeconds }}
+      policies:
+        - type: Percent
+          value: {{ .Values.autoscaling.behavior.scaleUp.percent }}
+          periodSeconds: {{ .Values.autoscaling.behavior.scaleUp.periodSeconds }}
+      selectPolicy: Max
+{{- end }}
