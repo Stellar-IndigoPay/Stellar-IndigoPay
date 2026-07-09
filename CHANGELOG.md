@@ -53,6 +53,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `backend/src/services/indexerService` exposes a `stop()` method so the
   Stellar Horizon stream is closed cleanly on SIGTERM.
 
+- **NetworkPolicies** — default-deny for the `indigopay` namespace plus
+  explicit allow policies for ingress → backend, backend → postgres +
+  kube-dns, backend → redis, backend → Stellar Horizon / Soroban RPC /
+  Anthropic / Sentry, Prometheus → backend `/metrics`, and frontend →
+  backend (the last one closes the default-deny gap for the Next.js client).
+- **Autoscaling** — `HorizontalPodAutoscaler` for backend and frontend
+  (min 2, max 10, CPU 70% / memory 80%) and `PodDisruptionBudget` with
+  `minAvailable: 1` for both, mirrored in the Helm chart via
+  `values.autoscaling` and `values.pdb`.
+- **Helm chart** — new `_helpers.tpl` (`backendName`, `frontendName`,
+  `commonLabels`) and `values.yaml` blocks for autoscaling and PDB so
+  the chart actually renders end-to-end (`helm template` was previously
+  broken by missing helpers).
+- **Secrets management** — `k8s/secret.example.yaml` is the checked-in
+  template; the real `k8s/secret.yaml` is gitignored;
+  `.github/workflows/secrets-lint.yml` fails CI on placeholder leaks in
+  `k8s/`, `helm/`, and `monitoring/`. The template was rewritten to use
+  lint-safe `__LIKE_THIS__` markers so the lint does not trip on it.
+- **External Secrets** — `ExternalSecret` + `SecretStore` templates for
+  AWS Secrets Manager, an IRSA `ServiceAccount` stub, and full setup
+  documentation (`docs/external-secrets.md`).
+
 <!-- BACKFILL_INSERT -->
 
 ## [1.0.0] - 2025-01-01
