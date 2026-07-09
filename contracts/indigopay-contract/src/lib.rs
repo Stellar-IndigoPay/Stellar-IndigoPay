@@ -193,6 +193,12 @@ pub enum DataKey {
     // bulk operations (e.g. `deactivate_all_projects`) so they can
     // enumerate projects without external indexing.
     ProjectIdsAll,
+    // Pending admin for the two-step `transfer_admin` / `accept_admin`
+    // flow. Stored when the current admin calls `transfer_admin` and
+    // cleared either on `accept_admin` (promotion) or
+    // `cancel_admin_transfer`. Never holds an Address that's already
+    // the current admin.
+    PendingAdmin,
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -1230,6 +1236,60 @@ impl IndigoPayContract {
     pub fn get_contract_wasm_hash(env: Env) -> Option<BytesN<32>> {
         env.storage().instance().get(&DataKey::ContractWasmHash)
     }
+
+    // ─── Two-step admin transfer ─────────────────────────────────────────────
+
+    /// Admin-only: step 1 of a two-step admin transfer. Stores the proposed
+    /// new admin; the proposal becomes final when they call `accept_admin`.
+    /// Refuses to overwrite an existing pending transfer — the caller must
+    /// `cancel_admin_transfer` first.
+    pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        if env.storage().instance().has(&DataKey::PendingAdmin) {
+            panic!("Admin transfer already pending; cancel first");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        env.events()
+            .publish((symbol_short!("ad_xfer"), admin), new_admin);
+    }
+
+    /// Step 2 of the two-step transfer. The caller must be the pending
+    /// admin recorded by a prior `transfer_admin`. On success the stored
+    /// admin is updated and the pending entry is cleared.
+    pub fn accept_admin(env: Env) {
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .expect("No pending admin transfer");
+        pending.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &pending);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.events()
+            .publish((symbol_short!("ad_acc"),), pending);
+    }
+
+    /// Admin-only: cancel a pending admin transfer without promoting anyone.
+    /// Useful when the proposed recipient lost their key or the transfer
+    /// was a mistake.
+    pub fn cancel_admin_transfer(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        if !env.storage().instance().has(&DataKey::PendingAdmin) {
+            panic!("No pending admin transfer");
+        }
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.events()
+            .publish((symbol_short!("ad_xfc"), admin), ());
+    }
+
+    /// Returns the proposed new admin if a transfer is pending, or `None`.
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
 }
 
 // ─── Mock oracle (test / integration use only) ────────────────────────────────
@@ -2266,6 +2326,82 @@ mod tests {
         let (env, _cid, client, _admin, _pid) = setup();
         let imposter = Address::generate(&env);
         client.deactivate_all_projects(&imposter);
+    }
+
+    // ─── Two-step admin transfer tests ─────────────────────────────────────
+
+    /// Helper that bootstraps a fresh contract with only an admin (no
+    /// project). The admin-transfer tests need a clean slate.
+    fn setup_admin_only() -> (Env, soroban_sdk::Address, IndigoPayContractClient<'static>, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        (env, cid, client, admin)
+    }
+
+    #[test]
+    fn test_two_step_admin_transfer_success() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        let new_admin = Address::generate(&env);
+
+        client.transfer_admin(&admin, &new_admin);
+        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+        // Stored admin does not change until accept_admin.
+        assert_eq!(client.get_admin(), admin);
+
+        client.accept_admin();
+        assert_eq!(client.get_admin(), new_admin);
+        assert_eq!(client.get_pending_admin(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_two_step_admin_transfer_non_admin_cant_initiate() {
+        let (env, _cid, client, _admin) = setup_admin_only();
+        let imposter = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.transfer_admin(&imposter, &new_admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "No pending admin transfer")]
+    fn test_two_step_admin_transfer_accept_without_proposal_fails() {
+        let (_env, _cid, client, _admin) = setup_admin_only();
+        // mock_all_auths is enabled, but no proposal exists.
+        client.accept_admin();
+    }
+
+    #[test]
+    #[should_panic(expected = "Admin transfer already pending; cancel first")]
+    fn test_two_step_admin_transfer_double_propose_fails() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        let a = Address::generate(&env);
+        let b = Address::generate(&env);
+        client.transfer_admin(&admin, &a);
+        client.transfer_admin(&admin, &b);
+    }
+
+    #[test]
+    fn test_two_step_admin_transfer_cancel_clears_pending() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        let new_admin = Address::generate(&env);
+
+        client.transfer_admin(&admin, &new_admin);
+        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+        client.cancel_admin_transfer(&admin);
+        assert_eq!(client.get_pending_admin(), None);
+        // Original admin is still the admin.
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "No pending admin transfer")]
+    fn test_two_step_admin_transfer_cancel_without_pending_fails() {
+        let (_env, _cid, client, admin) = setup_admin_only();
+        client.cancel_admin_transfer(&admin);
     }
 }
 
