@@ -24,3 +24,4 @@ jobs:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
       - run: eas build --platform all --profile preview --non-interactive
+        if: ${{ secrets.EXPO_TOKEN != '' }}
