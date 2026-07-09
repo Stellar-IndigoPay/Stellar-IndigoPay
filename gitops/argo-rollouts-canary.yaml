@@ -1,8 +1,19 @@
 # gitops/argo-rollouts-canary.yaml
 #
-# Argo Rollouts canary strategy for the backend. Replaces the
-# `Deployment` in k8s/backend.yaml with a `Rollout` that performs
-# traffic-shifted canary releases. Each new release:
+# Argo Rollouts STEPPED canary strategy for the backend. Replaces the
+# `Deployment` in k8s/backend.yaml with a `Rollout` that performs a
+# stepped rollout via pod replacement (20% → 50% → 100% of new-revision
+# pods, with 5-min analysis pauses between steps).
+#
+# IMPORTANT — this is Argo Rollouts' DEFAULT mode. Both `canaryService`
+# and `stableService` point at the same `backend-svc`, so the Rollout
+# does NOT split live HTTP traffic between two Service revisions. It
+# replaces pods in-place at each `setWeight` step. For real traffic-
+# split canary (e.g. 5% of user traffic to the new revision), add a
+# `trafficRouting` block — Istio, NGINX, ALB, or Ambassador. The
+# bottom of this file has an Istio example commented out.
+#
+# Each new release:
 #   1. Deploys 20% of pods with the new revision.
 #   2. Watches the canary metrics for 5 minutes; aborts on regression.
 #   3. Graduates to 50%, then 100%, with a 5-minute pause between
@@ -20,10 +31,6 @@
 # Switch the Deployment→Rollout via:
 #   kubectl apply -f gitops/argo-rollouts-canary.yaml
 #   kubectl delete deployment backend -n indigopay
-#
-# Optional: the `trafficRouting.istio` block assumes Istio is the
-# cluster's service mesh. Remove the block and use the default
-# `trafficRouting: {}` if you don't run Istio.
 
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
