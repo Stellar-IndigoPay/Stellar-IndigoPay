@@ -199,6 +199,12 @@ pub enum DataKey {
     // `cancel_admin_transfer`. Never holds an Address that's already
     // the current admin.
     PendingAdmin,
+    // Contract-level pause flag. When true, every state-mutating
+    // function (donate, donate_usdc, mint_*, governance create/vote,
+    // project register/deactivate) rejects with "Contract is paused".
+    // `pause_contract` / `unpause_contract` are themselves exempt so
+    // the admin can always recover from a pause.
+    ContractPaused,
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -233,6 +239,21 @@ fn read_admin(env: &Env) -> Address {
 fn require_admin(env: &Env, caller: &Address) {
     if read_admin(env) != *caller {
         panic!("Only admin can perform this action");
+    }
+}
+
+/// Fail fast when the contract is in the paused state. State-mutating
+/// public functions call this right after `require_auth` and before
+/// any storage read so a paused contract costs as little as possible
+/// to verify and the panic message is uniform.
+fn require_not_paused(env: &Env) {
+    let paused: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::ContractPaused)
+        .unwrap_or(false);
+    if paused {
+        panic!("Contract is paused");
     }
 }
 
@@ -287,6 +308,7 @@ impl IndigoPayContract {
     ) {
         admin.require_auth();
         require_admin(&env, &admin);
+        require_not_paused(&env);
         if env
             .storage()
             .instance()
@@ -341,6 +363,7 @@ impl IndigoPayContract {
     pub fn batch_register_projects(env: Env, admin: Address, projects: Vec<ProjectInit>) {
         admin.require_auth();
         require_admin(&env, &admin);
+        require_not_paused(&env);
 
         let mut ids: Vec<String> = env.storage().instance()
             .get(&DataKey::ProjectIdsAll)
@@ -379,6 +402,7 @@ impl IndigoPayContract {
     pub fn deactivate_all_projects(env: Env, admin: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
+        require_not_paused(&env);
 
         let ids: Vec<String> = env
             .storage()
@@ -407,6 +431,7 @@ impl IndigoPayContract {
     pub fn deactivate_project(env: Env, admin: Address, project_id: String) {
         admin.require_auth();
         require_admin(&env, &admin);
+        require_not_paused(&env);
         let mut project: Project = env
             .storage()
             .instance()
@@ -421,6 +446,7 @@ impl IndigoPayContract {
     pub fn update_project_co2_rate(env: Env, admin: Address, project_id: String, co2_per_xlm: u32) {
         admin.require_auth();
         require_admin(&env, &admin);
+        require_not_paused(&env);
 
         // Bounds must match `register_project` so the on-chain limits stay
         // consistent regardless of whether the rate was set at registration
@@ -453,6 +479,8 @@ impl IndigoPayContract {
     pub fn pause_project(env: Env, admin: Address, project_id: String) {
         admin.require_auth();
         require_admin(&env, &admin);
+        // pause_project is intentionally NOT paused-gated so the admin can
+        // still manage individual projects during a contract-wide pause.
         let mut project: Project = env.storage().instance()
             .get(&DataKey::Project(project_id.clone())).expect("Project not found");
         if !project.active { panic!("Cannot pause a deactivated project"); }
@@ -469,6 +497,7 @@ impl IndigoPayContract {
     pub fn resume_project(env: Env, admin: Address, project_id: String) {
         admin.require_auth();
         require_admin(&env, &admin);
+        // resume_project is intentionally NOT paused-gated.
         let mut project: Project = env.storage().instance()
             .get(&DataKey::Project(project_id.clone())).expect("Project not found");
         if !project.active { panic!("Cannot resume a deactivated project"); }
@@ -489,6 +518,7 @@ impl IndigoPayContract {
         msg_hash: u32,
     ) {
         donor.require_auth();
+        require_not_paused(&env);
         if amount <= 0 {
             panic!("Donation amount must be positive");
         }
@@ -741,6 +771,7 @@ impl IndigoPayContract {
 
     pub fn mint_impact_nft(env: Env, donor: Address, tier: BadgeTier) {
         donor.require_auth();
+        require_not_paused(&env);
         if tier == BadgeTier::None {
             panic!("Cannot mint NFT for None tier");
         }
@@ -791,6 +822,7 @@ impl IndigoPayContract {
     /// call for the same (donor, project_id) pair panics.
     pub fn mint_project_nft(env: Env, donor: Address, project_id: String) {
         donor.require_auth();
+        require_not_paused(&env);
 
         let project: Project = env.storage().instance()
             .get(&DataKey::Project(project_id.clone())).expect("Project not found");
@@ -847,6 +879,7 @@ impl IndigoPayContract {
     pub fn create_proposal(env: Env, admin: Address, project_id: String, duration_ledgers: u32) {
         admin.require_auth();
         require_admin(&env, &admin);
+        require_not_paused(&env);
         if !env
             .storage()
             .instance()
@@ -896,6 +929,7 @@ impl IndigoPayContract {
     /// Badge holders (≥ Seedling) cast a vote. One vote per address per proposal.
     pub fn vote_verify_project(env: Env, voter: Address, project_id: String, approve: bool) {
         voter.require_auth();
+        require_not_paused(&env);
 
         let stats: DonorStats = env
             .storage()
@@ -1027,6 +1061,7 @@ impl IndigoPayContract {
         msg_hash: u32,
     ) {
         donor.require_auth();
+        require_not_paused(&env);
         if usdc_amount <= 0 {
             panic!("Donation amount must be positive");
         }
@@ -1189,6 +1224,7 @@ impl IndigoPayContract {
     pub fn set_usdc_token(env: Env, admin: Address, usdc_token: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
+        require_not_paused(&env);
         env.storage()
             .instance()
             .set(&DataKey::USDCTokenAddress, &usdc_token);
@@ -1206,6 +1242,7 @@ impl IndigoPayContract {
     pub fn set_oracle(env: Env, admin: Address, oracle: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
+        require_not_paused(&env);
         env.storage().instance().set(&DataKey::OracleAddress, &oracle);
         env.events().publish((symbol_short!("oracle"),), oracle);
     }
@@ -1289,6 +1326,39 @@ impl IndigoPayContract {
     /// Returns the proposed new admin if a transfer is pending, or `None`.
     pub fn get_pending_admin(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    // ─── Contract-level pause ─────────────────────────────────────────────────
+
+    /// Admin-only: pause the entire contract. While paused, every state-
+    /// mutating function rejects with "Contract is paused". Read-only
+    /// getters continue to work, and the admin can always call
+    /// `unpause_contract` to recover.
+    pub fn pause_contract(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractPaused, &true);
+        env.events().publish((symbol_short!("paused"), admin), ());
+    }
+
+    /// Admin-only: lift the contract-level pause.
+    pub fn unpause_contract(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractPaused, &false);
+        env.events().publish((symbol_short!("unpause"), admin), ());
+    }
+
+    /// Read-only: returns the contract-level pause state.
+    pub fn is_contract_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::ContractPaused)
+            .unwrap_or(false)
     }
 }
 
@@ -2402,6 +2472,77 @@ mod tests {
     fn test_two_step_admin_transfer_cancel_without_pending_fails() {
         let (_env, _cid, client, admin) = setup_admin_only();
         client.cancel_admin_transfer(&admin);
+    }
+
+    // ─── Contract-level pause tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_pause_blocks_donate() {
+        let (env, _cid, client, _admin) = setup_admin_only();
+        let pid = String::from_str(&env, "proj-pause");
+        let wallet = Address::generate(&env);
+        client.register_project(
+            &client.get_admin(),
+            &pid,
+            &String::from_str(&env, "P"),
+            &wallet,
+            &100u32,
+        );
+
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        soroban_sdk::token::StellarAssetClient::new(&env, &token)
+            .mint(&donor, &(10 * STROOP));
+
+        client.pause_contract(&client.get_admin());
+        assert!(client.is_contract_paused());
+
+        // A donate attempt must panic with the contract-level pause message.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32);
+        }));
+        assert!(result.is_err(), "donate should be rejected while paused");
+    }
+
+    #[test]
+    fn test_pause_then_unpause_allows_donate() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        let pid = String::from_str(&env, "proj-pause2");
+        let wallet = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &pid,
+            &String::from_str(&env, "P2"),
+            &wallet,
+            &100u32,
+        );
+
+        client.pause_contract(&admin);
+        client.unpause_contract(&admin);
+        assert!(!client.is_contract_paused());
+
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        soroban_sdk::token::StellarAssetClient::new(&env, &token)
+            .mint(&donor, &(10 * STROOP));
+        client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32);
+
+        let p = client.get_project(&pid);
+        assert_eq!(p.total_raised, 10 * STROOP);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_pause_contract_non_admin_fails() {
+        let (env, _cid, client, _admin) = setup_admin_only();
+        let imposter = Address::generate(&env);
+        client.pause_contract(&imposter);
     }
 }
 
