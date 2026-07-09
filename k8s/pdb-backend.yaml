@@ -1,0 +1,23 @@
+# k8s/pdb-backend.yaml
+#
+# PodDisruptionBudget for the backend. With HPA minReplicas=2 we have
+# a 2-pod floor; PDB ensures `kubectl drain` / node upgrades cannot
+# evict both pods simultaneously, so the API never goes dark during
+# voluntary disruptions.
+#
+# We use `minAvailable: 1` rather than an absolute number so the PDB
+# scales correctly with HPA (HPA bumps us to 5 pods? PDB still keeps
+# at least 1 available).
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: backend
+  namespace: indigopay
+  labels:
+    app: backend
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: backend
