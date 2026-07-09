@@ -1,0 +1,26 @@
+# k8s/networkpolicy-allow-backend-redis.yaml
+#
+# Open Redis traffic from backend to the optional Redis cache on port
+# 6379. Redis is a soft dependency — backend tolerates a missing
+# connection — but for the deployments that do run Redis (production),
+# the backend pods need to be able to reach it.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-backend-to-redis
+  namespace: indigopay
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379
