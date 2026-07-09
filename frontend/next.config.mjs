@@ -1,3 +1,5 @@
+import { withSentryConfig } from "@sentry/nextjs";
+
 /** @type {import('next').NextConfig} */
 
 // ---------------------------------------------------------------------------
@@ -94,4 +96,25 @@ const nextConfig = {
   },
 }
 
-export default nextConfig
+// Wrap with Sentry so source maps upload, instrumentation, and the
+// /monitoring tunnel route are auto-configured. withSentryConfig is a
+// no-op when SENTRY_DSN is unset (e.g. local dev), so it's safe to
+// leave enabled unconditionally.
+//
+// Build-time env vars (set these in CI / prod):
+//   SENTRY_DSN                    - public DSN
+//   SENTRY_ORG / SENTRY_PROJECT / SENTRY_AUTH_TOKEN - source-map upload
+//   SENTRY_RELEASE                - `git rev-parse --short HEAD` (or commit SHA)
+// `silent: !process.env.CI` keeps build logs clean locally while still
+// printing Sentry output in CI.
+export default withSentryConfig(nextConfig, {
+  org: process.env.SENTRY_ORG,
+  project: process.env.SENTRY_PROJECT,
+  authToken: process.env.SENTRY_AUTH_TOKEN,
+  release: process.env.SENTRY_RELEASE,
+  silent: !process.env.CI,
+  widenClientFileUpload: true,
+  transpileClientSDK: true,
+  hideSourceMaps: true,
+  disableLogger: true,
+});
