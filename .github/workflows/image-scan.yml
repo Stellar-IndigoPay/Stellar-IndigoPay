@@ -37,6 +37,9 @@ jobs:
             ./${{ matrix.service }}
 
       - name: Run Trivy vulnerability scanner
+        # NOTE: pin the action to a commit SHA in production
+        # (e.g. aquasecurity/trivy-action@<commit-sha>) for supply-chain
+        # hygiene. The tag is used here for clarity.
         uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: indigopay-${{ matrix.service }}:scan
