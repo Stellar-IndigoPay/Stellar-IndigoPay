@@ -1,0 +1,19 @@
+{{- /*
+helm/indigopay/templates/pdb.yaml
+PodDisruptionBudget for the backend. Mirrors k8s/pdb-backend.yaml
+and renders only when pdb.enabled is true.
+*/ -}}
+{{- if .Values.pdb.enabled -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "indigopay.backendName" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "indigopay.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app: backend
+{{- end }}
