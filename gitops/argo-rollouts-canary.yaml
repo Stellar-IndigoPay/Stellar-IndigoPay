@@ -1,0 +1,140 @@
+# gitops/argo-rollouts-canary.yaml
+#
+# Argo Rollouts canary strategy for the backend. Replaces the
+# `Deployment` in k8s/backend.yaml with a `Rollout` that performs
+# traffic-shifted canary releases. Each new release:
+#   1. Deploys 20% of pods with the new revision.
+#   2. Watches the canary metrics for 5 minutes; aborts on regression.
+#   3. Graduates to 50%, then 100%, with a 5-minute pause between
+#      steps.
+#   4. On full rollout, scales down the old revision.
+#
+# Prerequisite: install argo-rollouts in the cluster.
+#   kubectl create namespace argo-rollouts
+#   kubectl apply -n argo-rollouts -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
+#
+# Migration: when you adopt this, delete the existing Deployment
+# `backend` (the Rollout takes over the same selector). The Service
+# continues to select `app: backend`; no service change is required.
+#
+# Switch the Deployment→Rollout via:
+#   kubectl apply -f gitops/argo-rollouts-canary.yaml
+#   kubectl delete deployment backend -n indigopay
+#
+# Optional: the `trafficRouting.istio` block assumes Istio is the
+# cluster's service mesh. Remove the block and use the default
+# `trafficRouting: {}` if you don't run Istio.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: backend
+  namespace: indigopay
+  labels:
+    app: backend
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: backend
+  strategy:
+    canary:
+      canaryService: backend-svc
+      stableService: backend-svc
+      steps:
+        - setWeight: 20
+        - pause: { duration: 5m }
+        - setWeight: 50
+        - pause: { duration: 5m }
+        - setWeight: 100
+      analysis:
+        templates:
+          - templateName: backend-success-rate
+        startingStep: 1
+        # Re-run analysis on each weight step. If the template returns
+        # `Failed`, the rollout aborts and traffic reverts to stable.
+        args:
+          - name: service-name
+            value: backend-svc
+  template:
+    metadata:
+      labels:
+        app: backend
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: indigopay
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "4000"
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 35
+      containers:
+        - name: backend
+          image: indigopay/backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 4000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: indigopay-config
+            - secretRef:
+                name: indigopay-secrets
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 1
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: backend-success-rate
+  namespace: indigopay
+spec:
+  args:
+    - name: service-name
+  metrics:
+    - name: http-success-rate
+      interval: 60s
+      count: 5
+      successCondition: result[0] >= 0.99
+      failureLimit: 2
+      provider:
+        prometheus:
+          address: http://prometheus-operated.monitoring.svc:9090
+          query: |
+            sum(rate(http_requests_total{job="indigopay-backend",status_code!~"5.."}[2m]))
+              /
+            sum(rate(http_requests_total{job="indigopay-backend"}[2m]))
