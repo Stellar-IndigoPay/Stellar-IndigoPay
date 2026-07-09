@@ -1,0 +1,30 @@
+# k8s/networkpolicy-allow-ingress-backend.yaml
+#
+# Open the backend's HTTP port (4000) to the cluster's ingress controller
+# so external traffic from outside the cluster can reach the API. The
+# ingress controller is identified by the well-known label that
+# ingress-nginx sets on its pods.
+#
+# Assumes the default-deny policy in networkpolicy-default-deny.yaml
+# is in place — this rule is what makes the API reachable from outside
+# the pod mesh.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-controller-to-backend
+  namespace: indigopay
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 4000
