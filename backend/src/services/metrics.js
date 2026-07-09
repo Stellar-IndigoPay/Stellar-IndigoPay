@@ -136,6 +136,35 @@ const webhookAttemptDurationSeconds = new client.Histogram({
   registers: [registry],
 });
 
+const aiSummaryTokensTotal = new client.Counter({
+  name: "ai_summary_tokens_total",
+  help: "Anthropic tokens consumed by the AI summary feature, labelled by model and direction (input|output|cache_read|cache_write).",
+  labelNames: ["model", "direction"],
+  registers: [registry],
+});
+
+const aiSummaryCostUsdTotal = new client.Counter({
+  name: "ai_summary_cost_usd_total",
+  help: "Estimated USD cost for AI summary generations, labelled by model. Computed from the per-model token pricing sheet in lib/anthropicPricing.js.",
+  labelNames: ["model"],
+  registers: [registry],
+});
+
+const aiSummaryLatencySeconds = new client.Histogram({
+  name: "ai_summary_latency_seconds",
+  help: "End-to-end latency of generateProjectSummary in seconds, labelled by model and outcome (success|error).",
+  labelNames: ["model", "outcome"],
+  buckets: [0.25, 0.5, 1, 2, 4, 8, 16, 32, 64],
+  registers: [registry],
+});
+
+const aiSummaryOutcomesTotal = new client.Counter({
+  name: "ai_summary_outcomes_total",
+  help: "AI summary generation outcomes, labelled by outcome (success|error) and reason (api_key|empty_response|provider_error|rate_limit|...).",
+  labelNames: ["outcome", "reason"],
+  registers: [registry],
+});
+
 /**
  * Normalise an Express req.route.path / req.path to a low-cardinality
  * route label. We fall back to the literal path when no route is
@@ -191,5 +220,9 @@ module.exports = {
     webhookDeliveriesTotal,
     webhookAttemptsTotal,
     webhookAttemptDurationSeconds,
+    aiSummaryTokensTotal,
+    aiSummaryCostUsdTotal,
+    aiSummaryLatencySeconds,
+    aiSummaryOutcomesTotal,
   },
 };
