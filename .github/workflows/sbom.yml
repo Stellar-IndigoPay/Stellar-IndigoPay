@@ -1,0 +1,60 @@
+# .github/workflows/sbom.yml
+#
+# Generates a CycloneDX-format Software Bill of Materials for every
+# push to main and every PR. The SBOM is uploaded as a workflow
+# artifact (`sbom`) and pushed to the GitHub dependency-graph
+# submission endpoint so the repository's Dependencies tab is
+# populated.
+#
+# Anchore's action supports both backend and frontend Dockerfiles in
+# the same run; we build a single SBOM per service.
+
+name: SBOM
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  sbom:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required to write to the GitHub dependency graph API
+      actions: read
+    strategy:
+      matrix:
+        service: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate SBOM for ${{ matrix.service }}
+        uses: anchore/sbom-action@v0
+        with:
+          format: cyclonedx-json
+          artifact-name: sbom-${{ matrix.service }}.cdx.json
+          # Generate from the working directory's package files
+          # (cyclonedx-node-npm is auto-selected for Node.js).
+          path: ${{ matrix.service }}/package.json
+          fetch-licenses: true
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.service }}
+          path: sbom-${{ matrix.service }}.cdx.json
+          retention-days: 30
+
+      - name: Submit SBOM to GitHub dependency graph
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: anchore/sbom-action@v0
+        with:
+          format: cyclonedx-json
+          artifact-name: sbom-${{ matrix.service }}.cdx.json
+          path: ${{ matrix.service }}/package.json
+          # `output-format: github` pushes directly to the dependency
+          # graph API instead of saving to a file.
+          output-format: github
