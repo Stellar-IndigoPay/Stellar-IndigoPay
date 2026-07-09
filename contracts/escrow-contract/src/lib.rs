@@ -42,9 +42,9 @@ pub enum DataKey {
     Admin,
 }
 
-#[contract]
 pub const RELEASE_AFTER_LEDGERS: u32 = 10;
 
+#[contract]
 pub struct EscrowContract;
 
 #[contractimpl]
@@ -85,10 +85,10 @@ impl EscrowContract {
             panic!("Milestones must sum to 100%");
         }
 
-        let token_client = token::Client::new(&env, &token);
-        let contract_addr = env.current_contract_address();
-        token_client.transfer(&client, &contract_addr, &amount);
-
+        // ── Effects: persist the Job struct BEFORE the external token
+        //    transfer so a malicious token contract cannot exploit a
+        //    non-CEI ordering to leave the ledger without a `Job` entry
+        //    while having already received the funds.
         let job = Job {
             id: job_id.clone(),
             client: client.clone(),
@@ -101,6 +101,11 @@ impl EscrowContract {
             release_after: env.ledger().sequence() + RELEASE_AFTER_LEDGERS,
         };
         env.storage().instance().set(&DataKey::Job(job_id), &job);
+
+        // ── Interaction: external token transfer last.
+        let token_client = token::Client::new(&env, &token);
+        let contract_addr = env.current_contract_address();
+        token_client.transfer(&client, &contract_addr, &amount);
     }
 
     /// Client releases a specific milestone. Pays proportional XLM to freelancer.
@@ -127,15 +132,13 @@ impl EscrowContract {
             panic!("Milestone already released");
         }
 
-        // Calculate proportional amount
+        // Calculate proportional amount once; reused below.
         let proportion = milestone.percentage as i128;
         let release_amount = (job.amount * proportion) / 100i128;
 
-        let token_client = token::Client::new(&env, &job.token);
-        let contract_addr = env.current_contract_address();
-        token_client.transfer(&contract_addr, &job.freelancer, &release_amount);
-
-        // Mark milestone as released
+        // ── Effects: rebuild the milestone vector, recompute status,
+        //    and persist state BEFORE the external token movement
+        //    (CEI ordering).
         let mut updated_milestones = job.milestones.clone();
         let mut released_count = 0u32;
         for (i, m) in updated_milestones.iter_mut().enumerate() {
@@ -147,15 +150,17 @@ impl EscrowContract {
             }
         }
         job.milestones = updated_milestones;
-
-        // Update job status
-        if released_count as usize == job.milestones.len() {
-            job.status = JobStatus::Completed;
+        job.status = if released_count as usize == job.milestones.len() {
+            JobStatus::Completed
         } else {
-            job.status = JobStatus::PartiallyReleased;
-        }
-
+            JobStatus::PartiallyReleased
+        };
         env.storage().instance().set(&DataKey::Job(job_id), &job);
+
+        // ── Interaction: external token transfer last.
+        let token_client = token::Client::new(&env, &job.token);
+        let contract_addr = env.current_contract_address();
+        token_client.transfer(&contract_addr, &job.freelancer, &release_amount);
     }
 
     /// Admin-only: Mark a job as disputed, freezing remaining releases.
@@ -196,48 +201,35 @@ impl EscrowContract {
             panic!("Job is not disputed");
         }
 
-        if approve_remaining {
-            // Release all unreleased milestones
-            let mut total_unreleased: i128 = 0;
-            for milestone in job.milestones.iter() {
-                if !milestone.released {
-                    let proportion = milestone.percentage as i128;
-                    total_unreleased = total_unreleased.checked_add(
-                        (job.amount * proportion) / 100i128
-                    ).expect("total_unreleased overflow");
-                }
+        // Compute the unreleased portion once. It goes to the freelancer
+        // on approval and to the client on refund.
+        let mut remaining_amount: i128 = 0;
+        for milestone in job.milestones.iter() {
+            if !milestone.released {
+                let proportion = milestone.percentage as i128;
+                remaining_amount = remaining_amount.checked_add(
+                    (job.amount * proportion) / 100i128
+                ).expect("remaining_amount overflow");
             }
-
-            if total_unreleased > 0 {
-                let token_client = token::Client::new(&env, &job.token);
-                let contract_addr = env.current_contract_address();
-                token_client.transfer(&contract_addr, &job.freelancer, &total_unreleased);
-            }
-
-            job.status = JobStatus::Completed;
-        } else {
-            // Return funds to client (refund)
-            let mut remaining_amount: i128 = 0;
-            for milestone in job.milestones.iter() {
-                if !milestone.released {
-                    let proportion = milestone.percentage as i128;
-                    remaining_amount = remaining_amount.checked_add(
-                        (job.amount * proportion) / 100i128
-                    ).expect("remaining_amount overflow");
-                }
-            }
-
-            if remaining_amount > 0 {
-                let token_client = token::Client::new(&env, &job.token);
-                let contract_addr = env.current_contract_address();
-                token_client.transfer(&contract_addr, &job.client, &remaining_amount);
-            }
-
-            job.status = JobStatus::Completed;
         }
 
+        // ── Effects: persist the resolved Job state BEFORE the token
+        //    movement (CEI ordering).
+        job.status = JobStatus::Completed;
         job.disputed = false;
-        env.storage().instance().set(&DataKey::Job(job_id), &job);
+        env.storage().instance().set(&DataKey::Job(job_id.clone()), &job);
+
+        // ── Interaction: external token transfer last.
+        if remaining_amount > 0 {
+            let token_client = token::Client::new(&env, &job.token);
+            let contract_addr = env.current_contract_address();
+            let recipient = if approve_remaining {
+                job.freelancer.clone()
+            } else {
+                job.client.clone()
+            };
+            token_client.transfer(&contract_addr, &recipient, &remaining_amount);
+        }
     }
 
     /// Freelancer can claim a milestone after release_after ledgers if not disputed.
@@ -258,23 +250,23 @@ impl EscrowContract {
         if milestone.released {
             panic!("Milestone already released");
         }
-        // Calculate amount
+        // Calculate amount once.
         let proportion = milestone.percentage as i128;
         let release_amount = (job.amount * proportion) / 100i128;
-        let token_client = token::Client::new(&env, &job.token);
-        let contract_addr = env.current_contract_address();
-        token_client.transfer(&contract_addr, &job.freelancer, &release_amount);
 
-        // Mark as released
+        // ── Effects: mark milestone released and update status BEFORE
+        //    the external token transfer (CEI ordering).
         let mut updated_milestones = job.milestones.clone();
         updated_milestones.get_mut(milestone_index as usize).unwrap().released = true;
         job.milestones = updated_milestones;
-
-        // Update status
         let all_released = job.milestones.iter().all(|m| m.released);
         job.status = if all_released { JobStatus::Completed } else { JobStatus::PartiallyReleased };
-
         env.storage().instance().set(&DataKey::Job(job_id), &job);
+
+        // ── Interaction: external token transfer last.
+        let token_client = token::Client::new(&env, &job.token);
+        let contract_addr = env.current_contract_address();
+        token_client.transfer(&contract_addr, &job.freelancer, &release_amount);
     }
 
     pub fn get_job(env: Env, job_id: String) -> Option<Job> {
