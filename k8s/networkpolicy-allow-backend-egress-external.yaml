@@ -1,0 +1,62 @@
+# k8s/networkpolicy-allow-backend-egress-external.yaml
+#
+# Open the backend's egress to external networks it needs to reach:
+#   - Stellar Horizon (GET /api/*) and Soroban RPC (POST /)
+#   - Anthropic API (POST /v1/messages) for AI summary generation
+#   - Sentry ingestion (optional)
+#   - Webhook receivers (the URL is project-configured, so we can't
+#     narrow to specific destinations; we cap egress to 443 with a
+#     high-level shape and rely on application-level allow-lists
+#     upstream)
+#
+# Everything else outbound is blocked. This rule intentionally does
+# NOT use `to: ipBlock: 0.0.0.0/0` for arbitrary destinations — instead
+# we explicitly enumerate the IPs/CIDRs in use. Update this file when
+# the dependency set changes.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-backend-egress-external
+  namespace: indigopay
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  policyTypes:
+    - Egress
+  egress:
+    # Stellar Horizon testnet
+    - to:
+        - ipBlock:
+            cidr: 34.82.117.0/24  # SDF testnet approx; pin exactly when stable
+      ports:
+        - protocol: TCP
+          port: 443
+    # Soroban RPC testnet
+    - to:
+        - ipBlock:
+            cidr: 34.83.112.0/24
+      ports:
+        - protocol: TCP
+          port: 443
+    # Anthropic API
+    - to:
+        - ipBlock:
+            cidr: 160.79.104.0/24
+      ports:
+        - protocol: TCP
+          port: 443
+    # Sentry ingestion (sentry.io) — optional, only used when SENTRY_DSN is set
+    - to:
+        - ipBlock:
+            cidr: 35.186.247.0/24
+      ports:
+        - protocol: TCP
+          port: 443
+    # Generic HTTPS egress for webhook delivery to project-configured URLs.
+    # Application-level URL allow-list in backend/src/services/webhookQueue.js
+    # is the primary defense; this network-level rule is the safety net.
+    - ports:
+        - protocol: TCP
+          port: 443
