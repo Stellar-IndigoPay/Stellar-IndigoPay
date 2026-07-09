@@ -1,0 +1,32 @@
+# k8s/networkpolicy-allow-prometheus-scrape.yaml
+#
+# Allow Prometheus to scrape the backend's /metrics endpoint on port 4000.
+# The Prometheus pod is identified by the `prometheus` label which is
+# the standard convention from kube-prometheus-stack.
+#
+# If you use a different Prometheus distribution, set the label selector
+# here to match. Some Helm charts label their pods `app=prometheus`,
+# others `app.kubernetes.io/name=prometheus`.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape-backend
+  namespace: indigopay
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 4000
