@@ -134,7 +134,9 @@ export async function fetchProjects(params?: {
  * @returns The project.
  * @throws If the request fails (including 404s for missing projects).
  */
-export async function fetchProject(id: string) {
+export async function fetchProject(id: string, walletAddress?: string) {
+  const params: Record<string, string> = {};
+  if (walletAddress) params.walletAddress = walletAddress;
   const { data } = await api.get<{ success: boolean; data: ClimateProject }>(
     `/api/projects/${id}`,
     { params },
@@ -327,11 +329,13 @@ export async function upsertProfile(
  * @returns Leaderboard entries.
  * @throws If the request fails.
  */
-export async function fetchLeaderboard(limit = 20) {
+export async function fetchLeaderboard(limit = 20, period?: string) {
+  const params: Record<string, unknown> = { limit };
+  if (period) params.period = period;
   const { data } = await api.get<{
     success: boolean;
     data: LeaderboardEntry[];
-  }>("/api/leaderboard", { params: { limit, period } });
+  }>("/api/leaderboard", { params });
   return data.data;
 }
 
@@ -479,6 +483,50 @@ export async function fetchGlobalStats(): Promise<GlobalStats> {
   }
 
   return normalizeGlobalStats(data);
+}
+
+// ── Tag Suggestions ────────────────────────────────────────────────
+/**
+ * Fetch tag suggestions for autocomplete.
+ */
+export async function fetchTagSuggestions(query: string): Promise<string[]> {
+  const { data } = await api.get<{ success: boolean; data: string[] }>(
+    "/api/tags/suggestions",
+    { params: { q: query } },
+  );
+  return data.data;
+}
+
+/**
+ * Notify an admin (placeholder function for future use).
+ */
+export async function notifyAdmin(payload: AdminNotificationPayload): Promise<void> {
+  await api.post("/api/admin/notify", payload);
+}
+
+// ── Follow / Unfollow ──────────────────────────────────────────────
+/**
+ * Follow a project.
+ * @returns Updated follow state and count.
+ */
+export async function followProject(projectId: string, walletAddress: string) {
+  const { data } = await api.post<{ success: boolean; data: { isFollowing: boolean; followCount: number } }>(
+    `/api/projects/${projectId}/follow`,
+    { walletAddress },
+  );
+  return data.data;
+}
+
+/**
+ * Unfollow a project.
+ * @returns Updated follow state and count.
+ */
+export async function unfollowProject(projectId: string, walletAddress: string) {
+  const { data } = await api.delete<{ success: boolean; data: { isFollowing: boolean; followCount: number } }>(
+    `/api/projects/${projectId}/follow`,
+    { data: { walletAddress } },
+  );
+  return data.data;
 }
 
 // ── Admin: Project Approval ──────────────────────────────────────

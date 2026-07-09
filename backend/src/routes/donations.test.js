@@ -12,6 +12,10 @@ jest.mock("../services/stellar", () => ({
   server: { getTransaction: jest.fn().mockResolvedValue({ successful: true }) },
 }));
 
+jest.mock("../services/profileQueue", () => ({
+  enqueueProfileUpdate: jest.fn().mockResolvedValue(undefined),
+}));
+
 const { server } = require("../services/stellar");
 const pool = require("../db/pool");
 const { computeBadges } = require("../services/store");
@@ -431,7 +435,7 @@ describe("POST /api/donations", () => {
     expect(calls).toContain("COMMIT");
   });
 
-  test("rolls back the transaction if profile persistence fails after BEGIN", async () => {
+  test("commits the transaction and enqueues profile update asynchronously", async () => {
     const client = createMockClient(
       queryResult([{ id: "project-4" }]),
       queryResult([]),
@@ -447,10 +451,8 @@ describe("POST /api/donations", () => {
         transaction_hash: makeTxHash("a"),
         created_at: "2026-03-29T10:00:00.000Z",
       }]),
-      queryResult(),
       queryResult([]),
-      queryResult([{ count: "1" }]),
-      new Error("profile write failed"),
+      queryResult(),
       queryResult(),
     );
 
@@ -461,10 +463,12 @@ describe("POST /api/donations", () => {
       transactionHash: makeTxHash("a"),
     });
 
-    expect(next).toHaveBeenCalledTimes(1);
-    expect(next.mock.calls[0][0].message).toBe("profile write failed");
-    expect(res.statusCode).toBe(500);
-    expect(client.query).toHaveBeenLastCalledWith("ROLLBACK");
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(201);
+    expect(enqueueProfileUpdate).toHaveBeenCalledWith(makePublicKey("G"));
+    const calls = client.query.mock.calls.map(([sql]) => sql);
+    expect(calls).toContain("COMMIT");
+    expect(calls).not.toContain("ROLLBACK");
     expect(client.release).toHaveBeenCalledTimes(1);
   });
 });
