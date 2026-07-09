@@ -14,6 +14,8 @@ let lastProcessedLedger = 0;
 let isRunning = false;
 let io = null;
 let projectWallets = new Map(); // wallet_address -> project_id
+let projectWalletsInterval = null; // tracked so stop() can clearInterval
+let horizonStream = null; // tracked so stop() can close the SSE stream
 
 /**
  * Fetch all active project wallets and cache them.
@@ -48,13 +50,20 @@ async function startIndexer(socketIo) {
   io = socketIo;
 
   await updateProjectWallets();
-  // Refresh cache every 10 minutes
-  setInterval(updateProjectWallets, 10 * 60 * 1000);
+  // Refresh cache every 10 minutes. Keep a handle so stop() can clear it
+  // during graceful shutdown — otherwise the unref'd interval keeps the
+  // event loop alive past server.close().
+  projectWalletsInterval = setInterval(updateProjectWallets, 10 * 60 * 1000);
+  // Unref so this timer alone doesn't keep the process alive.
+  if (typeof projectWalletsInterval.unref === "function") projectWalletsInterval.unref();
 
   logger.info({ event: "indexer_started" }, "Starting Horizon operations stream");
 
-  // Start streaming operations from 'now'
-  stellarServer.operations()
+  // Start streaming operations from 'now'. The returned EventSource
+  // supports .close() (the @stellar/stellar-sdk wraps fetch's
+  // ReadableStream), which we call from stop() to release the SSE
+  // connection during shutdown.
+  horizonStream = stellarServer.operations()
     .cursor("now")
     .stream({
       onmessage: async (op) => {
@@ -217,7 +226,34 @@ function getStatus() {
  */
 // exported as `getStatus`
 
+/**
+ * Stop the indexer. Idempotent. Called from server.js during graceful
+ * shutdown so the Horizon SSE stream and the wallet-cache interval are
+ * released and the process can exit cleanly.
+ */
+async function stop() {
+  try {
+    if (horizonStream && typeof horizonStream.close === "function") {
+      horizonStream.close();
+    }
+  } catch {
+    // ignore
+  } finally {
+    horizonStream = null;
+  }
+  try {
+    if (projectWalletsInterval) {
+      clearInterval(projectWalletsInterval);
+      projectWalletsInterval = null;
+    }
+  } catch {
+    // ignore
+  }
+  isRunning = false;
+}
+
 module.exports = {
   startIndexer,
-  getStatus
+  getStatus,
+  stop,
 };
