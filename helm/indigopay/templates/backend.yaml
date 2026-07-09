@@ -3,6 +3,10 @@ kind: Deployment
 metadata:
   name: backend
   namespace: {{ .Values.namespace }}
+  labels:
+    app: backend
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: indigopay
 spec:
   replicas: {{ .Values.backend.replicas }}
   selector:
@@ -12,40 +16,110 @@ spec:
     metadata:
       labels:
         app: backend
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: indigopay
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.backend.port }}"
+        prometheus.io/path: "/metrics"
     spec:
+      # Allow the in-process drain to complete before SIGKILL. Must be
+      # greater than the value of backend.shutdownTimeoutMs.
+      terminationGracePeriodSeconds: {{ add .Values.backend.shutdownTimeoutMs 5000 | div 1000 | int64 }}
       containers:
         - name: backend
           image: {{ .Values.backend.image }}
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: {{ .Values.backend.port }}
+            - name: http
+              containerPort: {{ .Values.backend.port }}
+              protocol: TCP
           envFrom:
             - configMapRef:
                 name: indigopay-config
             - secretRef:
                 name: indigopay-secrets
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 1
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /health
-              port: {{ .Values.backend.port }}
-            initialDelaySeconds: 10
-            periodSeconds: 10
+              path: /api/readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # preStop sleep 5 gives the readiness probe a 5s window AFTER
+          # SIGTERM to flip to 503 (the in-process isShuttingDown() flag
+          # only goes true when the SIGTERM handler runs) and BEFORE the
+          # load balancer starts sending new traffic. This is the
+          # standard K8s pattern for draining gracefully.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]
           resources:
             requests:
-              cpu: "100m"
-              memory: "128Mi"
+              cpu: {{ .Values.backend.resources.requests.cpu }}
+              memory: {{ .Values.backend.resources.requests.memory }}
             limits:
-              cpu: "500m"
-              memory: "512Mi"
+              cpu: {{ .Values.backend.resources.limits.cpu }}
+              memory: {{ .Values.backend.resources.limits.memory }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: backend-svc
   namespace: {{ .Values.namespace }}
+  labels:
+    app: backend
 spec:
   selector:
     app: backend
   ports:
-    - port: {{ .Values.backend.port }}
-      targetPort: {{ .Values.backend.port }}
+    - name: http
+      port: {{ .Values.backend.port }}
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: 4001
+      targetPort: http
+      protocol: TCP
+---
+{{- if .Values.backend.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: backend
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: backend
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: backend
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      authorization:
+        type: Bearer
+        credentials:
+          name: indigopay-secrets
+          key: METRICS_BEARER_TOKEN
+{{- end }}

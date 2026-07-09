@@ -4,6 +4,16 @@ backend:
   image: indigopay/backend:latest
   replicas: 2
   port: 4000
+  serviceMonitor:
+    enabled: false
+  shutdownTimeoutMs: 30000
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
 
 frontend:
   image: indigopay/frontend:latest
@@ -28,6 +38,7 @@ secrets:
   postgresDb: indigopay
   resendApiKey: ""
   adminApiKey: ""
+  metricsBearerToken: ""
 
 ingress:
   host: indigopay.local

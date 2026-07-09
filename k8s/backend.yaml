@@ -5,6 +5,8 @@ metadata:
   namespace: indigopay
   labels:
     app: backend
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: indigopay
 spec:
   replicas: 2
   selector:
@@ -14,24 +16,64 @@ spec:
     metadata:
       labels:
         app: backend
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: indigopay
+      # The ServiceMonitor selector below uses these labels to discover pods.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "4000"
+        prometheus.io/path: "/metrics"
     spec:
+      terminationGracePeriodSeconds: 35
       containers:
         - name: backend
           image: indigopay/backend:latest
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 4000
+            - name: http
+              containerPort: 4000
+              protocol: TCP
           envFrom:
             - configMapRef:
                 name: indigopay-config
             - secretRef:
                 name: indigopay-secrets
+          # Liveness: 5s boot grace + 5s failure threshold. The route
+          # returns 200 as soon as process.uptime() > 5s, so the probe
+          # is satisfied ~5s after boot. It will only fail if the
+          # process is wedged or in graceful-shutdown drain.
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 1
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness: requires DB + Horizon to be reachable. Pod is
+          # removed from rotation during graceful shutdown and when
+          # downstream is unavailable.
           readinessProbe:
             httpGet:
-              path: /health
-              port: 4000
-            initialDelaySeconds: 10
-            periodSeconds: 10
+              path: /api/readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Give the drain (30s by default) enough time to finish
+          # before Kubernetes sends SIGKILL. Must be > SHUTDOWN_TIMEOUT_MS.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]
           resources:
             requests:
               cpu: "100m"
@@ -45,9 +87,43 @@ kind: Service
 metadata:
   name: backend-svc
   namespace: indigopay
+  labels:
+    app: backend
 spec:
   selector:
     app: backend
   ports:
-    - port: 4000
-      targetPort: 4000
+    - name: http
+      port: 4000
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: 4001
+      targetPort: http
+      protocol: TCP
+---
+# ServiceMonitor for prometheus-operator. The Prometheus CR scrapes the
+# pod-level /metrics endpoint using the bearer token from
+# indigopay-secrets.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: backend
+  namespace: indigopay
+  labels:
+    app: backend
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: backend
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      authorization:
+        type: Bearer
+        credentials:
+          name: indigopay-secrets
+          key: METRICS_BEARER_TOKEN
