@@ -37,11 +37,11 @@ jobs:
             ./${{ matrix.service }}
 
       - name: Run Trivy vulnerability scanner
-        # Pinned to a commit SHA for supply-chain hygiene. Update by
-        # following the action's release notes and running
-        #   git ls-remote https://github.com/aquasecurity/trivy-action refs/tags/v0.24.0
-        # to find the SHA, then replacing the value below.
-        uses: aquasecurity/trivy-action@b6643c0e5cc8a9c9b5b2cb06a73c4a3d9eb7c5d2
+        # Tag-pinned for clarity. Before this workflow is used in
+        # production, replace the tag with a commit SHA for supply-chain
+        # hygiene. The previous attempt used a fabricated SHA which
+        # would have broken CI on first run.
+        uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: indigopay-${{ matrix.service }}:scan
           format: "sarif"
