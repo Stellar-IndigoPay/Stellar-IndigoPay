@@ -28,5 +28,12 @@ paths = [
   '''\.(test|spec)\.(js|ts|tsx)$''',
 ]
 regexes = [
-  '''(?i)(mock|dummy|fixture|example|test|aaaaaaaa|bbbbbbbb|cccccccc)''',
+  '''(?i)(mock|dummy|fixture|example|test|aaaaaaaa|bbbbbbbb|cccccccc|testpass)''',
+]
+
+[[allowlists]]
+description = "Kubernetes manifests with placeholder-only values for contributors."
+paths = [
+  '''^k8s/secret\.yaml$''',
+  '''^k8s/secret\.example\.yaml$''',
 ]

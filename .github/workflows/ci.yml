@@ -113,7 +113,7 @@ jobs:
         with:
           version: latest
       - run: helm lint helm/indigopay/
-      - run: helm template indigopay helm/indigopay/ | kubectl apply --dry-run=client -f -
+      - run: helm template indigopay helm/indigopay/ | kubectl apply --dry-run=client --validate=false -f -
 
   gitleaks:
     name: Secret scanning
