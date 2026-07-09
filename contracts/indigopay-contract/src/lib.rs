@@ -213,6 +213,23 @@ const MAX_VOTING_WINDOW_LEDGERS: u32 = 518_400; // 30 days @ 5s/ledger
 // panics and misleading impact figures from misconfigured projects.
 const MAX_CO2_PER_XLM: u32 = 100_000;
 
+/// Read the stored admin. Caller must compare and panic on mismatch.
+/// Centralised so every admin check uses the same pattern.
+fn read_admin(env: &Env) -> Address {
+    env.storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .expect("Not initialized")
+}
+
+/// Verify that `caller` is the stored admin. Used after `require_auth`
+/// so the auth signature has already been verified by the host.
+fn require_admin(env: &Env, caller: &Address) {
+    if read_admin(env) != *caller {
+        panic!("Only admin can perform this action");
+    }
+}
+
 fn calculate_badge(total_stroops: i128) -> BadgeTier {
     let xlm = total_stroops / STROOP;
     if xlm >= 2000 {
@@ -263,14 +280,7 @@ impl IndigoPayContract {
         co2_per_xlm: u32,
     ) {
         admin.require_auth();
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Not initialized");
-        if stored_admin != admin {
-            panic!("Only admin can register projects");
-        }
+        require_admin(&env, &admin);
         if env
             .storage()
             .instance()
@@ -324,9 +334,7 @@ impl IndigoPayContract {
 
     pub fn batch_register_projects(env: Env, admin: Address, projects: Vec<ProjectInit>) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance()
-            .get(&DataKey::Admin).expect("Not initialized");
-        if stored_admin != admin { panic!("Only admin can register projects"); }
+        require_admin(&env, &admin);
 
         let mut ids: Vec<String> = env.storage().instance()
             .get(&DataKey::ProjectIdsAll)
@@ -364,14 +372,7 @@ impl IndigoPayContract {
     /// donations immediately.
     pub fn deactivate_all_projects(env: Env, admin: Address) {
         admin.require_auth();
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Not initialized");
-        if stored_admin != admin {
-            panic!("Only admin can deactivate all projects");
-        }
+        require_admin(&env, &admin);
 
         let ids: Vec<String> = env
             .storage()
@@ -399,14 +400,7 @@ impl IndigoPayContract {
 
     pub fn deactivate_project(env: Env, admin: Address, project_id: String) {
         admin.require_auth();
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Not initialized");
-        if stored_admin != admin {
-            panic!("Only admin can deactivate projects");
-        }
+        require_admin(&env, &admin);
         let mut project: Project = env
             .storage()
             .instance()
@@ -420,16 +414,7 @@ impl IndigoPayContract {
 
     pub fn update_project_co2_rate(env: Env, admin: Address, project_id: String, co2_per_xlm: u32) {
         admin.require_auth();
-
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Not initialized");
-
-        if stored_admin != admin {
-            panic!("Only admin can update project rate");
-        }
+        require_admin(&env, &admin);
 
         // Bounds must match `register_project` so the on-chain limits stay
         // consistent regardless of whether the rate was set at registration
@@ -461,9 +446,7 @@ impl IndigoPayContract {
 
     pub fn pause_project(env: Env, admin: Address, project_id: String) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance()
-            .get(&DataKey::Admin).expect("Not initialized");
-        if stored_admin != admin { panic!("Only admin can pause projects"); }
+        require_admin(&env, &admin);
         let mut project: Project = env.storage().instance()
             .get(&DataKey::Project(project_id.clone())).expect("Project not found");
         if !project.active { panic!("Cannot pause a deactivated project"); }
@@ -479,9 +462,7 @@ impl IndigoPayContract {
     /// project is not paused, to prevent accidental double-resumes).
     pub fn resume_project(env: Env, admin: Address, project_id: String) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance()
-            .get(&DataKey::Admin).expect("Not initialized");
-        if stored_admin != admin { panic!("Only admin can resume projects"); }
+        require_admin(&env, &admin);
         let mut project: Project = env.storage().instance()
             .get(&DataKey::Project(project_id.clone())).expect("Project not found");
         if !project.active { panic!("Cannot resume a deactivated project"); }
@@ -859,14 +840,7 @@ impl IndigoPayContract {
     /// [`MIN_VOTING_WINDOW_LEDGERS`, `MAX_VOTING_WINDOW_LEDGERS`].
     pub fn create_proposal(env: Env, admin: Address, project_id: String, duration_ledgers: u32) {
         admin.require_auth();
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Not initialized");
-        if stored_admin != admin {
-            panic!("Only admin can create proposals");
-        }
+        require_admin(&env, &admin);
         if !env
             .storage()
             .instance()
@@ -1012,9 +986,7 @@ impl IndigoPayContract {
     /// Emits prop_veto with the admin address for auditability.
     pub fn veto_proposal(env: Env, admin: Address, project_id: String) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance()
-            .get(&DataKey::Admin).expect("Not initialized");
-        if stored_admin != admin { panic!("Only admin can veto proposals"); }
+        require_admin(&env, &admin);
         let mut proposal: VoteProposal = env.storage().instance()
             .get(&DataKey::Proposal(project_id.clone())).expect("Proposal not found");
         if proposal.resolved { panic!("Proposal already resolved"); }
@@ -1210,14 +1182,7 @@ impl IndigoPayContract {
     /// Admin-only: Set the USDC token address for multi-currency donations.
     pub fn set_usdc_token(env: Env, admin: Address, usdc_token: Address) {
         admin.require_auth();
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Not initialized");
-        if stored_admin != admin {
-            panic!("Only admin can set USDC token");
-        }
+        require_admin(&env, &admin);
         env.storage()
             .instance()
             .set(&DataKey::USDCTokenAddress, &usdc_token);
@@ -1234,9 +1199,7 @@ impl IndigoPayContract {
     /// The oracle must implement `OracleInterface::get_price()`.
     pub fn set_oracle(env: Env, admin: Address, oracle: Address) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance()
-            .get(&DataKey::Admin).expect("Not initialized");
-        if stored_admin != admin { panic!("Only admin can set oracle"); }
+        require_admin(&env, &admin);
         env.storage().instance().set(&DataKey::OracleAddress, &oracle);
         env.events().publish((symbol_short!("oracle"),), oracle);
     }
@@ -1250,14 +1213,7 @@ impl IndigoPayContract {
     /// Preserves all on-chain state while replacing the contract implementation.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
         admin.require_auth();
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Not initialized");
-        if stored_admin != admin {
-            panic!("Only admin can upgrade");
-        }
+        require_admin(&env, &admin);
 
         // Store the new WASM hash for upgrade verification
         env.storage()
@@ -1810,7 +1766,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Only admin can veto proposals")]
+    #[should_panic(expected = "Only admin can perform this action")]
     fn test_veto_proposal_non_admin_fails() {
         let (env, _cid, client, admin, pid) = setup();
         client.create_proposal(&admin, &pid, &0u32);
@@ -2092,7 +2048,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Only admin can pause projects")]
+    #[should_panic(expected = "Only admin can perform this action")]
     fn test_pause_project_non_admin_fails() {
         let (env, _cid, client, _admin, pid) = setup();
         let imposter = Address::generate(&env);
@@ -2126,7 +2082,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Only admin can resume projects")]
+    #[should_panic(expected = "Only admin can perform this action")]
     fn test_resume_project_non_admin_fails() {
         let (env, _cid, client, admin, pid) = setup();
         client.pause_project(&admin, &pid);
@@ -2305,7 +2261,7 @@ mod tests {
     // ─── Bulk admin tests ──────────────────────────────────────────────────────
 
     #[test]
-    #[should_panic(expected = "Only admin can deactivate all projects")]
+    #[should_panic(expected = "Only admin can perform this action")]
     fn test_deactivate_all_projects_non_admin_fails() {
         let (env, _cid, client, _admin, _pid) = setup();
         let imposter = Address::generate(&env);
