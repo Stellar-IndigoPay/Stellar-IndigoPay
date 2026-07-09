@@ -1,0 +1,111 @@
+# .github/workflows/restore-drill.yml
+#
+# Monthly restore drill. Spins up an ephemeral Postgres pod, pulls
+# the latest backup from S3, restores it, and asserts the row
+# counts on the canonical tables match what production has.
+#
+# Schedule: 1st of every month at 03:00 UTC.
+# Manual dispatch: workflow_dispatch.
+
+name: Monthly Restore Drill
+
+on:
+  schedule:
+    - cron: "0 3 1 * *"
+  workflow_dispatch:
+
+jobs:
+  restore-drill:
+    name: Restore latest backup and assert row counts
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || "us-east-1" }}
+
+      - name: Install postgres client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Start ephemeral postgres
+        run: |
+          docker run -d --name drill-db \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB=indigopay_drill \
+            -p 5433:5432 \
+            postgres:16-alpine
+          sleep 10
+          for i in {1..30}; do
+            pg_isready -h localhost -p 5433 && break
+            sleep 2
+          done
+
+      - name: Download latest backup
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+        run: |
+          set -euo pipefail
+          LATEST=$(aws s3 ls "s3://${S3_BUCKET}/backups/" --recursive | sort | tail -1 | awk '{print $4}')
+          if [ -z "$LATEST" ]; then
+            echo "::error::No backups found in s3://${S3_BUCKET}/backups/"
+            exit 1
+          fi
+          echo "Restoring from $LATEST"
+          aws s3 cp "s3://${S3_BUCKET}/${LATEST}" /tmp/backup.sql.gz
+          gunzip -f /tmp/backup.sql.gz
+
+      - name: Restore backup
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -p 5433 -U postgres -d indigopay_drill \
+            -f /tmp/backup.sql
+
+      - name: Assert row counts
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          TABLES=("projects" "donations" "profiles" "webhook_deliveries")
+          for T in "${TABLES[@]}"; do
+            COUNT=$(psql -h localhost -p 5433 -U postgres -d indigopay_drill \
+              -tAc "SELECT count(*) FROM ${T};")
+            if [ "$COUNT" -lt 1 ]; then
+              echo "::error::Table ${T} has 0 rows after restore — backup is incomplete"
+              exit 1
+            fi
+            echo "  ${T}: ${COUNT} rows ✅"
+          done
+
+      - name: Tear down ephemeral postgres
+        if: always()
+        run: |
+          docker rm -f drill-db || true
+
+      - name: Notify on success
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.notice('✅ Monthly restore drill passed. Backup integrity verified.');
+
+      - name: Open issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = '🚨 Monthly Restore Drill Failed';
+            const body = `The monthly restore drill failed on ${new Date().toISOString()}.
+            Investigate immediately — this means the production backup may be unrecoverable.
+            Run: ${context.serverUrl}/${context.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              title, body, labels: ['bug', 'devops', 'backup', 'oncall'],
+            });
