@@ -1,0 +1,64 @@
+# gitops/argocd-application.yaml
+#
+# ArgoCD Application for GitOps-driven deployment of the Helm chart.
+# ArgoCD polls the git repo on `indigopay` chart changes and reconciles
+# the cluster state with the desired state. Use this in production
+# instead of `helm install` from CI — GitOps gives you a single pane
+# of glass (the ArgoCD UI) and drift detection for free.
+#
+# Install ArgoCD first:
+#   kubectl create namespace argocd
+#   kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+#   # (or use the operator-hub install)
+#
+# Then apply this manifest:
+#   kubectl apply -f gitops/argocd-application.yaml
+#
+# Notes:
+#   - `repoURL` points at the same repo. For a private repo, set up
+#     a GitHub App credential in ArgoCD via the Web UI.
+#   - `targetRevision: HEAD` is a moving target; pin to a release tag
+#     (e.g. `v1.2.0`) for stricter change control.
+#   - `syncPolicy.automated.selfHeal: true` means ArgoCD reverts
+#     out-of-band changes. Keep this on for prod.
+#   - `prune: true` deletes resources that disappear from the chart.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: indigopay
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Stellar-IndigoPay/Stellar-IndigoPay
+    targetRevision: HEAD
+    path: helm/indigopay
+    helm:
+      releaseName: indigopay
+      # Point at a values-prod.yaml checked into git (encrypted with
+      # SOPS or rendered from external-secrets). DO NOT commit plaintext
+      # production values to the repo.
+      valueFiles:
+        - values-prod.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: indigopay
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=false
+      # Honor server-side apply semantics for reduced drift
+      - ServerSideApply=true
+      - PrunePropagationPolicy=foreground
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 5m
+  revisionHistory:
+    limit: 10
