@@ -18,12 +18,65 @@ mod fuzz {
         testutils::Address as _,
         token::StellarAssetClient, Address, Env, String as SorobanString,
     };
-    use crate::{DataKey, IndigoPayContract, IndigoPayContractClient, Project};
+    use crate::{DataKey, IndigoPayContract, IndigoPayContractClient, MockOracle, Project};
 
     /// Upper bound for a single donation: 1 billion XLM in stroops (10^16).
     /// Chosen so that a single donation is large but a few thousand back-to-back
     /// still fit in an i128 without overflowing.
     const MAX_DONATION: i128 = 1_000_000_000 * 10_000_000; // 10^16
+
+    /// 1 XLM expressed in stroops. USDC fuzz tests multiply donations by
+    /// the 8x oracle rate and divide by this constant to get the
+    /// XLM-equivalent units that drive the CO₂ `checked_mul` path.
+    const FUZZ_STROOP: i128 = 10_000_000;
+
+    /// Stable msg-hash placeholder for `donate` / `donate_usdc` calls.
+    const MSG_HASH: u32 = 42;
+
+    /// USDC-flavoured variant of `setup`. Registers an oracle (the bundled
+    /// `MockOracle` returns a fixed rate of 8 XLM per 1 USDC stroop) and a
+    /// USDC Stellar asset, then binds them to the contract via
+    /// `set_oracle` / `set_usdc_token`.
+    fn setup_usdc(co2_per_xlm: u32) -> (
+        Env,
+        IndigoPayContractClient<'static>,
+        SorobanString,
+        Address,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let cid = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &cid);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let project_id = SorobanString::from_str(&env, "proj-usdc-fuzz");
+        let wallet = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &project_id,
+            &SorobanString::from_str(&env, "USDC Fuzz Project"),
+            &wallet,
+            &co2_per_xlm,
+        );
+
+        let token_admin = Address::generate(&env);
+        let usdc_token = env.register_stellar_asset_contract_v2(token_admin).address();
+        client.set_usdc_token(&admin, &usdc_token);
+
+        let oracle_id = env.register_contract(None, MockOracle);
+        let oracle_addr = oracle_id.address();
+        client.set_oracle(&admin, &oracle_addr);
+
+        (env, client, project_id, usdc_token)
+    }
+
+    /// Mint USDC balance for `donor` using a fresh Stellar asset admin.
+    fn fund_usdc(env: &Env, usdc_token: &Address, donor: &Address, amount: i128) {
+        StellarAssetClient::new(env, usdc_token).mint(donor, &amount);
+    }
 
     fn setup() -> (Env, Address, IndigoPayContractClient<'static>, Address, SorobanString, Address) {
         let env = Env::default();
