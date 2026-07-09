@@ -3,7 +3,7 @@
  */
 import Link from "next/link";
 import type { ClimateProject } from "@/utils/types";
-import { formatXLM, formatUSDEquivalent, formatCO2, progressPercent, statusClass, statusLabel, CATEGORY_ICONS } from "@/utils/format";
+import { formatXLM, formatCO2, progressPercent, statusClass, statusLabel, CATEGORY_ICONS } from "@/utils/format";
 import CircularProgress from "./CircularProgress";
 import { useXlmPrice } from "@/lib/priceContext";
 import { useWishlist } from "@/hooks/useWishlist";
@@ -67,49 +67,52 @@ export default function ProjectCard({ project }: { project: ClimateProject }) {
             {project.description}
           </p>
 
-        {/* Progress */}
-        <div className="mb-4">
-          {isComplete ? (
-            <div className="bg-gradient-to-r from-green-500 to-emerald-600 text-white px-4 py-2 rounded-lg text-center text-sm font-semibold shadow-sm">
-              ✅ Fully Funded
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <ProjectProgressBar
-                raisedXLM={project.raisedXLM}
-                goalXLM={project.goalXLM}
-                className="w-full"
-              />
-              <div className="flex items-center justify-between text-[11px] text-[#8aaa8a] font-body">
-                <span>{formatXLM(project.raisedXLM)} raised</span>
-                <span>{project.goalXLM && Number(project.goalXLM) > 0 ? `Goal: ${formatXLM(project.goalXLM)}` : "No goal set"}</span>
+          {/* Progress */}
+          <div className="mb-4">
+            {isComplete ? (
+              <div className="bg-gradient-to-r from-green-500 to-emerald-600 text-white px-4 py-2 rounded-lg text-center text-sm font-semibold shadow-sm">
+                ✅ Fully Funded
               </div>
-            </div>
-          )}
-        </div>
+            ) : (
+              <div className="space-y-2">
+                <ProjectProgressBar
+                  raisedXLM={project.raisedXLM}
+                  goalXLM={project.goalXLM}
+                  className="w-full"
+                />
+                <div className="flex items-center justify-between text-[11px] text-[#8aaa8a] font-body">
+                  <span>{formatXLM(project.raisedXLM)} raised</span>
+                  <span>
+                    {project.goalXLM && Number(project.goalXLM) > 0
+                      ? `Goal: ${formatXLM(project.goalXLM)}`
+                      : "No goal set"}
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
 
-	        {/* Stats row */}
-	        <div className="flex items-center justify-between pt-3 border-t border-[rgba(34,114,57,0.07)]">
-	          <div className="flex items-center gap-3 text-xs text-[#5a7a5a] font-body">
-	            <span>👥 {project.donorCount} donors</span>
-            <span className="flex items-center gap-1">
-              ♻️ {formatCO2(project.co2OffsetKg)}
-              <span className="tooltip" onClick={(e) => { e.stopPropagation(); e.preventDefault(); }}>
-                <button
-                  type="button"
-                  className="w-3.5 h-3.5 flex items-center justify-center rounded-full bg-forest-100 text-[8px] text-forest-600 border border-forest-200 hover:bg-forest-200 transition-colors focus:outline-none focus:ring-1 focus:ring-forest-400"
-                  aria-label="CO2 offset estimate methodology info"
-                >
+          {/* Stats row */}
+          <div className="flex items-center justify-between pt-3 border-t border-[rgba(34,114,57,0.07)]">
+            <div className="flex items-center gap-3 text-xs text-[#5a7a5a] font-body">
+              <span>👥 {project.donorCount} donors</span>
+              <span className="flex items-center gap-1">
+                ♻️ {formatCO2(project.co2OffsetKg)}
+                <span className="tooltip">
                   <button
                     type="button"
                     className="w-3.5 h-3.5 flex items-center justify-center rounded-full bg-forest-100 text-[8px] text-forest-600 border border-forest-200 hover:bg-forest-200 transition-colors focus:outline-none focus:ring-1 focus:ring-forest-400"
                     aria-label="CO2 offset estimate methodology info"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                    }}
                   >
                     ℹ️
                   </button>
                   <span className="tooltip-text" role="tooltip">
-                    Estimated CO₂ offset based on this project&apos;s declared impact
-                    rate per XLM donated. Actual results may vary.
+                    Estimated CO₂ offset based on this project&apos;s declared
+                    impact rate per XLM donated. Actual results may vary.
                   </span>
                 </span>
               </span>
@@ -118,26 +121,22 @@ export default function ProjectCard({ project }: { project: ClimateProject }) {
               Donate →
             </span>
           </div>
-	          <span className="text-xs font-semibold text-forest-600 font-body group-hover:text-forest-700">
-	            Donate →
-	          </span>
-	        </div>
-	      </div>
-	      </Link>
+        </div>
+      </Link>
 
       {/* Wishlist Toggle */}
       <button
+        type="button"
         onClick={(e) => {
           e.preventDefault();
           e.stopPropagation();
           toggleWishlist(project.id);
         }}
-        className={`absolute top-4 right-4 p-2.5 rounded-xl border transition-all duration-300 transform hover:scale-110 active:scale-95 z-20 shadow-sm
-          ${
-            isWishlisted
-              ? "bg-red-50 text-red-500 border-red-200 opacity-100"
-              : "bg-white/90 text-forest-300 border-forest-100 hover:text-red-400 hover:border-red-100 opacity-0 group-hover:opacity-100"
-          }`}
+        className={`absolute top-4 right-4 p-2.5 rounded-xl border transition-all duration-300 transform hover:scale-110 active:scale-95 z-20 shadow-sm ${
+          isWishlisted
+            ? "bg-red-50 text-red-500 border-red-200 opacity-100"
+            : "bg-white/90 text-forest-300 border-forest-100 hover:text-red-400 hover:border-red-100 opacity-0 group-hover:opacity-100"
+        }`}
         aria-label={isWishlisted ? "Remove from wishlist" : "Add to wishlist"}
       >
         <svg
