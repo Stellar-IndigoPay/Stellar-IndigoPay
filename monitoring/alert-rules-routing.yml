@@ -1,0 +1,57 @@
+# monitoring/alert-rules-routing.yml
+#
+# Alert routing rules that pair with monitoring/alertmanager-routing.yml.
+# Severity is the routing key — Alertmanager looks at this label to pick
+# the receiver. Add new alerts with `severity: page` to wake on-call,
+# `severity: warn` to ping the warn channel during business hours only.
+#
+# This file is additive — load BOTH monitoring/alert-rules.yml AND
+# monitoring/alert-rules-routing.yml in Prometheus. (See
+# monitoring/prometheus.yml's `rule_files:` block.)
+
+groups:
+  - name: indigopay-backend-availability
+    interval: 30s
+    rules:
+      - alert: BackendDown
+        # The readiness probe gauge is 0 when the deployment is fully down.
+        # /api/readyz returns 503 and increments readiness_check_failed_total.
+        expr: |
+          sum by (reason) (increase(readiness_check_failed_total{job="indigopay-backend"}[5m])) > 5
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Backend readiness has failed > 5 times in 5m"
+          description: |
+            /api/readyz is returning 503. Either the backend is down or
+            a required dependency (Postgres, Redis, Horizon) is unreachable.
+
+      - alert: BackupMissed
+        # Fires if a backup was expected in the last 36h but the S3
+        # inventory is older than that. The restore-drill workflow
+        # assumes fresh backups exist.
+        expr: |
+          (time() - max_over_time(backup_last_success_timestamp[36h])) > 36 * 3600
+        for: 30m
+        labels:
+          severity: page
+        annotations:
+          summary: "No successful Postgres backup in the last 36h"
+          description: |
+            The nightly backup workflow is failing. The DR plan assumes
+            we can restore from the last 24h of WAL archives on top of
+            a base backup.
+
+      - alert: RestoreDrillFailed
+        # Set by the .github/workflows/restore-drill.yml workflow via
+        # a Pushgateway push. Resolves when the next drill passes.
+        expr: restore_drill_failed == 1
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Last monthly restore drill failed"
+          description: |
+            The restore-drill workflow could not restore the latest
+            backup. The production backup may be unrecoverable.
