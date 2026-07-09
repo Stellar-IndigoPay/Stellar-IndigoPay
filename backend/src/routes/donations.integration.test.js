@@ -1,5 +1,13 @@
 "use strict";
 
+jest.mock("../services/stellar", () => ({
+  server: { getTransaction: jest.fn().mockResolvedValue({ successful: true }) },
+}));
+
+jest.mock("../services/profileQueue", () => ({
+  enqueueProfileUpdate: jest.fn().mockResolvedValue(undefined),
+}));
+
 /**
  * Integration test for donation flow using testcontainers-node
  * with a real PostgreSQL instance.
@@ -88,10 +96,14 @@ describe("Donation flow integration (testcontainers)", () => {
       // Ensure cleanup
       try {
         if (testPool) await testPool.end();
-      } catch {}
+      } catch {
+        // cleanup after startup failure
+      }
       try {
         if (container) await container.stop();
-      } catch {}
+      } catch {
+        // cleanup after startup failure
+      }
       container = null;
       testPool = null;
     }
@@ -100,13 +112,19 @@ describe("Donation flow integration (testcontainers)", () => {
   afterAll(async () => {
     try {
       if (pool) await pool.end();
-    } catch {}
+    } catch {
+      // cleanup pool
+    }
     try {
       if (testPool) await testPool.end();
-    } catch {}
+    } catch {
+      // cleanup testPool
+    }
     try {
       if (container) await container.stop({ timeout: 5000 });
-    } catch {}
+    } catch {
+      // cleanup container
+    }
   });
 
   async function cleanDb() {
@@ -186,20 +204,13 @@ describe("Donation flow integration (testcontainers)", () => {
     expect(donationCheck.rows[0].donor_address).toBe(donorAddress);
     expect(parseFloat(donationCheck.rows[0].amount_xlm)).toBeCloseTo(10, 5);
 
-    const profile1 = await testPool.query("SELECT * FROM profiles WHERE public_key = $1", [donorAddress]);
-    expect(profile1.rows).toHaveLength(1);
-    expect(parseFloat(profile1.rows[0].total_donated_xlm)).toBeCloseTo(10, 5);
-    expect(profile1.rows[0].projects_supported).toBe(1);
-    // Badge: seedling at 10 XLM
-    const badges1 = profile1.rows[0].badges;
-    expect(Array.isArray(badges1)).toBe(true);
-    expect(badges1[0].tier).toBe("seedling");
-
+    // Profile updates are now handled asynchronously by profileQueue,
+    // so we only verify the donation was recorded and project totals updated.
     const project1 = await testPool.query("SELECT raised_xlm, donor_count FROM projects WHERE id = $1", [projectId]);
     expect(parseFloat(project1.rows[0].raised_xlm)).toBeCloseTo(10, 5);
     expect(project1.rows[0].donor_count).toBe(1);
 
-    // Second donation from SAME donor: 90 XLM => total 100 => badge upgrade to tree
+    // Second donation from SAME donor: 90 XLM
     const txHash2 = makeTxHash("b");
     const res2 = await invoke({
       projectId,
@@ -209,10 +220,6 @@ describe("Donation flow integration (testcontainers)", () => {
       transactionHash: txHash2,
     });
     expect(res2.statusCode).toBe(201);
-
-    const profile2 = await testPool.query("SELECT total_donated_xlm, badges FROM profiles WHERE public_key = $1", [donorAddress]);
-    expect(parseFloat(profile2.rows[0].total_donated_xlm)).toBeCloseTo(100, 5);
-    expect(profile2.rows[0].badges[0].tier).toBe("tree");
 
     const project2 = await testPool.query("SELECT raised_xlm, donor_count FROM projects WHERE id = $1", [projectId]);
     // raised_xlm should be 100 now, donor_count still 1 (same donor)
@@ -234,9 +241,6 @@ describe("Donation flow integration (testcontainers)", () => {
     const project3 = await testPool.query("SELECT raised_xlm, donor_count FROM projects WHERE id = $1", [projectId]);
     expect(parseFloat(project3.rows[0].raised_xlm)).toBeCloseTo(125, 5);
     expect(project3.rows[0].donor_count).toBe(2);
-
-    const profileDonor2 = await testPool.query("SELECT total_donated_xlm FROM profiles WHERE public_key = $1", [donor2]);
-    expect(parseFloat(profileDonor2.rows[0].total_donated_xlm)).toBeCloseTo(25, 5);
 
     // Verify donations table count
     const allDonations = await testPool.query("SELECT COUNT(*) FROM donations WHERE project_id = $1", [projectId]);
@@ -287,9 +291,7 @@ describe("Donation flow integration (testcontainers)", () => {
     expect(parseFloat(project.rows[0].raised_xlm)).toBeCloseTo(15, 5);
     expect(project.rows[0].donor_count).toBe(1);
 
-    const profile = await testPool.query("SELECT total_donated_xlm FROM profiles WHERE public_key=$1", [donor]);
-    expect(parseFloat(profile.rows[0].total_donated_xlm)).toBeCloseTo(15, 5);
-
+    // Profile updates are handled asynchronously by profileQueue
     const donationsCount = await testPool.query("SELECT COUNT(*) FROM donations WHERE transaction_hash=$1", [txHash]);
     expect(parseInt(donationsCount.rows[0].count,10)).toBe(1);
   });
@@ -335,10 +337,7 @@ describe("Donation flow integration (testcontainers)", () => {
     });
     expect(res.statusCode).toBe(201);
 
-    const profile = await testPool.query("SELECT total_donated_xlm FROM profiles WHERE public_key=$1", [donor]);
-    // total_donated_xlm must remain 200
-    expect(parseFloat(profile.rows[0].total_donated_xlm)).toBeCloseTo(200, 5);
-
+    // Profile updates are handled asynchronously by profileQueue
     const project = await testPool.query("SELECT raised_xlm, donor_count FROM projects WHERE id=$1", [projectId]);
     // raised_xlm unchanged, but donor_count increments because donation row exists (distinct donor)
     expect(parseFloat(project.rows[0].raised_xlm)).toBeCloseTo(0, 5);

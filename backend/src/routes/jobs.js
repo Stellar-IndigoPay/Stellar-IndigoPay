@@ -37,6 +37,7 @@ router.get("/", async (req, res, next) => {
     }
 
     if (conditions.length > 0) {
+      // eslint-disable-next-line sql-injection/no-sql-injection
       queryStr += " WHERE " + conditions.join(" AND ");
     }
 

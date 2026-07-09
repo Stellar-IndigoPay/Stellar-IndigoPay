@@ -6,13 +6,15 @@ const crypto = require("crypto");
 const express = require("express");
 const router = express.Router();
 const { v4: uuid } = require("uuid");
+const { z } = require("zod");
 const QRCode = require("qrcode");
 const pool = require("../db/pool");
 const { logAdminAction } = require("../services/audit");
 const { adminKeyRequired } = require("../middleware/auth");
-const { mapProjectRow, mapProjectMilestoneRow } = require("../services/store");
+const { mapProjectRow, mapProjectMilestoneRow, mapDonationRow } = require("../services/store");
 const {
   getOnChainProject,
+  getProjectDonationEvents,
   CONTRACT_ID,
   server,
   NETWORK_PASSPHRASE,
@@ -21,6 +23,7 @@ const { enqueueAISummary } = require("../services/summaryQueue");
 const { Contract, TransactionBuilder } = require("@stellar/stellar-sdk");
 const redis = require("../services/redis");
 const { adminRequired } = require("../middleware/auth");
+const { sanitizedStringField } = require("../middleware/validation");
 
 const PROJECTS_LIST_CACHE_TTL = 60; // seconds
 const PROJECTS_LIST_CACHE_PREFIX = "projects:list:";
@@ -1214,6 +1217,142 @@ router.patch("/:id/status", async (req, res, next) => {
     if (typeof redis.deletePattern === "function") await redis.deletePattern("stats:*");
 
     res.json({ success: true, data: mapProjectRow(result.rows[0]) });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * GET /api/projects/:id/impact-certificate
+ * Returns an impact certificate for a donor on a project.
+ */
+router.get("/:id/impact-certificate", async (req, res, next) => {
+  try {
+    const { donorAddress } = req.query;
+    if (!donorAddress || typeof donorAddress !== "string") {
+      return res.status(400).json({ error: "donorAddress query parameter is required" });
+    }
+    if (!/^G[A-Z0-9]{55}$/.test(donorAddress)) {
+      return res.status(400).json({ error: "Invalid donorAddress format" });
+    }
+
+    const projectResult = await pool.query(
+      "SELECT * FROM projects WHERE id = $1",
+      [req.params.id],
+    );
+    if (!projectResult.rows[0]) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+    const project = projectResult.rows[0];
+
+    // Look up donor profile for display name
+    const profileResult = await pool.query(
+      "SELECT display_name FROM profiles WHERE public_key = $1",
+      [donorAddress],
+    );
+    const donorName = profileResult.rows[0]?.display_name || null;
+
+    // Look up donations by this donor for this project
+    const donationsResult = await pool.query(
+      `SELECT * FROM donations
+       WHERE project_id = $1 AND donor_address = $2
+       ORDER BY created_at DESC`,
+      [req.params.id, donorAddress],
+    );
+    if (donationsResult.rows.length === 0) {
+      return res.status(404).json({ error: "No donations found for this donor on this project" });
+    }
+
+    const donations = donationsResult.rows.map(mapDonationRow);
+
+    // Calculate totals
+    const totalDonatedXLM = donationsResult.rows.reduce(
+      (sum, row) => sum + parseFloat(row.amount_xlm || "0"),
+      0,
+    ).toFixed(7);
+
+    const projectRaisedXLM = parseFloat(project.raised_xlm || "0");
+    const projectCO2Kg = parseFloat(project.co2_offset_kg || "0");
+    const donorShare = projectRaisedXLM > 0 ? totalDonatedXLM / projectRaisedXLM : 0;
+    const co2OffsetKg = Math.round(donorShare * projectCO2Kg);
+    const treesEquivalent = Math.round(co2OffsetKg / 22);
+
+    // Compute badge tier
+    const totalXLM = parseFloat(totalDonatedXLM);
+    let badgeTier = "bronze";
+    if (totalXLM >= 10000) badgeTier = "platinum";
+    else if (totalXLM >= 1000) badgeTier = "gold";
+    else if (totalXLM >= 100) badgeTier = "silver";
+
+    // Generate QR code for project wallet (null if no wallet address)
+    const qrCode = project.wallet_address
+      ? await QRCode.toDataURL(project.wallet_address, {
+          width: 256,
+          margin: 2,
+          color: { dark: "#227239", light: "#ffffff" },
+        })
+      : null;
+
+    res.json({
+      success: true,
+      data: {
+        projectId: project.id,
+        projectName: project.name,
+        projectCategory: project.category,
+        projectVerified: Boolean(project.verified) || Boolean(project.on_chain_verified),
+        donorAddress,
+        donorName,
+        totalDonatedXLM,
+        co2OffsetKg,
+        treesEquivalent,
+        badgeTier,
+        donationCount: donations.length,
+        donations: donations.map((d) => ({
+          id: d.id,
+          amountXLM: d.amountXLM,
+          message: d.message,
+          transactionHash: d.transactionHash,
+          createdAt: d.createdAt,
+        })),
+        qrCode,
+        issuedAt: new Date().toISOString(),
+      },
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * GET /api/projects/:id/on-chain-donations
+ * Returns decoded on-chain donation events from the Soroban contract.
+ */
+router.get("/:id/on-chain-donations", async (req, res, next) => {
+  try {
+    const projectResult = await pool.query(
+      "SELECT id FROM projects WHERE id = $1",
+      [req.params.id],
+    );
+    if (!projectResult.rows[0]) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
+    const cursor = req.query.cursor;
+
+    const events = await getProjectDonationEvents(req.params.id, { limit, cursor });
+
+    const data = events.map((evt) => ({
+      donor: evt.donor,
+      amount: evt.amount,
+      ledger: evt.ledger,
+      badge: evt.badge,
+      msgHash: evt.msgHash,
+    }));
+
+    const nextCursor = events.length > 0 ? events[events.length - 1].pagingToken : null;
+
+    res.json({ success: true, data, nextCursor });
   } catch (e) {
     next(e);
   }

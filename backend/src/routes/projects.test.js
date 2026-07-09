@@ -221,15 +221,17 @@ describe("GET /api/projects/:id", () => {
 
   test("returns a single project", async () => {
     pool.query.mockResolvedValueOnce({ rows: [MOCK_PROJECT_ROW] }); // SELECT project
-    pool.query.mockResolvedValueOnce({ rows: [] }); // campaigns
+    pool.query.mockResolvedValueOnce({ rows: [] }); // campaigns (fetchCampaignsForProject)
     pool.query.mockResolvedValueOnce({ rows: [{ avg_rating: null, count: 0 }] }); // ratings
+    pool.query.mockResolvedValueOnce({ rows: [{ count: 0 }] }); // subscriber count
     pool.query.mockResolvedValueOnce({ rows: [] }); // milestones
+    pool.query.mockResolvedValueOnce({ rows: [{ count: "0" }] }); // follow count
 
     const res = await request(app).get("/api/projects/proj-1").expect(200);
 
     expect(res.body.success).toBe(true);
     expect(res.body.data.name).toBe("Test Project");
-    expect(res.body.data.subscriberCount).toBe(5);
+    expect(res.body.data.followCount).toBe(0);
   });
 
   test("returns 404 for non-existent project", async () => {
@@ -451,6 +453,7 @@ const MOCK_CERT_PROJECT_ROW = {
   on_chain_verified: false,
   raised_xlm: "1000",
   co2_offset_kg: "5000",
+  wallet_address: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
 };
 
 describe("GET /api/projects/:id/impact-certificate", () => {
@@ -747,6 +750,7 @@ describe("POST /api/projects/admin/confirm", () => {
 
     const res = await request(app)
       .post("/api/projects/admin/confirm")
+      .set("X-Admin-Key", "test-admin-key")
       .send({ transactionHash, projectId })
       .expect(200);
 

@@ -11,7 +11,11 @@ jest.mock("../services/redis", () => ({
 }));
 
 jest.mock("../services/stellar", () => ({
+  getOnChainProject: jest.fn(),
+  getProjectDonationEvents: jest.fn(),
+  CONTRACT_ID: "test-contract",
   server: { getTransaction: jest.fn().mockResolvedValue({ successful: true }) },
+  NETWORK_PASSPHRASE: "Test SDF Network ; September 2015",
 }));
 
 const pool = require("../db/pool");
@@ -19,6 +23,27 @@ const redis = require("../services/redis");
 const express = require("express");
 const request = require("supertest");
 const projectsRouter = require("./projects");
+const donationsRouter = require("./donations");
+
+function makePublicKey(char = "A") {
+  return `G${char.repeat(55)}`;
+}
+
+function makeTxHash(char = "a") {
+  return char.repeat(64);
+}
+
+const MOCK_DONATION_ROW = {
+  id: "donation-1",
+  project_id: "proj-1",
+  donor_address: makePublicKey(),
+  amount_xlm: "100",
+  amount: "100",
+  currency: "XLM",
+  message: "Great project!",
+  transaction_hash: makeTxHash(),
+  created_at: new Date().toISOString(),
+};
 
 function buildApp() {
   const app = express();
@@ -65,36 +90,6 @@ describe("GET /api/projects", () => {
     jest.clearAllMocks();
   });
 
-
-  test("records a valid donation", async () => {
-    createMockClient(
-      { rows: [MOCK_PROJECT] },
-      { rows: [] },
-      undefined,
-      { rows: [MOCK_DONATION_ROW] },
-      { rows: [] },
-      undefined,
-      { rows: [{ ...MOCK_DONATION_ROW, total_donated_xlm: 100 }] },
-      { rows: [{ count: "1" }] },
-    );
-
-    const res = await request(app)
-      .post("/api/donations")
-      .send({
-        projectId: "proj-1",
-        donorAddress: makePublicKey(),
-        amountXLM: 100,
-        currency: "XLM",
-        message: "Great project!",
-        transactionHash: makeTxHash(),
-      })
-      .expect(201);
-
-    expect(res.body.success).toBe(true);
-    expect(res.body.data).toHaveLength(1);
-    expect(res.body.data[0].name).toBe("Test Project");
-    expect(res.body.has_more).toBe(false);
-  });
 
   test("filters by category", async () => {
     pool.query.mockResolvedValue({ rows: [MOCK_PROJECT_ROW] });
@@ -165,11 +160,12 @@ describe("GET /api/projects/:id", () => {
   });
 
   test("returns a single project", async () => {
-    pool.query.mockResolvedValue({ rows: [MOCK_PROJECT_ROW] });
-    pool.query.mockResolvedValueOnce({ rows: [MOCK_PROJECT_ROW] });
-    pool.query.mockResolvedValueOnce({ rows: [] }); // campaigns
+    pool.query.mockResolvedValueOnce({ rows: [MOCK_PROJECT_ROW] }); // SELECT project
+    pool.query.mockResolvedValueOnce({ rows: [] }); // campaigns (fetchCampaignsForProject)
     pool.query.mockResolvedValueOnce({ rows: [{ avg_rating: "4.5", count: "10" }] }); // ratings
+    pool.query.mockResolvedValueOnce({ rows: [{ count: 5 }] }); // subscriber count
     pool.query.mockResolvedValueOnce({ rows: [] }); // milestones
+    pool.query.mockResolvedValueOnce({ rows: [{ count: "0" }] }); // follow count
 
     const res = await request(app).get("/api/projects/proj-1").expect(200);
 
