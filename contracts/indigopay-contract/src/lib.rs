@@ -180,6 +180,13 @@ pub enum DataKey {
     // Per-project milestone NFT: one per (project_id, donor) pair
     ProjectMilestoneNFT(String, Address),
     // Contract upgrade and multi-currency support
+    // ContractWasmHash is intentionally kept in the enum for backward
+    // compatibility with v1 storage layouts. The single-step `upgrade`
+    // function that wrote to it was replaced in Phase A by the
+    // two-step `propose_upgrade` / `execute_upgrade` flow which uses
+    // `PendingUpgrade` / `LastExecutedUpgrade` instead. No live code
+    // path writes to this variant; readers should treat any stored
+    // value as historical and consult `get_last_executed_upgrade`.
     ContractWasmHash,
     USDCTokenAddress,
     // Price oracle for USDC → XLM conversion
@@ -205,6 +212,18 @@ pub enum DataKey {
     // `pause_contract` / `unpause_contract` are themselves exempt so
     // the admin can always recover from a pause.
     ContractPaused,
+    // Pending contract upgrade — hash of the WASM that the admin has
+    // proposed via `propose_upgrade` but not yet executed. Cleared on
+    // `execute_upgrade` (after the timelock) or `cancel_upgrade`.
+    PendingUpgrade,
+    // Ledger sequence at which the pending upgrade becomes executable.
+    // Set together with `PendingUpgrade` and cleared on execute/cancel.
+    UpgradeEffectiveAt,
+    // Hash of the last EXECUTED contract upgrade. Set by
+    // `execute_upgrade` after `env.deployer().update_current_contract_wasm`
+    // returns. Used by indexers to confirm which WASM is currently
+    // running at the contract address.
+    LastExecutedUpgrade,
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -224,6 +243,14 @@ const MAX_VOTING_WINDOW_LEDGERS: u32 = 518_400; // 30 days @ 5s/ledger
 // Upper bound on co2_per_xlm at registration — prevents donate-time CO₂ overflow
 // panics and misleading impact figures from misconfigured projects.
 const MAX_CO2_PER_XLM: u32 = 100_000;
+
+// 48 hours × 3600 s / 5 s per ledger = 34 560 ledgers. The minimum delay
+// between `propose_upgrade` and the earliest ledger at which
+// `execute_upgrade` can fire. Gives the community, indexers, and any
+// downstream observers a 48-hour window to react to a pending upgrade
+// (e.g. by exiting their positions or signalling objections via
+// off-chain channels) before the WASM is swapped.
+const UPGRADE_TIMELOCK_LEDGERS: u32 = 34_560;
 
 /// Read the stored admin. Caller must compare and panic on mismatch.
 /// Centralised so every admin check uses the same pattern.
@@ -1252,23 +1279,6 @@ impl IndigoPayContract {
         env.storage().instance().get(&DataKey::OracleAddress)
     }
 
-    /// Admin-only: Upgrade the contract to a new WASM code.
-    /// Preserves all on-chain state while replacing the contract implementation.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
-        admin.require_auth();
-        require_admin(&env, &admin);
-
-        // Store the new WASM hash for upgrade verification
-        env.storage()
-            .instance()
-            .set(&DataKey::ContractWasmHash, &new_wasm_hash);
-
-        // Execute the actual upgrade
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
-
-        env.events().publish((symbol_short!("upgrade"),), admin);
-    }
-
     /// Get the current contract WASM hash.
     pub fn get_contract_wasm_hash(env: Env) -> Option<BytesN<32>> {
         env.storage().instance().get(&DataKey::ContractWasmHash)
@@ -1360,6 +1370,107 @@ impl IndigoPayContract {
             .get(&DataKey::ContractPaused)
             .unwrap_or(false)
     }
+
+    // ─── 48-hour upgrade timelock ────────────────────────────────────────────
+
+    /// Admin-only: step 1 of the 48-hour upgrade timelock. Stores the
+    /// proposed WASM hash and the ledger sequence at which it becomes
+    /// executable. Replaces any existing pending upgrade is not allowed;
+    /// the caller must `cancel_upgrade` first.
+    pub fn propose_upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        if env.storage().instance().has(&DataKey::PendingUpgrade) {
+            panic!("Upgrade already pending; cancel first");
+        }
+        let effective_at = env
+            .ledger()
+            .sequence()
+            .checked_add(UPGRADE_TIMELOCK_LEDGERS)
+            .expect("Upgrade effective-at overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgrade, &new_wasm_hash);
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeEffectiveAt, &effective_at);
+        env.events().publish(
+            (symbol_short!("upg_prop"), admin),
+            (new_wasm_hash, effective_at),
+        );
+    }
+
+    /// Permissionless: step 2 of the upgrade timelock. Callable by anyone
+    /// after the 48-hour delay has elapsed. On success the contract
+    /// WASM is swapped, the executed hash is recorded, and the pending
+    /// entry is cleared.
+    ///
+    /// **SECURITY**: the 48h timelock is the SOLE delay between a
+    /// proposed upgrade and its execution. If the admin key is
+    /// compromised, the attacker can `propose_upgrade` immediately,
+    /// but the community has 48h to react (exit positions, deploy a
+    /// rescue contract, signal off-chain) before the WASM is swapped.
+    /// There is NO second gate; the timelock is the only safeguard.
+    pub fn execute_upgrade(env: Env) {
+        let pending: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .expect("No pending upgrade");
+        let effective_at: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeEffectiveAt)
+            .expect("No pending upgrade effective-at");
+        if env.ledger().sequence() < effective_at {
+            panic!("Upgrade timelock not yet elapsed");
+        }
+        env.deployer().update_current_contract_wasm(pending.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::LastExecutedUpgrade, &pending);
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.storage().instance().remove(&DataKey::UpgradeEffectiveAt);
+        env.events().publish((symbol_short!("upg_exec"),), pending);
+    }
+
+    /// Admin-only: cancel a pending upgrade without executing it. Use
+    /// during incident response if the proposed WASM turns out to be
+    /// malicious or buggy before the timelock elapses.
+    pub fn cancel_upgrade(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        if !env.storage().instance().has(&DataKey::PendingUpgrade) {
+            panic!("No pending upgrade");
+        }
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.storage().instance().remove(&DataKey::UpgradeEffectiveAt);
+        env.events().publish((symbol_short!("upg_cancel"), admin), ());
+    }
+
+    /// Read-only: returns `(hash, effective_at_ledger)` for the pending
+    /// upgrade, or `None` if no upgrade is currently proposed.
+    pub fn get_pending_upgrade(env: Env) -> Option<(BytesN<32>, u32)> {
+        let hash: Option<BytesN<32>> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade);
+        let effective: Option<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeEffectiveAt);
+        match (hash, effective) {
+            (Some(h), Some(e)) => Some((h, e)),
+            _ => None,
+        }
+    }
+
+    /// Read-only: hash of the most-recently executed upgrade, or `None`
+    /// if the contract has never been upgraded. Updated by
+    /// `execute_upgrade`.
+    pub fn get_last_executed_upgrade(env: Env) -> Option<BytesN<32>> {
+        env.storage().instance().get(&DataKey::LastExecutedUpgrade)
+    }
 }
 
 // ─── Mock oracle (test / integration use only) ────────────────────────────────
@@ -1390,7 +1501,7 @@ mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Ledger as _};
     use soroban_sdk::token::StellarAssetClient;
-    use soroban_sdk::{Address, Env, String, Vec};
+    use soroban_sdk::{Address, BytesN, Env, String, Vec};
 
     // ─── Existing tests ───────────────────────────────────────────────────────
 
@@ -2543,6 +2654,97 @@ mod tests {
         let (env, _cid, client, _admin) = setup_admin_only();
         let imposter = Address::generate(&env);
         client.pause_contract(&imposter);
+    }
+
+    // ─── 48h upgrade timelock tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_propose_upgrade_stores_pending() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        let fake_hash = BytesN::from_array(&env, &[7u8; 32]);
+
+        client.propose_upgrade(&admin, &fake_hash);
+        let (h, eff) = client.get_pending_upgrade().expect("pending upgrade");
+        assert_eq!(h, fake_hash);
+        assert_eq!(eff, env.ledger().sequence() + UPGRADE_TIMELOCK_LEDGERS);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_propose_upgrade_non_admin_fails() {
+        let (env, _cid, client, _admin) = setup_admin_only();
+        let imposter = Address::generate(&env);
+        let fake_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.propose_upgrade(&imposter, &fake_hash);
+    }
+
+    #[test]
+    #[should_panic(expected = "Upgrade already pending; cancel first")]
+    fn test_propose_upgrade_double_propose_rejected() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        let h1 = BytesN::from_array(&env, &[1u8; 32]);
+        let h2 = BytesN::from_array(&env, &[2u8; 32]);
+        client.propose_upgrade(&admin, &h1);
+        client.propose_upgrade(&admin, &h2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Upgrade timelock not yet elapsed")]
+    fn test_execute_upgrade_before_timelock_fails() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        let fake_hash = BytesN::from_array(&env, &[3u8; 32]);
+        client.propose_upgrade(&admin, &fake_hash);
+        // Still well before the effective ledger.
+        client.execute_upgrade();
+    }
+
+    #[test]
+    fn test_execute_upgrade_after_timelock_succeeds() {
+        let (env, cid, client, admin) = setup_admin_only();
+        let fake_hash = BytesN::from_array(&env, &[4u8; 32]);
+        client.propose_upgrade(&admin, &fake_hash);
+
+        // Advance past the effective ledger. The test host executes the
+        // deployer.update_current_contract_wasm() against the same
+        // contract address; we just need to confirm the call succeeds
+        // and the post-conditions are met (pending cleared, last
+        // executed hash recorded).
+        env.as_contract(&cid, || {
+            env.storage().instance().extend_ttl(100_000, 100_000);
+        });
+        env.ledger().set_sequence_number(UPGRADE_TIMELOCK_LEDGERS + 1);
+        client.execute_upgrade();
+        assert_eq!(client.get_pending_upgrade(), None);
+        assert_eq!(
+            client.get_last_executed_upgrade(),
+            Some(fake_hash.clone())
+        );
+    }
+
+    #[test]
+    fn test_cancel_upgrade_clears_pending() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        let fake_hash = BytesN::from_array(&env, &[5u8; 32]);
+        client.propose_upgrade(&admin, &fake_hash);
+        assert!(client.get_pending_upgrade().is_some());
+        client.cancel_upgrade(&admin);
+        assert_eq!(client.get_pending_upgrade(), None);
+        // last-executed is untouched because no upgrade was ever executed.
+        assert_eq!(client.get_last_executed_upgrade(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "No pending upgrade")]
+    fn test_execute_upgrade_without_pending_fails() {
+        let (_env, _cid, client, _admin) = setup_admin_only();
+        client.execute_upgrade();
+    }
+
+    #[test]
+    #[should_panic(expected = "No pending upgrade")]
+    fn test_cancel_upgrade_without_pending_fails() {
+        let (_env, _cid, client, admin) = setup_admin_only();
+        client.cancel_upgrade(&admin);
     }
 }
 
