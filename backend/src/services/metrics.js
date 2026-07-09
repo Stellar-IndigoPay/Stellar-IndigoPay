@@ -114,6 +114,28 @@ const readinessCheckFailedTotal = new client.Counter({
   registers: [registry],
 });
 
+const webhookDeliveriesTotal = new client.Counter({
+  name: "webhook_deliveries_total",
+  help: "Webhook delivery outcomes, labelled by outcome (delivered|retry|dlq|skipped).",
+  labelNames: ["outcome"],
+  registers: [registry],
+});
+
+const webhookAttemptsTotal = new client.Counter({
+  name: "webhook_attempts_total",
+  help: "Number of webhook HTTP attempts, labelled by event_type.",
+  labelNames: ["event_type"],
+  registers: [registry],
+});
+
+const webhookAttemptDurationSeconds = new client.Histogram({
+  name: "webhook_attempt_duration_seconds",
+  help: "Duration of webhook HTTP attempts in seconds, labelled by outcome (success|failure).",
+  labelNames: ["outcome"],
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  registers: [registry],
+});
+
 /**
  * Normalise an Express req.route.path / req.path to a low-cardinality
  * route label. We fall back to the literal path when no route is
@@ -166,5 +188,8 @@ module.exports = {
     indexerLagSeconds,
     indexerRunning,
     readinessCheckFailedTotal,
+    webhookDeliveriesTotal,
+    webhookAttemptsTotal,
+    webhookAttemptDurationSeconds,
   },
 };
