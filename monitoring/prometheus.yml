@@ -1,0 +1,39 @@
+# monitoring/prometheus.yml
+# Prometheus scrape configuration for the Stellar IndigoPay backend.
+#
+# Mount this file at /etc/prometheus/prometheus.yml on the Prometheus
+# container. It expects the backend to be reachable at `backend-svc:4000`
+# (the Kubernetes service name).
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: indigopay
+
+rule_files:
+  - /etc/prometheus/alert-rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: indigopay-backend
+    metrics_path: /metrics
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    scheme: http
+    authorization:
+      type: Bearer
+      credentials: ${PROMETHEUS_BEARER_TOKEN}
+    static_configs:
+      - targets: ["backend-svc:4000"]
+        labels:
+          service: stellar-indigopay-api
+          env: production
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

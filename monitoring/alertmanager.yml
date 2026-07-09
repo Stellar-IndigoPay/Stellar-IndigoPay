@@ -1,0 +1,36 @@
+# monitoring/alertmanager.yml
+# Routes backend alerts to Slack, PagerDuty, and email. The receivers below
+# are placeholders — point them at your real notification channels in prod.
+
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: default
+  group_by: [alertname, severity]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - severity = "page"
+      receiver: pagerduty
+      continue: true
+    - matchers:
+        - severity = "warn"
+      receiver: slack-warn
+
+receivers:
+  - name: default
+    email_configs:
+      - to: alerts@indigopay.app
+        send_resolved: true
+  - name: pagerduty
+    pagerduty_configs:
+      - service_key: ${PAGERDUTY_SERVICE_KEY}
+        send_resolved: true
+  - name: slack-warn
+    slack_configs:
+      - api_url: ${SLACK_WEBHOOK_URL}
+        channel: "#indigopay-warn"
+        send_resolved: true

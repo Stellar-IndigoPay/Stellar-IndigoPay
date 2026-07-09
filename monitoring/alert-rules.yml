@@ -1,0 +1,70 @@
+# monitoring/alert-rules.yml
+# Alerting rules evaluated by Prometheus every `evaluation_interval` (15s).
+# Severity levels: page (wake someone up) | warn (look at during business hours).
+
+groups:
+  - name: indigopay-backend-http
+    interval: 30s
+    rules:
+      - alert: BackendHigh5xxRate
+        expr: |
+          sum(rate(http_requests_total{job="indigopay-backend",status_code=~"5.."}[5m]))
+            /
+          sum(rate(http_requests_total{job="indigopay-backend"}[5m]))
+            > 0.05
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Backend 5xx rate above 5% for 5m"
+          description: |
+            More than 5% of HTTP responses in the last 5 minutes returned 5xx.
+            Check Sentry and the readiness endpoint.
+
+      - alert: BackendHighP99Latency
+        expr: |
+          histogram_quantile(0.99,
+            sum by (route) (rate(http_request_duration_seconds_bucket{job="indigopay-backend"}[5m]))
+          ) > 2
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Backend p99 latency above 2s for 10m on {{ $labels.route }}"
+
+  - name: indigopay-backend-database
+    interval: 30s
+    rules:
+      - alert: DbPoolExhausted
+        expr: db_pool_waiting_count{job="indigopay-backend"} > 5
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "Postgres pool has > 5 waiting clients for 2m"
+          description: "Consider raising DB_POOL_MAX or investigating slow queries."
+
+      - alert: DbQuerySlow
+        expr: |
+          histogram_quantile(0.99,
+            sum by (operation) (rate(db_query_duration_seconds_bucket{job="indigopay-backend"}[5m]))
+          ) > 0.5
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Postgres p99 query latency above 500ms for 10m on op={{ $labels.operation }}"
+
+  - name: indigopay-backend-readiness
+    interval: 30s
+    rules:
+      - alert: ReadinessProbeFailing
+        # We can't directly scrape /api/readyz, so this rule fires when the
+        # in-process readiness_log metric indicates a failure. The wrapper
+        # increments readiness_check_failed_total when /api/readyz returns 503.
+        expr: increase(readiness_check_failed_total{job="indigopay-backend"}[5m]) > 0
+        for: 3m
+        labels:
+          severity: page
+        annotations:
+          summary: "Backend readiness has been failing for 3m"

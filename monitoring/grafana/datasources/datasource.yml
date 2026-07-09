@@ -1,0 +1,13 @@
+# monitoring/grafana/datasources/datasource.yml
+# Grafana provisioning: tells Grafana where Prometheus lives.
+# Mount at /etc/grafana/provisioning/datasources/datasource.yml.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
