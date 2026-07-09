@@ -1,6 +1,9 @@
 # Test stage — devDependencies for jest in docker-compose.test.yml
-# Pinned to a current LTS (Node 20) with a SHA256 digest for reproducibility.
-# Bump the digest intentionally when updating Node.
+# Pinned to a current LTS (Node 20). For digest pinning (recommended
+# for prod), compute the real digest with:
+#   docker buildx imagetools inspect node:20.18.1-alpine
+# and append `@sha256:<digest>` to each `FROM` below. Do NOT fabricate
+# a digest — a fake SHA breaks `docker build` immediately.
 FROM node:20.18.1-alpine AS test
 
 WORKDIR /app
