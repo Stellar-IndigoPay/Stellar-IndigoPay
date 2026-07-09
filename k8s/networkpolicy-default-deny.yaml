@@ -1,0 +1,23 @@
+# k8s/networkpolicy-default-deny.yaml
+#
+# Default-deny NetworkPolicy for the `indigopay` namespace.
+#
+# Once applied, every pod in the namespace has zero allowed ingress and
+# zero allowed egress unless a later NetworkPolicy in the same namespace
+# explicitly selects it. We rely on the layered allow policies in
+# `networkpolicy-allow-*.yaml` to open only the traffic the app actually
+# needs (backend ↔ postgres, backend ↔ redis, ingress → backend, etc.).
+#
+# Requires a CNI that supports NetworkPolicy (Calico, Cilium, Weave Net).
+# Plain Flannel does not enforce these rules.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: indigopay
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
