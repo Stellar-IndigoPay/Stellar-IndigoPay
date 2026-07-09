@@ -1,0 +1,19 @@
+# k8s/pdb-frontend.yaml
+#
+# PodDisruptionBudget for the frontend (Next.js) Deployment. Pairs
+# with hpa-frontend.yaml — minAvailable 1 keeps the SSR tier serving
+# traffic during voluntary disruptions (node drains, upgrades, spot
+# reclaim on cloud providers).
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend
+  namespace: indigopay
+  labels:
+    app: frontend
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: frontend
