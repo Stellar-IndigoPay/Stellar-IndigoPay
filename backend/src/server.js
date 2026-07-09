@@ -49,6 +49,7 @@ const { runMigrations } = require("./db/migrate");
 const { startTurretsServer } = require("./services/turrets");
 const { start: startSummaryQueue } = require("./services/summaryQueue");
 const { start: startProfileQueue } = require("./services/profileQueue");
+const { start: startWebhookQueue, stop: stopWebhookQueue } = require("./services/webhookQueue");
 const { startIndexer } = require("./services/indexerService");
 const lifecycle = require("./services/lifecycle");
 
@@ -226,6 +227,7 @@ async function startServer() {
   await runMigrations();
   await startSummaryQueue(io);
   await startProfileQueue(io);
+  await startWebhookQueue();
 
   // digestQueue is optional in some deployments
   try {
@@ -253,7 +255,12 @@ async function startServer() {
   // pg-boss queues: each one exposes a `stop()` method that drains in-flight
   // jobs. We register one hook per queue so a failure in one doesn't stop
   // the others from draining.
-  for (const queue of ["./services/summaryQueue", "./services/profileQueue", "./services/digestQueue"]) {
+  for (const queue of [
+    "./services/summaryQueue",
+    "./services/profileQueue",
+    "./services/digestQueue",
+    "./services/webhookQueue",
+  ]) {
     lifecycle.onShutdown(async () => {
       try {
         const mod = require(queue);
