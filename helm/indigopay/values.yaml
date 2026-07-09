@@ -43,3 +43,41 @@ secrets:
 ingress:
   host: indigopay.local
   className: nginx
+
+# ── Autoscaling (HPA) ──────────────────────────────────────────────
+# Mirrors k8s/hpa-backend.yaml. Set enabled: true in values-prod.yaml
+# to opt in. The HPA template only renders when enabled.
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      percent: 50
+      periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      percent: 100
+      periodSeconds: 30
+
+# ── PodDisruptionBudget ────────────────────────────────────────────
+# Mirrors k8s/pdb-backend.yaml. minAvailable is interpreted by the
+# eviction API as the number of pods (or percentage) that must remain
+# available during voluntary disruptions.
+pdb:
+  enabled: false
+  minAvailable: 1
