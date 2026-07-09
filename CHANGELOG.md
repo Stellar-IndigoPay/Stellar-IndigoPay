@@ -75,7 +75,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   AWS Secrets Manager, an IRSA `ServiceAccount` stub, and full setup
   documentation (`docs/external-secrets.md`).
 
-<!-- BACKFILL_INSERT -->
+- **Disaster recovery** — explicit RTO / RPO table, failure modes,
+  secret-compromise procedure, and multi-region roadmap
+  (`docs/disaster-recovery.md`).
+- **Restore runbook** — pre-flight → provision → cutover → post-restore
+  → dry-run procedure (`docs/restore-runbook.md`).
+- **Restore-drill workflow** — monthly CI job that pulls the latest
+  backup and asserts table row counts
+  (`.github/workflows/restore-drill.yml`).
+- **Alert routing** — Alertmanager with PagerDuty + Slack + business
+  hours override + inhibition rules
+  (`monitoring/alertmanager-routing.yml`), plus routing-aware alert
+  rules (`BackendDown`, `BackupMissed`, `RestoreDrillFailed`).
+- **Image hardening** — `backend/Dockerfile` and `frontend/Dockerfile`
+  pinned to `node:20.18.1-alpine` LTS; switched to `npm ci --omit=dev`
+  for reproducible installs.
+- **SBOM** — `anchore/sbom-action` uploads a Software Bill of Materials
+  to the GitHub dependency graph on every push.
+- **Image scan** — Trivy scan failing on CRITICAL / HIGH with fix
+  available.
+- **Image signing** — cosign keyless signing on release tags.
+- **GitOps** — ArgoCD `Application` manifest for chart-driven
+  reconciliation, Argo Rollouts stepped canary strategy with Prometheus
+  success-rate analysis (header corrected to reflect default stepped
+  mode rather than traffic-split canary).
+- **Observability** — Prometheus + Grafana + Alertmanager stack with
+  persistent volumes; `ServiceMonitor` + metrics port + readiness /
+  liveness probes + metrics secret wiring for the backend; backend
+  `indexerService.stop()` for clean shutdown.
+
+### Removed
+
+- `docs/openapi.yml` — stale duplicate of `docs/api/openapi.yaml`, which
+  is the canonical OpenAPI 3.0.3 spec served by `swagger-ui-express` at
+  `/api/docs` in development.
 
 ## [1.0.0] - 2025-01-01
 
