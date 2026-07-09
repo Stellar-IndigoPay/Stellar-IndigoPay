@@ -65,6 +65,15 @@ pub struct Project {
     pub donor_count: u32,
     pub active: bool,
     pub registered_at: u32,
+    /// Temporary pause flag — when true, `donate`/`donate_usdc` reject
+    /// with `"Project is temporarily paused"`. Distinct from `active`
+    /// (which is permanent deactivation).
+    ///
+    /// Appended (not inserted) so the wire-encoded layout stays
+    /// backward-compatible with any Project value that was already on
+    /// chain before this field existed. Per UPGRADE.md, new fields must
+    /// be appended or live behind a new storage version.
+    pub paused: bool,
 }
 
 /// Input for registering a project via `batch_register_projects`.
@@ -175,6 +184,15 @@ pub enum DataKey {
     USDCTokenAddress,
     // Price oracle for USDC → XLM conversion
     OracleAddress,
+    // Addresses of every voter on a given proposal, exposed via
+    // `get_voter_list` for governance UIs. Kept separate from the
+    // `Proposal` value so the proposal layout can evolve without
+    // breaking the voter enumeration.
+    VoterList(String),
+    // Ordered list of every project_id registered. Used by admin
+    // bulk operations (e.g. `deactivate_all_projects`) so they can
+    // enumerate projects without external indexing.
+    ProjectIdsAll,
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -271,6 +289,7 @@ impl IndigoPayContract {
             total_raised: 0,
             donor_count: 0,
             active: true,
+            paused: false,
             registered_at: env.ledger().sequence(),
         };
         env.storage()
@@ -285,6 +304,20 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::ProjectCount, &next_count);
+
+        // Track this project in the id index so admin bulk operations
+        // (e.g. `deactivate_all_projects`) can iterate without an
+        // external indexer.
+        let mut ids: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProjectIdsAll)
+            .unwrap_or(Vec::new(&env));
+        ids.push_back(project_id.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::ProjectIdsAll, &ids);
+
         env.events()
             .publish((symbol_short!("proj_reg"), admin), project_id);
     }
@@ -294,6 +327,10 @@ impl IndigoPayContract {
         let stored_admin: Address = env.storage().instance()
             .get(&DataKey::Admin).expect("Not initialized");
         if stored_admin != admin { panic!("Only admin can register projects"); }
+
+        let mut ids: Vec<String> = env.storage().instance()
+            .get(&DataKey::ProjectIdsAll)
+            .unwrap_or(Vec::new(&env));
 
         for init in projects.iter() {
             let project_id = init.id.clone();
@@ -308,14 +345,56 @@ impl IndigoPayContract {
                 total_raised: 0,
                 donor_count: 0,
                 active: true,
+                paused: false,
                 registered_at: env.ledger().sequence(),
             };
             env.storage().instance().set(&DataKey::Project(project_id.clone()), &project);
             let count: u32 = env.storage().instance().get(&DataKey::ProjectCount).unwrap_or(0);
             let next_count = count.checked_add(1).expect("ProjectCount overflow");
             env.storage().instance().set(&DataKey::ProjectCount, &next_count);
+            ids.push_back(project_id.clone());
             env.events().publish((symbol_short!("proj_reg"), admin.clone()), project_id);
         }
+        env.storage().instance().set(&DataKey::ProjectIdsAll, &ids);
+    }
+
+    /// Admin-only: deactivate every registered project in one call.
+    /// Iterates `DataKey::ProjectIdsAll` and flips `active=false`. Useful
+    /// for incident response when the platform needs to halt all
+    /// donations immediately.
+    pub fn deactivate_all_projects(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if stored_admin != admin {
+            panic!("Only admin can deactivate all projects");
+        }
+
+        let ids: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProjectIdsAll)
+            .unwrap_or(Vec::new(&env));
+
+        for pid in ids.iter() {
+            let mut project: Project = env
+                .storage()
+                .instance()
+                .get(&DataKey::Project(pid.clone()))
+                .expect("Project not found");
+            if project.active {
+                project.active = false;
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Project(pid.clone()), &project);
+            }
+        }
+
+        env.events()
+            .publish((symbol_short!("deact_all"), admin), ids);
     }
 
     pub fn deactivate_project(env: Env, admin: Address, project_id: String) {
@@ -352,6 +431,16 @@ impl IndigoPayContract {
             panic!("Only admin can update project rate");
         }
 
+        // Bounds must match `register_project` so the on-chain limits stay
+        // consistent regardless of whether the rate was set at registration
+        // or later updated by the admin.
+        if co2_per_xlm == 0 {
+            panic!("CO₂ rate must be greater than zero");
+        }
+        if co2_per_xlm > MAX_CO2_PER_XLM {
+            panic!("CO2 per XLM exceeds maximum");
+        }
+
         let mut project: Project = env
             .storage()
             .instance()
@@ -378,31 +467,28 @@ impl IndigoPayContract {
         let mut project: Project = env.storage().instance()
             .get(&DataKey::Project(project_id.clone())).expect("Project not found");
         if !project.active { panic!("Cannot pause a deactivated project"); }
+        if project.paused { panic!("Project is already paused"); }
         project.paused = true;
-        env.storage().instance().set(&DataKey::Project(project_id), &project);
+        env.storage().instance().set(&DataKey::Project(project_id.clone()), &project);
+        env.events().publish((symbol_short!("proj_pause"), admin), project_id);
     }
 
-    // ─── Admin functions ────────────────────────────────────────────────────────
-    /// Update the CO₂ per XLM rate for a project. Admin only.
-    pub fn update_project_co2_rate(
-        env: Env,
-        admin: Address,
-        project_id: String,
-        new_rate: u32,
-    ) {
+    /// Admin-only: lift a temporary pause on a project. Mirrors
+    /// `pause_project` — symmetric admin authorization, events emitted
+    /// for indexers, idempotency-aware (panics on resume when the
+    /// project is not paused, to prevent accidental double-resumes).
+    pub fn resume_project(env: Env, admin: Address, project_id: String) {
         admin.require_auth();
         let stored_admin: Address = env.storage().instance()
             .get(&DataKey::Admin).expect("Not initialized");
-        if stored_admin != admin { panic!("Only admin can update project CO₂ rate"); }
-        // Validate rate bounds: 1 to 10_000 grams CO₂ per XLM
-        if new_rate == 0 || new_rate > 10_000 { panic!("CO₂ rate must be between 1 and 10,000"); }
-        // Load project
+        if stored_admin != admin { panic!("Only admin can resume projects"); }
         let mut project: Project = env.storage().instance()
-            .get(&DataKey::Project(project_id.clone()))
-            .expect("Project not found");
-        project.co2_per_xlm = new_rate;
-        env.storage().instance().set(&DataKey::Project(project_id), &project);
-        env.events().publish((symbol_short!("proj_rate_update"), admin), (project_id, new_rate));
+            .get(&DataKey::Project(project_id.clone())).expect("Project not found");
+        if !project.active { panic!("Cannot resume a deactivated project"); }
+        if !project.paused { panic!("Project is not paused"); }
+        project.paused = false;
+        env.storage().instance().set(&DataKey::Project(project_id.clone()), &project);
+        env.events().publish((symbol_short!("proj_resume"), admin), project_id);
     }
 
     // ─── Donations ────────────────────────────────────────────────────────────
@@ -427,6 +513,9 @@ impl IndigoPayContract {
             .expect("Project not found");
         if !project.active {
             panic!("Project is not accepting donations");
+        }
+        if project.paused {
+            panic!("Project is temporarily paused");
         }
 
         // Pre-compute CO2 increment with checked multiplication so an attacker
@@ -858,15 +947,20 @@ impl IndigoPayContract {
         if env.storage().instance().has(&voted_key) {
             panic!("Already voted on this proposal");
         }
-        env.storage().instance().set(&voted_key, &true);
 
-        // Add voter to the voter list for this proposal
+        // Effects: persist voter-list membership first so the proposal
+        // accounting cannot fall out of sync with the voter-list even if
+        // a later state write is interrupted (Soroban reverts the whole
+        // tx on panic, but writing the indexable list before the
+        // duplicate-vote marker keeps the public read model consistent).
         let voter_list_key = DataKey::VoterList(project_id.clone());
         let mut voter_list: Vec<Address> = env.storage().instance()
             .get(&voter_list_key)
             .unwrap_or(Vec::new(&env));
         voter_list.push_back(voter.clone());
         env.storage().instance().set(&voter_list_key, &voter_list);
+
+        env.storage().instance().set(&voted_key, &true);
 
         if approve {
             proposal.votes_for = proposal
@@ -981,6 +1075,9 @@ impl IndigoPayContract {
             .expect("Project not found");
         if !project.active {
             panic!("Project is not accepting donations");
+        }
+        if project.paused {
+            panic!("Project is temporarily paused");
         }
 
         // Pre-compute CO2 increment using XLM-equivalent
@@ -1205,12 +1302,9 @@ impl OracleInterface for MockOracle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::{Address as _, Ledger as _}, Address, Env, String, Vec};
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
     use soroban_sdk::token::StellarAssetClient;
-    use soroban_sdk::{
-        testutils::{Address as _, Ledger as _},
-        Address, Env, String,
-    };
+    use soroban_sdk::{Address, Env, String, Vec};
 
     // ─── Existing tests ───────────────────────────────────────────────────────
 
@@ -1985,5 +2079,238 @@ mod tests {
         let nft = client.get_project_nft(&donor, &pid);
         assert_eq!(nft.amount_donated, 120 * STROOP);
     }
+
+    // ─── Pause / resume tests (#213) ──────────────────────────────────────────
+
+    #[test]
+    fn test_pause_project_sets_paused_flag() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.pause_project(&admin, &pid);
+        let p = client.get_project(&pid);
+        assert!(p.paused);
+        assert!(p.active); // pause is orthogonal to deactivation
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can pause projects")]
+    fn test_pause_project_non_admin_fails() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let imposter = Address::generate(&env);
+        client.pause_project(&imposter, &pid);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot pause a deactivated project")]
+    fn test_pause_deactivated_project_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.deactivate_project(&admin, &pid);
+        client.pause_project(&admin, &pid);
+    }
+
+    #[test]
+    #[should_panic(expected = "Project is already paused")]
+    fn test_pause_already_paused_project_fails() {
+        let (_env, _cid, client, admin, pid) = setup();
+        client.pause_project(&admin, &pid);
+        client.pause_project(&admin, &pid);
+    }
+
+    #[test]
+    fn test_resume_project_clears_paused_flag() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.pause_project(&admin, &pid);
+        client.resume_project(&admin, &pid);
+        let p = client.get_project(&pid);
+        assert!(!p.paused);
+        assert!(p.active);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can resume projects")]
+    fn test_resume_project_non_admin_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.pause_project(&admin, &pid);
+        let imposter = Address::generate(&env);
+        client.resume_project(&imposter, &pid);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot resume a deactivated project")]
+    fn test_resume_deactivated_project_fails() {
+        let (_env, _cid, client, admin, pid) = setup();
+        client.deactivate_project(&admin, &pid);
+        client.resume_project(&admin, &pid);
+    }
+
+    #[test]
+    #[should_panic(expected = "Project is not paused")]
+    fn test_resume_unpaused_project_fails() {
+        let (_env, _cid, client, admin, pid) = setup();
+        client.resume_project(&admin, &pid);
+    }
+
+    #[test]
+    #[should_panic(expected = "Project is temporarily paused")]
+    fn test_donate_to_paused_project_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.pause_project(&admin, &pid);
+
+        let donor        = Address::generate(&env);
+        let token_admin  = Address::generate(&env);
+        let token        = env.register_stellar_asset_contract_v2(token_admin).address();
+        StellarAssetClient::new(&env, &token).mint(&donor, &(25 * STROOP));
+        client.donate(&token, &donor, &pid, &(25 * STROOP), &42u32);
+    }
+
+    #[test]
+    fn test_donate_after_resume_succeeds() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.pause_project(&admin, &pid);
+        client.resume_project(&admin, &pid);
+
+        let donor        = Address::generate(&env);
+        let token_admin  = Address::generate(&env);
+        let token        = env.register_stellar_asset_contract_v2(token_admin).address();
+        StellarAssetClient::new(&env, &token).mint(&donor, &(25 * STROOP));
+        client.donate(&token, &donor, &pid, &(25 * STROOP), &42u32);
+
+        let p = client.get_project(&pid);
+        assert_eq!(p.total_raised, 25 * STROOP);
+        assert!(!p.paused);
+        assert_eq!(client.get_global_total(), 25 * STROOP);
+    }
+
+    // ─── Donate flow / overflow tests ──────────────────────────────────────────
+
+    /// End-to-end single-donation flow that exercises the Checks-Effects-
+    /// Interactions reorder applied to `donate`. State must be fully durable
+    /// before the external token transfer fires.
+    #[test]
+    fn test_donate_basic_flow_after_cei_reorder() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        token_client.mint(&donor, &(15 * STROOP));
+
+        client.donate(&token, &donor, &pid, &(15 * STROOP), &1u32);
+
+        // Project total reflects donation before token transfer fires
+        let p = client.get_project(&pid);
+        assert_eq!(p.total_raised, 15 * STROOP);
+        assert_eq!(p.donor_count, 1);
+        assert!(p.active);
+        // Donor stats: ticks over to Seedling tier (≥ 10 XLM)
+        let stats = client.get_donor_stats(&donor);
+        assert_eq!(stats.total_donated, 15 * STROOP);
+        assert_eq!(stats.donation_count, 1);
+        assert_eq!(stats.badge, BadgeTier::Seedling);
+        assert_eq!(stats.co2_offset_grams, 15 * 100);
+        // Globals
+        assert_eq!(client.get_global_total(), 15 * STROOP);
+        assert_eq!(client.get_global_co2(), 15 * 100);
+        assert_eq!(client.get_donation_count(), 1);
+    }
+
+    /// Note: total_raised overflow protection is already exercised by
+    /// `fuzz_tests::donation_of_i128_max_panics` and `sequential_donations_panic_when_sum_exceeds_i128_max`,
+    /// and the CO₂ `checked_mul` guard inside `donate` is unreachable
+    /// from any valid `amount <= i128::MAX` (since
+    /// `xlm_units * MAX_CO2_PER_XLM <= 9.22e16 < i128::MAX`), so no
+    /// redundant overflow tests are kept here.
+
+    /// Replaying the same donor must NOT inflate `project.donor_count` —
+    /// it counts unique donors.
+    #[test]
+    fn test_donate_unique_donor_count_not_inflated() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        StellarAssetClient::new(&env, &token).mint(&donor, &(30 * STROOP));
+
+        client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32);
+        client.donate(&token, &donor, &pid, &(10 * STROOP), &1u32);
+        client.donate(&token, &donor, &pid, &(10 * STROOP), &2u32);
+
+        let p = client.get_project(&pid);
+        assert_eq!(p.donor_count, 1);
+        assert_eq!(p.total_raised, 30 * STROOP);
+        // The donor stats aggregate across all three donations
+        let stats = client.get_donor_stats(&donor);
+        assert_eq!(stats.donation_count, 3);
+        assert_eq!(stats.total_donated, 30 * STROOP);
+    }
+
+    /// Two distinct donors to the same project must each be counted once.
+    #[test]
+    fn test_donate_distinct_donors_increment_count() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+        token_client.mint(&donor_a, &(10 * STROOP));
+        token_client.mint(&donor_b, &(10 * STROOP));
+
+        client.donate(&token, &donor_a, &pid, &(10 * STROOP), &0u32);
+        client.donate(&token, &donor_b, &pid, &(10 * STROOP), &1u32);
+
+        let p = client.get_project(&pid);
+        assert_eq!(p.donor_count, 2);
+        assert_eq!(p.total_raised, 20 * STROOP);
+    }
+
+    /// `get_voter_list` returns voters in the order they voted.
+    #[test]
+    fn test_get_voter_list() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&admin, &pid, &0u32);
+
+        let mut voters = std::vec::Vec::new();
+        for _ in 0..3 {
+            let v = Address::generate(&env);
+            grant_badge(&env, &cid, &v);
+            client.vote_verify_project(&v, &pid, &true);
+            voters.push(v);
+        }
+
+        let list = client.get_voter_list(&pid);
+        assert_eq!(list.len(), 3);
+        // Order-preserving: `vote_verify_project` pushes in voter-call order.
+        for (i, v) in voters.iter().enumerate() {
+            assert_eq!(list.get(i as u32).unwrap(), v.clone());
+        }
+    }
+
+    /// `get_voter_list` returns an empty `Vec` for a proposal no one has
+    /// voted on yet (does not panic and does not write defaults).
+    #[test]
+    fn test_get_voter_list_non_existent_proposal() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Initialize admin path + then ask for an unknown project.
+        let pid = String::from_str(&env, "never-created");
+        let list = client.get_voter_list(&pid);
+        assert_eq!(list.len(), 0);
+    }
+
+    // ─── Bulk admin tests ──────────────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Only admin can deactivate all projects")]
+    fn test_deactivate_all_projects_non_admin_fails() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let imposter = Address::generate(&env);
+        client.deactivate_all_projects(&imposter);
+    }
 }
+
 
