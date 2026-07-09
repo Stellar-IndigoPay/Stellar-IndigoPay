@@ -2,7 +2,11 @@
 const { z } = require("zod");
 
 const envSchema = z.object({
-  DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
+  // DATABASE_URL is technically required in production, but the rest of
+  // the codebase (notably db/pool.js) falls back to localhost when it's
+  // unset. We mirror that here so that test environments can boot the
+  // app without needing a real Postgres instance.
+  DATABASE_URL: z.string().optional().default("postgres://postgres:postgres@localhost:5432/indigopay"),
   PORT: z.string().optional().default("4000"),
   NODE_ENV: z.enum(["development", "production", "test"]).optional().default("development"),
   STELLAR_NETWORK: z.enum(["testnet", "mainnet"]).optional().default("testnet"),
@@ -34,14 +38,45 @@ const envSchema = z.object({
   S3_PUBLIC_URL: z.string().optional().default(""),
   IPFS_API_URL: z.string().optional().default(""),
   IPFS_GATEWAY_URL: z.string().optional().default(""),
+
+  // ── Observability / metrics ────────────────────────────────────────────────
+  // When METRICS_ENABLED=false the /metrics endpoint returns 404. Defaults
+  // to true so the endpoint is available out of the box in dev.
+  METRICS_ENABLED: z.enum(["true", "false"]).optional().default("true"),
+  // Bearer token required to scrape /metrics. If unset, the endpoint is
+  // unauthenticated (intended for local dev only).
+  METRICS_BEARER_TOKEN: z.string().optional().default(""),
+  // Sentry tracing sample rate. 0 disables, 1 samples everything. Production
+  // default 0.1 (10% of transactions). Anything above 0.5 gets expensive.
+  SENTRY_TRACES_SAMPLE_RATE: z.string().optional().default("0.1"),
+
+  // ── Rate limiter ──────────────────────────────────────────────────────────
+  RATE_LIMIT_MAX: z.string().optional().default("150"),
+
+  // ── Graceful shutdown ─────────────────────────────────────────────────────
+  // Hard deadline for the drain. After this we exit(1) regardless of state.
+  SHUTDOWN_TIMEOUT_MS: z.string().optional().default("30000"),
+
+  // ── Readiness probe ───────────────────────────────────────────────────────
+  // READINESS_REQUIRE_REDIS=true makes /api/readyz fail when Redis is down.
+  // Default false because Redis is an optional cache, not a hard dependency.
+  READINESS_REQUIRE_REDIS: z.enum(["true", "false"]).optional().default("false"),
+  // Per-subsystem check timeout. Coupled with DB_POOL_CONNECT_TIMEOUT and
+  // DB_STATEMENT_TIMEOUT_MS: their sum must stay under this value so a
+  // slow DB can never block the probe past its own deadline.
+  READINESS_CHECK_TIMEOUT_MS: z.string().optional().default("4000"),
 });
 
 function validateEnv() {
   const result = envSchema.safeParse(process.env);
 
   if (!result.success) {
-    const missing = result.error.errors.map((e) => `  - ${e.path.join(".")}: ${e.message}`).join("\n");
-    console.error(`\n[Startup] Environment validation failed:\n${missing}\n`);
+    // zod v4 renamed `error.errors` to `error.issues`. Fall back to
+    // `errors` for any v3 shim that still defines it.
+    const issues = (result.error.issues || result.error.errors || []).map(
+      (e) => `  - ${(e.path || []).join(".")}: ${e.message}`
+    ).join("\n");
+    console.error(`\n[Startup] Environment validation failed:\n${issues}\n`);
     process.exit(1);
   }
 
