@@ -10,6 +10,9 @@ import { useRouter } from 'expo-router';
 import { ThemeProvider, themes } from './theme';
 import { useDeepLink } from '../hooks/useDeepLink';
 import { setupNotificationListener, setupNotificationResponseListener } from '../utils/notifications';
+import { ErrorBoundary } from '../components/ErrorBoundary';
+import { AuthProvider } from '../providers/AuthProvider';
+import { init as initErrorReporter } from '../lib/errorReporter';
 
 function DeepLinkHandler() {
   useDeepLink();
@@ -40,26 +43,40 @@ export default function RootLayout() {
   const themeMode = colorScheme === 'dark' ? 'dark' : 'light';
   const theme = themes[themeMode];
 
+  // Best-effort optional-SDK init: silently fall through when
+  // @sentry/react-native is not installed (CI / dev / OSS forks).
+  useEffect(() => {
+    void initErrorReporter();
+  }, []);
+
   return (
-    <ThemeProvider>
-      <DeepLinkHandler />
-      <NotificationHandler />
-      <StatusBar style={theme.statusBarStyle} />
-      <Stack screenOptions={{
-        headerStyle: { backgroundColor: theme.header },
-        headerTintColor: theme.headerText,
-        headerTitleStyle: { fontFamily: 'Lora_700Bold' },
-      }}>
-        <Stack.Screen name="index" options={{ title: 'Home' }} />
-        <Stack.Screen name="projects" options={{ title: 'Projects' }} />
-        <Stack.Screen name="projects/[id]" options={{ title: 'Project Details' }} />
-        <Stack.Screen name="donate/[id]" options={{ title: 'Donate' }} />
-        <Stack.Screen name="impact" options={{ title: 'My Impact' }} />
-        <Stack.Screen name="profile/[address]" options={{ title: 'Donor Profile' }} />
-        <Stack.Screen name="leaderboard" options={{ title: 'Leaderboard' }} />
-        <Stack.Screen name="recurring" options={{ title: 'Monthly Giving' }} />
-        <Stack.Screen name="scan" options={{ title: 'Scan to Donate', headerShown: false }} />
-      </Stack>
-    </ThemeProvider>
+    <ErrorBoundary>
+      <ThemeProvider>
+        {/* Deep-link + notification handlers sit ABOVE AuthProvider so
+            they can navigate the router even when no session is
+            active. AuthGate will then present the locked UI for any
+            arriving gated route. */}
+        <DeepLinkHandler />
+        <NotificationHandler />
+        <AuthProvider>
+          <StatusBar style={theme.statusBarStyle} />
+          <Stack screenOptions={{
+            headerStyle: { backgroundColor: theme.header },
+            headerTintColor: theme.headerText,
+            headerTitleStyle: { fontFamily: 'Lora_700Bold' },
+          }}>
+            <Stack.Screen name="index" options={{ title: 'Home' }} />
+            <Stack.Screen name="projects" options={{ title: 'Projects' }} />
+            <Stack.Screen name="projects/[id]" options={{ title: 'Project Details' }} />
+            <Stack.Screen name="donate/[id]" options={{ title: 'Donate' }} />
+            <Stack.Screen name="impact" options={{ title: 'My Impact' }} />
+            <Stack.Screen name="profile/[address]" options={{ title: 'Donor Profile' }} />
+            <Stack.Screen name="leaderboard" options={{ title: 'Leaderboard' }} />
+            <Stack.Screen name="recurring" options={{ title: 'Monthly Giving' }} />
+            <Stack.Screen name="scan" options={{ title: 'Scan to Donate', headerShown: false }} />
+          </Stack>
+        </AuthProvider>
+      </ThemeProvider>
+    </ErrorBoundary>
   );
 }
