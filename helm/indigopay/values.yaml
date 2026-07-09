@@ -1,0 +1,34 @@
+namespace: indigopay
+
+backend:
+  image: indigopay/backend:latest
+  replicas: 2
+  port: 4000
+
+frontend:
+  image: indigopay/frontend:latest
+  replicas: 2
+  port: 3000
+
+postgres:
+  image: postgres:16-alpine
+  storage: 5Gi
+
+config:
+  stellarNetwork: testnet
+  horizonUrl: https://horizon-testnet.stellar.org
+  sorobanRpcUrl: https://soroban-testnet.stellar.org
+  contractId: ""
+  usdcIssuer: ""
+  emailFrom: "IndigoPay <updates@yourdomain.com>"
+
+secrets:
+  postgresUser: postgres
+  postgresPassword: changeme
+  postgresDb: indigopay
+  resendApiKey: ""
+  adminApiKey: ""
+
+ingress:
+  host: indigopay.local
+  className: nginx

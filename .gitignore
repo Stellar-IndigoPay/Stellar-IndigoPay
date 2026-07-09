@@ -1,0 +1,25 @@
+node_modules/
+.next/
+out/
+target/
+dist/
+build/
+*.log
+
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+Cargo.lock
+
+# Uploaded documents via /api/uploads (local storage backend).
+# Keep the directory in git via .gitkeep so the first run works out of the box.
+backend/uploads/*
+!backend/uploads/.gitkeep

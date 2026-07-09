@@ -1,0 +1,11 @@
+{
+  "applinks": {
+    "apps": [],
+    "details": [
+      {
+        "appIDs": ["TEAMID.com.stellarindigopay.app"],
+        "paths": ["/project/*"]
+      }
+    ]
+  }
+}

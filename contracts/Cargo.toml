@@ -1,0 +1,3 @@
+[workspace]
+members = ["indigopay-contract", "escrow-contract"]
+resolver = "2"

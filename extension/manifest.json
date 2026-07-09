@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "IndigoPay Companion",
+  "version": "1.0.1",
+  "description": "Support your favorite sustainable projects with a single click.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "IndigoPay Companion"
+  },
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "contextMenus"
+  ],
+  "background": {
+    "service_worker": "dist/background.js"
+  },
+  "host_permissions": [
+    "https://app.indigopay.io/*",
+    "https://testnet.indigopay.io/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://app.indigopay.io/*", "https://testnet.indigopay.io/*"],
+      "js": ["dist/content-script.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "privacy_policy_url": "https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/blob/main/PRIVACY.md",
+}
