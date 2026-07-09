@@ -2,6 +2,7 @@
  * pages/index.tsx — IndigoPay landing page
  */
 import Link from "next/link";
+import Head from "next/head";
 import { useState, useRef, useEffect } from "react";
 import WalletConnect from "@/components/WalletConnect";
 import { useCountUp } from "@/hooks/useCountUp";
@@ -183,6 +184,10 @@ export default function Home({ publicKey, onConnect }: HomeProps) {
 
   return (
     <div className="relative overflow-hidden">
+      <Head>
+        <title>Stellar IndigoPay — Fund the planet. One XLM at a time.</title>
+        <meta name="description" content="Stellar IndigoPay connects donors with verified climate projects worldwide. Donations go directly on-chain — no banks, no delays, no fees swallowed by middlemen." />
+      </Head>
       {/* Background leaf gradient */}
       <div className="absolute top-0 inset-x-0 h-96 bg-gradient-to-b from-white to-transparent pointer-events-none" />
 

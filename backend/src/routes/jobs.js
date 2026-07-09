@@ -37,12 +37,15 @@ router.get("/", async (req, res, next) => {
     }
 
     if (conditions.length > 0) {
+      // Dynamic WHERE is safe: conditions are built from parameterised $N
+      // placeholders with user values passed via `values` array.
       // eslint-disable-next-line sql-injection/no-sql-injection
       queryStr += " WHERE " + conditions.join(" AND ");
     }
 
     queryStr += " ORDER BY created_at DESC LIMIT 50";
 
+    // eslint-disable-next-line sql-injection/no-sql-injection
     const result = await pool.query(queryStr, values);
     res.json({ success: true, data: result.rows.map(mapJobRow) });
   } catch (e) {

@@ -258,7 +258,7 @@ describe("Donation flow integration (testcontainers)", () => {
 
     const projectId = "22222222-2222-2222-2222-222222222222";
     await testPool.query(
-      `INSERT INTO projects (id, name, description, category, location, wallet_address) VALUES ($1,$2,$3,$4,$5,$6)`,
+      "INSERT INTO projects (id, name, description, category, location, wallet_address) VALUES ($1,$2,$3,$4,$5,$6)",
       [projectId, "Dedupe Test", "x", "Solar Energy", "Kenya", makePublicKey("X")]
     );
 

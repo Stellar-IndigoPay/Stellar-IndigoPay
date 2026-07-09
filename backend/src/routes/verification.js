@@ -343,6 +343,9 @@ router.get("/", adminRequired, async (req, res, next) => {
     if (where.length) query += " WHERE " + where.join(" AND ");
     query += ` ORDER BY submitted_at DESC LIMIT $${values.length - 1} OFFSET $${values.length}`;
 
+    // Dynamic WHERE is safe: conditions are built from parameterised $N
+    // placeholders with user values passed via `values` array.
+    // eslint-disable-next-line sql-injection/no-sql-injection
     const result = await pool.query(query, values);
     res.json({
       success: true,

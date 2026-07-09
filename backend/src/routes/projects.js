@@ -1287,10 +1287,10 @@ router.get("/:id/impact-certificate", async (req, res, next) => {
     // Generate QR code for project wallet (null if no wallet address)
     const qrCode = project.wallet_address
       ? await QRCode.toDataURL(project.wallet_address, {
-          width: 256,
-          margin: 2,
-          color: { dark: "#227239", light: "#ffffff" },
-        })
+        width: 256,
+        margin: 2,
+        color: { dark: "#227239", light: "#ffffff" },
+      })
       : null;
 
     res.json({
