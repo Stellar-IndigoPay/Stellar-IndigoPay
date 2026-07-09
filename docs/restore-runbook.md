@@ -1,0 +1,80 @@
+# Postgres Restore Runbook
+
+This runbook covers restoring the production Postgres database from
+the latest S3 backup. Use it during a real incident after the on-call
+has confirmed the database is corrupt or the data is unrecoverable
+from the running cluster.
+
+## Pre-flight
+
+1. Confirm the incident: a healthy cluster returns 200 on
+   `/api/readyz` and the `db_pool_waiting_count` gauge is 0. If
+   not, the issue is elsewhere — do not proceed.
+2. Identify the restore target time. Aim for the most recent WAL
+   archive. Confirm it exists:
+   ```bash
+   aws s3 ls s3://${S3_BUCKET}/backups/ --recursive | tail -20
+   ```
+3. Announce in the on-call channel: "Beginning restore from
+   ${TIMESTAMP}, downtime expected 30-60 min."
+
+## Provision a fresh database
+
+1. Spin up a clean Postgres pod (or RDS instance) at the version
+   matching production (`postgres:16-alpine` for k8s, the matching
+   engine version for RDS). DO NOT touch the broken pod.
+2. Restore the base backup:
+   ```bash
+   aws s3 cp s3://${S3_BUCKET}/backups/indigopay_backup_${TIMESTAMP}.sql.gz /tmp/
+   gunzip /tmp/indigopay_backup_${TIMESTAMP}.sql.gz
+   psql "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${NEW_HOST}:5432/postgres" \
+     -f /tmp/indigopay_backup_${TIMESTAMP}.sql
+   ```
+3. Verify the base restore:
+   ```bash
+   psql "postgres://...@${NEW_HOST}:5432/indigopay" \
+     -c "SELECT count(*) FROM donations; SELECT count(*) FROM projects;"
+   ```
+4. Apply WAL archives from S3 (point-in-time recovery). The exact
+   `restore_command` is set in `postgresql.conf`:
+   ```ini
+   restore_command = 'aws s3 cp s3://${S3_BUCKET}/wal/%f %p'
+   recovery_target_time = '2026-07-09 10:30:00 UTC'
+   recovery_target_action = 'promote'
+   ```
+5. `pg_ctl promote` (or `SELECT pg_promote();`) when replay catches
+   up to the target time.
+
+## Cutover
+
+1. Stop the backend deployment:
+   ```bash
+   kubectl scale deploy/backend --replicas=0 -n indigopay
+   ```
+2. Update the `DATABASE_URL` secret in AWS Secrets Manager to point
+   at the new host.
+3. Restart the backend:
+   ```bash
+   kubectl scale deploy/backend --replicas=2 -n indigopay
+   ```
+4. Watch the readiness probe:
+   ```bash
+   kubectl logs -n indigopay -l app=backend -c backend --tail=200 -f
+   ```
+5. Smoke test: `curl https://api.indigopay.app/api/health` should
+   return 200; `/api/projects` should return the expected list.
+
+## Post-restore
+
+1. Re-enable scheduled backups (the restored DB has no cron).
+2. Verify webhook delivery resume: check `webhook_deliveries WHERE
+   status='pending' AND next_attempt_at <= NOW()`.
+3. Open a post-incident review within 48 hours.
+4. Update RTO/RPO numbers in `docs/disaster-recovery.md` if the
+   incident was longer/shorter than the target.
+
+## Dry Run
+
+The `restore-drill` workflow under `.github/workflows/restore-drill.yml`
+runs this runbook on a cron (1st of every month) against an
+ephemeral Postgres pod. Drill failures page on-call.
