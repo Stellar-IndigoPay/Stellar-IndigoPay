@@ -82,15 +82,25 @@ async function enqueueWebhookDelivery({ projectId, eventType, payload, secret })
     raisedXlm: payload.totalRaisedXLM ?? payload.raisedXlm ?? "0",
   });
 
-  const deliveryId = crypto.randomUUID();
+  const tentativeId = crypto.randomUUID();
+  let deliveryId;
+  let wasInserted = true;
   try {
-    await pool.query(
+    // Use ON CONFLICT ... DO UPDATE ... RETURNING to atomically claim a row id
+    // and discover whether we created it or matched an existing one. The
+    // xmax = 0 trick distinguishes a freshly-inserted tuple from one that
+    // was already present (xmax != 0 in that case).
+    const result = await pool.query(
       `INSERT INTO webhook_deliveries
          (id, project_id, event_id, event_type, payload, status, next_attempt_at)
        VALUES ($1, $2, $3, $4, $5::jsonb, 'pending', NOW())
-       ON CONFLICT (event_id) DO NOTHING`,
-      [deliveryId, projectId, eventId, eventType, JSON.stringify(payload)],
+       ON CONFLICT (event_id) DO UPDATE
+         SET updated_at = NOW()
+       RETURNING id, (xmax = 0) AS inserted`,
+      [tentativeId, projectId, eventId, eventType, JSON.stringify(payload)],
     );
+    deliveryId = result.rows[0].id;
+    wasInserted = result.rows[0].inserted;
   } catch (err) {
     logger.error(
       { event: "webhook_enqueue_db_error", err: err.message, projectId, eventId },
@@ -101,15 +111,29 @@ async function enqueueWebhookDelivery({ projectId, eventType, payload, secret })
 
   if (!boss) {
     // During tests / one-off scripts: skip the queue and process inline.
+    // Retries are unavailable in this mode; the row sits at status=pending
+    // and a future enqueueWebhookDelivery for the same event_id will pick
+    // it up via the ON CONFLICT branch above.
     await processDelivery(deliveryId, { eventId, projectId, eventType, payload, secret });
     return eventId;
   }
 
+  // Schedule a single-attempt pg-boss job. We control retries ourselves
+  // (see processDelivery) so the worker doesn't auto-retry on throw —
+  // instead, on failure we reschedule a new job with `startAfter` set to
+  // the appropriate backoff.
   await boss.send(
     QUEUE,
-    { deliveryId, secret, attempt: 1 },
-    { retryLimit: RETRY_DELAYS_SECONDS.length, retryDelay: RETRY_DELAYS_SECONDS[0] },
+    { deliveryId, secret },
+    { retryLimit: 0 },
   );
+
+  if (!wasInserted) {
+    logger.info(
+      { event: "webhook_dedupe_hit", eventId, deliveryId },
+      "duplicate webhook enqueue collapsed to existing delivery",
+    );
+  }
   return eventId;
 }
 
@@ -215,6 +239,29 @@ async function processDelivery(deliveryId, inMemoryOverrides) {
     metrics.webhookDeliveriesTotal.inc({ outcome: "dlq" });
   } else {
     metrics.webhookDeliveriesTotal.inc({ outcome: "retry" });
+    // Reschedule the next attempt with `startAfter` so the delay is
+    // honored even though pg-boss itself isn't doing retries. Without
+    // this, the delivery row would sit at status='pending' forever and
+    // the advertised 6-attempt backoff would never actually fire.
+    if (boss) {
+      try {
+        await boss.send(
+          QUEUE,
+          { deliveryId, secret: inMemoryOverrides ? secret : undefined },
+          { retryLimit: 0, startAfter: new Date(Date.now() + nextDelay * 1000) },
+        );
+      } catch (err) {
+        logger.error(
+          { event: "webhook_reschedule_error", deliveryId, err: err.message },
+          "failed to reschedule retry — row left in pending state",
+        );
+      }
+    } else {
+      logger.warn(
+        { event: "webhook_retry_unavailable", deliveryId },
+        "pg-boss not started; cannot reschedule retry, row left in pending state",
+      );
+    }
   }
   logger.warn(
     {
