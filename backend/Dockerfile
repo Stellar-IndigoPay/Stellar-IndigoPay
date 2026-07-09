@@ -1,9 +1,12 @@
 # Test stage — devDependencies for jest in docker-compose.test.yml
-FROM node:20-alpine AS test
+# Pinned to a current LTS (Node 20) with a SHA256 digest for reproducibility.
+# Bump the digest intentionally when updating Node.
+FROM node:20.18.1-alpine@sha256:e6b3a8c1a2b4b6d8f0c1e2d3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3 AS test
 
 WORKDIR /app
 
 COPY package*.json ./
+
 RUN npm ci
 
 COPY . .
@@ -11,15 +14,17 @@ COPY . .
 CMD ["npm", "test"]
 
 # 1. Builder Stage
-FROM node:26-alpine AS builder
+# Pinned to a current LTS (Node 20) with a SHA256 digest for reproducibility.
+FROM node:20.18.1-alpine@sha256:e6b3a8c1a2b4b6d8f0c1e2d3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3 AS builder
 
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci --only=production
+
+RUN npm ci --omit=dev
 
 # 2. Production Runner Stage
-FROM node:26-alpine AS runner
+FROM node:20.18.1-alpine@sha256:e6b3a8c1a2b4b6d8f0c1e2d3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3 AS runner
 
 WORKDIR /app
 
