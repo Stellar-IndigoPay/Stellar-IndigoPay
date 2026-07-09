@@ -1,0 +1,40 @@
+# k8s/networkpolicy-allow-frontend-backend.yaml
+#
+# The default-deny NetworkPolicy in networkpolicy-default-deny.yaml
+# blocks all egress. The frontend (Next.js) SSR tier needs to reach
+# the backend over the ClusterIP service `backend-svc:4000` to render
+# pages. Without this rule, every page render would 500.
+#
+# We narrow the source to `app: frontend` and the destination to
+# `app: backend` so a compromised frontend can't pivot to other
+# pods in the namespace.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend-to-backend
+  namespace: indigopay
+spec:
+  podSelector:
+    matchLabels:
+      app: frontend
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: backend
+      ports:
+        - protocol: TCP
+          port: 4000
+    # DNS so the frontend can resolve `backend-svc.indigopay.svc.cluster.local`.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
