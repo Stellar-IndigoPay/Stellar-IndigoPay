@@ -51,8 +51,7 @@ roadmap.
 - **RPO**: 1 min (replication lag).
 
 ### Secret compromise
-- **Detection**: gitleaks CI alert, anomalous access in CloudTrail, or
-  partner notification.
+- **Detection**: anomalous access in CloudTrail or partner notification.
 - **Recovery**: rotate the affected secret in AWS Secrets Manager;
   external-secrets-operator will refresh the K8s Secret within
   `refreshInterval` (default 1h). Trigger an immediate refresh with
