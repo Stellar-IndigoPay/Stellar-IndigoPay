@@ -5,6 +5,7 @@ const request = require("supertest");
 
 const readinessRouter = require("./readiness");
 const lifecycle = require("../services/lifecycle");
+const pool = require("../db/pool");
 
 function buildApp() {
   const app = express();
@@ -17,6 +18,10 @@ describe("GET /api/readyz (readiness)", () => {
     lifecycle._resetForTests();
   });
 
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
   test("returns 503 status=draining once shutdown begins (no DB call)", async () => {
     lifecycle.beginShutdown();
     const res = await request(buildApp()).get("/api/readyz");
@@ -25,8 +30,10 @@ describe("GET /api/readyz (readiness)", () => {
   });
 
   test("returns 503 not ready when the DB is unreachable (no DATABASE_URL / pool fails)", async () => {
-    // The default pool is constructed with localhost:5432 which won't
-    // resolve; readiness should still answer quickly with status=not ready.
+    // Simulate an unreachable database so the test is independent of the
+    // surrounding environment (local unit tests vs. docker-compose CI).
+    jest.spyOn(pool, "query").mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
+
     const res = await request(buildApp()).get("/api/readyz");
     expect(res.status).toBe(503);
     expect(res.body.status).toBe("not ready");

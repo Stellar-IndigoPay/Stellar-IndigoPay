@@ -61,6 +61,6 @@ describe('DonorProfile Component', () => {
       component = render(<DonorProfilePage />);
     });
 
-    expect(component.container).toMatchSnapshot();
+    expect(component!.container).toMatchSnapshot();
   });
 });

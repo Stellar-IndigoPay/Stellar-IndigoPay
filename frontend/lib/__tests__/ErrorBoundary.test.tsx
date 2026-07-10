@@ -42,7 +42,7 @@ describe("ErrorBoundary", () => {
   const originalEnv = process.env.NODE_ENV;
 
   afterEach(() => {
-    process.env.NODE_ENV = originalEnv;
+    (process.env as { NODE_ENV: string }).NODE_ENV = originalEnv;
   });
 
   it("renders children when no error is thrown", () => {
@@ -112,7 +112,7 @@ describe("ErrorBoundary", () => {
   });
 
   it("exposes the error stack trace outside production", () => {
-    process.env.NODE_ENV = "development";
+    (process.env as { NODE_ENV: string }).NODE_ENV = "development";
     const consoleErrorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     render(<Harness shouldThrow={true} />);
     expect(screen.getByTestId("error-boundary-stack")).toBeInTheDocument();
@@ -120,7 +120,7 @@ describe("ErrorBoundary", () => {
   });
 
   it("omits the stack trace in production NODE_ENV", () => {
-    process.env.NODE_ENV = "production";
+    (process.env as { NODE_ENV: string }).NODE_ENV = "production";
     const consoleErrorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     render(<Harness shouldThrow={true} />);
     expect(screen.queryByTestId("error-boundary-stack")).not.toBeInTheDocument();
