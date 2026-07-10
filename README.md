@@ -231,7 +231,8 @@ Upgrade mechanics: [`contracts/indigopay-contract/UPGRADE.md`](contracts/indigop
 - Default-deny **NetworkPolicy** in the `indigopay` namespace, with explicit allow for ingress → backend, backend → postgres/redis/Stellar/Anthropic/Sentry, Prometheus → backend, frontend → backend
 - HPA (min 2, max 10) + PDB (`minAvailable: 1`) on backend and frontend, mirrored in the Helm chart
 - **External Secrets** operator template ([`k8s/external-secret.yaml`](k8s/external-secret.yaml), [`docs/external-secrets.md`](docs/external-secrets.md))
-- **SBOM** on every push, **cosign** keyless signing on release tags
+- **SBOM** on every push, **Trivy** image scan (informational, non-blocking), **cosign** keyless signing on release tags
+- **Gitleaks** secret scan with a curated allowlist ([`.gitleaks.toml`](.gitleaks.toml))
 - Rate limit + CSRF + helmet + CSP + Sentry error capture
 - Audit log of every admin action with actor, target, IP, and metadata
 
@@ -304,7 +305,7 @@ Quick checklist for a good PR:
 - [ ] For backend API changes, the OpenAPI spec is updated and Swagger UI reflects it
 - [ ] For contract changes, `cargo test --features testutils` passes and an entry is added to [`contracts/EVENTS.md`](contracts/EVENTS.md) for any new event
 - [ ] CHANGELOG.md has a one-line entry under `[Unreleased]` in Keep-a-Changelog format
-- [ ] No secrets in the diff
+- [ ] No secrets in the diff (CI runs gitleaks)
 
 This project is governed by the [**Contributor Covenant**](CODE_OF_CONDUCT.md).
 

@@ -1,0 +1,6 @@
+# Trivy ignore list
+# Only add vulnerabilities here that are in upstream/base images and have no
+# fix available. Re-evaluate each entry periodically.
+
+# Example entries (uncomment if needed):
+# CVE-2024-XXXXX

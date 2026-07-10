@@ -1,0 +1,25 @@
+title = "IndigoPay Gitleaks Config"
+
+[allowlist]
+paths = [
+  "\\.test\\.(ts|tsx|js|jsx)$",
+  "\\.spec\\.(ts|tsx|js|jsx)$",
+  "__tests__",
+  "__mocks__",
+  "test_snapshots",
+  "node_modules",
+  "target",
+  "\\.env\\.example$",
+  "\\.env\\.local\\.example$",
+  "secret\\.example\\.yaml$",
+  "zap-false-positives\\.json$",
+  "CHANGELOG\\.md$",
+]
+
+# Common placeholder / example values that are not real secrets
+regexes = [
+  # Example passwords / tokens / placeholders
+  '''(?i)(changeme|replace_me|yourpassword|yourdomain|example\\.com|localhost|127\\.0\\.0\\.1)''',
+  # Example mnemonic / seed phrases with test/example prefix
+  '''(?i)(test|example|sample).{0,20}(mnemonic|seed|phrase|private.?key)''',
+]

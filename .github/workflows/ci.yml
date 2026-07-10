@@ -47,6 +47,24 @@ jobs:
       - run: docker compose -f docker-compose.test.yml up --abort-on-container-exit --exit-code-from backend --build
         working-directory: .
 
+  contracts:
+    name: Soroban Contracts (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+      - run: cargo check --workspace --all-features
+      - run: cargo test --workspace --all-features
+      - run: cargo build --workspace --target wasm32-unknown-unknown --release
+
   helm:
     name: Helm Chart Validation
     runs-on: ubuntu-latest
@@ -64,6 +82,20 @@ jobs:
         # helm template validates Go template syntax and value rendering; no
         # cluster access is required, unlike kubectl apply --dry-run (which
         # needs a running K8s API server even with --validate=false).
+
+  gitleaks:
+    name: Secret scanning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install gitleaks
+        run: |
+          GITLEAKS_VERSION="8.30.1"
+          curl -sL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_$(uname -s)_$(uname -m).tar.gz" -o /tmp/gitleaks.tar.gz
+          tar xzf /tmp/gitleaks.tar.gz -C /tmp
+          sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
+      - name: Secret scanning
+        run: gitleaks detect --config .gitleaks.toml --source . --no-git --exit-code 1
 
   zap_scan:
     name: DAST Security Scan (OWASP ZAP)
