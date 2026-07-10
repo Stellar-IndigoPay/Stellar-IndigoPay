@@ -8,7 +8,6 @@ jest.mock("../middleware/rateLimiter", () => ({
   createRateLimiter: () => (req, res, next) => next(),
 }));
 
-const pool = require("../db/pool");
 const express = require("express");
 const request = require("supertest");
 const profilesRouter = require("./profiles");

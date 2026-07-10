@@ -8,7 +8,7 @@
  * 3. Submits pre-signed matching transactions from the matcher account
  */
 
-const { Server, TransactionBuilder, Networks, Operation, Asset, Horizon } = require("@stellar/stellar-sdk");
+const { Server, TransactionBuilder, Networks, Operation, Asset } = require("@stellar/stellar-sdk");
 const pool = require("../db/pool");
 
 // Network configuration
@@ -35,8 +35,7 @@ async function matchDonationTxFunction(payment) {
       to, 
       amount, 
       asset_code, 
-      asset_type,
-      memo 
+      asset_type
     } = payment;
 
     // Only match XLM donations
@@ -94,8 +93,7 @@ async function matchDonationTxFunction(payment) {
         projectWallet: to,
         amount: matchAmount,
         originalTxHash: transaction_hash,
-        matchId: match.id,
-        projectId: project.id
+        matchId: match.id
       });
 
       if (matchResult.success) {
@@ -128,7 +126,6 @@ async function matchDonationTxFunction(payment) {
 
         totalMatched += matchAmount;
         matchResults.push({
-          matchId: match.id,
           matcherAddress: match.matcher_address,
           amount: matchAmount,
           txHash: matchResult.txHash
@@ -168,8 +165,7 @@ async function submitMatchingPayment({
   projectWallet,
   amount,
   originalTxHash,
-  matchId,
-  projectId
+  matchId
 }) {
   try {
     // Load the matcher account
@@ -242,8 +238,7 @@ async function generatePreSignedTransactions({
   matcherSecret,
   projectWallet,
   capXlm,
-  multiplier,
-  projectId
+  multiplier
 }) {
   const transactions = [];
   const matcherKeypair = require("@stellar/stellar-sdk").Keypair.fromSecret(matcherSecret);
@@ -291,7 +286,7 @@ async function generatePreSignedTransactions({
 /**
  * Generate a set of pre-signed matching transactions for a matcher account.
  *
- * @param {{matcherAddress:string,matcherSecret:string,projectWallet:string,capXlm:number,multiplier:number,projectId:string}} opts
+ * @param {{matcherAddress:string,matcherSecret:string,projectWallet:string,capXlm:number,multiplier:number}} opts
  * @returns {Promise<Array<{donationAmount:number,matchAmount:number,xdr:string}>>}
  */
 // exported as `generatePreSignedTransactions`
@@ -346,7 +341,6 @@ function startTurretsServer(port = 3001) {
         projectWallet,
         capXlm: parseFloat(capXlm),
         multiplier: parseFloat(multiplier),
-        projectId
       });
 
       res.json({ success: true, transactions });

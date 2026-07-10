@@ -10,7 +10,6 @@ const { z } = require("zod");
 const QRCode = require("qrcode");
 const pool = require("../db/pool");
 const { logAdminAction } = require("../services/audit");
-const { adminKeyRequired } = require("../middleware/auth");
 const { mapProjectRow, mapProjectMilestoneRow, mapDonationRow } = require("../services/store");
 const {
   getOnChainProject,
@@ -46,17 +45,7 @@ const VALID_CATEGORIES = [
   "Sustainable Agriculture",
   "Other",
 ];
-const STELLAR_PUBLIC_KEY_RE = /^G[A-Z0-9]{55}$/;
 
-const createProjectSchema = z.object({
-  name: sanitizedStringField({ required: true, minLength: 3, maxLength: 120, message: "must not contain HTML" }),
-  description: sanitizedStringField({ required: true, minLength: 10, maxLength: 5000, message: "must not contain HTML" }),
-  location: sanitizedStringField({ required: true, minLength: 2, maxLength: 200, message: "must not contain HTML" }),
-  category: z.enum(VALID_CATEGORIES),
-  wallet_address: z.string().min(1, "wallet_address is required"),
-  goal_xlm: z.union([z.string(), z.number()]).optional(),
-  tags: z.array(z.string()).optional().default([]),
-});
 
 /**
  * GET /api/projects/featured
@@ -811,12 +800,6 @@ router.get("/:id", async (req, res, next) => {
     // Fetch average rating
     const ratingResult = await pool.query(
       "SELECT AVG(rating) as avg_rating, COUNT(*) as count FROM project_ratings WHERE project_id = $1",
-      [req.params.id],
-    );
-
-    // Fetch subscriber count
-    const subscriberResult = await pool.query(
-      "SELECT COUNT(*)::int AS count FROM project_subscriptions WHERE project_id = $1",
       [req.params.id],
     );
 
