@@ -7,6 +7,7 @@
 [![MIT License](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-6366F1.svg)](CONTRIBUTING.md)
 [![Code of Conduct](https://img.shields.io/badge/Contributor%20Covenant-2.1-818CF8.svg)](CODE_OF_CONDUCT.md)
+[![Contributors](https://img.shields.io/badge/Contributors-welcome-1f9d55.svg)](CONTRIBUTORS.md)
 [![CI](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/actions/workflows/ci.yml/badge.svg)](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/actions/workflows/ci.yml)
 [![Contracts CI](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/actions/workflows/contracts.yml/badge.svg)](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/actions/workflows/contracts.yml)
 [![Release](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/actions/workflows/release.yml/badge.svg)](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/actions/workflows/release.yml)
