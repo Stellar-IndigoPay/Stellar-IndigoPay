@@ -49,6 +49,35 @@ const HANDLERS = {
   async project_update({ project, update }) {
     await pushService.sendProjectUpdateNotifications({ project, update });
   },
+
+  async governance_proposal({ proposalId, title, description, endsAt }) {
+    await pushService.sendGovernanceProposalNotifications({
+      proposalId,
+      title,
+      description,
+      endsAt,
+    });
+  },
+
+  async recurring_reminder({
+    donorAddress,
+    projectName,
+    amount,
+    currency,
+    projectId,
+    nextPaymentDate,
+    recurringId,
+  }) {
+    await pushService.sendRecurringReminder({
+      donorAddress,
+      projectName,
+      amount,
+      currency,
+      projectId,
+      nextPaymentDate,
+      recurringId,
+    });
+  },
 };
 
 /**

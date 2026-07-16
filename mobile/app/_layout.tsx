@@ -74,6 +74,10 @@ export default function RootLayout() {
           >
             <Stack.Screen name="index" options={{ title: "Home" }} />
             <Stack.Screen name="settings" options={{ title: "Settings" }} />
+            <Stack.Screen
+              name="settings/notifications"
+              options={{ title: "Notification Settings" }}
+            />
             <Stack.Screen name="projects" options={{ title: "Projects" }} />
             <Stack.Screen
               name="projects/[id]"
