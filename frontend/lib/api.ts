@@ -118,18 +118,54 @@ export async function csrfFetch(input: RequestInfo, init: RequestInit = {}) {
  * const projects = await fetchProjects({ verified: true, limit: 12 });
  * console.log("projects:", projects.length);
  */
-export async function fetchProjects(params?: {
+export interface ProjectListFilters {
   category?: string;
   status?: string;
   verified?: boolean;
   search?: string;
+  location?: string;
+  co2Min?: number;
+  co2Max?: number;
   limit?: number;
-}): Promise<ClimateProject[]> {
+}
+
+export async function fetchProjects(
+  params?: ProjectListFilters,
+): Promise<ClimateProject[]> {
   const { data } = await api.get<{ success: boolean; data: ClimateProject[] }>(
     "/api/projects",
     { params },
   );
   return data.data;
+}
+
+export interface ProjectFacetValue {
+  value: string;
+  count: number;
+}
+
+export interface ProjectFacets {
+  category: ProjectFacetValue[];
+  location: ProjectFacetValue[];
+  status: ProjectFacetValue[];
+}
+
+/**
+ * Fetch facet counts (how many projects match each category/location/status
+ * value) scoped to the given filters, for rendering counts like
+ * "Reforestation (12)" next to filter options that aren't active yet.
+ */
+export async function fetchProjectFacets(
+  params?: ProjectListFilters,
+): Promise<ProjectFacets> {
+  const { data } = await api.get<{
+    success: boolean;
+    data: ClimateProject[];
+    facets?: ProjectFacets;
+  }>("/api/projects", {
+    params: { ...params, facets: true, limit: 1 },
+  });
+  return data.facets || { category: [], location: [], status: [] };
 }
 
 /**
@@ -984,4 +1020,75 @@ export async function purgeQueue(name: string, adminKey: string): Promise<boolea
     },
   );
   return data.success;
+}
+
+// ── Admin: Webhook Dead-Letter Queue Management ──────────────────────────────
+export interface WebhookDelivery {
+  id: string;
+  projectId: string;
+  projectName: string | null;
+  eventId: string;
+  eventType: string;
+  status: "pending" | "delivered" | "failed" | "dlq";
+  attempts: number;
+  lastAttemptAt: string | null;
+  lastError: string | null;
+  nextAttemptAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function fetchDeadLetterWebhooks(
+  adminKey: string,
+  params?: { projectId?: string; limit?: number; page?: number },
+): Promise<{ data: WebhookDelivery[]; total: number; page: number; pageSize: number }> {
+  const { data } = await api.get<{
+    success: boolean;
+    data: WebhookDelivery[];
+    total: number;
+    page: number;
+    pageSize: number;
+  }>("/api/admin/webhooks/dead-letter", {
+    params,
+    headers: { "X-Admin-Key": adminKey },
+  });
+  return data;
+}
+
+export async function replayWebhookDelivery(
+  deliveryId: string,
+  adminKey: string,
+): Promise<WebhookDelivery> {
+  const { data } = await api.post<{ success: boolean; data: WebhookDelivery }>(
+    `/api/admin/webhooks/dead-letter/${deliveryId}/replay`,
+    {},
+    { headers: { "X-Admin-Key": adminKey } },
+  );
+  return data.data;
+}
+
+export async function replayAllWebhookDeliveries(
+  projectId: string,
+  adminKey: string,
+): Promise<number> {
+  const { data } = await api.post<{ success: boolean; count: number }>(
+    "/api/admin/webhooks/dead-letter/replay-all",
+    { projectId },
+    { headers: { "X-Admin-Key": adminKey } },
+  );
+  return data.count;
+}
+
+export async function fetchWebhookDeliveries(
+  adminKey: string,
+  params?: { projectId?: string; status?: string; limit?: number },
+): Promise<WebhookDelivery[]> {
+  const { data } = await api.get<{ success: boolean; data: WebhookDelivery[] }>(
+    "/api/admin/webhooks/deliveries",
+    {
+      params,
+      headers: { "X-Admin-Key": adminKey },
+    },
+  );
+  return data.data;
 }

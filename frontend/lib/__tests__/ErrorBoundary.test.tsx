@@ -87,6 +87,8 @@ describe("ErrorBoundary", () => {
       .spyOn(console, "error")
       .mockImplementation(() => {});
     // Toggle shouldThrow so re-rendering children clears the error.
+    // The "stop-booming" button lives OUTSIDE the ErrorBoundary so it
+    // remains accessible even while the boundary is showing its fallback.
     function ToggleHarness() {
       const [boom, setBoom] = React.useState(true);
       return (

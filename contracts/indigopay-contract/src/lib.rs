@@ -5,6 +5,8 @@
 #![allow(deprecated)]
 #[cfg(all(test, feature = "testutils"))]
 mod fuzz_tests;
+#[cfg(all(test, feature = "testutils"))]
+mod fuzz_template;
 
 /**
  * contracts/indigopay-contract/src/lib.rs

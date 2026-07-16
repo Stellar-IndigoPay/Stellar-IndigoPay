@@ -25,6 +25,8 @@ const envSchema = z.object({
     .default("https://horizon-testnet.stellar.org"),
   ALLOWED_ORIGINS: z.string().optional().default("http://localhost:3000"),
   CONTRACT_ID: z.string().optional().default(""),
+  ORACLE_CONTRACT_ID: z.string().optional().default(""),
+  ORACLE_ADMIN_SECRET: z.string().optional().default(""),
   RESEND_API_KEY: z.string().optional().default(""),
   EMAIL_FROM: z
     .string()
@@ -76,6 +78,15 @@ const envSchema = z.object({
   // Sentry tracing sample rate. 0 disables, 1 samples everything. Production
   // default 0.1 (10% of transactions). Anything above 0.5 gets expensive.
   SENTRY_TRACES_SAMPLE_RATE: z.string().optional().default("0.1"),
+
+  // ── USDC donation indexing ───────────────────────────────────────────────
+  // USDC token contract address on Stellar. Required for the indexer to
+  // detect and record USDC payments. If unset, the indexer skips USDC
+  // detection and logs a warning.
+  USDC_TOKEN_ADDRESS: z.string().optional().default(""),
+  // Conversion rate from USDC to XLM for CO₂ offset calculation and
+  // raised_xlm increment. Default 8.0 means 1 USDC = 8 XLM.
+  USDC_TO_XLM_RATE: z.string().optional().default("8.0"),
 
   // ── Rate limiter ──────────────────────────────────────────────────────────
   RATE_LIMIT_MAX: z.string().optional().default("150"),

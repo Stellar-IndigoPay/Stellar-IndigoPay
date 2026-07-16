@@ -25,6 +25,10 @@ const mockFetchQueues = jest.fn().mockResolvedValue([
 const mockPauseQueue = jest.fn().mockResolvedValue(true);
 const mockResumeQueue = jest.fn().mockResolvedValue(true);
 const mockPurgeQueue = jest.fn().mockResolvedValue(true);
+const mockFetchDeadLetterWebhooks = jest
+  .fn()
+  .mockResolvedValue({ data: [], total: 0, page: 1, pageSize: 20 });
+const mockFetchWebhookDeliveries = jest.fn().mockResolvedValue([]);
 
 jest.mock("@/lib/api", () => ({
   fetchProjects: () => mockFetchProjects(),
@@ -35,6 +39,10 @@ jest.mock("@/lib/api", () => ({
   pauseQueue: (name: string, adminKey: string) => mockPauseQueue(name, adminKey),
   resumeQueue: (name: string, adminKey: string) => mockResumeQueue(name, adminKey),
   purgeQueue: (name: string, adminKey: string) => mockPurgeQueue(name, adminKey),
+  fetchDeadLetterWebhooks: (...args: unknown[]) => mockFetchDeadLetterWebhooks(...args),
+  replayWebhookDelivery: jest.fn(),
+  replayAllWebhookDeliveries: jest.fn(),
+  fetchWebhookDeliveries: (...args: unknown[]) => mockFetchWebhookDeliveries(...args),
 }));
 
 describe("AdminIndex - Queue Monitoring", () => {

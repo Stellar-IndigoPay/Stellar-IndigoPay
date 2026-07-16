@@ -2,6 +2,8 @@
 
 ### Features
 
+* **docs:** add CONTRIBUTORS.md to credit community work (GF-015, closes #64)
+
 * **backend:** implement Soroban RPC retry with exponential backoff and circuit breaker (GF-043, closes #100)
   - Add `backend/src/services/circuitBreaker.js` — reusable `CircuitBreaker` class (CLOSED / HALF_OPEN / OPEN state machine, configurable `failureThreshold` and `resetTimeout`)
   - Export `indigopay_soroban_circuit_breaker_state` Prometheus Gauge (0=closed, 1=half_open, 2=open)
@@ -167,6 +169,8 @@ RETURNING id, (xmax=0) AS inserted` on `webhook_deliveries`.
   existing `deliveryId` rather than silently re-creating a row.
 - `backend/src/services/indexerService` exposes a `stop()` method so the
   Stellar Horizon stream is closed cleanly on SIGTERM.
+
+- **scripts:** ensure `scripts/setup-dev.sh` installs `mobile` and `extension` dependencies (fix README mismatch)
 
 - **NetworkPolicies** — default-deny for the `indigopay` namespace plus
   explicit allow policies for ingress → backend, backend → postgres +

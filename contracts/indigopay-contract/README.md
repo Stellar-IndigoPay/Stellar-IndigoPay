@@ -71,6 +71,57 @@ cargo build --target wasm32v1-none --release
 cargo test
 ```
 
+## Fuzz Testing
+
+The contract includes property-based fuzz tests for every state-mutating
+function, verifying invariants such as:
+- Global total_raised and CO₂ offset never decrease
+- Per-project totals never decrease
+- Donation counts are monotonically increasing
+- Donor badges only upgrade (never downgrade)
+- Deactivated/paused projects reject donations
+- Contract-level pause/unpause gating works correctly
+- Multi-project global consistency (global total = sum of project totals)
+- Admin transfer two-step handoff
+- USDC donations with oracle price conversion
+
+### Running fuzz tests
+
+```bash
+# Default: 10 000 iterations
+cargo test --features testutils -- fuzz
+
+# CI-level: 100 000 iterations
+FUZZ_ITERATIONS=100000 cargo test --features testutils -- fuzz
+
+# Nightly deep fuzz: 1 000 000 iterations
+FUZZ_ITERATIONS=1000000 cargo test --features testutils -- fuzz
+```
+
+The `FUZZ_ITERATIONS` environment variable is read by the fuzz test harness
+and passed to proptest as the case count. When unset, the default is 10 000.
+
+### Adding fuzz tests for new functions
+
+See `fuzz_template.rs` for a reusable template with property-definition
+patterns and input-generation strategies. Key steps:
+1. Copy the template block into `fuzz_tests.rs` inside the `proptest!` macro
+2. Replace dummy strategies with real parameter ranges
+3. Assert at least one invariant (counters monotonic, state validity, etc.)
+
+### Coverage
+
+Coverage is measured with `cargo-tarpaulin` and enforced in CI:
+
+```bash
+cargo install cargo-tarpaulin
+cargo tarpaulin --config .tarpaulin.toml
+```
+
+When opening a PR, the coverage job runs and uploads an HTML report.
+The minimum coverage threshold is 70% (configurable in `.tarpaulin.toml`).
+PRs that drop coverage below the threshold will fail CI.
+
 ## Deploy
 
 ```bash

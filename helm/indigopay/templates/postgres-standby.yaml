@@ -1,0 +1,171 @@
+{{- if .Values.postgres.standby.enabled }}
+# helm/indigopay/templates/postgres-standby.yaml — PostgreSQL warm standby
+#
+# Deploys a warm standby PostgreSQL instance that streams WAL from the
+# primary. The standby stays in continuous recovery mode (hot_standby=on)
+# and is read-only. On failover, promote it to primary.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-standby-config
+  namespace: {{ .Values.namespace }}
+data:
+  postgresql.conf: |
+    listen_addresses = '*'
+    max_connections = 100
+    include 'postgresql.standby.conf'
+    hot_standby = on
+    hot_standby_feedback = on
+    restore_command = '/usr/local/bin/restore-wal.sh %f %p'
+    shared_buffers = 256MB
+    effective_cache_size = 768MB
+    maintenance_work_mem = 64MB
+    wal_buffers = 16MB
+    random_page_cost = 1.1
+    effective_io_concurrency = 200
+    log_checkpoints = on
+    log_connections = on
+    log_disconnections = on
+    log_lock_waits = on
+  postgresql.standby.conf: |
+    primary_conninfo = 'host={{ .Values.postgres.standby.primaryHost }}.{{ .Values.namespace }}.svc.cluster.local port={{ .Values.postgres.standby.primaryPort }} user={{ .Values.secrets.postgresReplicationUser }} password={{ .Values.secrets.postgresReplicationPassword }} application_name=standby'
+    primary_slot_name = 'standby_slot'
+    recovery_target_timeline = 'latest'
+  restore-wal.sh: |
+    #!/bin/sh
+    set -e
+    WAL_NAME="$1"
+    WAL_DEST="$2"
+    S3_BUCKET="{{ .Values.postgres.replication.walArchive.s3Bucket }}"
+    aws s3 cp "s3://${S3_BUCKET}/{{ .Values.postgres.replication.walArchive.s3Prefix }}${WAL_NAME}" "${WAL_DEST}" 2>/dev/null
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-standby
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: postgres
+    role: standby
+spec:
+  serviceName: postgres-standby-svc
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+      role: standby
+  template:
+    metadata:
+      labels:
+        app: postgres
+        role: standby
+    spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: topology.kubernetes.io/zone
+                    operator: In
+                    values:
+                      - {{ .Values.postgres.standby.zone }}
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: postgres
+                  role: primary
+              topologyKey: topology.kubernetes.io/zone
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: POSTGRES_DB
+            - name: POSTGRES_REPLICATION_USER
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: POSTGRES_REPLICATION_USER
+            - name: POSTGRES_REPLICATION_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: POSTGRES_REPLICATION_PASSWORD
+          volumeMounts:
+            - name: postgres-standby-data
+              mountPath: /var/lib/postgresql/data
+            - name: postgres-standby-config
+              mountPath: /etc/postgresql/postgresql.conf
+              subPath: postgresql.conf
+            - name: postgres-standby-config
+              mountPath: /etc/postgresql/postgresql.standby.conf
+              subPath: postgresql.standby.conf
+          args:
+            - "-c"
+            - "config_file=/etc/postgresql/postgresql.conf"
+          readinessProbe:
+            exec:
+              command:
+                - "/bin/sh"
+                - "-c"
+                - "pg_isready -U postgres && psql -U postgres -tAc 'SELECT pg_is_in_recovery();' | grep -q t"
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+      volumes:
+        - name: postgres-standby-config
+          configMap:
+            name: postgres-standby-config
+            defaultMode: 0755
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-standby-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.postgres.standby.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-standby-svc
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: postgres
+    role: standby
+spec:
+  selector:
+    app: postgres
+    role: standby
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+{{- end }}

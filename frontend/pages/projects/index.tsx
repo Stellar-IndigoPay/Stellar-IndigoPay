@@ -5,7 +5,12 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useRouter } from "next/router";
 import ProjectCard, { ProjectCardSkeleton } from "@/components/ProjectCard";
 import ProjectComparison from "@/components/ProjectComparison";
-import { fetchProjects, fetchTagSuggestions } from "@/lib/api";
+import {
+  fetchProjects,
+  fetchProjectFacets,
+  fetchTagSuggestions,
+  type ProjectFacets,
+} from "@/lib/api";
 import { PROJECT_CATEGORIES, CATEGORY_ICONS } from "@/utils/format";
 import type { ClimateProject } from "@/utils/types";
 import { useAutocomplete } from "@/hooks/useAutocomplete";
@@ -15,6 +20,7 @@ export default function ProjectsPage() {
   const router = useRouter();
   const [projects, setProjects] = useState<ClimateProject[]>([]);
   const [loading, setLoading] = useState(true);
+  const [facets, setFacets] = useState<ProjectFacets | null>(null);
   const [selectedProjectIds, setSelectedProjectIds] = useState<string[]>([]);
   const [showComparison, setShowComparison] = useState(false);
 
@@ -35,6 +41,13 @@ export default function ProjectsPage() {
   const verified = (router.query.verified as string) === "true";
   const searchQuery = (router.query.search as string) || "";
   const compareQuery = (router.query.compare as string) || "";
+  const location = (router.query.location as string) || "";
+  const co2Min = (router.query.co2Min as string) || "";
+  const co2Max = (router.query.co2Max as string) || "";
+
+  const hasActiveFilters = Boolean(
+    category || status !== "active" || verified || search || location || co2Min || co2Max,
+  );
 
   const selectedProjects = useMemo(
     () => projects.filter((project) => selectedProjectIds.includes(project.id)),
@@ -63,20 +76,26 @@ export default function ProjectsPage() {
   useEffect(() => {
     const timer = setTimeout(() => {
       setLoading(true);
-      fetchProjects({
+      const filters = {
         category: category || undefined,
         status: status || undefined,
         verified: verified || undefined,
         search: search || undefined,
-        limit: 50,
-      })
+        location: location || undefined,
+        co2Min: co2Min ? Number(co2Min) : undefined,
+        co2Max: co2Max ? Number(co2Max) : undefined,
+      };
+      fetchProjects({ ...filters, limit: 50 })
         .then(setProjects)
         .catch(console.error)
         .finally(() => setLoading(false));
+      fetchProjectFacets(filters)
+        .then(setFacets)
+        .catch(() => setFacets(null));
     }, 300);
 
     return () => clearTimeout(timer);
-  }, [category, status, verified, search]);
+  }, [category, status, verified, search, location, co2Min, co2Max]);
 
   useEffect(() => {
     if (!compareQuery || projects.length === 0) return;
@@ -96,6 +115,22 @@ export default function ProjectsPage() {
       {
         pathname: "/projects",
         query: { ...router.query, [key]: val || undefined },
+      },
+      undefined,
+      { shallow: true },
+    );
+  };
+
+  const setFilters = (updates: Record<string, string>) => {
+    router.push(
+      {
+        pathname: "/projects",
+        query: {
+          ...router.query,
+          ...Object.fromEntries(
+            Object.entries(updates).map(([key, val]) => [key, val || undefined]),
+          ),
+        },
       },
       undefined,
       { shallow: true },
@@ -148,6 +183,23 @@ export default function ProjectsPage() {
     });
   };
 
+  const clearAllFilters = () => {
+    setSearch("");
+    router.push(
+      { pathname: "/projects", query: {} },
+      undefined,
+      { shallow: true },
+    );
+  };
+
+  const facetCount = (
+    group: keyof ProjectFacets,
+    value: string,
+  ): number | null => {
+    const entry = facets?.[group]?.find((f) => f.value === value);
+    return entry ? entry.count : null;
+  };
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-10 animate-fade-in">
       {/* Header */}
@@ -156,12 +208,23 @@ export default function ProjectsPage() {
           <h1 className="font-display text-3xl font-bold text-forest-900 mb-1">
             Climate Projects
           </h1>
-          <p className="text-[#5a7a5a] dark:text-[#8aaa8a] text-sm font-body">
+          <p
+            className="text-[#5a7a5a] dark:text-[#8aaa8a] text-sm font-body"
+            aria-live="polite"
+          >
             {loading
               ? "Loading..."
-              : `${projects.length} verified project${projects.length !== 1 ? "s" : ""}`}
+              : `Showing ${projects.length} project${projects.length !== 1 ? "s" : ""}`}
           </p>
         </div>
+        {hasActiveFilters && (
+          <button
+            onClick={clearAllFilters}
+            className="text-xs font-semibold text-forest-600 hover:text-forest-800 font-body underline self-start sm:self-auto"
+          >
+            Clear all filters
+          </button>
+        )}
       </div>
 
       {/* Filter chips (mobile-friendly) */}
@@ -195,13 +258,17 @@ export default function ProjectsPage() {
       </div>
 
       {/* Active filter summary */}
-      {(category || status !== "active" || verified || search) && (
-        <div className="flex flex-wrap items-center gap-2 mb-4">
+      {hasActiveFilters && (
+        <div
+          role="list"
+          aria-label="Active filters"
+          className="flex flex-wrap items-center gap-2 mb-4"
+        >
           <span className="text-xs text-[#8aaa8a] dark:text-forest-300 font-body">
             Active filters:
           </span>
           {category && (
-            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-forest-100 text-forest-700 text-xs font-body">
+            <span role="listitem" className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-forest-100 text-forest-700 text-xs font-body">
               {CATEGORY_ICONS[category]} {category}
               <button
                 onClick={() => setFilter("category", "")}
@@ -212,7 +279,7 @@ export default function ProjectsPage() {
             </span>
           )}
           {status !== "active" && (
-            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-forest-100 text-forest-700 text-xs font-body">
+            <span role="listitem" className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-forest-100 text-forest-700 text-xs font-body">
               {status || "All"} status
               <button
                 onClick={() => setFilter("status", "active")}
@@ -223,7 +290,7 @@ export default function ProjectsPage() {
             </span>
           )}
           {verified && (
-            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-forest-100 text-forest-700 text-xs font-body">
+            <span role="listitem" className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-forest-100 text-forest-700 text-xs font-body">
               ✓ Verified
               <button
                 onClick={() => setFilter("verified", "")}
@@ -234,13 +301,35 @@ export default function ProjectsPage() {
             </span>
           )}
           {search && (
-            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-forest-100 text-forest-700 text-xs font-body">
+            <span role="listitem" className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-forest-100 text-forest-700 text-xs font-body">
               🔍 {search}
               <button
                 onClick={() => {
                   setSearch("");
                   setFilter("search", "");
                 }}
+                className="ml-1 hover:text-forest-900"
+              >
+                ✕
+              </button>
+            </span>
+          )}
+          {location && (
+            <span role="listitem" className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-forest-100 text-forest-700 text-xs font-body">
+              📍 {location}
+              <button
+                onClick={() => setFilter("location", "")}
+                className="ml-1 hover:text-forest-900"
+              >
+                ✕
+              </button>
+            </span>
+          )}
+          {(co2Min || co2Max) && (
+            <span role="listitem" className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-forest-100 text-forest-700 text-xs font-body">
+              CO₂ {co2Min || "0"}–{co2Max || "∞"} kg
+              <button
+                onClick={() => setFilters({ co2Min: "", co2Max: "" })}
                 className="ml-1 hover:text-forest-900"
               >
                 ✕
@@ -267,6 +356,7 @@ export default function ProjectsPage() {
           }}
           onFocus={() => search.length >= 2 && setIsAutocompleteOpen(true)}
           placeholder="Search projects by name, location, or tag..."
+          aria-label="Search projects"
           role="combobox"
           aria-expanded={isAutocompleteOpen}
           aria-autocomplete="list"
@@ -379,21 +469,76 @@ export default function ProjectsPage() {
               >
                 All Categories
               </button>
-              {PROJECT_CATEGORIES.map((cat) => (
-                <button
-                  key={cat}
-                  onClick={() => setFilter("category", cat)}
-                  className={clsx(
-                    "w-full text-left px-3 py-2 rounded-lg text-sm transition-colors font-body flex items-center gap-2",
-                    category === cat
-                      ? "bg-forest-100 text-forest-700 font-semibold"
-                      : "text-[#5a7a5a] dark:text-[#8aaa8a] hover:bg-forest-50 hover:text-forest-700",
-                  )}
-                >
-                  <span>{CATEGORY_ICONS[cat]}</span>
-                  {cat}
-                </button>
-              ))}
+              {PROJECT_CATEGORIES.map((cat) => {
+                const count = facetCount("category", cat);
+                return (
+                  <button
+                    key={cat}
+                    onClick={() => setFilter("category", cat)}
+                    className={clsx(
+                      "w-full text-left px-3 py-2 rounded-lg text-sm transition-colors font-body flex items-center gap-2",
+                      category === cat
+                        ? "bg-forest-100 text-forest-700 font-semibold"
+                        : "text-[#5a7a5a] dark:text-[#8aaa8a] hover:bg-forest-50 hover:text-forest-700",
+                    )}
+                  >
+                    <span>{CATEGORY_ICONS[cat]}</span>
+                    <span className="flex-1">{cat}</span>
+                    {count !== null && (
+                      <span className="text-xs text-[#8aaa8a] dark:text-forest-300">
+                        ({count})
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div>
+            <label htmlFor="location-filter" className="label">
+              Location
+            </label>
+            <input
+              id="location-filter"
+              key={location}
+              type="text"
+              defaultValue={location}
+              onBlur={(e) => setFilter("location", e.target.value.trim())}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  setFilter("location", (e.target as HTMLInputElement).value.trim());
+                }
+              }}
+              placeholder="e.g. Kenya"
+              className="input-field text-sm py-2 px-3 w-full"
+            />
+          </div>
+
+          <div>
+            <p className="label">CO₂ offset (kg)</p>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={0}
+                key={`co2Min-${co2Min}`}
+                defaultValue={co2Min}
+                onBlur={(e) => setFilter("co2Min", e.target.value)}
+                placeholder="Min"
+                aria-label="Minimum CO2 offset in kilograms"
+                className="input-field text-sm py-2 px-2 w-full"
+              />
+              <span className="text-[#8aaa8a]">–</span>
+              <input
+                type="number"
+                min={0}
+                key={`co2Max-${co2Max}`}
+                defaultValue={co2Max}
+                onBlur={(e) => setFilter("co2Max", e.target.value)}
+                placeholder="Max"
+                aria-label="Maximum CO2 offset in kilograms"
+                className="input-field text-sm py-2 px-2 w-full"
+              />
             </div>
           </div>
         </aside>
@@ -425,13 +570,23 @@ export default function ProjectsPage() {
             <div className="card text-center py-16">
               <p className="text-4xl mb-3">🌿</p>
               <p className="font-display text-xl text-forest-900 mb-2">
-                {search ? `No results for "${search}"` : "No projects found"}
+                {hasActiveFilters
+                  ? "No projects match your filters"
+                  : "No projects available yet"}
               </p>
-              <p className="text-[#5a7a5a] dark:text-[#8aaa8a] text-sm font-body">
-                {search
-                  ? "Try a different search"
-                  : "Try adjusting your filters"}
+              <p className="text-[#5a7a5a] dark:text-[#8aaa8a] text-sm font-body mb-4">
+                {hasActiveFilters
+                  ? "Try adjusting your search or filters."
+                  : "Check back soon, or apply to list a project."}
               </p>
+              {hasActiveFilters && (
+                <button
+                  onClick={clearAllFilters}
+                  className="btn-secondary text-sm py-2 px-4"
+                >
+                  Clear filters
+                </button>
+              )}
             </div>
           ) : (
             <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">

@@ -11,6 +11,7 @@ const pool = require("../db/pool");
 const { createRateLimiter } = require("../middleware/rateLimiter");
 const { mapDonationRow } = require("../services/store");
 const { enqueueProfileUpdate } = require("../services/profileQueue");
+const { enqueuePushNotification } = require("../services/pushQueue");
 const { server } = require("../services/stellar");
 const donationLimiter = createRateLimiter(10, 1); // 10 requests per minute
 
@@ -213,6 +214,22 @@ async function recordDonation(req, res, next) {
       );
     });
 
+    enqueuePushNotification({
+      type: "donation_receipt",
+      payload: {
+        donorAddress,
+        projectId,
+        donationId: recordedDonation.id,
+        amount: parsedAmount,
+        currency,
+      },
+    }).catch((err) => {
+      logger.error(
+        { event: "push_enqueue_failed", err: err.message, donorAddress, projectId },
+        "Failed to enqueue donation receipt push notification",
+      );
+    });
+
     (req.log || logger).info(
       {
         event: "donation_recorded",
@@ -385,13 +402,17 @@ router.get("/:id", async (req, res, next) => {
       throw e;
     }
 
+    const USDC_TO_XLM_RATE = parseFloat(process.env.USDC_TO_XLM_RATE || "8.0");
     const query = `
       SELECT 
         d.*,
         p.name AS project_name,
         pr.display_name AS donor_display_name,
         CASE
-          WHEN p.raised_xlm > 0 THEN (d.amount_xlm * (p.co2_offset_kg::numeric / p.raised_xlm))
+          WHEN d.currency = 'USDC' AND p.raised_xlm > 0
+            THEN (d.amount * ${USDC_TO_XLM_RATE} * (p.co2_offset_kg::numeric / p.raised_xlm))
+          WHEN d.currency = 'XLM' AND p.raised_xlm > 0
+            THEN (d.amount_xlm * (p.co2_offset_kg::numeric / p.raised_xlm))
           ELSE 0
         END AS co2_offset_kg
       FROM donations d

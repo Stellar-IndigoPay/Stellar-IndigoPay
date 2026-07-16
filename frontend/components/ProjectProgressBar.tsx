@@ -1,9 +1,20 @@
 import React from "react";
+import { SkeletonProgressBar, type SkeletonPalette } from "./Skeleton";
 
 interface ProjectProgressBarProps {
   raisedXLM: string | number;
   goalXLM: string | number;
   className?: string;
+}
+
+export function ProjectProgressBarSkeleton({
+  className = "",
+  palette = "forest",
+}: {
+  className?: string;
+  palette?: SkeletonPalette;
+}) {
+  return <SkeletonProgressBar className={className} palette={palette} />;
 }
 
 export default function ProjectProgressBar({

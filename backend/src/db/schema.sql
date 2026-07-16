@@ -39,6 +39,34 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS webhook_secret TEXT;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS webhook_url    TEXT;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS webhook_secret TEXT;
 
+-- Geocoded coordinates for project.location, resolved server-side by
+-- services/geocoder.js at creation time. NULL until successfully geocoded.
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS latitude  DOUBLE PRECISION;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
+CREATE INDEX IF NOT EXISTS idx_projects_location ON projects (latitude, longitude);
+
+-- Full-text search: tsvector kept current by a trigger (see migration
+-- 013_project_search) so GET /api/projects can rank matches with ts_rank
+-- instead of relying solely on ILIKE substring matching.
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS search_vector tsvector;
+CREATE INDEX IF NOT EXISTS projects_search_idx ON projects USING GIN(search_vector);
+
+CREATE OR REPLACE FUNCTION update_project_search_vector()
+RETURNS trigger AS $$
+BEGIN
+  NEW.search_vector :=
+    setweight(to_tsvector('english', COALESCE(NEW.name, '')), 'A') ||
+    setweight(to_tsvector('english', COALESCE(NEW.location, '') || ' ' || array_to_string(NEW.tags, ' ')), 'B') ||
+    setweight(to_tsvector('english', COALESCE(NEW.description, '')), 'C');
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS project_search_update ON projects;
+CREATE TRIGGER project_search_update
+  BEFORE INSERT OR UPDATE ON projects
+  FOR EACH ROW EXECUTE FUNCTION update_project_search_vector();
+
 -- donations: immutable donation ledger. Each row is a single
 -- contribution from donor_address to a project. transaction_hash must be
 -- unique (one Stellar payment → one donation). No updated_at column —

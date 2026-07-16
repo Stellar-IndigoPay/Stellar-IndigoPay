@@ -57,7 +57,10 @@ const {
   start: startWebhookQueue,
   stop: stopWebhookQueue,
 } = require("./services/webhookQueue");
+const { start: startPushQueue } = require("./services/pushQueue");
 const { startIndexer } = require("./services/indexerService");
+const { startReconciler, stopReconciler } = require("./services/indexerReconciler");
+const { startDLQWorker, stopDLQWorker } = require("./services/indexerDLQWorker");
 const lifecycle = require("./services/lifecycle");
 
 Sentry.init({
@@ -193,6 +196,7 @@ const routeMounts = [
   "impact",
   "notifications",
   "verification",
+  "oracle",
 ];
 
 for (const name of routeMounts) {
@@ -269,6 +273,7 @@ async function startServer() {
   await startSummaryQueue(io);
   await startProfileQueue(io);
   await startWebhookQueue();
+  await startPushQueue();
 
   // digestQueue is optional in some deployments
   try {
@@ -288,6 +293,17 @@ async function startServer() {
     ),
   );
 
+  try {
+    const oracleService = require("./services/oracleService");
+    oracleService.start();
+    logger.info({ event: "oracle_scheduler_started" }, "Oracle service scheduler started");
+  } catch (err) {
+    logger.error(
+      { event: "oracle_startup_error", err: err.message },
+      "Oracle service failed to start",
+    );
+  }
+
   // The Stellar Horizon stream in the indexer holds the event loop open.
   // Register a shutdown hook so the stream is closed cleanly on SIGTERM.
   lifecycle.onShutdown(async () => {
@@ -297,6 +313,20 @@ async function startServer() {
     } catch {
       // Indexer may already be stopped; swallow.
     }
+    try {
+      const oracleService = require("./services/oracleService");
+      if (typeof oracleService.stop === "function") oracleService.stop();
+    } catch {
+      // ignore
+    }
+  });
+
+  lifecycle.onShutdown(async () => {
+    await stopReconciler();
+  });
+
+  lifecycle.onShutdown(async () => {
+    await stopDLQWorker();
   });
 
   // pg-boss queues: each one exposes a `stop()` method that drains in-flight
@@ -307,6 +337,7 @@ async function startServer() {
     "./services/profileQueue",
     "./services/digestQueue",
     "./services/webhookQueue",
+    "./services/pushQueue",
   ]) {
     lifecycle.onShutdown(async () => {
       try {

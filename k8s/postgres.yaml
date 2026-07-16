@@ -1,26 +1,101 @@
+# k8s/postgres.yaml — PostgreSQL primary with streaming replication
+#
+# This is the PRIMARY instance. It is configured for streaming replication
+# with a warm standby (see k8s/postgres-standby.yaml).
+#
+# Replication architecture:
+#   primary → streaming WAL → standby (hot_standby=on, read-only)
+#   primary → WAL archive → S3 (fallback for standby catch-up)
+#
+# WAL settings:
+#   wal_level = replica
+#   max_wal_senders = 5
+#   wal_keep_size = 1GB
+#   archive_mode = on
+#   archive_command = 'aws s3 cp %p s3://${S3_BUCKET}/wal/%f'
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-primary-config
+  namespace: stellar-indigopay
+data:
+  postgresql.conf: |
+    # ── Connection ──────────────────────────────────────────────
+    listen_addresses = '*'
+    max_connections = 100
+
+    # ── Streaming Replication (Primary) ─────────────────────────
+    wal_level = replica
+    max_wal_senders = 5
+    wal_keep_size = 1GB
+    max_replication_slots = 5
+    hot_standby = on
+
+    # ── WAL Archiving to S3 (fallback for standby) ─────────────
+    archive_mode = on
+    archive_command = '/usr/local/bin/archive-wal.sh %p %f'
+    archive_timeout = 300
+
+    # ── Performance ─────────────────────────────────────────────
+    shared_buffers = 256MB
+    effective_cache_size = 768MB
+    maintenance_work_mem = 64MB
+    wal_buffers = 16MB
+    random_page_cost = 1.1
+    effective_io_concurrency = 200
+    checkpoint_completion_target = 0.9
+
+    # ── Logging ─────────────────────────────────────────────────
+    log_checkpoints = on
+    log_connections = on
+    log_disconnections = on
+    log_lock_waits = on
+    log_temp_files = 0
+    log_autovacuum_min_duration = 0
+    log_replication_commands = on
+  archive-wal.sh: |
+    #!/bin/sh
+    # WAL archiver — uploads completed WAL segments to S3.
+    # Called by PostgreSQL via archive_command.
+    # %p = path of the WAL file to archive
+    # %f = filename only
+    set -e
+    WAL_PATH="$1"
+    WAL_NAME="$2"
+    S3_BUCKET="${S3_BUCKET:-stellar-indigopay-backups}"
+    aws s3 cp "$WAL_PATH" "s3://${S3_BUCKET}/wal/${WAL_NAME}" \
+      --sse AES256 \
+      --storage-class STANDARD_IA \
+      && echo "[archive] ${WAL_NAME} → s3://${S3_BUCKET}/wal/"
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: postgres
+  name: postgres-primary
   namespace: stellar-indigopay
   labels:
     app: postgres
+    role: primary
 spec:
-  serviceName: postgres-svc
+  serviceName: postgres-primary-svc
   replicas: 1
   selector:
     matchLabels:
       app: postgres
+      role: primary
   template:
     metadata:
       labels:
         app: postgres
+        role: primary
     spec:
       containers:
         - name: postgres
           image: postgres:16-alpine
           ports:
             - containerPort: 5432
+              name: postgres
           env:
             - name: POSTGRES_USER
               valueFrom:
@@ -37,22 +112,46 @@ spec:
                 secretKeyRef:
                   name: stellar-indigopay-secrets
                   key: POSTGRES_DB
+            - name: POSTGRES_REPLICATION_USER
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: POSTGRES_REPLICATION_USER
+            - name: POSTGRES_REPLICATION_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: POSTGRES_REPLICATION_PASSWORD
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
+            - name: postgres-config
+              mountPath: /etc/postgresql/postgresql.conf
+              subPath: postgresql.conf
+            - name: postgres-config
+              mountPath: /usr/local/bin/archive-wal.sh
+              subPath: archive-wal.sh
+          args:
+            - "-c"
+            - "config_file=/etc/postgresql/postgresql.conf"
           readinessProbe:
             exec:
               command:
                 ["pg_isready", "-U", "postgres", "-d", "stellar_indigopay"]
-            initialDelaySeconds: 5
+            initialDelaySeconds: 10
             periodSeconds: 5
           resources:
             requests:
-              cpu: "100m"
-              memory: "256Mi"
+              cpu: "250m"
+              memory: "512Mi"
             limits:
-              cpu: "500m"
-              memory: "1Gi"
+              cpu: "1000m"
+              memory: "2Gi"
+      volumes:
+        - name: postgres-config
+          configMap:
+            name: postgres-primary-config
+            defaultMode: 0755
   volumeClaimTemplates:
     - metadata:
         name: postgres-data
@@ -60,17 +159,42 @@ spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
-            storage: 5Gi
+            storage: 10Gi
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-primary-svc
+  namespace: stellar-indigopay
+  labels:
+    app: postgres
+    role: primary
+spec:
+  selector:
+    app: postgres
+    role: primary
+  clusterIP: None
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+---
+# Keep the original service name for backward compatibility with all
+# existing backend DATABASE_URL references.
 apiVersion: v1
 kind: Service
 metadata:
   name: postgres-svc
   namespace: stellar-indigopay
+  labels:
+    app: postgres
+    role: primary
 spec:
   selector:
     app: postgres
-  clusterIP: None # Headless service for StatefulSet
+    role: primary
+  clusterIP: None
   ports:
     - port: 5432
       targetPort: 5432
+      name: postgres

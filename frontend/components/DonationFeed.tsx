@@ -7,12 +7,17 @@ import { fetchProjectDonations } from "@/lib/api";
 import { formatXLM, timeAgo, shortenAddress } from "@/utils/format";
 import { explorerUrl, streamProjectPayments } from "@/lib/stellar";
 import type { Donation } from "@/utils/types";
+import { SkeletonList } from "./Skeleton";
 
 interface DonationFeedProps {
   projectId: string;
   walletAddress?: string;
   refreshKey?: number;
   onNewDonation?: (donation: Donation) => void;
+}
+
+export function DonationFeedSkeleton({ rows = 3 }: { rows?: number }) {
+  return <SkeletonList rows={rows} withAvatar={true} palette="indigo" />;
 }
 
 export default function DonationFeed({
@@ -117,22 +122,7 @@ export default function DonationFeed({
   };
 
   if (loading)
-    return (
-      <div className="space-y-3">
-        {[1, 2, 3].map((i) => (
-          <div
-            key={i}
-            className="animate-pulse flex gap-3 p-3 rounded-xl bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)]"
-          >
-            <div className="w-8 h-8 rounded-full bg-[rgba(99,102,241,0.10)] dark:bg-[rgba(129,140,248,0.12)] flex-shrink-0" />
-            <div className="flex-1 space-y-2">
-              <div className="h-3 bg-[rgba(99,102,241,0.10)] dark:bg-[rgba(129,140,248,0.12)] rounded w-1/2" />
-              <div className="h-2 bg-[rgba(99,102,241,0.06)] dark:bg-[rgba(129,140,248,0.08)] rounded w-1/3" />
-            </div>
-          </div>
-        ))}
-      </div>
-    );
+    return <DonationFeedSkeleton />;
 
   if (donations.length === 0)
     return (

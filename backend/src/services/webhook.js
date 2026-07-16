@@ -16,6 +16,7 @@
 const pool = require("../db/pool");
 const logger = require("../logger");
 const { enqueueWebhookDelivery } = require("./webhookQueue");
+const { enqueuePushNotification } = require("./pushQueue");
 
 /**
  * Check project milestones after a donation and enqueue webhooks for
@@ -79,6 +80,25 @@ async function checkAndDeliverMilestones(projectId) {
       return;
     }
     client.release();
+
+    // Push notifications don't depend on the project having a webhook
+    // configured, so they're enqueued unconditionally for every follower.
+    for (const milestone of milestones) {
+      enqueuePushNotification({
+        type: "milestone_reached",
+        payload: { projectId, percentage: milestone.percentage },
+      }).catch((err) => {
+        logger.error(
+          {
+            event: "push_enqueue_error",
+            projectId,
+            milestoneId: milestone.id,
+            err: err.message,
+          },
+          "failed to enqueue milestone push notification",
+        );
+      });
+    }
 
     if (project.webhook_url && project.webhook_secret) {
       for (const milestone of milestones) {
