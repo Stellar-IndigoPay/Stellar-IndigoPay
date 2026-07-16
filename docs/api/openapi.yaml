@@ -1261,8 +1261,24 @@ paths:
       tags: [Donations]
       summary: Record a donation
       operationId: recordDonation
-      description: Record a new donation made to a project, including the transaction hash and amount.
+      description: |
+        Record a new donation made to a project, including the transaction hash and amount.
+
+        **Idempotency:** Clients can safely retry this endpoint by supplying an
+        `Idempotency-Key` header with a UUID v4 value. The server stores the
+        response keyed by this header and replays it on subsequent requests with
+        the same key within 24 hours. If the key is missing or malformed the
+        request is processed normally (no idempotency guarantee).
       security: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: A UUID v4 that uniquely identifies this donation request. Supplying the same key within 24 hours returns the original response without creating a duplicate record.
+          schema:
+            type: string
+            format: uuid
+            example: "550e8400-e29b-41d4-a716-446655440000"
       requestBody:
         required: true
         content:
@@ -1270,6 +1286,17 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateDonationRequest"
       responses:
+        "200":
+          description: Donation already recorded (idempotent replay).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/Donation"
         "201":
           description: Donation recorded.
           content:

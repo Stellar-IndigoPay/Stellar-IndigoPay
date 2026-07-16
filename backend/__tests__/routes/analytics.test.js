@@ -20,6 +20,7 @@ jest.mock("../../src/db/pool", () => ({
 
 const pool = require("../../src/db/pool");
 const analyticsRouter = require("../../src/routes/analytics");
+const { AppError } = require("../../src/errors");
 
 function buildApp() {
   const app = express();
@@ -27,6 +28,9 @@ function buildApp() {
   app.use("/api/projects", analyticsRouter);
   // Error handler
   app.use((err, _req, res, _next) => {
+    if (err instanceof AppError) {
+      return res.status(err.status).json(err.toJSON());
+    }
     res.status(err.status || 500).json({ error: err.message || "Internal error" });
   });
   return app;
@@ -65,7 +69,7 @@ describe("GET /api/projects/:id/analytics", () => {
       .get(`/api/projects/proj-1/analytics?wallet=${nonOwnerWallet}`);
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain("Access denied");
+    expect(res.body.error.code).toBe("FORBIDDEN");
   });
 
   test("returns 403 when wallet query param is missing", async () => {
@@ -75,7 +79,7 @@ describe("GET /api/projects/:id/analytics", () => {
       .get("/api/projects/proj-1/analytics");
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain("Access denied");
+    expect(res.body.error.code).toBe("FORBIDDEN");
   });
 
   test("returns 404 when project does not exist", async () => {
@@ -85,7 +89,7 @@ describe("GET /api/projects/:id/analytics", () => {
       .get(`/api/projects/nonexistent/analytics?wallet=${ownerWallet}`);
 
     expect(res.status).toBe(404);
-    expect(res.body.error).toContain("Project not found");
+    expect(res.body.error.code).toBe("PROJECT_NOT_FOUND");
   });
 
   // -----------------------------------------------------------------------

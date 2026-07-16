@@ -10,7 +10,6 @@ on:
   pull_request:
     paths:
       - "extension/**"
-    branches: [main]
 
 jobs:
   build:

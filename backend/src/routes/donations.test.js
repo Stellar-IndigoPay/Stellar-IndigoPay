@@ -16,11 +16,16 @@ jest.mock("../services/profileQueue", () => ({
   enqueueProfileUpdate: jest.fn().mockResolvedValue(undefined),
 }));
 
+jest.mock("../services/pushQueue", () => ({
+  enqueuePushNotification: jest.fn().mockResolvedValue(undefined),
+}));
+
 const { server } = require("../services/stellar");
 const pool = require("../db/pool");
 const { computeBadges } = require("../services/store");
 const { enqueueProfileUpdate } = require("../services/profileQueue");
 const { recordDonation } = require("./donations");
+const { AppError } = require("../errors");
 
 function makePublicKey(char = "A") {
   return `G${char.repeat(55)}`;
@@ -68,14 +73,18 @@ function createMockResponse() {
   };
 }
 
-async function invokeRecordDonation(body) {
-  const req = { body };
+async function invokeRecordDonation(body, headers = {}) {
+  const req = { body, headers };
   const res = createMockResponse();
   const next = jest.fn((err) => {
     if (err) {
-      res
-        .status(err.status || 500)
-        .json({ error: err.message || "Internal server error" });
+      if (err instanceof AppError) {
+        res.status(err.status).json(err.toJSON());
+      } else {
+        res
+          .status(err.status || 500)
+          .json({ error: err.message || "Internal server error" });
+      }
     }
   });
 
@@ -212,7 +221,7 @@ describe("POST /api/donations", () => {
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(404);
-    expect(res.body.error).toBe("Project not found");
+    expect(res.body.error.code).toBe("PROJECT_NOT_FOUND");
     expect(client.release).toHaveBeenCalledTimes(1);
   });
 
@@ -226,7 +235,7 @@ describe("POST /api/donations", () => {
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(400);
-    expect(res.body.error).toBe("Invalid Stellar public key");
+    expect(res.body.error.code).toBe("INVALID_ADDRESS");
     expect(pool.connect).not.toHaveBeenCalled();
   });
 
@@ -240,7 +249,7 @@ describe("POST /api/donations", () => {
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(400);
-    expect(res.body.error).toBe("Invalid transaction hash");
+    expect(res.body.error.code).toBe("INVALID_TX_HASH");
     expect(pool.connect).not.toHaveBeenCalled();
   });
 
@@ -323,7 +332,7 @@ describe("POST /api/donations", () => {
 
   test("calculates badges from cumulative donations across multiple requests", async () => {
     const donorAddress = makePublicKey("F");
-    const client = createMockClient(
+    createMockClient(
       queryResult([{ id: "project-3" }]), // SELECT project
       queryResult([]), // dedup check
       queryResult(), // BEGIN
@@ -373,7 +382,7 @@ describe("POST /api/donations", () => {
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(400);
-    expect(res.body.error).toBe("Transaction not confirmed on Stellar");
+    expect(res.body.error.code).toBe("TX_FAILED");
     // No DB write transaction should have been opened.
     expect(client.query).not.toHaveBeenCalledWith("BEGIN");
     expect(client.release).toHaveBeenCalledTimes(1);
@@ -395,7 +404,7 @@ describe("POST /api/donations", () => {
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(400);
-    expect(res.body.error).toBe("Transaction not found on Stellar");
+    expect(res.body.error.code).toBe("TX_NOT_FOUND");
     expect(client.query).not.toHaveBeenCalledWith("BEGIN");
     expect(client.release).toHaveBeenCalledTimes(1);
   });
@@ -501,7 +510,7 @@ describe("profile upsert on first donation", () => {
       created_at: "2026-03-29T10:00:00.000Z",
     };
 
-    const client = createMockClient(
+    createMockClient(
       queryResult([{ id: "project-p" }]),
       queryResult([]),
       queryResult(),
@@ -540,7 +549,7 @@ describe("profile upsert on first donation", () => {
       created_at: "2026-03-29T10:00:00.000Z",
     };
 
-    const client = createMockClient(
+    createMockClient(
       queryResult([{ id: "project-q" }]),
       queryResult([]),
       queryResult(),
@@ -587,7 +596,7 @@ describe("profile upsert on first donation", () => {
       created_at: "2026-03-29T10:00:00.000Z",
     };
 
-    const client = createMockClient(
+    createMockClient(
       queryResult([{ id: "project-r" }]),
       queryResult([]),
       queryResult(),
@@ -608,5 +617,216 @@ describe("profile upsert on first donation", () => {
     expect(next).not.toHaveBeenCalled();
     expect(res.statusCode).toBe(201);
     expect(enqueueProfileUpdate).toHaveBeenCalledWith(donorAddress);
+  });
+});
+
+describe("Idempotency-Key header", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  const validIdempotencyKey = "550e8400-e29b-41d4-a716-446655440000";
+
+  test("stores the idempotency key after a successful donation", async () => {
+    const donorAddress = makePublicKey("K");
+    const transactionHash = makeTxHash("a");
+    const donationRow = {
+      id: "donation-idem-1",
+      project_id: "project-idem",
+      donor_address: donorAddress,
+      amount_xlm: "30",
+      amount: "30",
+      currency: "XLM",
+      message: null,
+      transaction_hash: transactionHash,
+      created_at: "2026-03-29T10:00:00.000Z",
+    };
+
+    const client = createMockClient(
+      queryResult([]), // SELECT idempotency_keys → not found
+      queryResult([{ id: "project-idem" }]), // SELECT project
+      queryResult([]), // dedup check
+      queryResult(), // BEGIN
+      queryResult([donationRow]), // INSERT donation
+      queryResult([]), // SELECT donation_matches (empty)
+      queryResult(), // UPDATE projects
+      queryResult(), // COMMIT
+      queryResult(), // INSERT idempotency_keys
+    );
+
+    const { res, next } = await invokeRecordDonation(
+      {
+        projectId: "project-idem",
+        donorAddress,
+        amountXLM: "30",
+        transactionHash,
+      },
+      { "idempotency-key": validIdempotencyKey },
+    );
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(201);
+    expect(res.body.success).toBe(true);
+
+    // Verify that the idempotency key insert was called
+    const insertIdemCall = findQueryCall(client, "INSERT INTO idempotency_keys");
+    expect(insertIdemCall).toBeDefined();
+    expect(insertIdemCall[1][0]).toBe(validIdempotencyKey);
+    expect(insertIdemCall[1][1]).toBe(201);
+  });
+
+  test("replays the cached response when the same key is sent again", async () => {
+    const cachedBody = {
+      success: true,
+      data: {
+        id: "donation-idem-cached",
+        projectId: "project-idem-2",
+        donorAddress: makePublicKey("L"),
+        amount: "50",
+        amountXLM: "50.0000000",
+        currency: "XLM",
+        message: null,
+        transactionHash: makeTxHash("b"),
+        createdAt: "2026-03-29T10:00:00.000Z",
+      },
+    };
+
+    const client = createMockClient(
+      queryResult([
+        {
+          response_status: 201,
+          response_body: cachedBody,
+          created_at: new Date().toISOString(), // fresh, not expired
+        },
+      ]), // SELECT idempotency_keys → found
+    );
+
+    const { res, next } = await invokeRecordDonation(
+      {
+        projectId: "project-idem-2",
+        donorAddress: makePublicKey("L"),
+        amountXLM: "50",
+        transactionHash: makeTxHash("b"),
+      },
+      { "idempotency-key": validIdempotencyKey },
+    );
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(201);
+    expect(res.body).toEqual(cachedBody);
+    // Should not have queried the project or donations tables
+    const calls = client.query.mock.calls.map(([sql]) => sql);
+    expect(calls.filter((c) => c.includes("FROM projects")).length).toBe(0);
+    expect(calls.filter((c) => c.includes("FROM donations")).length).toBe(0);
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
+
+  test("returns 400 for an invalid idempotency key format", async () => {
+    const { res, next } = await invokeRecordDonation(
+      {
+        projectId: "project-1",
+        donorAddress: makePublicKey("M"),
+        amountXLM: "10",
+        transactionHash: makeTxHash("c"),
+      },
+      { "idempotency-key": "not-a-uuid" },
+    );
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toBe("Idempotency-Key must be a valid UUID v4");
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  test("stores idempotency key even for deduplicated tx hash responses", async () => {
+    const donorAddress = makePublicKey("N");
+    const transactionHash = makeTxHash("d");
+    const existingDonation = {
+      id: "donation-existing-idem",
+      project_id: "project-idem-3",
+      donor_address: donorAddress,
+      amount_xlm: "25",
+      amount: "25",
+      currency: "XLM",
+      message: null,
+      transaction_hash: transactionHash,
+      created_at: "2026-03-29T10:00:00.000Z",
+    };
+
+    const client = createMockClient(
+      queryResult([]), // SELECT idempotency_keys → not found
+      queryResult([{ id: "project-idem-3" }]), // SELECT project
+      queryResult([existingDonation]), // dedup check → found
+      queryResult(), // INSERT idempotency_keys
+    );
+
+    const { res, next } = await invokeRecordDonation(
+      {
+        projectId: "project-idem-3",
+        donorAddress,
+        amountXLM: "25",
+        transactionHash,
+      },
+      { "idempotency-key": validIdempotencyKey },
+    );
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+
+    // Verify that the idempotency key was stored for the dedup response
+    const insertIdemCall = findQueryCall(client, "INSERT INTO idempotency_keys");
+    expect(insertIdemCall).toBeDefined();
+  });
+
+  test("expired idempotency key is treated as a new request", async () => {
+    const donorAddress = makePublicKey("O");
+    const transactionHash = makeTxHash("e");
+    const donationRow = {
+      id: "donation-idem-expired",
+      project_id: "project-idem-4",
+      donor_address: donorAddress,
+      amount_xlm: "10",
+      amount: "10",
+      currency: "XLM",
+      message: null,
+      transaction_hash: transactionHash,
+      created_at: "2026-03-29T10:00:00.000Z",
+    };
+
+    const expiredDate = new Date(Date.now() - 25 * 60 * 60 * 1000); // 25 hours ago
+    createMockClient(
+      queryResult([
+        {
+          response_status: 201,
+          response_body: { success: true, data: { id: "old" } },
+          created_at: expiredDate.toISOString(),
+        },
+      ]), // SELECT idempotency_keys → found but expired
+      queryResult(), // DELETE expired key
+      queryResult([{ id: "project-idem-4" }]), // SELECT project
+      queryResult([]), // dedup check
+      queryResult(), // BEGIN
+      queryResult([donationRow]), // INSERT donation
+      queryResult([]), // SELECT donation_matches
+      queryResult(), // UPDATE projects
+      queryResult(), // COMMIT
+      queryResult(), // INSERT idempotency_keys
+    );
+
+    const { res, next } = await invokeRecordDonation(
+      {
+        projectId: "project-idem-4",
+        donorAddress,
+        amountXLM: "10",
+        transactionHash,
+      },
+      { "idempotency-key": validIdempotencyKey },
+    );
+
+    expect(next).not.toHaveBeenCalled();
+    // Should be treated as a new donation (201 vs 200 for replays)
+    expect(res.statusCode).toBe(201);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.transactionHash).toBe(transactionHash);
   });
 });

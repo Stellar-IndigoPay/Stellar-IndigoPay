@@ -42,7 +42,7 @@ describe("ProjectCard", () => {
 
   it("renders category, name, location and donor count", () => {
     render(<ProjectCard project={mockProject} />);
-    expect(screen.getByText(/^Reforestation$/)).toBeInTheDocument();
+    expect(screen.getByText("Reforestation")).toBeInTheDocument();
     expect(
       screen.getByRole("heading", { name: /amazon reforestation initiative/i }),
     ).toBeInTheDocument();

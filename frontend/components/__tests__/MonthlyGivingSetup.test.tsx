@@ -6,10 +6,14 @@
  */
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { axe, toHaveNoViolations } from "jest-axe";
+// jest-axe ships without TypeScript declarations; the ambient shim lives
+// at frontend/types/jest-axe.d.ts and is picked up by tsconfig.json.
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+import { axe } from "jest-axe";
 import MonthlyGivingSetup from "../MonthlyGivingSetup";
 
-expect.extend(toHaveNoViolations);
+// Note: toHaveNoViolations is registered globally for every test suite by
+// frontend/jest.setup.ts, so it does not need to be re-imported here.
 
 // Provide a deterministic projectId so the storage subset returns []
 // (we don't want localStorage state leaking between test runs).
@@ -60,6 +64,9 @@ describe("MonthlyGivingSetup modal a11y", () => {
         onClose={onClose}
       />,
     );
+    // Wait for useFocusTrap's setTimeout(…, 0) to finish wiring the
+    // keydown listener before dispatching the Escape key.
+    await new Promise((resolve) => setTimeout(resolve, 10));
     await user.keyboard("{Escape}");
     expect(onClose).toHaveBeenCalled();
   });
@@ -86,7 +93,8 @@ describe("MonthlyGivingSetup modal a11y", () => {
     );
     const results = await axe(container);
     // Only fail the build on critical/serious issues per WCAG 2.1 AA scope.
-    const blocking = results.violations.filter((v: { impact?: string | null }) =>
+    type Violation = (typeof results.violations)[number];
+    const blocking = results.violations.filter((v: Violation) =>
       ["critical", "serious"].includes(v.impact ?? ""),
     );
     expect(blocking).toEqual([]);

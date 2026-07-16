@@ -41,6 +41,7 @@ const {
   isIpfsConfigured,
   UPLOAD_DIR,
 } = require("../services/storage");
+const { AppError } = require("../errors");
 
 const submitLimiter = createRateLimiter(10, 15); // 10 submissions / 15 min / IP
 
@@ -319,7 +320,7 @@ router.post("/", submitLimiter, async (req, res, next) => {
     }
 
     if (errors.length > 0) {
-      return res.status(400).json({ error: errors.join("; ") });
+      throw new AppError("VALIDATION_ERROR", { detail: errors.join("; ") });
     }
 
     // Pin locally uploaded documents to IPFS (content-addressed, tamper
@@ -396,9 +397,9 @@ router.get("/me", async (req, res, next) => {
     const wallet =
       typeof req.query.wallet === "string" ? req.query.wallet.trim() : "";
     if (!STELLAR_ADDRESS_RE.test(wallet)) {
-      return res
-        .status(400)
-        .json({ error: "wallet query param must be a valid Stellar address" });
+      throw new AppError("INVALID_ADDRESS", {
+        detail: "wallet query param must be a valid Stellar address",
+      });
     }
     const result = await pool.query(
       `SELECT * FROM verification_requests
@@ -426,8 +427,7 @@ router.get("/:id", async (req, res, next) => {
       [req.params.id],
     );
     const row = result.rows[0];
-    if (!row)
-      return res.status(404).json({ error: "Verification request not found" });
+    if (!row) throw new AppError("VERIFICATION_NOT_FOUND");
 
     // Allow admin-readable without wallet guard.
     const auth = req.headers.authorization || "";
@@ -446,8 +446,8 @@ router.get("/:id", async (req, res, next) => {
     const wallet =
       typeof req.query.wallet === "string" ? req.query.wallet.trim() : "";
     if (!wallet || wallet !== row.wallet_address) {
-      return res.status(403).json({
-        error: "Provide a matching ?wallet= query param to view this request",
+      throw new AppError("FORBIDDEN", {
+        detail: "Provide a matching ?wallet= query param to view this request",
       });
     }
     res.json({ success: true, data: mapRequestRow(row) });
@@ -502,8 +502,9 @@ router.patch("/:id/status", adminRequired, async (req, res, next) => {
   try {
     const { status, reviewerNotes, reviewedBy } = req.body || {};
     if (!status || !Object.keys(VALID_TRANSITIONS).includes(status)) {
-      return res.status(400).json({
-        error: `status must be one of: ${Object.keys(VALID_TRANSITIONS).join(", ")}`,
+      throw new AppError("VALIDATION_ERROR", {
+        field: "status",
+        detail: `status must be one of: ${Object.keys(VALID_TRANSITIONS).join(", ")}`,
       });
     }
     const reviewerNotesStr =
@@ -511,9 +512,10 @@ router.patch("/:id/status", adminRequired, async (req, res, next) => {
         ? reviewerNotes.trim()
         : null;
     if (reviewerNotesStr && reviewerNotesStr.length > 2000) {
-      return res
-        .status(400)
-        .json({ error: "reviewerNotes must be at most 2000 characters" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "reviewerNotes",
+        detail: "reviewerNotes must be at most 2000 characters",
+      });
     }
 
     const existing = await pool.query(
@@ -521,18 +523,17 @@ router.patch("/:id/status", adminRequired, async (req, res, next) => {
       [req.params.id],
     );
     const row = existing.rows[0];
-    if (!row)
-      return res.status(404).json({ error: "Verification request not found" });
+    if (!row) throw new AppError("VERIFICATION_NOT_FOUND");
 
     const transitions = VALID_TRANSITIONS[row.status] || [];
     if (row.status === status) {
-      return res
-        .status(400)
-        .json({ error: `Request is already in "${status}" state` });
+      throw new AppError("INVALID_STATE_TRANSITION", {
+        detail: `Request is already in "${status}" state`,
+      });
     }
     if (!transitions.includes(status)) {
-      return res.status(400).json({
-        error: `Cannot transition from "${row.status}" to "${status}"`,
+      throw new AppError("INVALID_STATE_TRANSITION", {
+        detail: `Cannot transition from "${row.status}" to "${status}"`,
       });
     }
 

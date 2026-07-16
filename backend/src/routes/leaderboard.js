@@ -5,6 +5,7 @@
 const express = require("express");
 const router = express.Router();
 const pool = require("../db/pool");
+const { AppError } = require("../errors");
 
 router.get("/", async (req, res, next) => {
   try {
@@ -143,7 +144,7 @@ router.post("/snapshot", async (req, res, next) => {
   try {
     const secret = req.headers["x-admin-secret"];
     if (!secret || secret !== process.env.ADMIN_SECRET) {
-      return res.status(403).json({ success: false, error: "Forbidden" });
+      throw new AppError("FORBIDDEN");
     }
 
     const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);

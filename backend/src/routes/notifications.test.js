@@ -9,12 +9,16 @@ const express = require("express");
 const request = require("supertest");
 const pool = require("../db/pool");
 const notificationsRouter = require("./notifications");
+const { AppError } = require("../errors");
 
 function buildApp() {
   const app = express();
   app.use(express.json());
   app.use("/api/notifications", notificationsRouter);
   app.use((err, _req, res, _next) => {
+    if (err instanceof AppError) {
+      return res.status(err.status).json(err.toJSON());
+    }
     res
       .status(err.status || 500)
       .json({ error: err.message || "Internal server error" });
@@ -77,7 +81,8 @@ describe("GET /api/notifications/unread-count", () => {
       .get("/api/notifications/unread-count")
       .expect(400);
 
-    expect(res.body.error).toBe("token query parameter is required");
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(res.body.error.field).toBe("token");
     expect(pool.query).not.toHaveBeenCalled();
   });
 
@@ -87,7 +92,8 @@ describe("GET /api/notifications/unread-count", () => {
       .query({ token: "ExponentPushToken[abc]", lastSeen: "not-a-date" })
       .expect(400);
 
-    expect(res.body.error).toBe("lastSeen must be a valid ISO-8601 timestamp");
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(res.body.error.field).toBe("lastSeen");
     expect(pool.query).not.toHaveBeenCalled();
   });
 
@@ -99,7 +105,7 @@ describe("GET /api/notifications/unread-count", () => {
       .query({ token: "ExponentPushToken[missing]" })
       .expect(404);
 
-    expect(res.body.error).toBe("Device token not found");
+    expect(res.body.error.code).toBe("DEVICE_TOKEN_NOT_FOUND");
     expect(pool.query).toHaveBeenCalledTimes(1);
   });
 });

@@ -37,18 +37,18 @@ export default function MonthlyGivingSetup({
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
   // Trap focus while the dialog is open and Esc closes it (WCAG 2.4.3).
-  const focusTrapRef = useFocusTrap<HTMLDivElement>({
+  // The containerRef MUST be attached to the dialog wrapper so the hook's
+  // focusable-element query targets the actual modal subtree.
+  const dialogRef = useFocusTrap<HTMLDivElement>({
     active: true,
     onEscape: onClose,
     initialFocusRef: closeButtonRef,
   });
 
-  // Prevent body scroll while the dialog is open and move focus into the
-  // dialog so screen readers announce it.
+  // Prevent body scroll while the dialog is open.
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    closeButtonRef.current?.focus();
     return () => {
       document.body.style.overflow = previousOverflow;
     };
@@ -93,7 +93,7 @@ export default function MonthlyGivingSetup({
       }}
     >
       <div
-        ref={focusTrapRef}
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="monthly-giving-setup-title"
@@ -123,9 +123,11 @@ export default function MonthlyGivingSetup({
 
         <div className="grid sm:grid-cols-2 gap-4">
           <div>
-            <label htmlFor="mg-amount" className="label">Amount (XLM)</label>
+            <label htmlFor="amount-xlm" className="label">
+              Amount (XLM)
+            </label>
             <input
-              id="mg-amount"
+              id="amount-xlm"
               type="number"
               min="1"
               step="1"
@@ -135,9 +137,11 @@ export default function MonthlyGivingSetup({
             />
           </div>
           <div>
-            <label htmlFor="mg-start-date" className="label">Start Date</label>
+            <label htmlFor="start-date" className="label">
+              Start Date
+            </label>
             <input
-              id="mg-start-date"
+              id="start-date"
               type="date"
               value={startDate}
               onChange={(e) => setStartDate(e.target.value)}

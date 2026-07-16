@@ -153,7 +153,12 @@ export default function DonationFeed({
       {/* Hidden aggregate live region so each new donation is announced. The
           key changes when a new donation lands so the message is re-read even
           when only a single live region is present. */}
-      <p className="sr-only" aria-live="polite" aria-atomic="true">
+      <p
+        key={donations[0]?.id ?? "empty"}
+        className="sr-only"
+        aria-live="polite"
+        aria-atomic="true"
+      >
         {donations.length > 0
           ? `${donations.length} donation${
               donations.length === 1 ? "" : "s"

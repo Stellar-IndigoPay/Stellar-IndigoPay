@@ -24,6 +24,7 @@ const router = express.Router();
 const { adminRequired } = require("../../middleware/auth");
 const { logAdminAction } = require("../../services/audit");
 const { verifyIPFSDocument } = require("../../services/storage");
+const { AppError } = require("../../errors");
 
 async function verifyDocumentHandler(req, res, next) {
   try {
@@ -49,7 +50,7 @@ async function verifyDocumentHandler(req, res, next) {
     });
 
     if (result.error === "Invalid CID") {
-      return res.status(400).json({ error: "Invalid CID" });
+      throw new AppError("VALIDATION_ERROR", { field: "cid", detail: "Invalid CID" });
     }
     res.json({ success: true, data: result });
   } catch (e) {

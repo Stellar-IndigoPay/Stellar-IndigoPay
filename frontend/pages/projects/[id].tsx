@@ -152,7 +152,7 @@ export default function ProjectDetail({
       })
       .catch(() => router.push("/projects"))
       .finally(() => setLoading(false));
-  }, [id]);
+  }, [id, publicKey, router]);
 
   useEffect(() => {
     if (!project) return;
@@ -161,6 +161,9 @@ export default function ProjectDetail({
       .then(setDiscussion)
       .catch(() => setDiscussion([]))
       .finally(() => setDiscussionLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- project object
+    // identity changes at the same frequency as walletAddress; including
+    // project in the deps array would cause spurious refetches.
   }, [project?.walletAddress]);
 
   useEffect(() => {

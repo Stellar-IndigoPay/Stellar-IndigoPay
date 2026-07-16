@@ -195,7 +195,8 @@ describe("adminKeyRequired middleware", () => {
   it("rejects requests without X-Admin-Key", async () => {
     const res = await request(app).post("/protected").send({});
     expect(res.status).toBe(401);
-    expect(res.body.error).toBe("Missing X-Admin-Key header");
+    expect(res.body.error.code).toBe("UNAUTHORIZED");
+    expect(res.body.error.reason).toBe("Missing X-Admin-Key header");
   });
 
   it("rejects requests with an invalid X-Admin-Key", async () => {
@@ -204,7 +205,8 @@ describe("adminKeyRequired middleware", () => {
       .set("X-Admin-Key", "wrong")
       .send({});
     expect(res.status).toBe(401);
-    expect(res.body.error).toBe("Invalid X-Admin-Key header");
+    expect(res.body.error.code).toBe("UNAUTHORIZED");
+    expect(res.body.error.reason).toBe("Invalid X-Admin-Key header");
   });
 
   it("allows requests with the configured X-Admin-Key", async () => {

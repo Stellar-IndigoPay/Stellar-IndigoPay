@@ -63,10 +63,15 @@ export default function ToastNotification({
       aria-label="Notifications"
     >
       {/* Visually hidden aggregate live region so screen readers announce
-          a summary for the newest toast. The text re-fires whenever the
-          top entry of `sorted` changes (the array is sorted ascending by
-          createdAt, so the newest is at index 0). */}
-      <p className="sr-only" aria-live="polite" aria-atomic="true">
+          a summary for the newest toast. We key the <p> on the newest toast
+          id so the live region’s content actually changes for each new
+          notification — a stable string would not re-announce. */}
+      <p
+        key={sorted[0]?.id ?? "empty"}
+        className="sr-only"
+        aria-live="polite"
+        aria-atomic="true"
+      >
         {sorted.length > 0
           ? `Notification: ${sorted[0].title}${
               sorted[0].description ? ` — ${sorted[0].description}` : ""

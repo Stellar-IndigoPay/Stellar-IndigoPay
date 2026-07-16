@@ -15,6 +15,7 @@
 "use strict";
 
 const client = require("prom-client");
+const logger = require("../logger");
 
 const registry = new client.Registry();
 
@@ -70,6 +71,25 @@ const dbPoolIdleCount = new client.Gauge({
 const dbPoolWaitingCount = new client.Gauge({
   name: "db_pool_waiting_count",
   help: "Number of queued requests waiting for a Postgres connection.",
+  registers: [registry],
+});
+
+const dbPoolUtilizationRatio = new client.Gauge({
+  name: "db_pool_utilization_ratio",
+  help: "Ratio of total connections to max connections in the Postgres pool.",
+  registers: [registry],
+});
+
+const dbSlowQueriesTotal = new client.Counter({
+  name: "db_slow_queries_total",
+  help: "Total number of slow database queries, labelled by operation.",
+  labelNames: ["operation"],
+  registers: [registry],
+});
+
+const dbConnectionErrorsTotal = new client.Counter({
+  name: "db_connection_errors_total",
+  help: "Total number of Postgres connection errors.",
   registers: [registry],
 });
 
@@ -236,9 +256,56 @@ function normaliseRoute(req) {
 function refreshDbPoolMetrics(pool) {
   if (!pool) return;
   try {
-    dbPoolTotalCount.set(pool.totalCount ?? 0);
-    dbPoolIdleCount.set(pool.idleCount ?? 0);
-    dbPoolWaitingCount.set(pool.waitingCount ?? 0);
+    const totalCount = pool.totalCount ?? 0;
+    const idleCount = pool.idleCount ?? 0;
+    const waitingCount = pool.waitingCount ?? 0;
+    const max = pool.max || 1;
+
+    dbPoolTotalCount.set(totalCount);
+    dbPoolIdleCount.set(idleCount);
+    dbPoolWaitingCount.set(waitingCount);
+
+    const utilizationRatio = totalCount / max;
+    dbPoolUtilizationRatio.set(utilizationRatio);
+
+    if (waitingCount > 0) {
+      logger.warn(
+        {
+          event: "db_pool_contention",
+          waitingCount,
+          totalCount,
+          idleCount,
+          max,
+        },
+        `DB pool contention: ${waitingCount} queries waiting`,
+      );
+    }
+
+    if (waitingCount > 5) {
+      logger.error(
+        {
+          event: "db_pool_high_contention",
+          waitingCount,
+          totalCount,
+          idleCount,
+          max,
+        },
+        `DB pool high contention: ${waitingCount} queries waiting`,
+      );
+      readinessCheckFailedTotal.inc({ reason: "db_pool_contention" });
+    }
+
+    if (utilizationRatio >= 0.9) {
+      logger.warn(
+        {
+          event: "db_pool_high_utilization",
+          utilizationRatio,
+          totalCount,
+          max,
+        },
+        `DB pool utilization at ${(utilizationRatio * 100).toFixed(1)}%`,
+      );
+    }
   } catch {
     // Pool may be in a transitional state; swallow.
   }
@@ -274,6 +341,9 @@ module.exports = {
     dbPoolTotalCount,
     dbPoolIdleCount,
     dbPoolWaitingCount,
+    dbPoolUtilizationRatio,
+    dbSlowQueriesTotal,
+    dbConnectionErrorsTotal,
     dbQueryDurationSeconds,
     cacheOperationsTotal,
     queueJobsTotal,
