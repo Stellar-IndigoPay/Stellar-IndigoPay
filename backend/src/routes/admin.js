@@ -4,6 +4,7 @@ const router = express.Router();
 const pool = require("../db/pool");
 const { signToken, adminRequired } = require("../middleware/auth");
 const { createRateLimiter } = require("../middleware/rateLimiter");
+const { buildAuditFilters } = require("./admin/audit-export");
 
 const loginLimiter = createRateLimiter(10, 15);
 
@@ -106,18 +107,23 @@ router.get("/me", adminRequired, (req, res) => {
  */
 router.get("/audit-log", adminRequired, async (req, res, next) => {
   try {
-    const { actor, action, page = "1", pageSize = "50" } = req.query;
-    const where = [];
-    const values = [];
+    const {
+      actor,
+      action,
+      targetType,
+      targetId,
+      ipAddress,
+      dateFrom,
+      dateTo,
+      metadataKey,
+      metadataValue,
+      page = "1",
+      pageSize = "50",
+    } = req.query;
 
-    if (actor && typeof actor === "string") {
-      values.push(actor);
-      where.push(`actor = $${values.length}`);
-    }
-    if (action && typeof action === "string") {
-      values.push(action);
-      where.push(`action = $${values.length}`);
-    }
+    const { where, values } = buildAuditFilters(
+      { actor, action, targetType, targetId, ipAddress, dateFrom, dateTo, metadataKey, metadataValue },
+    );
 
     const limit = Math.min(Number.parseInt(pageSize, 10) || 50, 200);
     const offset = (Math.max(Number.parseInt(page, 10) || 1, 1) - 1) * limit;
@@ -125,7 +131,7 @@ router.get("/audit-log", adminRequired, async (req, res, next) => {
 
     // eslint-disable-next-line sql-injection/no-sql-injection
     let query =
-      "SELECT id, actor, action, target_type, target_id, metadata, ip_address, created_at FROM admin_audit_log";
+      "SELECT id, actor, action, target_type, target_id, metadata, ip_address, created_at, prev_hash, row_hash FROM admin_audit_log";
     if (where.length) {
       // eslint-disable-next-line sql-injection/no-sql-injection
       query += " WHERE " + where.join(" AND ");
@@ -133,27 +139,37 @@ router.get("/audit-log", adminRequired, async (req, res, next) => {
     query += ` ORDER BY created_at DESC LIMIT $${values.length - 1} OFFSET $${values.length}`;
 
     // eslint-disable-next-line sql-injection/no-sql-injection
-    const result = await pool.query(query, values);
-
-    let countQuery = "SELECT COUNT(*) AS total FROM admin_audit_log";
+    let countQuery = "SELECT COUNT(*)::bigint AS total FROM admin_audit_log";
     if (where.length) {
       // eslint-disable-next-line sql-injection/no-sql-injection
       countQuery += " WHERE " + where.join(" AND ");
     }
+
+    const startedAt = Date.now();
+    // eslint-disable-next-line sql-injection/no-sql-injection
+    const result = await pool.query(query, values);
     // eslint-disable-next-line sql-injection/no-sql-injection
     const countResult = await pool.query(countQuery, values.slice(0, -2));
+    const queryTimeMs = Date.now() - startedAt;
 
     res.json({
       success: true,
       data: result.rows,
-      total: parseInt(countResult.rows[0].total),
-      page: parseInt(page),
+      total: Number(countResult.rows[0].total),
+      page: parseInt(page, 10),
       pageSize: limit,
+      queryTimeMs,
     });
   } catch (e) {
     next(e);
   }
 });
+
+// Audit log sub-resources: export + stats. Mounted before the catch-all
+// `/audit-log` GET above would otherwise shadow them — Express matches the
+// more specific registered routes first within this router.
+router.use("/audit-log", require("./admin/audit-export"));
+router.use("/audit-log", require("./admin/audit-stats"));
 
 router.use("/queues", require("./admin/queues"));
 router.use("/documents", require("./admin/documents"));

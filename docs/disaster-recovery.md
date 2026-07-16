@@ -70,32 +70,84 @@ roadmap.
 - **Detection**: partner notification or anomalous delivery pattern.
 - **Recovery**: rotate `webhook_secret` per project; receivers must
   re-fetch the new value and update their verifier.
-- **RTO**: per-receiver (typically < 1h).
+- **RTO**: per-receiver (typically < 1h).## Multi-Region Strategy (Implemented)
 
-## Multi-Region Strategy (Roadmap)
+### Architecture
 
-Single-region currently. The next DR step is:
+Stellar-IndigoPay implements a warm PostgreSQL standby for multi-region
+disaster recovery using PostgreSQL native streaming replication:
 
-1. Provision a warm Postgres standby in a second region (e.g.
-   `us-west-2`) via managed Postgres replication.
-2. Add a Route 53 / Cloud DNS health-check that flips the API
-   origin to the standby when the primary fails its health check.
-3. Frontend is replicated by the CDN origin; no application change
-   needed beyond the LB swap.
-4. Backups replicate cross-region via S3 cross-region replication.
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  Region A (us-east-1)                   Region B (us-west-2)    │
+│  ┌──────────────────┐                  ┌──────────────────────┐ │
+│  │ postgres-primary  │  streaming WAL   │  postgres-standby    │ │
+│  │ (read/write)      │ ═══════════════► │  (hot_standby=on)    │ │
+│  │                    │                  │  (read-only)         │ │
+│  └────────┬───────────┘                  └──────────────────────┘ │
+│           │ WAL archive (every 5 min)                             │
+│           ▼                                                       │
+│  ┌─────────────────┐                                              │
+│  │  S3 (cross-      │◄──────── WAL restore (fallback) ────────────│
+│  │  region repl.)   │                                              │
+│  └─────────────────┘                                              │
+└──────────────────────────────────────────────────────────────────┘
+```
 
-This is targeted for the next release; until then, single-region is
-the documented posture and the runbook above applies.
+### Implementation Details
+
+1. **Streaming Replication**: The primary streams WAL to the standby via
+   a replication slot (`standby_slot`). The standby stays in continuous
+   recovery mode with `hot_standby=on`, allowing read-only queries for
+   verification.
+
+2. **WAL Archiving**: WAL segments are archived to S3 every 5 minutes
+   as a fallback. If the standby falls behind on streaming, it fetches
+   WAL from S3 via `restore_command`.
+
+3. **Initial Setup**: Run `scripts/setup-replication.sh` after deploying
+   the standby StatefulSet. This script:
+   - Creates the replication user and slot on the primary
+   - Runs `pg_basebackup` to initialize the standby
+   - Verifies replication is active
+
+4. **Failover Procedure** (see `docs/restore-runbook.md`):
+   ```bash
+   # 1. Verify primary is unreachable
+   kubectl exec -n stellar-indigopay postgres-standby-0 -- pg_isready
+
+   # 2. Promote standby to primary
+   kubectl exec -n stellar-indigopay postgres-standby-0 -- pg_ctl promote
+
+   # 3. Update DATABASE_URL in AWS Secrets Manager to point at standby
+   aws secretsmanager update-secret --secret-id stellar-indigopay/prod \
+     --secret-string '{"database_url":"postgres://...@postgres-standby-svc:5432/..."}'
+
+   # 4. Force refresh the external secret
+   kubectl annotate externalsecret stellar-indigopay-secrets \
+     force-sync="$(date +%s)" -n stellar-indigopay
+
+   # 5. Restart backend pods
+   kubectl rollout restart deployment/backend -n stellar-indigopay
+   ```
+
+5. **Monitoring**:
+   - `PgReplicationLag` alert fires when replication lag > 60s
+   - `PgReplicationDown` alert fires when no active replication slots exist
+   - `PgStandbyNotReady` alert fires when the standby pod is unhealthy
+   - All alerts route to PagerDuty (`severity: page`)
+
+6. **Node Affinity**: The standby uses pod anti-affinity to ensure it
+   schedules on a different availability zone than the primary, providing
+   zone-level fault tolerance.
 
 ## Monitoring the DR Plan
+The on-call alert pipeline includes:
 
-The on-call alert pipeline must include:
-
-- Backup success (last 24h) — `database_backup_success` alert.
-- Restore drill success (last 30 days) — checked manually in the
-  on-call review.
-- Cross-region replication lag (when enabled) — `pg_replication_lag`
-  alert at 60s.
+- Backup success (last 36h) — `BackupMissed` alert (see alert-rules-routing.yml).
+- Restore drill success (last 30 days) — `RestoreDrillFailed` alert.
+- Replication lag — `PgReplicationLag` alert at 60s.
+- Standby health — `PgStandbyNotReady` alert.
 
 See `monitoring/alert-rules.yml` for the current rules and
 `.github/workflows/restore-drill.yml` for the drill workflow.

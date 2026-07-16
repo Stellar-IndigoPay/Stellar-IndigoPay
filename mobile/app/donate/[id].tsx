@@ -35,7 +35,6 @@ import {
   Memo,
 } from "@stellar/stellar-sdk";
 import { useBiometricAuth } from "../../hooks/useBiometricAuth";
-import type { BiometricAuthOutcome } from "../../hooks/useBiometricAuth";
 import { useTheme } from "../theme";
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
@@ -55,22 +54,7 @@ interface ClimateProject {
 
 type StatusKind = "success" | "error" | "info" | null;
 
-/**
- * Render-time hint shown above the Donate button. Reassures the user
- * that we'll either prompt for biometrics or fall back to their device
- * PIN/passcode — we never sign a transaction silently.
- */
-function buildBioHint(
-  available: boolean,
-  enrolled: boolean,
-  label: string,
-): string {
-  if (!available)
-    return "No biometric sensor — donations will require your device PIN.";
-  if (!enrolled)
-    return "No biometric enrolled — donations will require your device PIN.";
-  return `You will be asked to authenticate with ${label} before signing.`;
-}
+
 
 export default function DonateScreen() {
   const { colors } = useTheme();
@@ -125,32 +109,7 @@ export default function DonateScreen() {
   const selectedProject =
     projects.find((p) => p.id === selectedProjectId) || projects[0] || null;
 
-  /**
-   * Map a biometric auth outcome to a user-facing status message.
-   */
-  const surfaceAuthFailure = (outcome: BiometricAuthOutcome) => {
-    switch (outcome) {
-      case "cancel":
-        setStatusType("info");
-        setStatusMessage("Authentication cancelled — donation not sent.");
-        return;
-      case "fallback":
-        setStatusType("info");
-        setStatusMessage(
-          "Use your device PIN to confirm the donation next time.",
-        );
-        return;
-      case "error":
-        setStatusType("error");
-        setStatusMessage(
-          'Biometric authentication failed. Please try again or tap "Use Passcode" / "Cancel" and retry.',
-        );
-        return;
-      default:
-        setStatusType("error");
-        setStatusMessage("Authentication required to send a donation.");
-    }
-  };
+
 
   const handleDonate = async () => {
     setStatusMessage(null);
@@ -217,12 +176,20 @@ export default function DonateScreen() {
      * mid-prompt the `isMountedRef` guard prevents setState-after-unmount
      * noise.
      */
-    const authResult = await bio.authenticate(DONATE_PROMPT);
+    const confirmed = await bio.confirmDonation(donationAmount);
     if (!isMountedRef.current) return;
 
-    if (!authResult.success) {
-      surfaceAuthFailure(authResult.outcome);
-      return;
+    if (!confirmed.success) {
+      if (confirmed.error === "lockout" || confirmed.error === "permanent_lockout") {
+        Alert.alert(
+          "Biometrics Locked Out",
+          "Biometric authentication is locked. Proceeding with donation without biometrics.",
+          [{ text: "OK" }]
+        );
+      } else {
+        Alert.alert("Cancelled", "Donation was not confirmed.");
+        return;
+      }
     }
 
     setSubmitting(true);
@@ -318,7 +285,7 @@ export default function DonateScreen() {
     );
   }
 
-  const bioHint = buildBioHint(bio.available, bio.enrolled, bio.label);
+
 
   return (
     <ScrollView
@@ -510,14 +477,20 @@ export default function DonateScreen() {
           accessibilityLabel="Optional donation message"
         />
 
-        <View style={styles.bioHintRow}>
-          <Text style={styles.bioHintIcon} accessibilityElementsHidden>
-            🔒
-          </Text>
-          <Text style={[styles.bioHintText, { color: colors.secondaryText }]}>
-            {bioHint}
-          </Text>
-        </View>
+        {bio.isAvailable && bio.isEnabled && parseFloat(amount) >= bio.threshold ? (
+          <View style={styles.biometricBadge}>
+            <Text style={[styles.biometricBadgeText, { color: colors.primary }]}>🔒</Text>
+            <Text style={[styles.biometricBadgeText, { color: colors.primary, marginLeft: 6 }]}>
+              {bio.biometricType || "Biometrics"} will be required to confirm
+            </Text>
+          </View>
+        ) : !bio.isAvailable ? (
+          <View style={styles.infoBanner}>
+            <Text style={[styles.infoBannerText, { color: colors.secondaryText }]}>
+              ⚠️ Biometric authentication is unavailable. Donations will proceed without confirmation.
+            </Text>
+          </View>
+        ) : null}
       </View>
 
       {statusMessage ? (
@@ -726,5 +699,33 @@ const styles = StyleSheet.create({
   donateButtonText: {
     fontSize: 18,
     fontWeight: "bold",
+  },
+  biometricBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 12,
+    padding: 10,
+    backgroundColor: "rgba(34, 114, 57, 0.1)",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "rgba(34, 114, 57, 0.2)",
+  },
+  biometricBadgeText: {
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  infoBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 12,
+    padding: 10,
+    backgroundColor: "rgba(239, 68, 68, 0.05)",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.15)",
+  },
+  infoBannerText: {
+    fontSize: 13,
+    lineHeight: 18,
   },
 });

@@ -362,19 +362,29 @@ function Header({
   colors: ReturnType<typeof useTheme>["colors"];
   unreadCount: number;
 }) {
+  const router = useRouter();
   return (
     <View style={[styles.header, { backgroundColor: colors.primary }]}>
       <View style={styles.headerTitleRow}>
         <Text style={[styles.title, { color: colors.headerText }]}>
           Stellar IndigoPay
         </Text>
-        {unreadCount > 0 && (
-          <View style={styles.unreadBadge}>
-            <Text style={styles.unreadBadgeText}>
-              {unreadCount > 99 ? "99+" : unreadCount}
-            </Text>
-          </View>
-        )}
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+          {unreadCount > 0 && (
+            <View style={styles.unreadBadge}>
+              <Text style={styles.unreadBadgeText}>
+                {unreadCount > 99 ? "99+" : unreadCount}
+              </Text>
+            </View>
+          )}
+          <TouchableOpacity
+            onPress={() => router.push("/settings" as `${string}`)}
+            accessibilityLabel="Open settings screen"
+            accessibilityRole="button"
+          >
+            <Text style={{ fontSize: 22, color: colors.headerText }}>⚙️</Text>
+          </TouchableOpacity>
+        </View>
       </View>
       <Text style={[styles.subtitle, { color: colors.headerText }]}>
         Climate donations on Stellar

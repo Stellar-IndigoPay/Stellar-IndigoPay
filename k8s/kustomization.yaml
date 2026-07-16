@@ -8,6 +8,17 @@ resources:
   - configmap.yaml
   - secret.yaml
   - postgres.yaml
+  - postgres-standby.yaml
+  - postgres-exporter.yaml
   - backend.yaml
   - frontend.yaml
   - ingress.yaml
+  - networkpolicy-default-deny.yaml
+  - networkpolicy-allow-backend-postgres.yaml
+  - networkpolicy-allow-backend-redis.yaml
+  - networkpolicy-allow-frontend-backend.yaml
+  - networkpolicy-allow-ingress-backend.yaml
+  - networkpolicy-allow-prometheus-scrape.yaml
+  - networkpolicy-allow-backend-egress-external.yaml
+  - networkpolicy-allow-postgres-replication.yaml
+  - networkpolicy-allow-exporter-postgres.yaml

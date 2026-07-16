@@ -1,5 +1,17 @@
 /**
  * backend/src/services/indexerService.js
+ *
+ * Horizon operations stream indexer.
+ *
+ * Listens for Stellar payments (both native XLM and USDC) on the Horizon
+ * SSE stream and records them as donations in the database.
+ *
+ * USDC support (GF-004):
+ *   - Detects credit_alphanum4 payments with asset_code "USDC" that match
+ *     the configured USDC_TOKEN_ADDRESS.
+ *   - Normalizes USDC amounts (7 decimal places) and converts to XLM-equivalent
+ *     for raised_xlm increment and CO₂ calculation.
+ *   - Falls back gracefully when USDC_TOKEN_ADDRESS is unset.
  */
 "use strict";
 
@@ -14,11 +26,22 @@ let lastProcessedLedger = 0;
 let isRunning = false;
 let io = null;
 let projectWallets = new Map(); // wallet_address -> project_id
-let projectWalletsInterval = null; // tracked so stop() can clearInterval
-let horizonStream = null; // tracked so stop() can close the SSE stream
+let projectWalletsInterval = null;
+let horizonStream = null;
+
+// ── USDC configuration ──────────────────────────────────────────────────────
+// Resolved at startup in updateProjectWallets(). Falls back to env var,
+// then attempts a Soroban RPC call to get_usdc_token(). If all fail,
+// USDC indexing is skipped with a warning.
+let usdcTokenAddress = null;
+let usdcToXlmRate = 8.0; // default: 1 USDC ≈ 8 XLM
+
+// Stellar asset code for USD Coin (credit_alphanum4).
+const USDC_ASSET_CODE = "USDC";
 
 /**
  * Fetch all active project wallets and cache them.
+ * Also resolves the USDC token address from env or contract.
  */
 async function updateProjectWallets() {
   try {
@@ -33,17 +56,48 @@ async function updateProjectWallets() {
       { event: "indexer_wallets_refreshed", count: projectWallets.size },
       "Project wallet cache updated",
     );
+
+    // ── Resolve USDC token address ──────────────────────────────────────────
+    const envToken = process.env.USDC_TOKEN_ADDRESS;
+    if (envToken && envToken.trim()) {
+      usdcTokenAddress = envToken.trim();
+      logger.info(
+        { event: "usdc_token_configured", source: "env" },
+        "USDC token address loaded from environment",
+      );
+    } else {
+      // Attempt Soroban RPC fallback
+      try {
+        const { getOnChainUsdcToken } = require("./stellar");
+        const contractToken = await getOnChainUsdcToken();
+        if (contractToken && contractToken.trim()) {
+          usdcTokenAddress = contractToken.trim();
+          logger.info(
+            { event: "usdc_token_configured", source: "contract" },
+            "USDC token address resolved from Soroban contract",
+          );
+        }
+      } catch {
+        // Non-fatal — USDC indexing will be skipped
+      }
+    }
+
+    if (!usdcTokenAddress) {
+      logger.warn(
+        { event: "usdc_token_unconfigured" },
+        "USDC_TOKEN_ADDRESS is not set — USDC payment indexing will be skipped. Set USDC_TOKEN_ADDRESS env var to enable.",
+      );
+    }
+
+    // Parse the USDC→XLM conversion rate
+    const rateFromEnv = process.env.USDC_TO_XLM_RATE;
+    if (rateFromEnv && !isNaN(parseFloat(rateFromEnv))) {
+      usdcToXlmRate = parseFloat(rateFromEnv);
+    }
   } catch (err) {
     logger.error({ event: "indexer_wallets_refresh_error", err }, err.message);
   }
 }
-
-/**
- * Refresh the in-memory cache of active project wallet addresses.
- *
- * @returns {Promise<void>} Resolves after the cache is updated.
- */
-// internal helper
 
 /**
  * Start the Stellar indexer service.
@@ -55,23 +109,16 @@ async function startIndexer(socketIo) {
   io = socketIo;
 
   await updateProjectWallets();
-  // Refresh cache every 10 minutes. Keep a handle so stop() can clear it
-  // during graceful shutdown — otherwise the unref'd interval keeps the
-  // event loop alive past server.close().
   projectWalletsInterval = setInterval(updateProjectWallets, 10 * 60 * 1000);
-  // Unref so this timer alone doesn't keep the process alive.
   if (typeof projectWalletsInterval.unref === "function")
     projectWalletsInterval.unref();
 
   logger.info(
-    { event: "indexer_started" },
-    "Starting Horizon operations stream",
+    { event: "indexer_started", usdcEnabled: Boolean(usdcTokenAddress) },
+    "Starting Horizon operations stream" +
+      (usdcTokenAddress ? " (USDC indexing enabled)" : ""),
   );
 
-  // Start streaming operations from 'now'. The returned EventSource
-  // supports .close() (the @stellar/stellar-sdk wraps fetch's
-  // ReadableStream), which we call from stop() to release the SSE
-  // connection during shutdown.
   horizonStream = stellarServer
     .operations()
     .cursor("now")
@@ -80,12 +127,24 @@ async function startIndexer(socketIo) {
         try {
           lastProcessedLedger = op.ledger_attr;
 
-          // We only care about XLM payments
-          if (op.type === "payment" && op.asset_type === "native") {
-            const projectId = projectWallets.get(op.to);
-            if (projectId) {
-              await handleDonation(projectId, op);
-            }
+          // We only care about payment operations
+          if (op.type !== "payment") return;
+
+          const isNative = op.asset_type === "native";
+          const isUSDC =
+            !isNative &&
+            op.asset_code === USDC_ASSET_CODE &&
+            usdcTokenAddress !== null &&
+            op.asset_issuer === usdcTokenAddress;
+
+          if (!isNative && !isUSDC) {
+            // Unknown/unsupported asset — skip silently
+            return;
+          }
+
+          const projectId = projectWallets.get(op.to);
+          if (projectId) {
+            await handleDonation(projectId, op, { isNative, isUSDC });
           }
         } catch (err) {
           logger.error({ event: "indexer_op_error", err }, err.message);
@@ -101,21 +160,39 @@ async function startIndexer(socketIo) {
 }
 
 /**
- * Start the Stellar indexer service which streams Horizon operations and
- * processes project donations.
+ * Handle a payment to a project — supports both native XLM and USDC.
  *
- * @param {import('socket.io').Server} socketIo - Socket.io server instance used for websocket events.
- * @returns {Promise<void>} Resolves when the indexer is started.
+ * @param {string} projectId - Internal project UUID.
+ * @param {object} op        - Horizon operation object.
+ * @param {{ isNative: boolean, isUSDC: boolean }} flags
  */
-// exported as `startIndexer`
-
-/**
- * Handle a payment to a project.
- */
-async function handleDonation(projectId, op) {
+async function handleDonation(projectId, op, { isNative, isUSDC }) {
   const txHash = op.transaction_hash;
   const donorAddress = op.from;
-  const amountXLM = parseFloat(op.amount);
+
+  // ── Determine currency and amounts ────────────────────────────────────────
+  let currency;
+  let amount; // stored in the `amount` column
+  let amountXlmForRaised; // XLM-equivalent for raised_xlm increment
+  let amountXlmForInsert; // stored in `amount_xlm` column (null for USDC)
+
+  if (isNative) {
+    currency = "XLM";
+    amount = parseFloat(op.amount);
+    amountXlmForRaised = amount;
+    amountXlmForInsert = amount;
+  } else if (isUSDC) {
+    currency = "USDC";
+    amount = parseFloat(op.amount);
+    const xlmEquiv = amount * usdcToXlmRate;
+    amountXlmForRaised = xlmEquiv;
+    amountXlmForInsert = null; // Per schema: amount_xlm is null for non-XLM
+  } else {
+    // Should not reach here (filtered in onmessage)
+    return;
+  }
+
+  if (isNaN(amount) || amount <= 0) return;
 
   const client = await pool.connect();
   let inTransaction = false;
@@ -137,21 +214,21 @@ async function handleDonation(projectId, op) {
     const donationId = uuid();
     await client.query(
       `INSERT INTO donations (id, project_id, donor_address, amount_xlm, amount, currency, transaction_hash, created_at)
-       VALUES ($1, $2, $3, $4, $5, 'XLM', $6, NOW())`,
-      [donationId, projectId, donorAddress, amountXLM, amountXLM, txHash],
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+      [donationId, projectId, donorAddress, amountXlmForInsert, amount, currency, txHash],
     );
 
-    // 3. Update project raised amount and donor count
+    // 3. Update project: raised_xlm uses the XLM-equivalent for both currencies
     await client.query(
       `UPDATE projects
        SET raised_xlm = raised_xlm + $1,
            donor_count = (SELECT COUNT(DISTINCT donor_address) FROM donations WHERE project_id = $2),
            updated_at = NOW()
        WHERE id = $2`,
-      [amountXLM, projectId],
+      [amountXlmForRaised, projectId],
     );
 
-    // 4. Update donor profile (total donated, projects supported, badges)
+    // 4. Update donor profile (total donated xlm, projects supported, badges)
     const existingProfileResult = await client.query(
       "SELECT total_donated_xlm FROM profiles WHERE public_key = $1",
       [donorAddress],
@@ -160,7 +237,7 @@ async function handleDonation(projectId, op) {
     const previousTotal = existingProfile
       ? parseFloat(existingProfile.total_donated_xlm || "0")
       : 0;
-    const newTotal = previousTotal + amountXLM;
+    const newTotal = previousTotal + amountXlmForRaised;
 
     const projectsSupportedResult = await client.query(
       "SELECT COUNT(DISTINCT project_id) AS count FROM donations WHERE donor_address = $1",
@@ -178,12 +255,7 @@ async function handleDonation(projectId, op) {
          projects_supported = EXCLUDED.projects_supported,
          badges = EXCLUDED.badges,
          updated_at = NOW()`,
-      [
-        donorAddress,
-        newTotal.toFixed(7),
-        projectsSupported,
-        JSON.stringify(badges),
-      ],
+      [donorAddress, newTotal.toFixed(7), projectsSupported, JSON.stringify(badges)],
     );
 
     await client.query("COMMIT");
@@ -192,8 +264,8 @@ async function handleDonation(projectId, op) {
     logger.info(
       {
         event: "indexer_donation_recorded",
-        amount: amountXLM,
-        currency: "XLM",
+        amount,
+        currency,
         project: projectId,
         donor: donorAddress,
         txHash,
@@ -201,12 +273,14 @@ async function handleDonation(projectId, op) {
       "Indexer donation recorded",
     );
 
-    // 5. Emit WebSocket event
+    // 5. Emit WebSocket event with currency field
     if (io) {
       io.emit("newDonation", {
         projectId,
         donorAddress,
-        amountXLM,
+        amountXLM: amountXlmForInsert, // null for USDC
+        amount,
+        currency,
         txHash,
         timestamp: new Date().toISOString(),
       });
@@ -226,15 +300,6 @@ async function handleDonation(projectId, op) {
 }
 
 /**
- * Handle a Horizon payment operation observed for a project wallet.
- *
- * @param {string} projectId - Internal project UUID.
- * @param {object} op - Horizon operation object for the payment.
- * @returns {Promise<void>} Resolves once processing (DB updates, profiles) completes.
- */
-// internal helper
-
-/**
  * Returns the indexer status for the health endpoint.
  */
 function getStatus() {
@@ -242,21 +307,14 @@ function getStatus() {
     isRunning,
     lastProcessedLedger,
     projectWalletsCount: projectWallets.size,
+    usdcTokenConfigured: Boolean(usdcTokenAddress),
+    usdcToXlmRate,
     timestamp: new Date().toISOString(),
   };
 }
 
 /**
- * Get the current indexer status used by the health endpoint.
- *
- * @returns {{isRunning:boolean,lastProcessedLedger:number,projectWalletsCount:number,timestamp:string}}
- */
-// exported as `getStatus`
-
-/**
- * Stop the indexer. Idempotent. Called from server.js during graceful
- * shutdown so the Horizon SSE stream and the wallet-cache interval are
- * released and the process can exit cleanly.
+ * Stop the indexer. Idempotent.
  */
 async function stop() {
   try {
@@ -283,4 +341,7 @@ module.exports = {
   startIndexer,
   getStatus,
   stop,
+  // Exported for unit testing
+  handleDonation,
+  updateProjectWallets,
 };

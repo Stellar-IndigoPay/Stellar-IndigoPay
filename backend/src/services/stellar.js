@@ -361,6 +361,43 @@ async function getProjectDonationEvents(
     });
 }
 
+/**
+ * Resolve the USDC token address from the Soroban contract via
+ * get_usdc_token(). Returns null when the contract is not configured
+ * or the RPC call fails (non-fatal — caller should fall back to env var).
+ *
+ * @returns {Promise<string|null>}
+ */
+async function getOnChainUsdcToken() {
+  if (!CONTRACT_ID) return null;
+
+  const contract = new Contract(CONTRACT_ID);
+  const dummyAccount = new Horizon.Account(
+    "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    "-1",
+  );
+
+  const tx = new TransactionBuilder(dummyAccount, {
+    fee: "100",
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(contract.call("get_usdc_token"))
+    .setTimeout(30)
+    .build();
+
+  let result;
+  try {
+    result = await simulateTransactionWithRetry(tx);
+  } catch {
+    return null;
+  }
+
+  if (rpc.Api.isSimulationSuccess(result)) {
+    return scValToNative(result.result.retval);
+  }
+  return null;
+}
+
 module.exports = {
   server,
   rpcServer,
@@ -374,6 +411,7 @@ module.exports = {
   // Service functions
   getOnChainProject,
   getProjectDonationEvents,
+  getOnChainUsdcToken,
   submitTransaction,
   simulateTransactionWithRetry,
 };

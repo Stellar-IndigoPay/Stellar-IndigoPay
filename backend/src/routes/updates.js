@@ -10,7 +10,7 @@ const { v4: uuidv4 } = require("uuid");
 const pool = require("../db/pool");
 const { mapProjectUpdateRow, mapProjectRow } = require("../services/store");
 const { sendUpdateNotifications } = require("../services/email");
-const { sendUpdatePushNotifications } = require("../services/push");
+const { enqueuePushNotification } = require("../services/pushQueue");
 
 const { adminRequired } = require("../middleware/auth");
 
@@ -131,7 +131,10 @@ router.post("/", adminRequired, async (req, res, next) => {
       });
 
     // Send push notifications (non-blocking)
-    sendUpdatePushNotifications({ project, update }).catch((err) => {
+    enqueuePushNotification({
+      type: "project_update",
+      payload: { project, update },
+    }).catch((err) => {
       console.error(
         "[updates] Failed to send push notifications:",
         err.message,

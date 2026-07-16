@@ -1,6 +1,6 @@
 # Horizon Indexer Service
 
-The indexer is a background service that listens for native XLM payments on the Stellar network and records them as donations in the database. It is the bridge between on-chain activity and the application's leaderboard, profile badges, and donation feed.
+The indexer is a background service that listens for payments (both native XLM and USDC) on the Stellar network and records them as donations in the database. It is the bridge between on-chain activity and the application's leaderboard, profile badges, and donation feed.
 
 ---
 
@@ -15,7 +15,10 @@ stellarServer.operations().cursor("now").stream({ onmessage, onerror });
 ```
 
 - The `operations()` endpoint returns all operations on the network.
-- Only operations with `type === "payment"` and `asset_type === "native"` (XLM) are processed.
+- Only `type === "payment"` operations are processed.
+- Two asset types are accepted:
+  - **Native XLM** (`asset_type === "native"`)
+  - **USDC** (`asset_type === "credit_alphanum4"`, `asset_code === "USDC"`, and `asset_issuer` matching the configured `USDC_TOKEN_ADDRESS`)
 - A filter matches the payment recipient (`op.to`) against an in-memory cache of active project wallets.
 
 ### Cursor Tracking
@@ -35,11 +38,13 @@ stellarServer.operations().cursor("now").stream({ onmessage, onerror });
 
 When a matching payment arrives:
 
-1. **Deduplication** — Checks if the `transaction_hash` already exists in the `donations` table.
-2. **Insert donation** — Writes a new row with `project_id`, `donor_address`, `amount_xlm`, `transaction_hash`.
-3. **Update project** — Increments `raised_xlm` and recalculates `donor_count`.
-4. **Upsert donor profile** — Computes new `total_donated_xlm`, `projects_supported`, and badge tiers.
-5. **Emit WebSocket event** — Notifies the frontend in real time via Socket.io.
+1. **Currency detection** — Determines if the payment is XLM or USDC based on `asset_type` and `asset_issuer`.
+2. **Amount normalization** — For USDC, the raw amount is stored in the `amount` column; `amount_xlm` is left `null`. The XLM-equivalent is computed using `USDC_TO_XLM_RATE` for `raised_xlm` increment and donor profile updates.
+3. **Deduplication** — Checks if the `transaction_hash` already exists in the `donations` table.
+4. **Insert donation** — Writes a new row with `project_id`, `donor_address`, `amount_xlm` (null for USDC), `amount`, `currency`, `transaction_hash`.
+5. **Update project** — Increments `raised_xlm` by the XLM-equivalent amount and recalculates `donor_count`.
+6. **Upsert donor profile** — Computes new `total_donated_xlm` (XLM-equivalent for USDC), `projects_supported`, and badge tiers.
+7. **Emit WebSocket event** — Notifies the frontend in real time via Socket.io with a `currency` field.
 
 All database writes are wrapped in a PostgreSQL transaction (`BEGIN` / `COMMIT` / `ROLLBACK`).
 
@@ -48,6 +53,14 @@ All database writes are wrapped in a PostgreSQL transaction (`BEGIN` / `COMMIT` 
 - A `Map<wallet_address, project_id>` is built from the `projects` table at startup.
 - The cache is refreshed every **10 minutes** via `setInterval`.
 - Only projects with `status = 'active'` are included.
+
+### USDC Token Address Resolution
+
+The USDC token address is resolved at startup inside `updateProjectWallets()`:
+
+1. First, check `process.env.USDC_TOKEN_ADDRESS`.
+2. If unset, attempt a Soroban RPC call to `get_usdc_token()` on the deployed contract.
+3. If neither succeeds, log a warning and skip USDC indexing (non-fatal).
 
 ---
 
@@ -118,6 +131,8 @@ The status is exposed via the `/health` endpoint:
   "isRunning": true,
   "lastProcessedLedger": 12345678,
   "projectWalletsCount": 15,
+  "usdcTokenConfigured": true,
+  "usdcToXlmRate": 8.0,
   "timestamp": "2025-01-15T10:30:00.000Z"
 }
 ```
@@ -130,6 +145,8 @@ The status is exposed via the `/health` endpoint:
 | -------------------- | ------------------------------------- | --------------------------------------- |
 | `HORIZON_URL`        | `https://horizon-testnet.stellar.org` | Horizon server endpoint                 |
 | `DATABASE_URL`       | —                                     | PostgreSQL connection string            |
+| `USDC_TOKEN_ADDRESS` | —                                     | Stellar address of the USDC token (required for USDC indexing) |
+| `USDC_TO_XLM_RATE`   | `8.0`                                 | Conversion rate: 1 USDC = N XLM (used for raised_xlm & CO₂) |
 | Wallet cache refresh | 10 minutes                            | Interval for refreshing project wallets |
 
 ---
@@ -138,8 +155,8 @@ The status is exposed via the `/health` endpoint:
 
 | File                                     | Purpose                                                                                     |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `backend/src/services/indexerService.js` | Core indexer — SSE stream, payment processing, deduplication, DB writes, WebSocket emission |
-| `backend/src/services/stellar.js`        | Exports the `Horizon.Server` instance used by the indexer                                   |
+| `backend/src/services/indexerService.js` | Core indexer — SSE stream, payment processing, USDC detection, deduplication, DB writes, WebSocket emission |
+| `backend/src/services/stellar.js`        | Exports the `Horizon.Server` instance and `getOnChainUsdcToken()` used by the indexer       |
 | `backend/src/server.js`                  | Calls `startIndexer(io)` during server boot                                                 |
 | `backend/src/routes/health.js`           | Exposes `getStatus()` in the `/health` response                                             |
 | `backend/src/services/store.js`          | `computeBadges()` used to assign donor tiers                                                |
