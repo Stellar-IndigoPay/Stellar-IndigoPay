@@ -27,6 +27,8 @@ const { Contract, TransactionBuilder } = require("@stellar/stellar-sdk");
 const redis = require("../services/redis");
 const { adminRequired } = require("../middleware/auth");
 const { sanitizedStringField } = require("../middleware/validation");
+const { geocode } = require("../services/geocoder");
+const logger = require("../logger");
 
 const PROJECTS_LIST_CACHE_TTL = 60; // seconds
 const PROJECTS_LIST_CACHE_PREFIX = "projects:list:";
@@ -144,6 +146,72 @@ router.get("/featured", async (req, res, next) => {
 });
 
 /**
+ * Proximity search: active projects within `radius` km of (lat, lng),
+ * nearest first. Uses the Haversine formula directly in SQL rather than
+ * PostGIS since the dataset doesn't warrant a spatial extension. Projects
+ * without stored coordinates never match — they simply aren't returned,
+ * not treated as an error.
+ *
+ * @route GET /api/projects/nearby
+ * @param {import('express').Request} req - Express request with lat, lng, radius query params.
+ * @param {import('express').Response} res - Express response object.
+ * @param {import('express').NextFunction} next - Express error middleware.
+ * @returns {Promise<void>} Sends the list of nearby projects, nearest first.
+ * @throws {Error} If the database query fails.
+ */
+router.get("/nearby", async (req, res, next) => {
+  try {
+    const lat = Number.parseFloat(req.query.lat);
+    const lng = Number.parseFloat(req.query.lng);
+    const radius = Math.min(
+      Number.parseFloat(req.query.radius) || 50,
+      20000,
+    );
+
+    if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
+      return res.status(400).json({ error: "lat must be a number between -90 and 90" });
+    }
+    if (!Number.isFinite(lng) || lng < -180 || lng > 180) {
+      return res.status(400).json({ error: "lng must be a number between -180 and 180" });
+    }
+    if (!Number.isFinite(radius) || radius <= 0) {
+      return res.status(400).json({ error: "radius must be a positive number" });
+    }
+
+    const result = await pool.query(
+      `SELECT * FROM (
+         SELECT *, (
+           6371 * acos(
+             LEAST(1, GREATEST(-1,
+               cos(radians($1)) * cos(radians(latitude)) *
+               cos(radians(longitude) - radians($2)) +
+               sin(radians($1)) * sin(radians(latitude))
+             ))
+           )
+         ) AS distance_km
+         FROM projects
+         WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+           AND status = 'active'
+       ) sub
+       WHERE distance_km <= $3
+       ORDER BY distance_km ASC
+       LIMIT 50`,
+      [lat, lng, radius],
+    );
+
+    res.json({
+      success: true,
+      data: result.rows.map((row) => ({
+        ...mapProjectRow(row),
+        distanceKm: Number.parseFloat(row.distance_km),
+      })),
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
  * List projects with optional filtering, pagination, and search.
  *
  * @route GET /api/projects
@@ -160,6 +228,10 @@ router.get("/", async (req, res, next) => {
       status,
       verified,
       search,
+      location,
+      co2Min,
+      co2Max,
+      facets,
       limit = 20,
       cursor,
     } = req.query;
@@ -172,6 +244,10 @@ router.get("/", async (req, res, next) => {
         status,
         verified,
         search,
+        location,
+        co2Min,
+        co2Max,
+        facets,
         limit: pageSize,
         cursor: cursor || null,
       });
@@ -194,18 +270,83 @@ router.get("/", async (req, res, next) => {
     if (verified === "true") {
       where.push("verified = true");
     }
+
+    // Full-text search: `search_vector` (see migration 013_project_search) is
+    // matched via plainto_tsquery for relevance-ranked results, OR'd with the
+    // original ILIKE substring match so short fragments/typos that don't form
+    // a valid tsquery term still surface results.
+    let searchTsqueryIdx = null;
     if (search && typeof search === "string") {
+      values.push(search);
+      searchTsqueryIdx = values.length;
       values.push(`%${search}%`);
+      const ilikeIdx = values.length;
       where.push(`(
-        name ILIKE $${values.length}
-        OR description ILIKE $${values.length}
-        OR location ILIKE $${values.length}
+        search_vector @@ plainto_tsquery('english', $${searchTsqueryIdx})
+        OR name ILIKE $${ilikeIdx}
+        OR description ILIKE $${ilikeIdx}
+        OR location ILIKE $${ilikeIdx}
         OR EXISTS (
           SELECT 1
           FROM unnest(tags) AS tag
-          WHERE tag ILIKE $${values.length}
+          WHERE tag ILIKE $${ilikeIdx}
         )
       )`);
+    }
+
+    if (location && typeof location === "string") {
+      values.push(`%${location}%`);
+      where.push(`location ILIKE $${values.length}`);
+    }
+
+    if (co2Min !== undefined) {
+      const min = Number.parseInt(co2Min, 10);
+      if (Number.isFinite(min)) {
+        values.push(min);
+        where.push(`co2_offset_kg >= $${values.length}`);
+      }
+    }
+    if (co2Max !== undefined) {
+      const max = Number.parseInt(co2Max, 10);
+      if (Number.isFinite(max)) {
+        values.push(max);
+        where.push(`co2_offset_kg <= $${values.length}`);
+      }
+    }
+
+    // Facet counts reflect every filter above (category/status/verified/
+    // search/location/co2 range) but not pagination, so they're computed
+    // from a snapshot of `values`/`where` before the cursor clause (which is
+    // pagination-only) is appended below.
+    let facetsPayload;
+    if (facets === "true") {
+      const facetValues = [...values];
+      const facetWhereSql = where.length ? "WHERE " + where.join(" AND ") : "";
+      const [categoryFacets, locationFacets, statusFacets] = await Promise.all([
+        pool.query(
+          `SELECT category AS value, COUNT(*)::int AS count
+             FROM projects ${facetWhereSql}
+            GROUP BY category ORDER BY count DESC`,
+          facetValues,
+        ),
+        pool.query(
+          `SELECT location AS value, COUNT(*)::int AS count
+             FROM projects ${facetWhereSql}
+            GROUP BY location ORDER BY count DESC LIMIT 20`,
+          facetValues,
+        ),
+        pool.query(
+          `SELECT status AS value, COUNT(*)::int AS count
+             FROM projects ${facetWhereSql}
+            GROUP BY status ORDER BY count DESC`,
+          facetValues,
+        ),
+      ]);
+      facetsPayload = {
+        category: categoryFacets.rows,
+        location: locationFacets.rows,
+        status: statusFacets.rows,
+      };
     }
 
     if (cursor) {
@@ -234,7 +375,14 @@ router.get("/", async (req, res, next) => {
     if (where.length) {
       query += "WHERE " + where.join(" AND ") + " ";
     }
-    query += `ORDER BY created_at DESC, id DESC LIMIT $${limitIdx}`;
+    // Rank by relevance when searching (only safe to reorder by rank when
+    // there's no keyset cursor in play, since keyset pagination requires a
+    // stable ORDER BY matching the cursor's inequality).
+    if (searchTsqueryIdx && !cursor) {
+      query += `ORDER BY ts_rank(search_vector, plainto_tsquery('english', $${searchTsqueryIdx})) DESC, created_at DESC, id DESC LIMIT $${limitIdx}`;
+    } else {
+      query += `ORDER BY created_at DESC, id DESC LIMIT $${limitIdx}`;
+    }
 
     // All user-controlled values (status, category, search, cursor fields) are
     // passed as parameterised $N placeholders in `values`. Dynamic WHERE clauses
@@ -258,6 +406,7 @@ router.get("/", async (req, res, next) => {
       data,
       next_cursor: nextCursor,
       has_more: hasMore,
+      ...(facetsPayload ? { facets: facetsPayload } : {}),
     };
     await redis.set(cacheKey, responseBody, PROJECTS_LIST_CACHE_TTL);
 
@@ -349,10 +498,23 @@ router.post("/", async (req, res, next) => {
       ],
     );
 
+    let project = result.rows[0];
+    const coords = await geocode(project.location);
+    if (coords) {
+      const geocoded = await pool.query(
+        "UPDATE projects SET latitude = $1, longitude = $2 WHERE id = $3 RETURNING *",
+        [coords.latitude, coords.longitude, id],
+      );
+      project = geocoded.rows[0];
+    } else {
+      logger.warn(
+        { event: "project_no_geocode", projectId: id, location: project.location },
+        "Could not geocode project location",
+      );
+    }
+
     await redis.deletePattern(PROJECTS_LIST_CACHE_PREFIX + "*");
-    res
-      .status(201)
-      .json({ success: true, data: mapProjectRow(result.rows[0]) });
+    res.status(201).json({ success: true, data: mapProjectRow(project) });
   } catch (e) {
     next(e);
   }

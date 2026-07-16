@@ -1,4 +1,5 @@
 [workspace]
-members = ["indigopay-contract", "escrow-contract"]
+members = ["indigopay-contract", "escrow-contract", "oracle-contract"]
 resolver = "2"
+
 

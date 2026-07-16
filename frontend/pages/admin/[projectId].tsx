@@ -16,6 +16,7 @@ import {
 import { buildMilestoneTransaction, submitTransaction } from "@/lib/stellar";
 import { formatCO2, formatXLM, shortenAddress, timeAgo } from "@/utils/format";
 import type { ClimateProject, Donation } from "@/utils/types";
+import { SkeletonBox, SkeletonStatCard } from "@/components/Skeleton";
 
 const DonationGrowthChartNoSSR = dynamic(
   () => import("@/components/DonationGrowthChart"),
@@ -405,8 +406,15 @@ export default function ProjectAdmin({ publicKey, onConnect }: AdminProps) {
 
   if (loading) {
     return (
-      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-12">
-        <div className="card">Loading…</div>
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10 animate-pulse pointer-events-none">
+        <SkeletonBox className="h-8 rounded w-1/3 mb-2" palette="forest" />
+        <SkeletonBox className="h-4 rounded w-1/2 mb-8" palette="forest" />
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+          {[1, 2, 3, 4].map((i) => (
+            <SkeletonStatCard key={i} palette="forest" />
+          ))}
+        </div>
+        <div className="card h-64" />
       </div>
     );
   }

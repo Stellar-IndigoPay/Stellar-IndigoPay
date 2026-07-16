@@ -170,6 +170,8 @@ RETURNING id, (xmax=0) AS inserted` on `webhook_deliveries`.
 - `backend/src/services/indexerService` exposes a `stop()` method so the
   Stellar Horizon stream is closed cleanly on SIGTERM.
 
+- **scripts:** ensure `scripts/setup-dev.sh` installs `mobile` and `extension` dependencies (fix README mismatch)
+
 - **NetworkPolicies** — default-deny for the `indigopay` namespace plus
   explicit allow policies for ingress → backend, backend → postgres +
   kube-dns, backend → redis, backend → Stellar Horizon / Soroban RPC /

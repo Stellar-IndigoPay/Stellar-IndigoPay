@@ -173,5 +173,7 @@ router.use("/audit-log", require("./admin/audit-stats"));
 
 router.use("/queues", require("./admin/queues"));
 router.use("/documents", require("./admin/documents"));
+router.use("/webhooks", require("./admin/webhooks"));
+router.use("/indexer", require("./admin/indexer"));
 
 module.exports = router;

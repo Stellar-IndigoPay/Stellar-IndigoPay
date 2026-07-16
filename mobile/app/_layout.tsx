@@ -74,6 +74,10 @@ export default function RootLayout() {
           >
             <Stack.Screen name="index" options={{ title: "Home" }} />
             <Stack.Screen name="settings" options={{ title: "Settings" }} />
+            <Stack.Screen
+              name="settings/notifications"
+              options={{ title: "Notification Settings" }}
+            />
             <Stack.Screen name="projects" options={{ title: "Projects" }} />
             <Stack.Screen
               name="projects/[id]"
@@ -96,6 +100,35 @@ export default function RootLayout() {
             <Stack.Screen
               name="scan"
               options={{ title: "Scan to Donate", headerShown: false }}
+            />
+            <Stack.Screen name="wallet" options={{ title: "Wallet" }} />
+            <Stack.Screen
+              name="wallet/receive"
+              options={{ title: "Receive" }}
+            />
+            <Stack.Screen
+              name="wallet/send"
+              options={{ title: "Send" }}
+            />
+            <Stack.Screen
+              name="wallet/backup"
+              options={{ title: "Backup Wallet" }}
+            />
+            <Stack.Screen
+              name="wallet/settings"
+              options={{ title: "Wallet Settings" }}
+            />
+            <Stack.Screen
+              name="onboarding/create"
+              options={{ title: "Create Wallet", headerShown: false }}
+            />
+            <Stack.Screen
+              name="onboarding/import"
+              options={{ title: "Import Wallet", headerShown: false }}
+            />
+            <Stack.Screen
+              name="wallet/sep0007"
+              options={{ title: "Confirm Transaction" }}
             />
           </Stack>
         </AuthProvider>

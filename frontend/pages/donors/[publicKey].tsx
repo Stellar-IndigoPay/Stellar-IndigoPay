@@ -22,6 +22,7 @@ import {
 } from "@/lib/wallet";
 import type { DonorProfile, Donation, BadgeTier } from "@/utils/types";
 import { formatXLM } from "@/utils/format";
+import { SkeletonBox, SkeletonAvatar } from "@/components/Skeleton";
 
 // ── Badge helpers ─────────────────────────────────────────────────────────────
 
@@ -174,12 +175,12 @@ function ProfileNotFound({ publicKey }: { publicKey: string }) {
 
 function ProfileSkeleton() {
   return (
-    <div className="animate-pulse space-y-6 max-w-2xl mx-auto px-4 py-10">
+    <div className="animate-pulse pointer-events-none space-y-6 max-w-2xl mx-auto px-4 py-10">
       <div className="flex items-center gap-4">
-        <div className="w-16 h-16 rounded-full bg-[#c8dfc8]" />
+        <SkeletonAvatar size="lg" palette="forest" />
         <div className="space-y-2 flex-1">
-          <div className="h-5 bg-[#c8dfc8] rounded w-1/3" />
-          <div className="h-3 bg-[#c8dfc8] rounded w-1/2" />
+          <SkeletonBox className="h-5 rounded w-1/3" palette="forest" />
+          <SkeletonBox className="h-3 rounded w-1/2" palette="forest" />
         </div>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
@@ -189,7 +190,7 @@ function ProfileSkeleton() {
       </div>
       <div className="card space-y-3">
         {[0, 1, 2, 3].map((i) => (
-          <div key={i} className="h-4 bg-[#c8dfc8] rounded w-full" />
+          <SkeletonBox key={i} className="h-4 rounded w-full" palette="forest" />
         ))}
       </div>
     </div>
