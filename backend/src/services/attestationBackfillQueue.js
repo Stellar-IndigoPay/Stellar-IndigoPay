@@ -51,9 +51,18 @@ const CURSOR_ID = "attestation_events";
 const POLL_MS = Number(
   process.env.ATTESTATION_BACKFILL_POLL_MS || String(30_000),
 );
-const ENABLED =
-  String(process.env.ATTESTATION_BACKFILL_ENABLED || "true").toLowerCase() !==
-  "false";
+
+/**
+ * Evaluate at startup time, but re-checked each time start() runs so
+ * tests that flip ATTESTATION_BACKFILL_ENABLED mid-run still get the
+ * expected no-op behaviour without having to clear module caches.
+ */
+function isEnabled() {
+  return (
+    String(process.env.ATTESTATION_BACKFILL_ENABLED || "true").toLowerCase() !==
+    "false"
+  );
+}
 
 let boss = null;
 
@@ -337,8 +346,17 @@ async function applyEvent(decoded) {
 
 /**
  * A single poll iteration. Loads cursor, fetches events, applies each,
- * advances cursor. Idempotent — calling it twice with no new events
- * is a no-op.
+ * advances cursor.
+ *
+ * Delivery semantics: at-least-once per event. If `applyEvent` throws
+ * partway through a batch, the cursor is intentionally NOT advanced
+ * past the failing row — the next tick re-reads the same ledger
+ * window. The failure counter (`attestation_backfill_polls_total{outcome="error"}`)
+ * ticks up so an operator can spot a stuck loop; manual replay is the
+ * documented response (see docs/cross-chain-attestation.md). Per-event
+ * retry jobs were intentionally avoided: the cost of re-submitting
+ * the same att_new event downstream exceeds the cost of a single SQL
+ * UPDATE retry.
  */
 async function runOnce() {
   let cursor;
@@ -405,17 +423,33 @@ async function runOnce() {
 
 /**
  * Boot the pg-boss scheduler + the polling worker.
- * Idempotent (safe to call more than once).
+ *
+ * Returns:
+ *   { alreadyRunning: false }   — fresh start, worker scheduled
+ *   { alreadyRunning: true  }   — another start() call already wired
+ *                                 up the worker; this call was a no-op.
+ *
+ * Returning `alreadyRunning: true` is what server.js and tests can
+ * watch to detect accidental double-starts (e.g. a hot-reload in dev
+ * or a retry on the production boot path). The previous bare
+ * `return` hid the bug; this version logs `attestation_backfill_already_running`
+ * so a misconfiguration shows up clearly in observability pipelines.
  */
 async function start() {
-  if (boss) return;
+  if (boss) {
+    logger.warn(
+      { event: "attestation_backfill_already_running" },
+      "start() called while a previous worker is still active; ignoring",
+    );
+    return { alreadyRunning: true };
+  }
 
-  if (!ENABLED) {
+  if (!isEnabled()) {
     logger.info(
       { event: "attestation_backfill_disabled" },
       "Back-fill worker disabled via env",
     );
-    return;
+    return { alreadyRunning: false };
   }
 
   const contractId =
@@ -425,8 +459,23 @@ async function start() {
       { event: "attestation_backfill_no_contract" },
       "ATTESTATION_CONTRACT_ID unset — back-fill worker idle (set the env var to enable)",
     );
-    return;
+    return { alreadyRunning: false };
   }
+
+  // Log the configured relayer identity on boot so a deploy / env
+  // drift is visible in the same logs as the first poll. If the
+  // `ATTESTATION_RELAYER_ADDRESS` env is missing, the worker still
+  // operates — the relayer only affects audit attribution. The next
+  // refactor should add a Soroban get_relayer() comparison at boot so
+  // a divergent env value fails loudly.
+  logger.info(
+    {
+      event: "attestation_backfill_relayer_configured",
+      relayer: process.env.ATTESTATION_RELAYER_ADDRESS || "(unset)",
+      contractId,
+    },
+    "Relayer identity recorded",
+  );
 
   const connectionString =
     process.env.DATABASE_URL ||

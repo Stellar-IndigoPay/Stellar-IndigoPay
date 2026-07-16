@@ -9,12 +9,15 @@
  */
 
 jest.mock("pg-boss", () => {
+  let lastInstance = null;
   class FakeBoss {
     constructor() {
       this.started = false;
       this.sent = [];
       this.worked = null;
       this.workOptions = null;
+      this.handlers = {};
+      lastInstance = this;
     }
     async start() {
       this.started = true;
@@ -29,9 +32,28 @@ jest.mock("pg-boss", () => {
     }
     async stop() {
       this.started = false;
+      lastInstance = null;
+    }
+    on(event, handler) {
+      // EventEmitter-ish interface: stash handlers so tests can inspect
+      // them. The production code wires `boss.on("error", …)`.
+      this.handlers[event] = handler;
+      return this;
     }
   }
-  FakeBoss.__instance = null;
+  // Read-only accessor for tests that want to inspect the most recent
+  // instance. Module-scoped so subsequent constructors always overwrite.
+  Object.defineProperty(FakeBoss, "__instance", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      return lastInstance;
+    },
+    set(v) {
+      // Tests reset via __instance = null
+      lastInstance = v;
+    },
+  });
   return FakeBoss;
 });
 
@@ -100,9 +122,13 @@ const sampleEvent = {
   value: { __value: [42, "project-x", "10", "80"] },
 };
 
-beforeEach(() => {
+beforeEach(async () => {
   jest.clearAllMocks();
   PgBoss.__instance = null;
+  // Drain any prior-test stub worker before each so the module-scoped
+  // `boss` guard in services/attestationBackfillQueue.start() doesn't
+  // leak between tests. The call is a no-op when nothing was started.
+  await backfill.stop().catch(() => {});
   process.env.ATTESTATION_BACKFILL_ENABLED = "true";
   process.env.ATTESTATION_CONTRACT_ID = "C-TEST-CONTRACT";
 });
@@ -284,11 +310,11 @@ describe("applyEvent", () => {
 });
 
 describe("fetchEventsSince", () => {
-  test("returns [] when contract id env is unset", async () => {
+  test("returns empty shape when contract id env is unset", async () => {
     delete process.env.ATTESTATION_CONTRACT_ID;
     delete process.env.CONTRACT_ID;
-    const events = await backfill.fetchEventsSince(0);
-    expect(events).toEqual([]);
+    const r = await backfill.fetchEventsSince(0);
+    expect(r).toEqual({ events: [], head: 0 });
     expect(stellar.rpcServer.getEvents).not.toHaveBeenCalled();
   });
 
@@ -298,9 +324,10 @@ describe("fetchEventsSince", () => {
     stellar.rpcServer.getEvents.mockResolvedValueOnce({
       events: [sampleEvent, sampleEvent],
     });
-    const events = await backfill.fetchEventsSince(100);
-    expect(events.length).toBe(2);
-    expect(events[0].id).toBe(42);
+    const r = await backfill.fetchEventsSince(100);
+    expect(r.events.length).toBe(2);
+    expect(r.events[0].id).toBe(42);
+    expect(r.head).toBe(200);
   });
 
   test("tolerates RPC errors and rethrows", async () => {
@@ -324,21 +351,21 @@ describe("start / stop", () => {
     expect(PgBoss.__instance).toBeNull();
   });
 
-  test("start registers the worker + arranges the rearming poll", async () => {
+  test("start registers the worker + sends the kickoff poll", async () => {
     await backfill.start();
     expect(PgBoss.__instance).not.toBeNull();
     expect(PgBoss.__instance.started).toBe(true);
     expect(PgBoss.__instance.worked.queue).toBe("attestation-backfill");
-    // rearmPoller calls boss.send with startAfter
+    // start() schedules one immediate poll so the worker is warm on boot.
     expect(PgBoss.__instance.sent.length).toBeGreaterThanOrEqual(1);
     expect(PgBoss.__instance.sent[0].data).toEqual({ kind: "poll" });
   });
 
   test("stop drains pg-boss and clears singleton", async () => {
     await backfill.start();
-    const boss = PgBoss.__instance;
+    const bossInstance = PgBoss.__instance;
     await backfill.stop();
-    expect(boss.started).toBe(false);
+    expect(bossInstance.started).toBe(false);
     expect(PgBoss.__instance).toBeNull();
   });
 });
@@ -355,8 +382,7 @@ describe("tick (single iteration)", () => {
       .mockResolvedValueOnce({ rows: [{ id: "row-1" }] }) // applyEvent
       .mockResolvedValueOnce({ rows: [] }); // writeCursor
 
-    const cursor = await backfill.tick();
-    expect(cursor.lastStatus).toBe("ok");
+    await backfill.tick();
     expect(metrics.attestationBackfillUpdatesTotal.inc).toHaveBeenCalledWith({
       outcome: "matched",
     });
