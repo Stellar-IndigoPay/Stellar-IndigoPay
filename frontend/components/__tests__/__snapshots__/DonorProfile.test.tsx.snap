@@ -1,4 +1,6 @@
-// Jest Snapshot v1, https://goo.gl/fbAQLP
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`DonorProfile Component matches snapshot for badge tier: EarthGuardian 1`] = `
 <div>
   <div
     class="min-h-screen bg-leaf"
