@@ -22,6 +22,8 @@ import {
   getUnreadNotificationCount,
   setupNotificationListener,
 } from "../utils/notifications";
+import DonationQueueStatus from "../components/DonationQueueStatus";
+import { startQueueWorker, stopQueueWorker } from "../utils/donationQueueWorker";
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
 const CACHE_KEY_PROJECTS = "home:projects_list";
@@ -208,6 +210,12 @@ export default function HomeScreen() {
 
   useEffect(() => {
     loadProjects();
+    // Start the offline donation queue retry worker (module-level singleton)
+    startQueueWorker();
+    return () => {
+      // Cleanup worker when component unmounts
+      stopQueueWorker();
+    };
   }, [loadProjects]);
 
   useEffect(() => {
@@ -248,6 +256,7 @@ export default function HomeScreen() {
     return (
       <View style={[styles.container, { backgroundColor: colors.background }]}>
         {renderSkeleton()}
+        <DonationQueueStatus />
       </View>
     );
   }
@@ -308,6 +317,7 @@ export default function HomeScreen() {
         ListFooterComponent={<Footer colors={colors} />}
         showsVerticalScrollIndicator={false}
       />
+      <DonationQueueStatus />
     </View>
   );
 }

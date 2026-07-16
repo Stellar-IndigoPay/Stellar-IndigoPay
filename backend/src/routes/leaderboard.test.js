@@ -6,12 +6,16 @@ const pool = require("../db/pool");
 const request = require("supertest");
 const express = require("express");
 const leaderboardRouter = require("./leaderboard");
+const { AppError } = require("../errors");
 
 function buildApp() {
   const app = express();
   app.use(express.json());
   app.use("/api/leaderboard", leaderboardRouter);
   app.use((err, _req, res, _next) => {
+    if (err instanceof AppError) {
+      return res.status(err.status).json(err.toJSON());
+    }
     res.status(err.status || 500).json({ error: err.message });
   });
   return app;

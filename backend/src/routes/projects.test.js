@@ -34,6 +34,7 @@ const { server } = require("../services/stellar");
 const express = require("express");
 const request = require("supertest");
 const projectsRouter = require("./projects");
+const { AppError } = require("../errors");
 
 process.env.ADMIN_API_KEY = "test-admin-key";
 
@@ -42,6 +43,9 @@ function buildApp() {
   app.use(express.json());
   app.use("/api/projects", projectsRouter);
   app.use((err, _req, res, _next) => {
+    if (err instanceof AppError) {
+      return res.status(err.status).json(err.toJSON());
+    }
     res
       .status(err.status || 500)
       .json({ error: err.message || "Internal server error" });
@@ -355,7 +359,7 @@ describe("GET /api/projects/featured", () => {
     pool.query.mockResolvedValue({ rows: [] });
 
     const res = await request(app).get("/api/projects/featured").expect(404);
-    expect(res.body).toEqual({ error: "No featured project found" });
+    expect(res.body.error.code).toBe("NO_FEATURED_PROJECT");
 
     nowSpy.mockRestore();
   });
@@ -442,7 +446,7 @@ describe("GET /api/projects/:id/badge-holders", () => {
       .get(`/api/projects/${validUuid}/badge-holders`)
       .expect(404);
 
-    expect(res.body.error).toBe("Project not found");
+    expect(res.body.error.code).toBe("PROJECT_NOT_FOUND");
   });
 
   test("returns 404 if project ID is not a valid UUID", async () => {
@@ -450,7 +454,7 @@ describe("GET /api/projects/:id/badge-holders", () => {
       .get("/api/projects/invalid-uuid/badge-holders")
       .expect(404);
 
-    expect(res.body.error).toBe("Project not found");
+    expect(res.body.error.code).toBe("PROJECT_NOT_FOUND");
   });
 });
 
@@ -513,15 +517,24 @@ describe("POST /api/projects (admin)", () => {
     redis.deletePattern.mockResolvedValue(null);
   });
 
+  test("returns 401 without admin auth", async () => {
+    const res = await request(app)
+      .post("/api/projects/admin/register")
+      .send({ name: "Test", adminAddress: "GADMIN" });
+
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe("UNAUTHORIZED");
+  });
+
   test("returns 400 when adminAddress is missing", async () => {
     const res = await request(app)
       .post("/api/projects/admin/register")
+      .set("X-Admin-Key", "test-admin-key")
       .send({ name: "Test" });
 
-    // Route currently returns 500 when adminAddress is missing.
-    // Ideally this should be 401, but existing implementation returns 500.
-    expect([401, 500]).toContain(res.status);
-    expect(res.body.error).toMatch(/adminAddress|Unauthorized|auth/i);
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(res.body.error.field).toBe("adminAddress");
   });
 });
 
@@ -864,7 +877,8 @@ describe("GET /api/projects/:id/impact-certificate", () => {
       .get("/api/projects/proj-1/impact-certificate")
       .expect(400);
 
-    expect(res.body.error).toMatch(/donorAddress/i);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(res.body.error.field).toBe("donorAddress");
   });
 
   test("returns 400 when donorAddress is invalid (too short)", async () => {
@@ -872,7 +886,8 @@ describe("GET /api/projects/:id/impact-certificate", () => {
       .get("/api/projects/proj-1/impact-certificate?donorAddress=GBADKEY")
       .expect(400);
 
-    expect(res.body.error).toMatch(/donorAddress/i);
+    expect(res.body.error.code).toBe("INVALID_ADDRESS");
+    expect(res.body.error.field).toBe("donorAddress");
   });
 
   test("returns 400 when donorAddress starts with wrong letter", async () => {
@@ -882,7 +897,8 @@ describe("GET /api/projects/:id/impact-certificate", () => {
       )
       .expect(400);
 
-    expect(res.body.error).toMatch(/donorAddress/i);
+    expect(res.body.error.code).toBe("INVALID_ADDRESS");
+    expect(res.body.error.field).toBe("donorAddress");
   });
 
   test("returns 404 when project does not exist", async () => {
@@ -894,7 +910,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
       )
       .expect(404);
 
-    expect(res.body.error).toMatch(/project not found/i);
+    expect(res.body.error.code).toBe("PROJECT_NOT_FOUND");
   });
 
   test("returns 404 when donor has no donations on this project", async () => {
@@ -906,7 +922,8 @@ describe("GET /api/projects/:id/impact-certificate", () => {
       .get(`/api/projects/proj-1/impact-certificate?donorAddress=${CERT_DONOR}`)
       .expect(404);
 
-    expect(res.body.error).toMatch(/no donations found/i);
+    expect(res.body.error.code).toBe("DONATION_NOT_FOUND");
+    expect(res.body.error.detail).toMatch(/no donations found/i);
   });
 
   test("co2OffsetKg is proportional to donor's share of total raised", async () => {

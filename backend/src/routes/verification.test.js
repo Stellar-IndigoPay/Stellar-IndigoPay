@@ -37,6 +37,7 @@ const { signToken } = require("../middleware/auth");
 const verification = require("./verification");
 const email = require("../services/email");
 const storage = require("../services/storage");
+const { AppError } = require("../errors");
 
 function buildApp() {
   const app = express();
@@ -44,6 +45,9 @@ function buildApp() {
   // Bypass helmet/csrf from server.js for the unit test.
   app.use("/api/verification-requests", verification);
   app.use((err, _req, res, _next) => {
+    if (err instanceof AppError) {
+      return res.status(err.status).json(err.toJSON());
+    }
     res
       .status(err.status || 500)
       .json({ error: err.message || "Internal server error" });
@@ -156,7 +160,7 @@ describe("POST /api/verification-requests", () => {
       .post("/api/verification-requests")
       .send({ ...VALID_PAYLOAD, organizationName: "" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/organizationName/);
+    expect(res.body.error.detail).toMatch(/organizationName/);
     expect(pool.query).not.toHaveBeenCalled();
   });
 
@@ -165,7 +169,7 @@ describe("POST /api/verification-requests", () => {
       .post("/api/verification-requests")
       .send({ ...VALID_PAYLOAD, contactEmail: "not-an-email" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/contactEmail/);
+    expect(res.body.error.detail).toMatch(/contactEmail/);
   });
 
   test("rejects malformed Stellar address", async () => {
@@ -173,7 +177,7 @@ describe("POST /api/verification-requests", () => {
       .post("/api/verification-requests")
       .send({ ...VALID_PAYLOAD, walletAddress: "not-a-wallet" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/walletAddress/);
+    expect(res.body.error.detail).toMatch(/walletAddress/);
   });
 
   test("rejects project category not in the whitelist", async () => {
@@ -181,7 +185,7 @@ describe("POST /api/verification-requests", () => {
       .post("/api/verification-requests")
       .send({ ...VALID_PAYLOAD, projectCategory: "Not a real category" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/projectCategory/);
+    expect(res.body.error.detail).toMatch(/projectCategory/);
   });
 
   test("rejects negative CO₂ per XLM", async () => {
@@ -189,7 +193,7 @@ describe("POST /api/verification-requests", () => {
       .post("/api/verification-requests")
       .send({ ...VALID_PAYLOAD, co2PerXLM: "-1" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/co2PerXLM/);
+    expect(res.body.error.detail).toMatch(/co2PerXLM/);
   });
 
   test("rejects document with non-http(s) URL", async () => {
@@ -202,7 +206,7 @@ describe("POST /api/verification-requests", () => {
         ],
       });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/document.url/);
+    expect(res.body.error.detail).toMatch(/document.url/);
   });
 
   test("does not mirror external document URLs even when IPFS is configured", async () => {
@@ -386,7 +390,7 @@ describe("PATCH /api/verification-requests/:id/status (admin)", () => {
       .set("Authorization", `Bearer ${token}`)
       .send({ status: "approved" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/Cannot transition/);
+    expect(res.body.error.detail).toMatch(/Cannot transition/);
   });
 
   test("rejects an unknown target status", async () => {

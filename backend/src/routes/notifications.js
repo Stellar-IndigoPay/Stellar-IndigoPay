@@ -11,6 +11,7 @@ const express = require("express");
 const router = express.Router();
 const { v4: uuidv4 } = require("uuid");
 const pool = require("../db/pool");
+const { AppError } = require("../errors");
 
 function parseLastSeen(value) {
   if (!value || typeof value !== "string") return null;
@@ -32,16 +33,15 @@ router.get("/unread-count", async (req, res, next) => {
     const { token, lastSeen } = req.query;
 
     if (!token || typeof token !== "string") {
-      return res
-        .status(400)
-        .json({ error: "token query parameter is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "token" });
     }
 
     const lastSeenAt = parseLastSeen(lastSeen);
     if (lastSeen !== undefined && !lastSeenAt) {
-      return res
-        .status(400)
-        .json({ error: "lastSeen must be a valid ISO-8601 timestamp" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "lastSeen",
+        detail: "lastSeen must be a valid ISO-8601 timestamp",
+      });
     }
 
     const tokenResult = await pool.query(
@@ -50,7 +50,7 @@ router.get("/unread-count", async (req, res, next) => {
     );
 
     if (!tokenResult.rows[0]) {
-      return res.status(404).json({ error: "Device token not found" });
+      throw new AppError("DEVICE_TOKEN_NOT_FOUND");
     }
 
     const params = [tokenResult.rows[0].id];
@@ -83,17 +83,19 @@ router.post("/register", async (req, res, next) => {
     const { token, platform, walletAddress } = req.body;
 
     if (!token || typeof token !== "string") {
-      return res.status(400).json({ error: "token is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "token" });
     }
     if (!platform || typeof platform !== "string") {
-      return res
-        .status(400)
-        .json({ error: "platform is required (ios/android)" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "platform",
+        detail: "platform is required (ios/android)",
+      });
     }
     if (!["ios", "android"].includes(platform.toLowerCase())) {
-      return res
-        .status(400)
-        .json({ error: "platform must be either ios or android" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "platform",
+        detail: "platform must be either ios or android",
+      });
     }
 
     const normalizedPlatform = platform.toLowerCase();
@@ -135,10 +137,10 @@ router.post("/follow", async (req, res, next) => {
     const { projectId, token, walletAddress } = req.body;
 
     if (!projectId || typeof projectId !== "string") {
-      return res.status(400).json({ error: "projectId is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "projectId" });
     }
     if (!token || typeof token !== "string") {
-      return res.status(400).json({ error: "token is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "token" });
     }
 
     // Get device token ID
@@ -148,9 +150,9 @@ router.post("/follow", async (req, res, next) => {
     );
 
     if (!tokenResult.rows[0]) {
-      return res
-        .status(404)
-        .json({ error: "Device token not found. Please register first." });
+      throw new AppError("DEVICE_TOKEN_NOT_FOUND", {
+        detail: "Please register first",
+      });
     }
 
     const deviceId = tokenResult.rows[0].id;
@@ -162,7 +164,7 @@ router.post("/follow", async (req, res, next) => {
     );
 
     if (!projectResult.rows[0]) {
-      return res.status(404).json({ error: "Project not found" });
+      throw new AppError("PROJECT_NOT_FOUND");
     }
 
     // Check if already following
@@ -199,10 +201,10 @@ router.post("/unfollow", async (req, res, next) => {
     const { projectId, token } = req.body;
 
     if (!projectId || typeof projectId !== "string") {
-      return res.status(400).json({ error: "projectId is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "projectId" });
     }
     if (!token || typeof token !== "string") {
-      return res.status(400).json({ error: "token is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "token" });
     }
 
     // Get device token ID
@@ -212,7 +214,7 @@ router.post("/unfollow", async (req, res, next) => {
     );
 
     if (!tokenResult.rows[0]) {
-      return res.status(404).json({ error: "Device token not found" });
+      throw new AppError("DEVICE_TOKEN_NOT_FOUND");
     }
 
     const deviceId = tokenResult.rows[0].id;
@@ -236,9 +238,7 @@ router.get("/follows", async (req, res, next) => {
     const { token } = req.query;
 
     if (!token || typeof token !== "string") {
-      return res
-        .status(400)
-        .json({ error: "token query parameter is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "token" });
     }
 
     // Get device token ID
@@ -248,7 +248,7 @@ router.get("/follows", async (req, res, next) => {
     );
 
     if (!tokenResult.rows[0]) {
-      return res.status(404).json({ error: "Device token not found" });
+      throw new AppError("DEVICE_TOKEN_NOT_FOUND");
     }
 
     const deviceId = tokenResult.rows[0].id;

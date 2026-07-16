@@ -45,6 +45,13 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS latitude  DOUBLE PRECISION;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
 CREATE INDEX IF NOT EXISTS idx_projects_location ON projects (latitude, longitude);
 
+-- Path-payment donations: track source asset and conversion details for
+-- donations made via any Stellar asset converted to XLM through the DEX.
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS source_asset        TEXT;
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS conversion_path     JSONB;
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS converted_amount_xlm NUMERIC(20, 7);
+CREATE INDEX IF NOT EXISTS idx_donations_source_asset ON donations (source_asset) WHERE source_asset IS NOT NULL;
+
 -- Full-text search: tsvector kept current by a trigger (see migration
 -- 013_project_search) so GET /api/projects can rank matches with ts_rank
 -- instead of relying solely on ILIKE substring matching.
@@ -185,6 +192,19 @@ CREATE TABLE IF NOT EXISTS donation_matches (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+
+-- idempotency_keys: stores response snapshots keyed by Idempotency-Key
+-- headers so safe retries of POST /api/donations replay the original
+-- response instead of creating duplicate donation records. Keys expire
+-- after 24 hours and are cleaned up by a background job.
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+  key TEXT PRIMARY KEY,
+  response_status INTEGER NOT NULL,
+  response_body JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at
+  ON idempotency_keys (created_at);
 
 -- device_tokens: push notification device registrations. token is the FCM /
 -- APNs device token; platform is 'ios' or 'android'. wallet_address links

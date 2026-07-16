@@ -4,6 +4,7 @@ const router = express.Router();
 const pool = require("../db/pool");
 const { signToken, adminRequired } = require("../middleware/auth");
 const { createRateLimiter } = require("../middleware/rateLimiter");
+const { sendAppError } = require("../errors");
 const { buildAuditFilters } = require("./admin/audit-export");
 
 const loginLimiter = createRateLimiter(10, 15);
@@ -26,13 +27,13 @@ router.post("/login", loginLimiter, (req, res) => {
   const adminPass = process.env.ADMIN_PASSWORD;
 
   if (!adminPass) {
-    return res
-      .status(503)
-      .json({ error: "Admin authentication not configured on this server" });
+    return sendAppError(res, "SERVICE_UNAVAILABLE", {
+      reason: "Admin authentication not configured on this server",
+    });
   }
 
   if (username !== adminUser || password !== adminPass) {
-    return res.status(401).json({ error: "Invalid credentials" });
+    return sendAppError(res, "UNAUTHORIZED", { reason: "Invalid credentials" });
   }
 
   const token = signToken({ role: "admin", sub: username }, TOKEN_EXPIRY);
@@ -58,13 +59,15 @@ router.post("/login", loginLimiter, (req, res) => {
 router.post("/refresh", (req, res) => {
   const { refreshToken } = req.body || {};
   if (!refreshToken) {
-    return res.status(400).json({ error: "refreshToken is required" });
+    return sendAppError(res, "VALIDATION_ERROR", { field: "refreshToken" });
   }
 
   try {
     const decoded = require("../middleware/auth").verifyToken(refreshToken);
     if (decoded.type !== "refresh") {
-      return res.status(401).json({ error: "Invalid refresh token" });
+      return sendAppError(res, "UNAUTHORIZED", {
+        reason: "Invalid refresh token",
+      });
     }
     const token = signToken({ role: "admin", sub: decoded.sub }, TOKEN_EXPIRY);
     res.json({
@@ -72,7 +75,9 @@ router.post("/refresh", (req, res) => {
       data: { token, expiresIn: 3600 },
     });
   } catch {
-    return res.status(401).json({ error: "Invalid or expired refresh token" });
+    return sendAppError(res, "UNAUTHORIZED", {
+      reason: "Invalid or expired refresh token",
+    });
   }
 });
 

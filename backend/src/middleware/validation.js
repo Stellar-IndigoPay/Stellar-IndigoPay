@@ -1,6 +1,7 @@
 "use strict";
 
 const { z } = require("zod");
+const { AppError } = require("../errors");
 
 function containsHtml(value) {
   return /<[^>]+>/i.test(value || "");
@@ -46,7 +47,7 @@ function sanitizedStringField({
 }
 
 function validateBody(schema) {
-  return (req, res, next) => {
+  return (req, _res, next) => {
     const result = schema.safeParse(req.body);
 
     if (!result.success) {
@@ -56,7 +57,7 @@ function validateBody(schema) {
         details[path] = issue.message;
       }
 
-      return res.status(422).json({ error: "Validation failed", details });
+      return next(new AppError("SCHEMA_VALIDATION_ERROR", { details }));
     }
 
     req.body = result.data;

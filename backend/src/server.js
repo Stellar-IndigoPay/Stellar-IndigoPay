@@ -50,6 +50,7 @@ const {
   getAllowedOrigins,
 } = require("./middleware/corsPolicy");
 const { runMigrations } = require("./db/migrate");
+const { AppError } = require("./errors");
 const { startTurretsServer } = require("./services/turrets");
 const { start: startSummaryQueue } = require("./services/summaryQueue");
 const { start: startProfileQueue } = require("./services/profileQueue");
@@ -58,6 +59,7 @@ const {
   stop: stopWebhookQueue,
 } = require("./services/webhookQueue");
 const { start: startPushQueue } = require("./services/pushQueue");
+const { start: startIdempotencyCleanup } = require("./services/idempotencyCleanup");
 const { startIndexer } = require("./services/indexerService");
 const { startReconciler, stopReconciler } = require("./services/indexerReconciler");
 const { startDLQWorker, stopDLQWorker } = require("./services/indexerDLQWorker");
@@ -67,6 +69,16 @@ Sentry.init({
   dsn: process.env.SENTRY_DSN || "",
   tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE || 0.1),
   environment: process.env.NODE_ENV,
+  // Group events by our own error code (set via `extra.errorCode` at the
+  // capture site) instead of Sentry's default message-based grouping,
+  // which is fragile — two different bugs that happen to interpolate the
+  // same words into their message would otherwise collapse into one issue.
+  beforeSend(event) {
+    if (event.extra?.errorCode) {
+      event.fingerprint = [String(event.extra.errorCode)];
+    }
+    return event;
+  },
 });
 
 const app = express();
@@ -178,6 +190,31 @@ if (process.env.NODE_ENV !== "production") {
   }
 }
 
+// Admin event service routes — mounted BEFORE the main admin router so that
+// /api/admin/* paths for specific sub-routers are matched before the generic
+// admin catch-all.
+try {
+  const adminEventsRouter = require("./routes/admin/events");
+  app.use("/api/admin/events", adminEventsRouter);
+  app.use("/api/v1/admin/events", adminEventsRouter);
+} catch (err) {
+  logger.error(
+    { event: "route_load_failed", route: "admin/events", err: err.message },
+    "Failed to load admin events route module",
+  );
+}
+
+try {
+  const adminAnalyticsRouter = require("./routes/admin/analytics");
+  app.use("/api/admin/analytics", adminAnalyticsRouter);
+  app.use("/api/v1/admin/analytics", adminAnalyticsRouter);
+} catch (err) {
+  logger.error(
+    { event: "route_load_failed", route: "admin/analytics", err: err.message },
+    "Failed to load admin analytics route module",
+  );
+}
+
 // ── Application routes ──────────────────────────────────────────────────────
 // Each route file is mounted under both /api and /api/v1 so that the v1
 // versioned path and the legacy unversioned path stay in lockstep.
@@ -230,32 +267,110 @@ try {
 }
 
 // ── 404 + error handling ────────────────────────────────────────────────────
+
+// Best-effort code for 4xx errors raised outside AppError (library/middleware
+// errors that carry a `.status` but aren't one of our own error classes).
+const STATUS_FALLBACK_CODE = {
+  400: "VALIDATION_ERROR",
+  401: "UNAUTHORIZED",
+  403: "FORBIDDEN",
+  404: "NOT_FOUND",
+  409: "VALIDATION_ERROR",
+  413: "FILE_TOO_LARGE",
+  422: "SCHEMA_VALIDATION_ERROR",
+  429: "RATE_LIMITED",
+};
+
 app.use((req, res) =>
-  res.status(404).json({ error: `${req.method} ${req.path} not found` }),
+  res.status(404).json({
+    error: {
+      code: "NOT_FOUND",
+      message: `${req.method} ${req.path} not found`,
+    },
+  }),
 );
 
 // Sentry error handler captures the exception and emits a transaction.
 app.use(Sentry.Handlers.errorHandler());
 
-app.use((err, req, res, _next) => {
+/**
+ * Central error-handling middleware. Extracted to a named function (rather
+ * than an inline arrow passed to `app.use`) so it can be unit-tested
+ * directly — see `errorHandler.test.js`.
+ */
+function errorHandler(err, req, res, _next) {
+  if (err instanceof AppError) {
+    // 4xx AppErrors are expected client-facing traffic (validation, auth,
+    // not-found, …) and are intentionally never sent to Sentry. 5xx
+    // AppErrors (DB_ERROR, RPC_ERROR, …) are genuine server-side failures
+    // even though they're wrapped in a structured error, so those are
+    // still captured — fingerprinted by code via the beforeSend hook above.
+    if (err.status >= 500) {
+      try {
+        Sentry.captureException(err, { extra: { errorCode: err.code } });
+      } catch {
+        // Sentry may be uninitialised in tests — never let it block the response.
+      }
+    }
+    logger.error(
+      {
+        event: "request_error",
+        code: err.code,
+        err: err.message,
+        path: req.path,
+        method: req.method,
+      },
+      err.message,
+    );
+    return res.status(err.status).json(err.toJSON());
+  }
+
+  // A non-AppError with a 4xx status is a known, expected client error
+  // raised by a library ahead of our routes (e.g. csurf's "invalid csrf
+  // token"). It isn't an AppError instance, but it's not a bug either —
+  // surface its own status/message (safe: these come from trusted
+  // middleware, not raw internals) under a best-effort code, and skip
+  // Sentry the same way a 4xx AppError would.
+  if (err.status && err.status < 500) {
+    const code = STATUS_FALLBACK_CODE[err.status] || "VALIDATION_ERROR";
+    logger.warn(
+      {
+        event: "request_error",
+        code,
+        err: err.message,
+        path: req.path,
+        method: req.method,
+      },
+      err.message,
+    );
+    return res
+      .status(err.status)
+      .json({ error: { code, message: err.message } });
+  }
+
+  // Truly unhandled errors — always a bug, so always captured and always
+  // reported to the client as a generic INTERNAL_ERROR (never leak
+  // err.message, which may contain internals like a raw DB or SDK error).
   try {
-    Sentry.captureException(err);
+    Sentry.captureException(err, { extra: { errorCode: "INTERNAL_ERROR" } });
   } catch {
     // Sentry may be uninitialised in tests — never let it block the response.
   }
   logger.error(
     {
-      event: "request_error",
+      event: "unhandled_error",
       err: err.message,
       path: req.path,
       method: req.method,
     },
     err.message,
   );
-  res
-    .status(err.status || 500)
-    .json({ error: err.message || "Internal server error" });
-});
+  res.status(500).json({
+    error: { code: "INTERNAL_ERROR", message: "Internal server error" },
+  });
+}
+
+app.use(errorHandler);
 
 // ── Socket.IO ──────────────────────────────────────────────────────────────
 const io = new Server(server, {
@@ -274,6 +389,7 @@ async function startServer() {
   await startProfileQueue(io);
   await startWebhookQueue();
   await startPushQueue();
+  await startIdempotencyCleanup();
 
   // digestQueue is optional in some deployments
   try {
@@ -329,6 +445,15 @@ async function startServer() {
     await stopDLQWorker();
   });
 
+  // Soroban event service: stop the polling loop and persist the cursor.
+  lifecycle.onShutdown(async () => {
+    try {
+      await stopSorobanEvents();
+    } catch {
+      // Service may already be stopped; swallow.
+    }
+  });
+
   // pg-boss queues: each one exposes a `stop()` method that drains in-flight
   // jobs. We register one hook per queue so a failure in one doesn't stop
   // the others from draining.
@@ -338,6 +463,7 @@ async function startServer() {
     "./services/digestQueue",
     "./services/webhookQueue",
     "./services/pushQueue",
+    "./services/idempotencyCleanup",
   ]) {
     lifecycle.onShutdown(async () => {
       try {
@@ -466,3 +592,7 @@ if (require.main === module) {
 }
 
 module.exports = app;
+// Exposed for direct unit testing (see errorHandler.test.js) without
+// changing the primary export other code already relies on (`require("./server")`
+// resolving to the Express app instance).
+module.exports.errorHandler = errorHandler;

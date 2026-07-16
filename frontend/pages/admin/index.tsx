@@ -168,10 +168,13 @@ export default function AdminIndex({ publicKey, onConnect }: AdminIndexProps) {
           Admin
         </p>
         <h1 className="font-display text-3xl font-bold text-forest-900 mb-1">
-          All Projects
+          Admin Dashboard
         </h1>
         <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body">
-          Manage project approvals, registrations, and match funds.
+          Manage project approvals, registrations, and match funds.{" "}
+          <Link href="/admin/analytics" className="text-indigo-600 hover:underline font-medium">
+            View Analytics →
+          </Link>
         </p>
       </div>
 

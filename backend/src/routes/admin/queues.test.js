@@ -123,6 +123,7 @@ describe("Admin Queues Router", () => {
       .send({});
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/Invalid queue name/);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(res.body.error.detail).toMatch(/Invalid queue name/);
   });
 });

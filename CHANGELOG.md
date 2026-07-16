@@ -2,6 +2,14 @@
 
 ### Features
 
+* **backend,frontend:** add Idempotency-Key support for donation recording (closes #148)
+  - Accept `Idempotency-Key` header (UUID v4) on `POST /api/donations`; store response and replay within 24 hours
+  - New `idempotency_keys` table via migration 016 with index on `created_at`
+  - Hourly pg-boss cleanup cron (`idempotencyCleanup`) purges expired keys (configurable via `IDEMPOTENCY_CLEANUP_CRON`)
+  - Frontend: `DonateForm` and `bridge` generate `crypto.randomUUID()` per donation attempt
+  - Documented in OpenAPI spec with 200 replay response
+  - 11 new tests: 5 unit (donations), 8 unit (cleanup), 3 integration (testcontainers)
+
 * **docs:** add CONTRIBUTORS.md to credit community work (GF-015, closes #64)
 
 * **backend:** implement Soroban RPC retry with exponential backoff and circuit breaker (GF-043, closes #100)

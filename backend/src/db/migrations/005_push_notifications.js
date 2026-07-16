@@ -75,7 +75,7 @@ module.exports = {
   },
 
   async down(client) {
-    await client.query(`DROP TABLE IF EXISTS push_notifications`);
-    await client.query(`DROP TABLE IF EXISTS notification_preferences`);
+    await client.query("DROP TABLE IF EXISTS push_notifications");
+    await client.query("DROP TABLE IF EXISTS notification_preferences");
   },
 };

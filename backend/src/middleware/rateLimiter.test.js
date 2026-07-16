@@ -60,15 +60,15 @@ describe("Rate limiting middleware — donation endpoint", () => {
     expect(res.headers["retry-after"]).toBeDefined();
   });
 
-  it("returns a JSON body with a human-readable message on 429", async () => {
+  it("returns a structured JSON body with a human-readable message on 429", async () => {
     for (let i = 0; i < 10; i++) {
       await request(app).get("/ping");
     }
 
     const res = await request(app).get("/ping");
     expect(res.status).toBe(429);
-    expect(res.body).toHaveProperty("message");
-    expect(typeof res.body.message).toBe("string");
+    expect(res.body.error.code).toBe("RATE_LIMITED");
+    expect(typeof res.body.error.message).toBe("string");
   });
 
   it("still blocks request 12 after the 11th was already rejected", async () => {

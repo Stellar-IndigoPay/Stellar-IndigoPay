@@ -10,6 +10,7 @@ const { v4: uuidv4 } = require("uuid");
 const pool = require("../db/pool");
 const { mapProjectUpdateRow, mapProjectRow } = require("../services/store");
 const { sendUpdateNotifications } = require("../services/email");
+const { AppError } = require("../errors");
 const { enqueuePushNotification } = require("../services/pushQueue");
 
 const { adminRequired } = require("../middleware/auth");
@@ -29,12 +30,12 @@ router.get("/:projectId", async (req, res, next) => {
       try {
         cursorData = JSON.parse(Buffer.from(cursor, "base64").toString("utf8"));
       } catch {
-        return res.status(400).json({ error: "Invalid cursor" });
+        throw new AppError("INVALID_CURSOR");
       }
 
       const { created_at, id } = cursorData;
       if (!created_at || !id) {
-        return res.status(400).json({ error: "Invalid cursor" });
+        throw new AppError("INVALID_CURSOR");
       }
 
       values.push(created_at, id);
@@ -86,13 +87,13 @@ router.post("/", adminRequired, async (req, res, next) => {
     const { projectId, title, body } = req.body;
 
     if (!projectId || typeof projectId !== "string") {
-      return res.status(400).json({ error: "projectId is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "projectId" });
     }
     if (!title || typeof title !== "string" || !title.trim()) {
-      return res.status(400).json({ error: "title is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "title" });
     }
     if (!body || typeof body !== "string" || !body.trim()) {
-      return res.status(400).json({ error: "body is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "body" });
     }
 
     // Verify project exists
@@ -100,8 +101,7 @@ router.post("/", adminRequired, async (req, res, next) => {
       "SELECT * FROM projects WHERE id = $1",
       [projectId],
     );
-    if (!projResult.rows[0])
-      return res.status(404).json({ error: "Project not found" });
+    if (!projResult.rows[0]) throw new AppError("PROJECT_NOT_FOUND");
     const project = mapProjectRow(projResult.rows[0]);
 
     // Insert update
@@ -152,7 +152,7 @@ router.post("/:updateId/like", async (req, res, next) => {
   try {
     const { donorAddress } = req.body || {};
     if (!donorAddress || typeof donorAddress !== "string") {
-      return res.status(400).json({ error: "donorAddress is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "donorAddress" });
     }
 
     const updateResult = await pool.query(
@@ -160,7 +160,7 @@ router.post("/:updateId/like", async (req, res, next) => {
       [req.params.updateId],
     );
     if (!updateResult.rows[0]) {
-      return res.status(404).json({ error: "Update not found" });
+      throw new AppError("UPDATE_NOT_FOUND");
     }
 
     // Check if already liked

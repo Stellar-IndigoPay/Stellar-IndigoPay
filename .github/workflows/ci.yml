@@ -4,7 +4,6 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main]
 
 jobs:
   frontend:
@@ -98,6 +97,24 @@ jobs:
           sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
       - name: Secret scanning
         run: gitleaks detect --config .gitleaks.toml --source . --no-git --exit-code 1
+
+  openapi-lint:
+    name: OpenAPI Spec Validation (Spectral)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Validate OpenAPI spec with Spectral (built-in OAS rules)
+        run: npx @stoplight/spectral-cli@6.14.3 lint docs/api/openapi.yaml --ruleset .spectral.yaml
+
+      - name: Install dependencies for custom validation
+        run: npm ci
+
+      - name: Validate project-specific conventions (429, descriptions, summaries)
+        run: node scripts/validate-openapi.js
 
   zap_scan:
     name: DAST Security Scan (OWASP ZAP)
