@@ -57,10 +57,7 @@ const {
   start: startWebhookQueue,
   stop: stopWebhookQueue,
 } = require("./services/webhookQueue");
-const {
-  start: startMatchQueue,
-  stop: stopMatchQueue,
-} = require("./services/matchQueue");
+const { start: startPushQueue } = require("./services/pushQueue");
 const { startIndexer } = require("./services/indexerService");
 const lifecycle = require("./services/lifecycle");
 
@@ -273,7 +270,7 @@ async function startServer() {
   await startSummaryQueue(io);
   await startProfileQueue(io);
   await startWebhookQueue();
-  await startMatchQueue(io);
+  await startPushQueue();
 
   // digestQueue is optional in some deployments
   try {
@@ -312,7 +309,7 @@ async function startServer() {
     "./services/profileQueue",
     "./services/digestQueue",
     "./services/webhookQueue",
-    "./services/matchQueue",
+    "./services/pushQueue",
   ]) {
     lifecycle.onShutdown(async () => {
       try {
