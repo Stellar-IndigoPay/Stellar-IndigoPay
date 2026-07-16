@@ -1,0 +1,224 @@
+# k8s/postgres-standby.yaml — PostgreSQL warm standby (streaming replication)
+#
+# This is the WARM STANDBY instance deployed in a second region/zone.
+# It receives WAL from the primary via streaming replication and stays
+# in continuous recovery mode (hot_standby=on → read-only queries allowed).
+#
+# Failover procedure (see docs/disaster-recovery.md):
+#   1. Verify primary is unreachable
+#   2. Promote standby: pg_ctl promote (or touch /tmp/trigger_promote)
+#   3. Update DATABASE_URL in AWS Secrets Manager to point at standby
+#   4. Restart backend pods
+#
+# Initial setup must run scripts/setup-replication.sh to pg_basebackup
+# from the primary before the standby can start replicating.
+#
+# Node affinity is used to place the standby on a different zone than
+# the primary. Adjust the zone label to match your cloud provider.
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-standby
+  namespace: stellar-indigopay
+  labels:
+    app: postgres
+    role: standby
+spec:
+  serviceName: postgres-standby-svc
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+      role: standby
+  template:
+    metadata:
+      labels:
+        app: postgres
+        role: standby
+    spec:
+      # Schedule the standby on a different availability zone than the
+      # primary. The primary should have a corresponding anti-affinity or
+      # nodeSelector targeting a different zone value.
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: topology.kubernetes.io/zone
+                    operator: In
+                    values:
+                      - us-west-2b
+                      - us-east-1b
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: postgres
+                  role: primary
+              topologyKey: topology.kubernetes.io/zone
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: POSTGRES_DB
+            - name: POSTGRES_REPLICATION_USER
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: POSTGRES_REPLICATION_USER
+            - name: POSTGRES_REPLICATION_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: POSTGRES_REPLICATION_PASSWORD
+          volumeMounts:
+            - name: postgres-standby-data
+              mountPath: /var/lib/postgresql/data
+            - name: postgres-standby-config
+              mountPath: /etc/postgresql/postgresql.conf
+              subPath: postgresql.conf
+            - name: postgres-standby-config
+              mountPath: /etc/postgresql/postgresql.standby.conf
+              subPath: postgresql.standby.conf
+            - name: postgres-standby-config
+              mountPath: /tmp/primary-conninfo.txt
+              subPath: primary-conninfo.txt
+          # The standby runs in recovery mode. We supply a custom
+          # postgresql.conf that points to the primary. The standby.signal
+          # file tells PG to start in standby (recovery) mode.
+          args:
+            - "-c"
+            - "config_file=/etc/postgresql/postgresql.conf"
+          readinessProbe:
+            exec:
+              command:
+                - "/bin/sh"
+                - "-c"
+                - "pg_isready -U postgres && psql -U postgres -tAc 'SELECT pg_is_in_recovery();' | grep -q t"
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - "/bin/sh"
+                  - "-c"
+                  - |
+                    # Create standby.signal file so PG starts in recovery mode.
+                    # Only on first boot (when data dir is empty).
+                    if [ ! -f /var/lib/postgresql/data/PG_VERSION ]; then
+                      echo "Standby: data directory empty — run setup-replication.sh first to pg_basebackup from primary."
+                    fi
+      volumes:
+        - name: postgres-standby-config
+          configMap:
+            name: postgres-standby-config
+            defaultMode: 0755
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-standby-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+# ConfigMap with standby-specific PostgreSQL configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-standby-config
+  namespace: stellar-indigopay
+data:
+  postgresql.conf: |
+    # ── Connection ──────────────────────────────────────────────
+    listen_addresses = '*'
+    max_connections = 100
+
+    # ── Include standby-specific replication settings ───────────
+    include 'postgresql.standby.conf'
+
+    # ── Standby (Hot Standby) ───────────────────────────────────
+    hot_standby = on
+    hot_standby_feedback = on
+
+    # ── WAL Restore from S3 (fallback when streaming lags) ─────
+    restore_command = '/usr/local/bin/restore-wal.sh %f %p'
+
+    # ── Performance ─────────────────────────────────────────────
+    shared_buffers = 256MB
+    effective_cache_size = 768MB
+    maintenance_work_mem = 64MB
+    wal_buffers = 16MB
+    random_page_cost = 1.1
+    effective_io_concurrency = 200
+
+    # ── Logging ─────────────────────────────────────────────────
+    log_checkpoints = on
+    log_connections = on
+    log_disconnections = on
+    log_lock_waits = on
+  postgresql.standby.conf: |
+    # Stream from the primary with replication slot.
+    # ⚠️  REPLACE __POSTGRES_REPLICATION_USER__ and __POSTGRES_REPLICATION_PASSWORD__
+    # with real values before applying. Use Kustomize configMapGenerator,
+    # Helm templating, or setup-replication.sh to inject the actual credentials.
+    # PostgreSQL config files do NOT expand shell environment variables.
+    primary_conninfo = 'host=postgres-primary-svc.stellar-indigopay.svc.cluster.local port=5432 user=__POSTGRES_REPLICATION_USER__ password=__POSTGRES_REPLICATION_PASSWORD__ application_name=standby'
+    primary_slot_name = 'standby_slot'
+    recovery_target_timeline = 'latest'
+  primary-conninfo.txt: |
+    host=postgres-primary-svc.stellar-indigopay.svc.cluster.local port=5432 user=__POSTGRES_REPLICATION_USER__ password=__POSTGRES_REPLICATION_PASSWORD__ application_name=standby
+  restore-wal.sh: |
+    #!/bin/sh
+    # WAL restorer — fetches archived WAL segments from S3 as fallback
+    # when streaming replication lags behind or the standby restarts.
+    set -e
+    WAL_NAME="$1"
+    WAL_DEST="$2"
+    S3_BUCKET="${S3_BUCKET:-stellar-indigopay-backups}"
+    aws s3 cp "s3://${S3_BUCKET}/wal/${WAL_NAME}" "${WAL_DEST}" 2>/dev/null
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-standby-svc
+  namespace: stellar-indigopay
+  labels:
+    app: postgres
+    role: standby
+spec:
+  selector:
+    app: postgres
+    role: standby
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres

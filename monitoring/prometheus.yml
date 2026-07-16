@@ -34,6 +34,30 @@ scrape_configs:
           service: stellar-indigopay-api
           env: production
 
+  # ── PostgreSQL exporter (primary) ──────────────────────────────────
+  # Requires postgres_exporter sidecar or standalone deployment.
+  # Install: helm install postgres-exporter prometheus-community/prometheus-postgres-exporter
+  - job_name: postgres-exporter-primary
+    metrics_path: /metrics
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ["postgres-exporter-primary:9187"]
+        labels:
+          service: postgres-primary
+          env: production
+
+  # ── PostgreSQL exporter (standby) ──────────────────────────────────
+  - job_name: postgres-exporter-standby
+    metrics_path: /metrics
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ["postgres-exporter-standby:9187"]
+        labels:
+          service: postgres-standby
+          env: production
+
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]
