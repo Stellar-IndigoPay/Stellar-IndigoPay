@@ -1,8 +1,4 @@
 #![no_std]
-// Deprecated Events::publish — the new #[contractevent] macro is preferred.
-// Suppressing this warning so clippy -- -D warnings still passes.
-// TODO(indigopay-272): migrate to #[contractevent] pattern.
-#![allow(deprecated)]
 #[cfg(all(test, feature = "testutils"))]
 mod fuzz_tests;
 #[cfg(all(test, feature = "testutils"))]
@@ -31,8 +27,8 @@ mod fuzz_template;
  *     --source alice --network testnet
  */
 use soroban_sdk::{
-    contract, contractclient, contractimpl, contracttype, symbol_short, token, Address, BytesN,
-    Env, String, Symbol, Vec,
+    contract, contractclient, contractevent, contractimpl, contracttype, symbol_short, token,
+    Address, BytesN, Env, String, Symbol, Vec,
 };
 
 // ─── Oracle interface ─────────────────────────────────────────────────────────
@@ -56,6 +52,200 @@ pub enum BadgeTier {
     Tree,          // ≥ 100 XLM
     Forest,        // ≥ 500 XLM
     EarthGuardian, // ≥ 2000 XLM
+}
+
+// ─── Contract Events ──────────────────────────────────────────────────────────
+// Event types emitted by the contract using #[contractevent].
+// Fields marked with #[topic] are indexed and searchable by external consumers.
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ProjectRegistered {
+    #[topic]
+    pub admin: Address,
+    pub project_id: String,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct DeactivateAll {
+    #[topic]
+    pub admin: Address,
+    pub project_ids: Vec<String>,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CO2RateUpdated {
+    #[topic]
+    pub admin: Address,
+    pub project_id: String,
+    pub co2_per_xlm: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ProjectPaused {
+    #[topic]
+    pub admin: Address,
+    pub project_id: String,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ProjectResumed {
+    #[topic]
+    pub admin: Address,
+    pub project_id: String,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct NftMinted {
+    #[topic]
+    pub donor: Address,
+    pub badge_tier: BadgeTier,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct Donated {
+    #[topic]
+    pub donor: Address,
+    #[topic]
+    pub project_id: String,
+    pub amount: i128,
+    pub badge: BadgeTier,
+    pub msg_hash: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct UsdcDonated {
+    #[topic]
+    pub donor: Address,
+    #[topic]
+    pub project_id: String,
+    pub usdc_amount: i128,
+    pub currency: Symbol,
+    pub msg_hash: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ProposalCreated {
+    #[topic]
+    pub admin: Address,
+    pub project_id: String,
+    pub voting_window: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct Voted {
+    #[topic]
+    pub voter: Address,
+    #[topic]
+    pub project_id: String,
+    pub approve: bool,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ProposalVerified {
+    pub project_id: String,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ProposalRejected {
+    pub project_id: String,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ProposalVetoed {
+    #[topic]
+    pub admin: Address,
+    pub project_id: String,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct UsdcTokenSet {
+    pub usdc_token: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct OracleSet {
+    pub oracle: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AdminTransferInitiated {
+    #[topic]
+    pub admin: Address,
+    pub new_admin: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AdminAccepted {
+    pub new_admin: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AdminTransferCancelled {
+    #[topic]
+    pub admin: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContractPaused {
+    #[topic]
+    pub admin: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContractUnpaused {
+    #[topic]
+    pub admin: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct UpgradeProposed {
+    #[topic]
+    pub admin: Address,
+    pub new_wasm_hash: BytesN<32>,
+    pub effective_at: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct UpgradeExecuted {
+    pub wasm_hash: BytesN<32>,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct UpgradeCancelled {
+    #[topic]
+    pub admin: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ProjectNftMinted {
+    #[topic]
+    pub donor: Address,
+    pub project_id: String,
+    pub amount_donated: i128,
 }
 
 // ─── Data structures ──────────────────────────────────────────────────────────
@@ -387,8 +577,7 @@ impl IndigoPayContract {
         ids.push_back(project_id.clone());
         env.storage().instance().set(&DataKey::ProjectIdsAll, &ids);
 
-        env.events()
-            .publish((symbol_short!("proj_reg"), admin), project_id);
+        ProjectRegistered { admin, project_id }.publish(&env);
     }
 
     pub fn batch_register_projects(env: Env, admin: Address, projects: Vec<ProjectInit>) {
@@ -435,8 +624,11 @@ impl IndigoPayContract {
                 .instance()
                 .set(&DataKey::ProjectCount, &next_count);
             ids.push_back(project_id.clone());
-            env.events()
-                .publish((symbol_short!("proj_reg"), admin.clone()), project_id);
+            ProjectRegistered {
+                admin: admin.clone(),
+                project_id,
+            }
+            .publish(&env);
         }
         env.storage().instance().set(&DataKey::ProjectIdsAll, &ids);
     }
@@ -470,8 +662,11 @@ impl IndigoPayContract {
             }
         }
 
-        env.events()
-            .publish((symbol_short!("deact_all"), admin), ids);
+        DeactivateAll {
+            admin,
+            project_ids: ids,
+        }
+        .publish(&env);
     }
 
     pub fn deactivate_project(env: Env, admin: Address, project_id: String) {
@@ -516,10 +711,12 @@ impl IndigoPayContract {
             .instance()
             .set(&DataKey::Project(project_id.clone()), &project);
 
-        env.events().publish(
-            (symbol_short!("co2_rate"), admin),
-            (project_id, co2_per_xlm),
-        );
+        CO2RateUpdated {
+            admin,
+            project_id,
+            co2_per_xlm,
+        }
+        .publish(&env);
     }
 
     pub fn pause_project(env: Env, admin: Address, project_id: String) {
@@ -542,8 +739,7 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::Project(project_id.clone()), &project);
-        env.events()
-            .publish((symbol_short!("prj_pause"), admin), project_id);
+        ProjectPaused { admin, project_id }.publish(&env);
     }
 
     /// Admin-only: lift a temporary pause on a project. Mirrors
@@ -569,8 +765,7 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::Project(project_id.clone()), &project);
-        env.events()
-            .publish((symbol_short!("prj_resm"), admin), project_id);
+        ProjectResumed { admin, project_id }.publish(&env);
     }
 
     // ─── Donations ────────────────────────────────────────────────────────────
@@ -677,10 +872,11 @@ impl IndigoPayContract {
                     minted_at_ledger: env.ledger().sequence(),
                 };
                 env.storage().instance().set(&nft_key, &nft);
-                env.events().publish(
-                    (symbol_short!("nft_mint"), donor.clone()),
-                    donor_stats.badge.clone(),
-                );
+                NftMinted {
+                    donor: donor.clone(),
+                    badge_tier: donor_stats.badge.clone(),
+                }
+                .publish(&env);
             }
         }
 
@@ -730,10 +926,198 @@ impl IndigoPayContract {
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&donor, &project.wallet, &amount);
 
-        env.events().publish(
-            (symbol_short!("donated"), donor.clone(), project_id.clone()),
-            (amount, donor_stats.badge.clone(), msg_hash),
+        Donated {
+            donor: donor.clone(),
+            project_id: project_id.clone(),
+            amount,
+            badge: donor_stats.badge.clone(),
+            msg_hash,
+        }
+        .publish(&env);
+        env.storage()
+            .instance()
+            .extend_ttl(VOTING_WINDOW_LEDGERS * 4, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    // ─── DEX Path-Payment Donation (any Stellar asset → XLM) ──────────────────
+
+    /// Donate any Stellar asset via DEX path payment.
+    ///
+    /// The caller submits an atomic Stellar transaction that:
+    /// 1. Executes a `PathPaymentStrictSend` converting `source_asset` to XLM
+    ///    and delivering the XLM to the project wallet.
+    /// 2. Calls `donate_asset()` to record the donation on-chain.
+    ///
+    /// Because the XLM transfer already happened in the path payment operation,
+    /// this function only records the donation effects — it does NOT perform
+    /// a second token transfer. This keeps the contract simple while
+    /// leveraging Stellar's native DEX for path payments.
+    ///
+    /// `source_asset_code` is a short symbol identifying the source asset
+    /// (e.g. "yXLM", "USDT", "BTC") for the on-chain donation record.
+    pub fn donate_asset(
+        env: Env,
+        donor: Address,
+        project_id: String,
+        xlm_amount: i128,
+        source_asset_code: Symbol,
+        msg_hash: u32,
+    ) {
+        donor.require_auth();
+        require_not_paused(&env);
+        if xlm_amount <= 0 {
+            panic!("Donation amount must be positive");
+        }
+
+        let mut project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        if !project.active {
+            panic!("Project is not accepting donations");
+        }
+        if project.paused {
+            panic!("Project is temporarily paused");
+        }
+
+        // Pre-compute CO2 increment using the XLM-equivalent received
+        let xlm_units = xlm_amount / STROOP;
+        let co2_increment = xlm_units
+            .checked_mul(project.co2_per_xlm as i128)
+            .expect("CO2 calculation overflow");
+
+        let mut donor_stats: DonorStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonorStats(donor.clone()))
+            .unwrap_or(DonorStats {
+                total_donated: 0,
+                donation_count: 0,
+                badge: BadgeTier::None,
+                co2_offset_grams: 0,
+            });
+        let prev_badge = donor_stats.badge.clone();
+
+        // ── Effects: all state writes happen here (no external interaction
+        //    needed because the path payment already transferred XLM).
+        project.total_raised = project
+            .total_raised
+            .checked_add(xlm_amount)
+            .expect("Project total_raised overflow");
+        let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
+        if !env.storage().instance().has(&donated_key) {
+            env.storage().instance().set(&donated_key, &true);
+            project.donor_count = project
+                .donor_count
+                .checked_add(1)
+                .expect("Project donor_count overflow");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::Project(project_id.clone()), &project);
+
+        donor_stats.total_donated = donor_stats
+            .total_donated
+            .checked_add(xlm_amount)
+            .expect("Donor total_donated overflow");
+        donor_stats.donation_count = donor_stats
+            .donation_count
+            .checked_add(1)
+            .expect("Donor donation_count overflow");
+        donor_stats.co2_offset_grams = donor_stats
+            .co2_offset_grams
+            .checked_add(co2_increment)
+            .expect("Donor co2_offset overflow");
+        donor_stats.badge = calculate_badge(donor_stats.total_donated);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonorStats(donor.clone()), &donor_stats);
+
+        // Track per-project cumulative donations for milestone NFT eligibility.
+        let proj_total_key = DataKey::DonorProjectTotal(project_id.clone(), donor.clone());
+        let prev_proj_total: i128 = env.storage().instance().get(&proj_total_key).unwrap_or(0);
+        env.storage().instance().set(
+            &proj_total_key,
+            &prev_proj_total
+                .checked_add(xlm_amount)
+                .expect("DonorProjectTotal overflow"),
         );
+
+        // Auto-mint an Impact NFT when a donor reaches a new badge tier.
+        if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
+            let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
+            if !env.storage().instance().has(&nft_key) {
+                let nft = ImpactNFT {
+                    owner: donor.clone(),
+                    tier: donor_stats.badge.clone(),
+                    total_donated: donor_stats.total_donated,
+                    minted_at_ledger: env.ledger().sequence(),
+                };
+                env.storage().instance().set(&nft_key, &nft);
+                NftMinted {
+                    donor: donor.clone(),
+                    badge_tier: donor_stats.badge.clone(),
+                }
+                .publish(&env);
+            }
+        }
+
+        let dc: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationCount)
+            .unwrap_or(0);
+        let new_dc = dc.checked_add(1).expect("DonationCount overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationCount, &new_dc);
+        // Store donation record with the source asset code as currency
+        let donation_record = DonationRecord {
+            donor: donor.clone(),
+            project: project_id.clone(),
+            amount: xlm_amount,
+            ledger: env.ledger().sequence(),
+            message_hash: msg_hash,
+            currency: source_asset_code,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationRecord(dc), &donation_record);
+
+        let gr: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalTotalRaised)
+            .unwrap_or(0);
+        let new_gr = gr
+            .checked_add(xlm_amount)
+            .expect("GlobalTotalRaised overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::GlobalTotalRaised, &new_gr);
+
+        let gc: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalCO2OffsetGrams)
+            .unwrap_or(0);
+        let new_gc = gc.checked_add(co2_increment).expect("GlobalCO2 overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::GlobalCO2OffsetGrams, &new_gc);
+
+        // No token transfer — the path payment already delivered XLM to the
+        // project wallet in the same Stellar transaction.
+
+        Donated {
+            donor: donor.clone(),
+            project_id: project_id.clone(),
+            amount: xlm_amount,
+            badge: donor_stats.badge.clone(),
+            msg_hash,
+        }
+        .publish(&env);
         env.storage()
             .instance()
             .extend_ttl(VOTING_WINDOW_LEDGERS * 4, VOTING_WINDOW_LEDGERS * 4);
@@ -894,8 +1278,11 @@ impl IndigoPayContract {
             minted_at_ledger: env.ledger().sequence(),
         };
         env.storage().instance().set(&key, &nft);
-        env.events()
-            .publish((symbol_short!("nft_mint"), donor), tier);
+        NftMinted {
+            donor,
+            badge_tier: tier,
+        }
+        .publish(&env);
     }
 
     pub fn has_nft(env: Env, donor: Address, tier: BadgeTier) -> bool {
@@ -946,10 +1333,12 @@ impl IndigoPayContract {
             minted_at_ledger: env.ledger().sequence(),
         };
         env.storage().instance().set(&nft_key, &nft);
-        env.events().publish(
-            (symbol_short!("pnft_mnt"), donor.clone()),
-            (project_id, proj_total),
-        );
+        ProjectNftMinted {
+            donor: donor.clone(),
+            project_id,
+            amount_donated: proj_total,
+        }
+        .publish(&env);
     }
 
     pub fn has_project_nft(env: Env, donor: Address, project_id: String) -> bool {
@@ -1019,8 +1408,12 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::Proposal(project_id.clone()), &proposal);
-        env.events()
-            .publish((symbol_short!("prop_new"), admin), (project_id, window));
+        ProposalCreated {
+            admin,
+            project_id,
+            voting_window: window,
+        }
+        .publish(&env);
     }
 
     /// Badge holders (≥ Seedling) cast a vote. One vote per address per proposal.
@@ -1089,8 +1482,12 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::Proposal(project_id.clone()), &proposal);
-        env.events()
-            .publish((symbol_short!("voted"), voter, project_id), approve);
+        Voted {
+            voter,
+            project_id,
+            approve,
+        }
+        .publish(&env);
     }
 
     /// Callable by anyone after the deadline. Resolves based on majority.
@@ -1109,11 +1506,15 @@ impl IndigoPayContract {
         }
         proposal.resolved = true;
         if proposal.votes_for > proposal.votes_against {
-            env.events()
-                .publish((symbol_short!("proj_ver"),), project_id.clone());
+            ProposalVerified {
+                project_id: project_id.clone(),
+            }
+            .publish(&env);
         } else {
-            env.events()
-                .publish((symbol_short!("prop_rej"),), project_id.clone());
+            ProposalRejected {
+                project_id: project_id.clone(),
+            }
+            .publish(&env);
         }
         env.storage()
             .instance()
@@ -1135,8 +1536,11 @@ impl IndigoPayContract {
             panic!("Proposal already resolved");
         }
         proposal.resolved = true;
-        env.events()
-            .publish((symbol_short!("prop_veto"), admin), project_id.clone());
+        ProposalVetoed {
+            admin,
+            project_id: project_id.clone(),
+        }
+        .publish(&env);
         env.storage()
             .instance()
             .set(&DataKey::Proposal(project_id), &proposal);
@@ -1269,10 +1673,11 @@ impl IndigoPayContract {
                     minted_at_ledger: env.ledger().sequence(),
                 };
                 env.storage().instance().set(&nft_key, &nft);
-                env.events().publish(
-                    (symbol_short!("nft_mint"), donor.clone()),
-                    donor_stats.badge.clone(),
-                );
+                NftMinted {
+                    donor: donor.clone(),
+                    badge_tier: donor_stats.badge.clone(),
+                }
+                .publish(&env);
             }
         }
 
@@ -1334,10 +1739,14 @@ impl IndigoPayContract {
         let project_wallet = project.wallet;
         token_client.transfer(&donor, &project_wallet, &usdc_amount);
 
-        env.events().publish(
-            (symbol_short!("donated"), donor.clone(), project_id),
-            (usdc_amount, symbol_short!("USDC"), msg_hash),
-        );
+        UsdcDonated {
+            donor: donor.clone(),
+            project_id,
+            usdc_amount,
+            currency: symbol_short!("USDC"),
+            msg_hash,
+        }
+        .publish(&env);
     }
 
     /// Admin-only: Set the USDC token address for multi-currency donations.
@@ -1348,8 +1757,10 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::USDCTokenAddress, &usdc_token);
-        env.events()
-            .publish((symbol_short!("usdc_set"),), usdc_token);
+        UsdcTokenSet {
+            usdc_token: usdc_token.clone(),
+        }
+        .publish(&env);
     }
 
     /// Get the configured USDC token address.
@@ -1366,7 +1777,10 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::OracleAddress, &oracle);
-        env.events().publish((symbol_short!("oracle"),), oracle);
+        OracleSet {
+            oracle: oracle.clone(),
+        }
+        .publish(&env);
     }
 
     /// Get the configured price oracle address.
@@ -1394,8 +1808,11 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
-        env.events()
-            .publish((symbol_short!("ad_xfer"), admin), new_admin);
+        AdminTransferInitiated {
+            admin,
+            new_admin: new_admin.clone(),
+        }
+        .publish(&env);
     }
 
     /// Step 2 of the two-step transfer. The caller must be the pending
@@ -1410,7 +1827,10 @@ impl IndigoPayContract {
         pending.require_auth();
         env.storage().instance().set(&DataKey::Admin, &pending);
         env.storage().instance().remove(&DataKey::PendingAdmin);
-        env.events().publish((symbol_short!("ad_acc"),), pending);
+        AdminAccepted {
+            new_admin: pending.clone(),
+        }
+        .publish(&env);
     }
 
     /// Admin-only: cancel a pending admin transfer without promoting anyone.
@@ -1423,7 +1843,7 @@ impl IndigoPayContract {
             panic!("No pending admin transfer");
         }
         env.storage().instance().remove(&DataKey::PendingAdmin);
-        env.events().publish((symbol_short!("ad_xfc"), admin), ());
+        AdminTransferCancelled { admin }.publish(&env);
     }
 
     /// Returns the proposed new admin if a transfer is pending, or `None`.
@@ -1443,7 +1863,7 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::ContractPaused, &true);
-        env.events().publish((symbol_short!("paused"), admin), ());
+        ContractPaused { admin }.publish(&env);
     }
 
     /// Admin-only: lift the contract-level pause.
@@ -1453,7 +1873,7 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::ContractPaused, &false);
-        env.events().publish((symbol_short!("unpause"), admin), ());
+        ContractUnpaused { admin }.publish(&env);
     }
 
     /// Read-only: returns the contract-level pause state.
@@ -1487,10 +1907,12 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::UpgradeEffectiveAt, &effective_at);
-        env.events().publish(
-            (symbol_short!("upg_prop"), admin),
-            (new_wasm_hash, effective_at),
-        );
+        UpgradeProposed {
+            admin,
+            new_wasm_hash,
+            effective_at,
+        }
+        .publish(&env);
     }
 
     /// Permissionless: step 2 of the upgrade timelock. Callable by anyone
@@ -1526,7 +1948,10 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .remove(&DataKey::UpgradeEffectiveAt);
-        env.events().publish((symbol_short!("upg_exec"),), pending);
+        UpgradeExecuted {
+            wasm_hash: pending,
+        }
+        .publish(&env);
     }
 
     /// Admin-only: cancel a pending upgrade without executing it. Use
@@ -1542,7 +1967,7 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .remove(&DataKey::UpgradeEffectiveAt);
-        env.events().publish((symbol_short!("upg_cncl"), admin), ());
+        UpgradeCancelled { admin }.publish(&env);
     }
 
     /// Read-only: returns `(hash, effective_at_ledger)` for the pending
