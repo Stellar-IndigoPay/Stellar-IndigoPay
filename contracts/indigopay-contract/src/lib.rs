@@ -131,6 +131,21 @@ pub struct ProjectMilestoneNFT {
     pub minted_at_ledger: u32,
 }
 
+/// A recurring donation subscription — donor intent recorded on-chain so a
+/// backend cron can execute periodic payments autonomously.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Subscription {
+    pub donor: Address,
+    pub project_id: String,
+    pub amount: i128,
+    pub interval_ledgers: u32,
+    pub next_payment_ledger: u32,
+    pub remaining_payments: u32,
+    pub active: bool,
+    pub created_at_ledger: u32,
+}
+
 /// A community voting proposal to verify a project.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -228,6 +243,10 @@ pub enum DataKey {
     // returns. Used by indexers to confirm which WASM is currently
     // running at the contract address.
     LastExecutedUpgrade,
+    // Recurring donations
+    Subscription(u32),
+    DonorSubscriptions(Address),
+    SubscriptionCount,
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -255,6 +274,12 @@ const MAX_CO2_PER_XLM: u32 = 100_000;
 // (e.g. by exiting their positions or signalling objections via
 // off-chain channels) before the WASM is swapped.
 const UPGRADE_TIMELOCK_LEDGERS: u32 = 34_560;
+
+// Minimum interval between recurring payments: 43 200 ledgers ≈ 2.5 days.
+// Prevents rapid-fire payment execution by the backend cron.
+const MIN_INTERVAL_LEDGERS: u32 = 43_200;
+// Maximum number of payments per subscription (60 = 5 years at monthly interval).
+const MAX_PAYMENTS: u32 = 60;
 
 /// Read the stored admin. Caller must compare and panic on mismatch.
 /// Centralised so every admin check uses the same pattern.
@@ -1560,6 +1585,181 @@ impl IndigoPayContract {
     pub fn get_last_executed_upgrade(env: Env) -> Option<BytesN<32>> {
         env.storage().instance().get(&DataKey::LastExecutedUpgrade)
     }
+
+    // ─── Recurring donations ────────────────────────────────────────────────
+
+    /// Create a recurring donation subscription. Validates the project is
+    /// active, amount > 0, interval >= MIN_INTERVAL_LEDGERS, and max_payments
+    /// <= MAX_PAYMENTS. Stores the subscription on-chain and appends its ID
+    /// to the donor's subscription list.
+    pub fn create_subscription(
+        env: Env,
+        donor: Address,
+        project_id: String,
+        amount: i128,
+        interval_ledgers: u32,
+        max_payments: u32,
+    ) -> u32 {
+        donor.require_auth();
+        require_not_paused(&env);
+
+        if amount <= 0 {
+            panic!("Donation amount must be positive");
+        }
+        if interval_ledgers < MIN_INTERVAL_LEDGERS {
+            panic!("Interval too short");
+        }
+        if max_payments > MAX_PAYMENTS {
+            panic!("Max payments exceeds limit");
+        }
+
+        // Verify the project exists and is active.
+        let project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        if !project.active {
+            panic!("Project is not accepting donations");
+        }
+        if project.paused {
+            panic!("Project is temporarily paused");
+        }
+
+        let sc: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubscriptionCount)
+            .unwrap_or(0);
+        let sub_id = sc.checked_add(1).expect("SubscriptionCount overflow");
+        let next_payment = env
+            .ledger()
+            .sequence()
+            .checked_add(interval_ledgers)
+            .expect("next_payment_ledger overflow");
+
+        let subscription = Subscription {
+            donor: donor.clone(),
+            project_id: project_id.clone(),
+            amount,
+            interval_ledgers,
+            next_payment_ledger: next_payment,
+            remaining_payments: max_payments,
+            active: true,
+            created_at_ledger: env.ledger().sequence(),
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Subscription(sub_id), &subscription);
+        env.storage()
+            .instance()
+            .set(&DataKey::SubscriptionCount, &sub_id);
+
+        // Track this subscription ID in the donor's list.
+        let mut ids: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonorSubscriptions(donor.clone()))
+            .unwrap_or(Vec::new(&env));
+        ids.push_back(sub_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonorSubscriptions(donor.clone()), &ids);
+
+        env.events().publish(
+            (symbol_short!("sub_new"), donor.clone(), project_id),
+            (sub_id, amount, interval_ledgers, max_payments),
+        );
+
+        sub_id
+    }
+
+    /// Cancel an active subscription. Only the donor who created it can
+    /// cancel. Sets `active = false` so the backend cron skips it.
+    pub fn cancel_subscription(env: Env, donor: Address, subscription_id: u32) {
+        donor.require_auth();
+        let mut subscription: Subscription = env
+            .storage()
+            .instance()
+            .get(&DataKey::Subscription(subscription_id))
+            .expect("Subscription not found");
+        if subscription.donor != donor {
+            panic!("Only the subscription owner can cancel");
+        }
+        if !subscription.active {
+            panic!("Subscription already cancelled");
+        }
+        subscription.active = false;
+        env.storage()
+            .instance()
+            .set(&DataKey::Subscription(subscription_id), &subscription);
+        env.events().publish(
+            (symbol_short!("sub_cncl"), donor),
+            (subscription_id, subscription.remaining_payments),
+        );
+    }
+
+    /// Admin-only: mark a payment as executed. Decrements remaining_payments
+    /// and updates next_payment_ledger. Auto-cancels when remaining_payments
+    /// reaches zero. Called by the backend cron after a successful on-chain
+    /// donation transaction.
+    pub fn mark_payment_executed(
+        env: Env,
+        admin: Address,
+        subscription_id: u32,
+        new_next_payment_ledger: u32,
+    ) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        let mut subscription: Subscription = env
+            .storage()
+            .instance()
+            .get(&DataKey::Subscription(subscription_id))
+            .expect("Subscription not found");
+        if !subscription.active {
+            panic!("Subscription is not active");
+        }
+        subscription.remaining_payments = subscription
+            .remaining_payments
+            .checked_sub(1)
+            .expect("remaining_payments underflow");
+        subscription.next_payment_ledger = new_next_payment_ledger;
+        if subscription.remaining_payments == 0 {
+            subscription.active = false;
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::Subscription(subscription_id), &subscription);
+        env.events().publish(
+            (symbol_short!("sub_paid"), admin),
+            (subscription_id, subscription.remaining_payments, subscription.active),
+        );
+    }
+
+    /// Retrieve a subscription by its global ID.
+    pub fn get_subscription(env: Env, subscription_id: u32) -> Subscription {
+        env.storage()
+            .instance()
+            .get(&DataKey::Subscription(subscription_id))
+            .expect("Subscription not found")
+    }
+
+    /// List all subscriptions for a donor.
+    pub fn get_donor_subscriptions(env: Env, donor: Address) -> Vec<Subscription> {
+        let ids: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonorSubscriptions(donor))
+            .unwrap_or(Vec::new(&env));
+        let mut subs: Vec<Subscription> = Vec::new(&env);
+        for id in ids.iter() {
+            if let Some(sub) = env.storage().instance().get(&DataKey::Subscription(id)) {
+                subs.push_back(sub);
+            }
+        }
+        subs
+    }
 }
 
 // ─── Mock oracle (test / integration use only) ────────────────────────────────
@@ -2863,5 +3063,242 @@ mod tests {
     fn test_cancel_upgrade_without_pending_fails() {
         let (_env, _cid, client, admin) = setup_admin_only();
         client.cancel_upgrade(&admin);
+    }
+
+    // ─── Subscription tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_create_subscription_success() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let amount = 10 * STROOP;
+        let interval = MIN_INTERVAL_LEDGERS;
+        let max_payments = 12;
+
+        let sub_id = client.create_subscription(&donor, &pid, &amount, &interval, &max_payments);
+        assert_eq!(sub_id, 1);
+
+        let sub = client.get_subscription(&sub_id);
+        assert_eq!(sub.donor, donor);
+        assert_eq!(sub.project_id, pid);
+        assert_eq!(sub.amount, amount);
+        assert_eq!(sub.interval_ledgers, interval);
+        assert_eq!(sub.remaining_payments, max_payments);
+        assert!(sub.active);
+    }
+
+    #[test]
+    fn test_get_donor_subscriptions_returns_list() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let amount = 10 * STROOP;
+        let interval = MIN_INTERVAL_LEDGERS;
+
+        let id1 = client.create_subscription(&donor, &pid, &amount, &interval, &6);
+        let id2 = client.create_subscription(&donor, &pid, &amount, &interval, &12);
+
+        let subs = client.get_donor_subscriptions(&donor);
+        assert_eq!(subs.len(), 2);
+        // Subscriptions are returned in creation order (oldest first).
+        assert_eq!(subs.get(0).unwrap().remaining_payments, 6);
+        assert_eq!(subs.get(0).unwrap().donor, donor);
+        assert_eq!(subs.get(1).unwrap().remaining_payments, 12);
+        assert_eq!(subs.get(1).unwrap().donor, donor);
+        // IDs should match the order they were created
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+    }
+
+    #[test]
+    fn test_cancel_subscription_sets_active_false() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let sub_id = client.create_subscription(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &MIN_INTERVAL_LEDGERS,
+            &12,
+        );
+
+        let sub_before = client.get_subscription(&sub_id);
+        assert!(sub_before.active);
+
+        client.cancel_subscription(&donor, &sub_id);
+
+        let sub_after = client.get_subscription(&sub_id);
+        assert!(!sub_after.active);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only the subscription owner can cancel")]
+    fn test_cancel_subscription_non_owner_panics() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let sub_id = client.create_subscription(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &MIN_INTERVAL_LEDGERS,
+            &12,
+        );
+        client.cancel_subscription(&attacker, &sub_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Subscription already cancelled")]
+    fn test_cancel_subscription_already_cancelled_panics() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let sub_id = client.create_subscription(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &MIN_INTERVAL_LEDGERS,
+            &12,
+        );
+        client.cancel_subscription(&donor, &sub_id);
+        client.cancel_subscription(&donor, &sub_id);
+    }
+
+    #[test]
+    fn test_mark_payment_executed_decrements_remaining() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let sub_id = client.create_subscription(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &MIN_INTERVAL_LEDGERS,
+            &3,
+        );
+
+        let new_next = env.ledger().sequence() + MIN_INTERVAL_LEDGERS;
+        client.mark_payment_executed(&admin, &sub_id, &new_next);
+
+        let sub = client.get_subscription(&sub_id);
+        assert_eq!(sub.remaining_payments, 2);
+        assert_eq!(sub.next_payment_ledger, new_next);
+        assert!(sub.active);
+    }
+
+    #[test]
+    fn test_mark_payment_executed_auto_cancels_at_zero() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let sub_id = client.create_subscription(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &MIN_INTERVAL_LEDGERS,
+            &2,
+        );
+
+        let new_next = env.ledger().sequence() + MIN_INTERVAL_LEDGERS;
+        client.mark_payment_executed(&admin, &sub_id, &new_next);
+        let sub1 = client.get_subscription(&sub_id);
+        assert_eq!(sub1.remaining_payments, 1);
+        assert!(sub1.active);
+
+        let new_next2 = new_next + MIN_INTERVAL_LEDGERS;
+        client.mark_payment_executed(&admin, &sub_id, &new_next2);
+        let sub2 = client.get_subscription(&sub_id);
+        assert_eq!(sub2.remaining_payments, 0);
+        assert!(!sub2.active);
+    }
+
+    #[test]
+    #[should_panic(expected = "Project is not accepting donations")]
+    fn test_create_subscription_deactivated_project_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.deactivate_project(&admin, &pid);
+        let donor = Address::generate(&env);
+        client.create_subscription(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &MIN_INTERVAL_LEDGERS,
+            &12,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Interval too short")]
+    fn test_create_subscription_interval_too_short_panics() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        client.create_subscription(&donor, &pid, &(10 * STROOP), &(MIN_INTERVAL_LEDGERS - 1), &12);
+    }
+
+    #[test]
+    #[should_panic(expected = "Max payments exceeds limit")]
+    fn test_create_subscription_max_payments_exceeded_panics() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        client.create_subscription(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &MIN_INTERVAL_LEDGERS,
+            &(MAX_PAYMENTS + 1),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Donation amount must be positive")]
+    fn test_create_subscription_zero_amount_panics() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        client.create_subscription(&donor, &pid, &0, &MIN_INTERVAL_LEDGERS, &12);
+    }
+
+    #[test]
+    fn test_subscription_events_emitted() {
+        let (env, _cid, client, admin, pid) = setup();
+        env.mock_all_auths();
+        let donor = Address::generate(&env);
+
+        // Create subscription
+        let sub_id = client.create_subscription(
+            &donor,
+            &pid,
+            &(5 * STROOP),
+            &MIN_INTERVAL_LEDGERS,
+            &6,
+        );
+
+        let events = env.events().all();
+        let created = events.iter().find(|e| {
+            let topics: Vec<Symbol> = e.topics.clone();
+            topics.get(0).unwrap() == symbol_short!("sub_new")
+        });
+        assert!(created.is_some());
+
+        // Cancel subscription
+        client.cancel_subscription(&donor, &sub_id);
+        let events = env.events().all();
+        let cancelled = events.iter().find(|e| {
+            let topics: Vec<Symbol> = e.topics.clone();
+            topics.get(0).unwrap() == symbol_short!("sub_cncl")
+        });
+        assert!(cancelled.is_some());
+
+        // Re-create and mark payment executed
+        let sub_id2 = client.create_subscription(
+            &donor,
+            &pid,
+            &(5 * STROOP),
+            &MIN_INTERVAL_LEDGERS,
+            &3,
+        );
+        let new_next = env.ledger().sequence() + MIN_INTERVAL_LEDGERS;
+        client.mark_payment_executed(&admin, &sub_id2, &new_next);
+        let events = env.events().all();
+        let paid = events.iter().find(|e| {
+            let topics: Vec<Symbol> = e.topics.clone();
+            topics.get(0).unwrap() == symbol_short!("sub_paid")
+        });
+        assert!(paid.is_some());
     }
 }

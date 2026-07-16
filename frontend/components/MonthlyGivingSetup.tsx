@@ -9,6 +9,7 @@ import type { MonthlySubscription } from "@/utils/types";
 interface MonthlyGivingSetupProps {
   projectId: string;
   projectName: string;
+  publicKey: string;
   onClose: () => void;
   onCreated?: (subscriptionId: string) => void;
 }
@@ -23,6 +24,7 @@ const DURATION_OPTIONS = [
 export default function MonthlyGivingSetup({
   projectId,
   projectName,
+  publicKey,
   onClose,
   onCreated,
 }: MonthlyGivingSetupProps) {
@@ -35,9 +37,10 @@ export default function MonthlyGivingSetup({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const all = loadMonthlySubscriptions();
-    setSubscriptions(all.filter((sub) => sub.projectId === projectId));
-  }, [projectId]);
+    loadMonthlySubscriptions(publicKey).then((all) => {
+      setSubscriptions(all.filter((sub) => sub.projectId === projectId));
+    });
+  }, [projectId, publicKey]);
 
   const canCreate = useMemo(() => {
     const amount = Number.parseFloat(amountXLM);
@@ -46,7 +49,7 @@ export default function MonthlyGivingSetup({
     return true;
   }, [amountXLM, startDate]);
 
-  const handleCreate = () => {
+  const handleCreate = async () => {
     if (!canCreate) {
       setError("Enter a valid amount and start date.");
       return;
@@ -54,15 +57,19 @@ export default function MonthlyGivingSetup({
     setError(null);
     const durationMonths =
       duration === "indefinite" ? null : Number.parseInt(duration, 10);
-    const created = createMonthlySubscription({
-      projectId,
-      projectName,
-      amountXLM: Number.parseFloat(amountXLM).toFixed(7),
-      startDate: new Date(startDate).toISOString(),
-      durationMonths,
-    });
-    onCreated?.(created.id);
-    onClose();
+    try {
+      const created = await createMonthlySubscription(publicKey, {
+        projectId,
+        projectName,
+        amountXLM: Number.parseFloat(amountXLM).toFixed(7),
+        startDate: new Date(startDate).toISOString(),
+        durationMonths,
+      });
+      onCreated?.(String(created.subscriptionId));
+      onClose();
+    } catch {
+      setError("Failed to create subscription. Please try again.");
+    }
   };
 
   return (

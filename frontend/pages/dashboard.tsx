@@ -9,7 +9,7 @@ import ProjectCard from "@/components/ProjectCard";
 import ImpactCertificate from "@/components/ImpactCertificate";
 import ProjectRating from "@/components/ProjectRating";
 import { fetchProfile, fetchDonorHistory, fetchProjects } from "@/lib/api";
-import { getDueMonthlySubscriptions } from "@/lib/monthlyGiving";
+import { getDueMonthlySubscriptions as fetchDueMonthlySubscriptions } from "@/lib/monthlyGiving";
 import { getXLMBalance, getFriendBotFunding, NETWORK } from "@/lib/stellar";
 import {
   formatXLM,
@@ -101,7 +101,7 @@ export default function Dashboard({ publicKey, onConnect }: DashboardProps) {
 
   useEffect(() => {
     if (!publicKey) return;
-    setDueSubscriptions(getDueMonthlySubscriptions());
+    fetchDueMonthlySubscriptions(publicKey).then(setDueSubscriptions).catch(() => {});
   }, [publicKey]);
 
   const streak = calculateStreak(donations);

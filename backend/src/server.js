@@ -59,6 +59,7 @@ const {
 } = require("./services/webhookQueue");
 const { start: startPushQueue } = require("./services/pushQueue");
 const { startIndexer } = require("./services/indexerService");
+const recurringDonationService = require("./services/recurringDonationService");
 const lifecycle = require("./services/lifecycle");
 
 Sentry.init({
@@ -226,6 +227,18 @@ try {
   );
 }
 
+// Recurring donations
+try {
+  const recurringDonationsRouter = require("./routes/recurringDonations");
+  app.use("/api/recurring-donations", recurringDonationsRouter);
+  app.use("/api/v1/recurring-donations", recurringDonationsRouter);
+} catch (err) {
+  logger.error(
+    { event: "route_load_failed", route: "recurring-donations", err: err.message },
+    "Failed to load recurring-donations route module",
+  );
+}
+
 // ── 404 + error handling ────────────────────────────────────────────────────
 app.use((req, res) =>
   res.status(404).json({ error: `${req.method} ${req.path} not found` }),
@@ -290,6 +303,14 @@ async function startServer() {
     ),
   );
 
+  // Recurring donation service — polls for due subscriptions every 5 min.
+  recurringDonationService.start().catch((err) =>
+    logger.error(
+      { event: "recurring_startup_error", err: err.message },
+      "Recurring donation service failed to start",
+    ),
+  );
+
   // The Stellar Horizon stream in the indexer holds the event loop open.
   // Register a shutdown hook so the stream is closed cleanly on SIGTERM.
   lifecycle.onShutdown(async () => {
@@ -298,6 +319,15 @@ async function startServer() {
       if (typeof indexer.stop === "function") await indexer.stop();
     } catch {
       // Indexer may already be stopped; swallow.
+    }
+  });
+
+  lifecycle.onShutdown(async () => {
+    try {
+      if (typeof recurringDonationService.stop === "function")
+        await recurringDonationService.stop();
+    } catch {
+      // Swallow.
     }
   });
 
