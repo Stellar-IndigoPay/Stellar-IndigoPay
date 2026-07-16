@@ -1592,6 +1592,75 @@ router.get("/:id/badge-holders", async (req, res, next) => {
   }
 });
 
+/**
+ * GET /api/projects/:id/uploads
+ * List all uploads for a specific project.
+ * Only the project owner or an admin can access this list.
+ */
+router.get("/:id/uploads", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const projectRes = await pool.query(
+      "SELECT wallet_address FROM projects WHERE id = $1",
+      [id],
+    );
+    if (projectRes.rows.length === 0) {
+      throw new AppError("NOT_FOUND", { detail: "Project not found" });
+    }
+
+    const projectOwner = projectRes.rows[0].wallet_address;
+    const authHeader = req.headers.authorization || "";
+    let isAuthorized = false;
+
+    const walletAddress =
+      req.query.walletAddress || (req.body && req.body.walletAddress) || "";
+    if (walletAddress && walletAddress === projectOwner) {
+      isAuthorized = true;
+    } else if (authHeader.startsWith("Bearer ")) {
+      try {
+        const { verifyToken } = require("../middleware/auth");
+        const decoded = verifyToken(authHeader.slice(7));
+        if (decoded && decoded.role === "admin") {
+          isAuthorized = true;
+        }
+      } catch (e) {
+        // Ignore token errors and fall through
+      }
+    }
+
+    if (!isAuthorized) {
+      throw new AppError("FORBIDDEN", {
+        detail: "Only the project owner or an admin can view uploads",
+      });
+    }
+
+    const uploadsRes = await pool.query(
+      `SELECT id, storage_key, original_name, mime_type, size_bytes, sha256_hash, uploaded_by, created_at 
+       FROM project_uploads 
+       WHERE project_id = $1 
+       ORDER BY created_at DESC`,
+      [id]
+    );
+
+    res.json({
+      success: true,
+      data: uploadsRes.rows.map(row => ({
+        id: row.id,
+        storageKey: row.storage_key,
+        originalName: row.original_name,
+        mimeType: row.mime_type,
+        sizeBytes: Number(row.size_bytes),
+        sha256Hash: row.sha256_hash,
+        uploadedBy: row.uploaded_by,
+        createdAt: row.created_at,
+        url: `/api/uploads/${encodeURIComponent(row.storage_key)}`
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
 
 // Export internal functions for testing
