@@ -1,6 +1,17 @@
-import type { MonthlySubscription } from "@/utils/types";
-
-export const MONTHLY_GIVING_STORAGE_KEY = "indigopay_monthly_subscriptions";
+/**
+ * lib/monthlyGiving.ts — Recurring donation client
+ *
+ * Reads/writes subscriptions through the backend API instead of localStorage.
+ * Legacy MonthlySubscription type is kept for backward compatibility with the
+ * dashboard UI; the actual data is synced from the RecurringDonation on-chain
+ * state via the backend.
+ */
+import type { MonthlySubscription, RecurringDonation } from "@/utils/types";
+import {
+  fetchRecurringDonations,
+  createRecurringDonation,
+  cancelRecurringDonation,
+} from "@/lib/api";
 
 function addMonths(isoDate: string, months: number) {
   const date = new Date(isoDate);
@@ -14,88 +25,94 @@ function addMonths(isoDate: string, months: number) {
   return date.toISOString();
 }
 
-export function loadMonthlySubscriptions(): MonthlySubscription[] {
-  if (typeof window === "undefined") return [];
+function toMonthlySubscription(
+  rd: RecurringDonation,
+  projectName?: string,
+): MonthlySubscription {
+  const ledgerIntervalSecs = rd.interval_ledgers * 5; // 5s per ledger
+  const intervalMs = ledgerIntervalSecs * 1000;
+  const now = new Date();
+  const nextDueDate = new Date(now.getTime() + intervalMs);
+
+  return {
+    id: String(rd.subscription_id),
+    projectId: rd.project_id,
+    projectName: projectName || rd.project_id,
+    amountXLM: (Number(rd.amount_stroops) / 10_000_000).toFixed(7),
+    startDate: new Date(
+      Date.now() - intervalMs * (rd.remaining_payments || 1),
+    ).toISOString(),
+    durationMonths: rd.remaining_payments,
+    nextDueDate: nextDueDate.toISOString(),
+    remainingMonths: rd.remaining_payments,
+    status: rd.active ? "active" : "completed",
+    createdAt: rd.created_at,
+    history: [],
+  };
+}
+
+export async function loadMonthlySubscriptions(
+  donorAddress?: string,
+): Promise<MonthlySubscription[]> {
+  if (!donorAddress) return [];
   try {
-    const raw = window.localStorage.getItem(MONTHLY_GIVING_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    const subs = await fetchRecurringDonations(donorAddress);
+    return subs.map((s) => toMonthlySubscription(s));
   } catch {
     return [];
   }
 }
 
-export function saveMonthlySubscriptions(subscriptions: MonthlySubscription[]) {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(
-    MONTHLY_GIVING_STORAGE_KEY,
-    JSON.stringify(subscriptions),
-  );
-}
-
-export function createMonthlySubscription(input: {
-  projectId: string;
-  projectName: string;
-  amountXLM: string;
-  startDate: string;
-  durationMonths: number | null;
-}) {
-  const nowIso = new Date().toISOString();
-  const subscription: MonthlySubscription = {
-    id: `sub_${Math.random().toString(36).slice(2, 10)}_${Date.now()}`,
-    projectId: input.projectId,
-    projectName: input.projectName,
-    amountXLM: input.amountXLM,
-    startDate: input.startDate,
-    durationMonths: input.durationMonths,
-    nextDueDate: input.startDate,
-    remainingMonths: input.durationMonths,
-    status: "active",
-    createdAt: nowIso,
-    history: [],
-  };
-
-  const all = loadMonthlySubscriptions();
-  saveMonthlySubscriptions([subscription, ...all]);
-  return subscription;
-}
-
-export function markMonthlySubscriptionPaid(
-  subscriptionId: string,
-  amountXLM: string,
+export async function saveMonthlySubscriptions(
+  _subscriptions: MonthlySubscription[],
 ) {
-  const all = loadMonthlySubscriptions();
-  const updated = all.map((sub) => {
-    if (sub.id !== subscriptionId || sub.status !== "active") return sub;
-
-    const nextRemaining =
-      sub.remainingMonths === null
-        ? null
-        : Math.max(sub.remainingMonths - 1, 0);
-    const completed = nextRemaining === 0;
-    const nextStatus: MonthlySubscription["status"] = completed
-      ? "completed"
-      : "active";
-
-    return {
-      ...sub,
-      history: [
-        { paidAt: new Date().toISOString(), amountXLM },
-        ...sub.history,
-      ],
-      remainingMonths: nextRemaining,
-      status: nextStatus,
-      nextDueDate: completed ? sub.nextDueDate : addMonths(sub.nextDueDate, 1),
-    };
-  });
-  saveMonthlySubscriptions(updated);
+  // No-op: subscriptions are managed via the API.
+  // This function exists for backward compatibility with existing callers.
 }
 
-export function getDueMonthlySubscriptions() {
-  const now = new Date();
-  return loadMonthlySubscriptions().filter((sub) => {
-    if (sub.status !== "active") return false;
-    return new Date(sub.nextDueDate).getTime() <= now.getTime();
+export async function createMonthlySubscription(
+  donorAddress: string,
+  input: {
+    projectId: string;
+    projectName?: string;
+    amountXLM: string;
+    startDate: string;
+    durationMonths: number | null;
+  },
+) {
+  const amountNum = Number(input.amountXLM);
+  const amountStroops = Math.floor(amountNum * 10_000_000);
+  const intervalLedgers = 432_000; // ~30 days
+  const maxPayments = input.durationMonths || 12;
+
+  const result = await createRecurringDonation({
+    donorAddress,
+    projectId: input.projectId,
+    amount: amountStroops,
+    intervalLedgers,
+    maxPayments,
   });
+
+  return result;
+}
+
+export async function markMonthlySubscriptionPaid(
+  _subscriptionId: string,
+  _amountXLM: string,
+) {
+  // No-op: the backend cron handles this.
+}
+
+export async function getDueMonthlySubscriptions(donorAddress?: string) {
+  if (!donorAddress) return [];
+  const now = new Date();
+  try {
+    const subs = await fetchRecurringDonations(donorAddress);
+    return subs
+      .filter((s) => s.active)
+      .map((s) => toMonthlySubscription(s))
+      .filter((sub) => new Date(sub.nextDueDate).getTime() <= now.getTime());
+  } catch {
+    return [];
+  }
 }

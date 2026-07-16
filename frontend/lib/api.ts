@@ -15,6 +15,7 @@ import type {
   LeaderboardEntry,
   EscrowJob,
   ProjectCampaign,
+  RecurringDonation,
 } from "@/utils/types";
 
 const api = axios.create({
@@ -490,6 +491,58 @@ export async function fetchSubscriberCount(projectId: string) {
     `/api/subscriptions/${projectId}/count`,
   );
   return data.count;
+}
+
+// ── Recurring Donations ───────────────────────────────────────────
+
+/**
+ * Create an on-chain recurring donation subscription.
+ */
+export async function createRecurringDonation(payload: {
+  donorAddress: string;
+  projectId: string;
+  amount: number;
+  intervalLedgers: number;
+  maxPayments: number;
+  signedXDR?: string;
+}) {
+  const { data } = await api.post<{
+    success: boolean;
+    data: {
+      subscriptionId: number;
+      donorAddress: string;
+      projectId: string;
+      amountStroops: number;
+      xdr?: string;
+      networkPassphrase?: string;
+    };
+  }>("/api/recurring-donations", payload);
+  return data.data;
+}
+
+/**
+ * Fetch all recurring donations for a donor.
+ */
+export async function fetchRecurringDonations(donorAddress: string) {
+  const { data } = await api.get<{
+    success: boolean;
+    data: RecurringDonation[];
+  }>(`/api/recurring-donations/${donorAddress}`);
+  return data.data;
+}
+
+/**
+ * Cancel a recurring donation (off-chain DB mark).
+ */
+export async function cancelRecurringDonation(
+  id: number,
+  donorAddress: string,
+) {
+  const { data } = await api.delete<{
+    success: boolean;
+    data: RecurringDonation;
+  }>(`/api/recurring-donations/${id}`, { data: { donorAddress } });
+  return data.data;
 }
 
 // ── Global Stats ─────────────────────────────────────────────────

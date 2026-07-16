@@ -17,7 +17,7 @@ import {
 } from "@/lib/stellar";
 import { findBestPath, getAllBalances, formatConversionEstimate, formatPathForDisplay, type ConversionEstimate, type DonorAsset } from "@/lib/dex";
 import { signTransactionWithWallet } from "@/lib/wallet";
-import { recordDonation } from "@/lib/api";
+import { recordDonation, createRecurringDonation } from "@/lib/api";
 import { formatXLM, formatCO2 } from "@/utils/format";
 import type { ClimateProject } from "@/utils/types";
 
@@ -292,6 +292,23 @@ export default function DonateForm({
           transactionHash: result.hash,
         });
 
+        // Create recurring subscription if monthly checkbox is checked
+        if (makeMonthly && currency === "XLM") {
+          try {
+            const intervalLedgers = 432_000; // ~30 days
+            const maxPayments = 12;
+            await createRecurringDonation({
+              donorAddress: publicKey,
+              projectId: project.id,
+              amount: Math.floor(amountNum * 10_000_000),
+              intervalLedgers,
+              maxPayments,
+            });
+          } catch {
+            // Subscription creation failure is non-critical; don't block success
+          }
+        }
+
         setStep("success");
         onSuccess?.();
       } else {
@@ -341,6 +358,22 @@ export default function DonateForm({
           message: message.trim() || undefined,
           transactionHash: result.hash,
         });
+
+        if (makeMonthly && currency === "XLM") {
+          try {
+            const intervalLedgers = 432_000;
+            const maxPayments = 12;
+            await createRecurringDonation({
+              donorAddress: publicKey,
+              projectId: project.id,
+              amount: Math.floor(amountNum * 10_000_000),
+              intervalLedgers,
+              maxPayments,
+            });
+          } catch {
+            // Non-critical
+          }
+        }
 
         setStep("success");
         onSuccess?.();
@@ -587,6 +620,21 @@ export default function DonateForm({
         <p className={`text-xs mt-1 ${getCounterColor()}`}>
           {charCount} / 100 characters
         </p>
+
+        {/* Make this monthly */}
+        {currency === "XLM" && (
+          <label className="flex items-center gap-2 cursor-pointer mt-3">
+            <input
+              type="checkbox"
+              checked={makeMonthly}
+              onChange={(e) => setMakeMonthly(e.target.checked)}
+              className="w-4 h-4 rounded border-gray-300 text-[#4F46E5] focus:ring-[#4F46E5]"
+            />
+            <span className="text-sm text-[#475569] dark:text-[#94A3B8] font-body">
+              Make this a monthly donation
+            </span>
+          </label>
+        )}
       </div>
 
       {step === "error" && error && (

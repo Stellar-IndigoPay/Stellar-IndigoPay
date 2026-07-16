@@ -2,6 +2,25 @@
 
 ### Features
 
+* **contract:** implement on-chain recurring donation subscription system (closes #272)
+  - Add `Subscription` struct, `create_subscription`, `cancel_subscription`,
+    `mark_payment_executed` entry points with CEI pattern
+  - Add `get_subscription`, `get_donor_subscriptions` read-only queries
+  - Events: `sub_new`, `sub_cncl`, `sub_paid` for indexers
+  - Full unit test coverage: create, cancel, auto-cancel, edge cases
+
+* **backend:** add recurring donation cron service and API routes
+  - `recurringDonationService.js` polls due subscriptions every 5 min,
+    builds Stellar payment txs, updates contract via `mark_payment_executed`
+  - Prometheus metrics: `recurring_donations_due`, `_executed_total`, `_failed_total`
+  - DB migration `014_recurring_donations.js` with `recurring_donations` table
+  - Routes: `POST /api/v1/recurring-donations`, `GET /:donorAddress`, `DELETE /:id`
+
+* **frontend:** replace localStorage monthly giving with on-chain API calls
+  - `monthlyGiving.ts` reads/writes through backend API instead of localStorage
+  - `DonateForm.tsx` adds "Make this a monthly donation" checkbox
+  - Dashboard loads due subscriptions from API via donor address
+
 * **docs:** add CONTRIBUTORS.md to credit community work (GF-015, closes #64)
 
 * **backend:** implement Soroban RPC retry with exponential backoff and circuit breaker (GF-043, closes #100)

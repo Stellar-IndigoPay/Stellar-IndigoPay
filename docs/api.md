@@ -277,6 +277,47 @@ wallet owner via the `wallet` query parameter.
 
 ---
 
+## Recurring Donations
+
+### `POST /api/v1/recurring-donations`
+
+Create an on-chain recurring donation subscription.
+
+**Request Body:**
+```json
+{
+  "donorAddress": "G...",
+  "projectId": "proj_001",
+  "amount": 100,
+  "intervalLedgers": 432000,
+  "maxPayments": 12,
+  "signedXDR": "AAAA..." // optional, if pre-signed by donor
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "subscriptionId": 1,
+    "donorAddress": "G...",
+    "projectId": "proj_001",
+    "amountStroops": 1000000000
+  }
+}
+```
+
+### `GET /api/v1/recurring-donations/:donorAddress`
+
+List all recurring donations for a donor.
+
+### `DELETE /api/v1/recurring-donations/:id`
+
+Cancel a recurring donation (off-chain). Requires `donorAddress` in body.
+
+---
+
 ## Badge Tiers
 
 | Tier       | Threshold   | Emoji |

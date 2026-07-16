@@ -88,6 +88,10 @@ const envSchema = z.object({
   // raised_xlm increment. Default 8.0 means 1 USDC = 8 XLM.
   USDC_TO_XLM_RATE: z.string().optional().default("8.0"),
 
+  // ── Recurring donations ────────────────────────────────────────────────────
+  RECURRING_SIGNER_SECRET: z.string().optional().default(""),
+  RECURRING_POLL_INTERVAL_MS: z.string().optional().default("300000"),
+
   // ── Rate limiter ──────────────────────────────────────────────────────────
   RATE_LIMIT_MAX: z.string().optional().default("150"),
 

@@ -254,6 +254,18 @@ try {
   );
 }
 
+// Recurring donations
+try {
+  const recurringDonationsRouter = require("./routes/recurringDonations");
+  app.use("/api/recurring-donations", recurringDonationsRouter);
+  app.use("/api/v1/recurring-donations", recurringDonationsRouter);
+} catch (err) {
+  logger.error(
+    { event: "route_load_failed", route: "recurring-donations", err: err.message },
+    "Failed to load recurring-donations route module",
+  );
+}
+
 // ── 404 + error handling ────────────────────────────────────────────────────
 app.use((req, res) =>
   res.status(404).json({ error: `${req.method} ${req.path} not found` }),
@@ -315,6 +327,14 @@ async function startServer() {
     logger.error(
       { event: "indexer_startup_error", err: err.message },
       "Indexer failed to start",
+    ),
+  );
+
+  // Recurring donation service — polls for due subscriptions every 5 min.
+  recurringDonationService.start().catch((err) =>
+    logger.error(
+      { event: "recurring_startup_error", err: err.message },
+      "Recurring donation service failed to start",
     ),
   );
 
