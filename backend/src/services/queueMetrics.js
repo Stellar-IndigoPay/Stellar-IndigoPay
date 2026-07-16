@@ -6,7 +6,8 @@ const VALID_QUEUES = [
   "webhook-deliveries",
   "ai-summary",
   "profile-update",
-  "monthly-impact-digest"
+  "monthly-impact-digest",
+  "donation-matching"
 ];
 
 function isValidQueue(name) {

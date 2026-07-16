@@ -28,6 +28,10 @@ jest.mock("../../src/services/webhook", () => ({
   checkAndDeliverMilestones: jest.fn().mockResolvedValue(),
 }));
 
+jest.mock("../../src/services/matchQueue", () => ({
+  enqueueDonationMatching: jest.fn().mockResolvedValue("job-id"),
+}));
+
 jest.mock("../../src/logger", () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -38,6 +42,7 @@ jest.mock("../../src/logger", () => ({
 // ── Module imports (after mocks) ──────────────────────────────────────────
 
 const pool = require("../../src/db/pool");
+const { enqueueDonationMatching } = require("../../src/services/matchQueue");
 const { handleDonation } = require("../../src/services/indexerService");
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -169,6 +174,20 @@ describe("handleDonation with native XLM", () => {
     await handleDonation(projectId, op, { isNative: true, isUSDC: false });
 
     expect(client.release).toHaveBeenCalled();
+  });
+
+  test("enqueues donation matching for XLM donations", async () => {
+    const client = makeMockClient();
+    pool.connect.mockResolvedValue(client);
+
+    await handleDonation(projectId, op, { isNative: true, isUSDC: false });
+
+    expect(enqueueDonationMatching).toHaveBeenCalledWith(
+      projectId,
+      100, // parsed XLM amount
+      op.from,
+      op.transaction_hash,
+    );
   });
 });
 

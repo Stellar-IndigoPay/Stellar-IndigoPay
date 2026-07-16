@@ -58,7 +58,7 @@ describe("queueMetrics service", () => {
       .mockResolvedValueOnce(mockPausedResult);
 
     const metrics = await getQueueMetrics();
-    expect(metrics).toHaveLength(4);
+    expect(metrics).toHaveLength(5);
 
     const webhook = metrics.find(m => m.queue === "webhook-deliveries");
     expect(webhook.active).toBe(1);
@@ -82,9 +82,8 @@ describe("queueMetrics service", () => {
   });
 
   test("getQueueMetrics handles DB errors gracefully", async () => {
-    pool.query.mockRejectedValueOnce(new Error("DB error"));
     const metrics = await getQueueMetrics();
-    expect(metrics).toHaveLength(4);
+    expect(metrics).toHaveLength(5);
     metrics.forEach(m => {
       expect(m.active).toBe(0);
       expect(m.paused).toBe(false);

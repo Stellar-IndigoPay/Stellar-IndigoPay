@@ -11,6 +11,7 @@ const pool = require("../db/pool");
 const { createRateLimiter } = require("../middleware/rateLimiter");
 const { mapDonationRow } = require("../services/store");
 const { enqueueProfileUpdate } = require("../services/profileQueue");
+const { enqueueDonationMatching } = require("../services/matchQueue");
 const { server } = require("../services/stellar");
 const donationLimiter = createRateLimiter(10, 1); // 10 requests per minute
 
@@ -144,49 +145,19 @@ async function recordDonation(req, res, next) {
       created_at: new Date().toISOString(),
     };
 
-    // Check for active matching offers
+    // Enqueue donation matching for background processing
     if (currency === "XLM") {
-      const matchesResult = await client.query(
-        `SELECT id, matcher_address, cap_xlm, matched_xlm, multiplier
-         FROM donation_matches
-         WHERE project_id = $1 AND expires_at > NOW()`,
-        [projectId],
-      );
-
-      for (const match of matchesResult.rows) {
-        const matchedXlm = Number.parseFloat(match.matched_xlm || "0");
-        const capXlm = Number.parseFloat(match.cap_xlm);
-        const remaining = capXlm - matchedXlm;
-
-        if (remaining > 0) {
-          const matchAmount = Math.min(
-            parsedAmount * match.multiplier,
-            remaining,
-          );
-
-          await client.query(
-            `INSERT INTO donations (
-              id, project_id, donor_address, amount_xlm, amount, currency, message, transaction_hash, created_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
-            [
-              uuid(),
-              projectId,
-              match.matcher_address,
-              matchAmount,
-              matchAmount,
-              "XLM",
-              `Matching donation for donation from ${donorAddress}`,
-              `match-${transactionHash}-${match.id}`,
-            ],
-          );
-
-          await client.query(
-            "UPDATE donation_matches SET matched_xlm = matched_xlm + $1 WHERE id = $2",
-            [matchAmount, match.id],
-          );
-        }
-      }
+      enqueueDonationMatching(
+        projectId,
+        parsedAmount,
+        donorAddress,
+        transactionHash,
+      ).catch((err) => {
+        logger.error(
+          { event: "matching_enqueue_failed", err, projectId, donorAddress },
+          "Failed to enqueue donation matching job",
+        );
+      });
     }
 
     // Update project totals

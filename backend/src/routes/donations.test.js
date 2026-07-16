@@ -16,10 +16,15 @@ jest.mock("../services/profileQueue", () => ({
   enqueueProfileUpdate: jest.fn().mockResolvedValue(undefined),
 }));
 
+jest.mock("../services/matchQueue", () => ({
+  enqueueDonationMatching: jest.fn().mockResolvedValue("job-id"),
+}));
+
 const { server } = require("../services/stellar");
 const pool = require("../db/pool");
 const { computeBadges } = require("../services/store");
 const { enqueueProfileUpdate } = require("../services/profileQueue");
+const { enqueueDonationMatching } = require("../services/matchQueue");
 const { recordDonation } = require("./donations");
 
 function makePublicKey(char = "A") {
@@ -170,7 +175,6 @@ describe("POST /api/donations", () => {
       queryResult([]), // dedup check
       queryResult(), // BEGIN
       queryResult([donationRow]), // INSERT donation
-      queryResult([]), // SELECT donation_matches (empty)
       queryResult(), // UPDATE projects
       queryResult(), // COMMIT
     );
@@ -198,6 +202,12 @@ describe("POST /api/donations", () => {
     );
     expect(client.release).toHaveBeenCalledTimes(1);
     expect(enqueueProfileUpdate).toHaveBeenCalledWith(donorAddress);
+    expect(enqueueDonationMatching).toHaveBeenCalledWith(
+      "project-1",
+      10,
+      donorAddress,
+      transactionHash,
+    );
   });
 
   test("returns 404 for an unknown project id", async () => {
@@ -301,7 +311,6 @@ describe("POST /api/donations", () => {
           created_at: "2026-03-29T10:00:00.000Z",
         },
       ]), // INSERT donation
-      queryResult([]), // SELECT donation_matches (empty)
       queryResult(), // UPDATE projects
       queryResult(), // COMMIT
     );
@@ -340,7 +349,6 @@ describe("POST /api/donations", () => {
           created_at: "2026-03-29T10:00:00.000Z",
         },
       ]), // INSERT donation
-      queryResult([]), // SELECT donation_matches (empty)
       queryResult(), // UPDATE projects
       queryResult(), // COMMIT
     );
@@ -420,9 +428,7 @@ describe("POST /api/donations", () => {
       queryResult([]),
       queryResult(),
       queryResult([donationRow]),
-      queryResult([]),
       queryResult(),
-      queryResult([]),
       queryResult([{ count: "1" }]),
       queryResult(),
     );
@@ -459,7 +465,6 @@ describe("POST /api/donations", () => {
           created_at: "2026-03-29T10:00:00.000Z",
         },
       ]),
-      queryResult([]),
       queryResult(),
       queryResult(),
     );
@@ -506,9 +511,7 @@ describe("profile upsert on first donation", () => {
       queryResult([]),
       queryResult(),
       queryResult([donationRow]),
-      queryResult([]),
       queryResult(),
-      queryResult([]),
       queryResult([{ count: "1" }]),
       queryResult(),
     );
@@ -545,7 +548,6 @@ describe("profile upsert on first donation", () => {
       queryResult([]),
       queryResult(),
       queryResult([donationRow]),
-      queryResult([]),
       queryResult(),
       queryResult([
         {

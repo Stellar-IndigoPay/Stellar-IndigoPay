@@ -56,7 +56,7 @@ describe("Admin Queues Router", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(res.body.data).toHaveLength(4);
+    expect(res.body.data).toHaveLength(5);
   });
 
   test("POST /api/admin/queues/:name/pause pauses queue and logs audit action", async () => {

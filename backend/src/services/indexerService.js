@@ -22,6 +22,20 @@ const { computeBadges } = require("./store");
 const { checkAndDeliverMilestones } = require("./webhook");
 const logger = require("../logger");
 
+// Lazy-loaded to avoid circular dependency at module init time
+let enqueueDonationMatching = null;
+function getMatchQueue() {
+  if (!enqueueDonationMatching) {
+    try {
+      ({ enqueueDonationMatching } = require("./matchQueue"));
+    } catch {
+      // matchQueue may not be available in all environments
+      enqueueDonationMatching = null;
+    }
+  }
+  return enqueueDonationMatching;
+}
+
 let lastProcessedLedger = 0;
 let isRunning = false;
 let io = null;
@@ -286,7 +300,17 @@ async function handleDonation(projectId, op, { isNative, isUSDC }) {
       });
     }
 
-    // 6. Check milestones asynchronously
+    // 6. Enqueue donation matching for background processing (XLM only)
+    if (isNative) {
+      const matchFn = getMatchQueue();
+      if (matchFn) {
+        matchFn(projectId, amountXlmForRaised, donorAddress, txHash).catch(
+          () => {},
+        );
+      }
+    }
+
+    // 7. Check milestones asynchronously
     checkAndDeliverMilestones(projectId).catch(() => {});
   } catch (err) {
     if (inTransaction) await client.query("ROLLBACK");
