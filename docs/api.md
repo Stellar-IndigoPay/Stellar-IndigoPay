@@ -28,6 +28,86 @@ existing clients.
 
 ---
 
+## Rate Limiting
+
+The API uses a Redis-backed rate limiter with **two strategies**, configured
+per-endpoint via policies in `rateLimitConfig.js`. Every response includes
+standard rate-limit headers so clients can self-throttle.
+
+When Redis is unavailable the rate limiter degrades gracefully to pass-through
+(all requests are allowed), and a warning is emitted. This ensures the API
+stays available during a cache-layer outage.
+
+### Strategies
+
+| Strategy        | Description                                                                                  |
+| --------------- | -------------------------------------------------------------------------------------------- |
+| Sliding window  | The default. Counts requests in a rolling time window. Limits to `points` req / `duration`s. |
+| Token bucket    | Burst-tolerant. Bucket holds up to `capacity` tokens. Tokens refill at `refillRate`/sec.     |
+
+### Response headers
+
+Every response carries the following headers:
+
+| Header                  | Description                                                    |
+| ----------------------- | -------------------------------------------------------------- |
+| `X-RateLimit-Limit`     | Maximum requests allowed in the window (or bucket capacity).   |
+| `X-RateLimit-Remaining` | Requests remaining in the current window (or tokens left).     |
+| `X-RateLimit-Reset`     | Epoch seconds when the limit resets (or next token available). |
+
+When the limit is exceeded (HTTP 429) an additional header is sent:
+
+| Header        | Description                                      |
+| ------------- | ------------------------------------------------ |
+| `Retry-After` | Seconds to wait before retrying.                 |
+
+### 429 response body
+
+```json
+{
+  "error": "Too many requests — Try again later.",
+  "retryAfter": 1742169602
+}
+```
+
+### Per-endpoint tiers
+
+| Method | Path pattern                              | Strategy       | Limit                        |
+| ------ | ----------------------------------------- | -------------- | ---------------------------- |
+| POST   | `/api/donations`                          | Sliding window | 10 req / 60 s                |
+| POST   | `/api/verification-requests`              | Sliding window | 10 req / 900 s (15 min)      |
+| POST   | `/api/projects`                           | Sliding window | 5 req / 60 s                 |
+| PATCH  | `/api/projects/*`                         | Sliding window | 20 req / 60 s                |
+| POST   | `/api/profiles`                           | Sliding window | 10 req / 60 s                |
+| PATCH  | `/api/profiles/*`                         | Sliding window | 10 req / 60 s                |
+| POST   | `/api/ratings`                            | Sliding window | 10 req / 60 s                |
+| POST   | `/api/uploads`                            | Sliding window | 10 req / 60 s                |
+| *      | `/api/admin/*`                            | Sliding window | 30 req / 60 s                |
+| POST   | `/api/admin/*`                            | Sliding window | 20 req / 60 s                |
+| GET    | `/api/projects/*`                         | Sliding window | 100 req / 60 s               |
+| GET    | `/api/leaderboard`                        | Sliding window | 60 req / 60 s                |
+| GET    | `/api/stats`                              | Sliding window | 60 req / 60 s                |
+| GET    | `/api/impact/*`                           | Sliding window | 60 req / 60 s                |
+| GET    | `/api/map`                                | Sliding window | 60 req / 60 s                |
+| GET    | `/api/analytics/*`                        | **Token bucket** | Capacity: 10, Refill: 0.5/s (~30 req / min sustained) |
+| POST   | `/api/notifications`                      | Sliding window | 30 req / 60 s                |
+| POST   | `/api/subscriptions`                      | Sliding window | 20 req / 60 s                |
+| *      | *(catch-all default)*                     | Sliding window | 150 req / 900 s (15 min)     |
+
+The **token bucket** strategy on the analytics endpoint allows short bursts
+of up to 10 requests while the sustained rate is ~30 requests per minute.
+This is ideal for dashboards that may spike on page load.
+
+### Redis failure fallback
+
+If Redis is unreachable the rate limiter enters **degraded mode**:
+- All requests pass through to the route handler.
+- `X-RateLimit-Limit` and `X-RateLimit-Remaining` headers are still set
+  with the configured limit.
+- A warning is logged for observability.
+
+---
+
 ## Health
 
 `GET /health` — Server status check.

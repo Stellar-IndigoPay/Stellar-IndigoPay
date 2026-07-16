@@ -6,7 +6,6 @@ const crypto = require("crypto");
 const express = require("express");
 const router = express.Router();
 const { v4: uuid } = require("uuid");
-const { z } = require("zod");
 const QRCode = require("qrcode");
 const pool = require("../db/pool");
 const { logAdminAction } = require("../services/audit");
@@ -26,6 +25,8 @@ const { enqueueAISummary } = require("../services/summaryQueue");
 const { Contract, TransactionBuilder } = require("@stellar/stellar-sdk");
 const redis = require("../services/redis");
 const { adminRequired } = require("../middleware/auth");
+// sanitizedStringField imported but unused — kept for future validation use
+// eslint-disable-next-line no-unused-vars
 const { sanitizedStringField } = require("../middleware/validation");
 const { geocode } = require("../services/geocoder");
 const logger = require("../logger");
