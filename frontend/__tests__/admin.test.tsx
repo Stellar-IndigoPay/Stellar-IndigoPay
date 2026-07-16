@@ -38,8 +38,16 @@ jest.mock("@/lib/api", () => ({
 }));
 
 describe("AdminIndex - Queue Monitoring", () => {
+  const originalConfirm = window.confirm;
+
   beforeEach(() => {
     jest.clearAllMocks();
+    // Mock window.confirm so purge flows through
+    window.confirm = jest.fn().mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    window.confirm = originalConfirm;
   });
 
   test("renders wallet connect when not connected", () => {
@@ -63,17 +71,16 @@ describe("AdminIndex - Queue Monitoring", () => {
     expect(screen.getByText("4")).toBeTruthy(); // Completed count
     expect(screen.getByText("42.8%")).toBeTruthy(); // Failure rate
 
+    // Test purge action (before pause so queuesLoading stays false)
+    const purgeBtn = screen.getByRole("button", { name: "Purge" });
+    fireEvent.click(purgeBtn);
+    await waitFor(() => {
+      expect(mockPurgeQueue).toHaveBeenCalledWith("webhook-deliveries", "GADMINPUBLICKEY");
+    });
+
     // Test pause action
     const pauseBtn = screen.getByRole("button", { name: "Pause" });
     fireEvent.click(pauseBtn);
     expect(mockPauseQueue).toHaveBeenCalledWith("webhook-deliveries", "GADMINPUBLICKEY");
-
-    // Test purge action
-    const originalConfirm = window.confirm;
-    window.confirm = jest.fn().mockReturnValue(true);
-    const purgeBtn = screen.getByRole("button", { name: "Purge" });
-    fireEvent.click(purgeBtn);
-    expect(mockPurgeQueue).toHaveBeenCalledWith("webhook-deliveries", "GADMINPUBLICKEY");
-    window.confirm = originalConfirm;
   });
 });

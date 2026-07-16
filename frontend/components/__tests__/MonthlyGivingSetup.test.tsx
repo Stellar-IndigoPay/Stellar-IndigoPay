@@ -86,7 +86,7 @@ describe("MonthlyGivingSetup modal a11y", () => {
     );
     const results = await axe(container);
     // Only fail the build on critical/serious issues per WCAG 2.1 AA scope.
-    const blocking = results.violations.filter((v) =>
+    const blocking = results.violations.filter((v: { impact?: string | null }) =>
       ["critical", "serious"].includes(v.impact ?? ""),
     );
     expect(blocking).toEqual([]);

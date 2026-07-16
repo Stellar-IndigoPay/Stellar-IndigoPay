@@ -37,7 +37,7 @@ export default function MonthlyGivingSetup({
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
   // Trap focus while the dialog is open and Esc closes it (WCAG 2.4.3).
-  useFocusTrap<HTMLDivElement>({
+  const focusTrapRef = useFocusTrap<HTMLDivElement>({
     active: true,
     onEscape: onClose,
     initialFocusRef: closeButtonRef,
@@ -93,6 +93,7 @@ export default function MonthlyGivingSetup({
       }}
     >
       <div
+        ref={focusTrapRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="monthly-giving-setup-title"
@@ -122,8 +123,9 @@ export default function MonthlyGivingSetup({
 
         <div className="grid sm:grid-cols-2 gap-4">
           <div>
-            <label className="label">Amount (XLM)</label>
+            <label htmlFor="mg-amount" className="label">Amount (XLM)</label>
             <input
+              id="mg-amount"
               type="number"
               min="1"
               step="1"
@@ -133,8 +135,9 @@ export default function MonthlyGivingSetup({
             />
           </div>
           <div>
-            <label className="label">Start Date</label>
+            <label htmlFor="mg-start-date" className="label">Start Date</label>
             <input
+              id="mg-start-date"
               type="date"
               value={startDate}
               onChange={(e) => setStartDate(e.target.value)}

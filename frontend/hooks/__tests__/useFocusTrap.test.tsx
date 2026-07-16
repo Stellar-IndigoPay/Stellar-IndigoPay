@@ -10,6 +10,16 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useFocusTrap } from "../useFocusTrap";
 
+// jsdom does not compute layout, so offsetParent is always null.
+// The focus trap filters elements with null offsetParent (assuming
+// display:none). Mock it so focusable elements are discovered.
+beforeAll(() => {
+  Object.defineProperty(HTMLElement.prototype, "offsetParent", {
+    get() { return this.parentNode || document.body; },
+    configurable: true,
+  });
+});
+
 function TrapHarness({
   active = true,
   onEscape,

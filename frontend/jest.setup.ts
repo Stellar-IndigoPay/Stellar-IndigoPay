@@ -4,3 +4,13 @@ import "@testing-library/jest-dom";
 import { toHaveNoViolations } from "jest-axe";
 
 expect.extend(toHaveNoViolations);
+
+// jsdom does not implement ResizeObserver; supply a minimal polyfill so that
+// components using it (e.g. the embeddable widget, recharts) don't crash.
+if (typeof globalThis.ResizeObserver === "undefined") {
+  globalThis.ResizeObserver = class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}

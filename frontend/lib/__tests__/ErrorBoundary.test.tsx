@@ -90,12 +90,14 @@ describe("ErrorBoundary", () => {
     function ToggleHarness() {
       const [boom, setBoom] = React.useState(true);
       return (
-        <ErrorBoundary>
+        <>
           <button data-testid="stop-booming" onClick={() => setBoom(false)}>
             stop
           </button>
-          <Bomb shouldThrow={boom} />
-        </ErrorBoundary>
+          <ErrorBoundary>
+            <Bomb shouldThrow={boom} />
+          </ErrorBoundary>
+        </>
       );
     }
     render(<ToggleHarness />);

@@ -83,7 +83,7 @@ function Dump() {
       <span data-testid="connected">{String(w.isConnected)}</span>
       <span data-testid="connecting">{String(w.isConnecting)}</span>
       <span data-testid="error">{w.error ?? ""}</span>
-      <button data-testid="connect" onClick={() => void w.connect()}>
+      <button data-testid="connect" disabled={w.isConnecting} onClick={() => void w.connect()}>
         connect
       </button>
       <button data-testid="disconnect" onClick={w.disconnect}>
@@ -208,7 +208,9 @@ describe("WalletProvider", () => {
     const button = screen.getByTestId("connect");
     await act(async () => {
       button.click();
-      // Synthetic second click before the first promise resolves
+    });
+    // Second click is now blocked by the disabled attribute (set via w.isConnecting)
+    await act(async () => {
       button.click();
     });
 
