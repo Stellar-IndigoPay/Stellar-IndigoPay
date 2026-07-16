@@ -150,7 +150,7 @@ router.get("/:donorAddress", async (req, res, next) => {
     }
 
     const result = await pool.query(
-      `SELECT * FROM recurring_donations WHERE donor_address = $1 ORDER BY created_at DESC`,
+      "SELECT * FROM recurring_donations WHERE donor_address = $1 ORDER BY created_at DESC",
       [donorAddress],
     );
 
