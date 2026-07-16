@@ -54,11 +54,17 @@
             class="search-input"
             placeholder="Search projects…"
             autocomplete="off"
+            aria-label="Search projects"
           />
           <ul id="search-dropdown" class="search-dropdown hidden"></ul>
         </div>
 
-        <ul id="project-list" class="project-list">
+        <ul
+          id="project-list"
+          class="project-list"
+          role="listbox"
+          aria-label="Saved projects"
+        >
           <!-- Skeleton Loader -->
           <li class="glass-panel project-item skeleton">
             <div class="skeleton-avatar"></div>
@@ -69,32 +75,99 @@
           </li>
         </ul>
 
-        <!-- Quick Donate -->
-        <section class="glass-panel donate-section">
+        <!-- Donation Form -->
+        <form
+          id="donation-form"
+          class="glass-panel donate-section"
+          novalidate
+          aria-label="Donation form"
+        >
           <h3>Quick Donate</h3>
-          <p class="subtitle">Support your active project directly.</p>
-          <div class="preset-amounts">
-            <button class="btn preset-btn" data-amount="1">1 XLM</button>
-            <button class="btn preset-btn" data-amount="5">5 XLM</button>
-            <button class="btn preset-btn" data-amount="10">10 XLM</button>
+          <p class="subtitle">Send XLM directly from your connected wallet.</p>
+
+          <div class="form-field">
+            <label for="source-address" class="form-label">Source (your wallet)</label>
+            <input
+              type="text"
+              id="source-address"
+              class="settings-input"
+              placeholder="G... (auto-filled on connect)"
+              autocomplete="off"
+              spellcheck="false"
+              readonly
+            />
           </div>
+
+          <div class="form-field">
+            <label for="destination" class="form-label">Destination address</label>
+            <input
+              type="text"
+              id="destination"
+              class="settings-input"
+              placeholder="G... (Stellar public key)"
+              autocomplete="off"
+              spellcheck="false"
+              required
+            />
+          </div>
+
+          <div class="form-field">
+            <label for="memo" class="form-label">Memo (optional)</label>
+            <input
+              type="text"
+              id="memo"
+              class="settings-input"
+              placeholder="Up to 28 bytes"
+              autocomplete="off"
+              maxlength="28"
+            />
+          </div>
+
+          <div class="preset-amounts" role="group" aria-label="Preset amounts">
+            <button
+              type="button"
+              class="btn preset-btn"
+              data-amount="1"
+              aria-label="Donate 1 XLM"
+            >
+              1 XLM
+            </button>
+            <button
+              type="button"
+              class="btn preset-btn"
+              data-amount="5"
+              aria-label="Donate 5 XLM"
+            >
+              5 XLM
+            </button>
+            <button
+              type="button"
+              class="btn preset-btn"
+              data-amount="10"
+              aria-label="Donate 10 XLM"
+            >
+              10 XLM
+            </button>
+          </div>
+
           <div class="custom-donate">
             <div class="input-wrapper">
               <input
                 type="number"
-                id="custom-amount-input"
-                placeholder="Custom"
-                min="0.1"
+                id="amount"
+                placeholder="Custom amount"
+                min="0.0000001"
                 step="0.1"
+                aria-label="Custom donation amount in XLM"
               />
               <span class="currency">XLM</span>
             </div>
-            <button id="donate-submit" class="btn donate-btn" disabled>
+            <button type="submit" id="donate-submit" class="btn donate-btn" disabled>
               Donate
             </button>
           </div>
-          <div id="status-message" class="status-message"></div>
-        </section>
+          <div id="status-message" class="status-message" role="status" aria-live="polite"></div>
+        </form>
       </main>
     </div>
     <script src="dist/popup.js"></script>

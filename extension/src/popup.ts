@@ -1,18 +1,25 @@
 import {
   Asset,
   Horizon,
+  Memo,
   Networks,
   Operation,
   TransactionBuilder,
 } from '@stellar/stellar-sdk';
-import { loadSettings, type ExtensionSettings } from './settings';
+import { ExtensionSettings, loadSettings } from './settings';
 
 // Module-level vars
 let API_BASE = 'https://api.stellar-indigopay.app';
 let NETWORK_PASSPHRASE: string = Networks.TESTNET;
 let horizonUrl = 'https://horizon-testnet.stellar.org';
 let server = new Horizon.Server(horizonUrl);
+let currentPublicKey: string | null = null;
+let selectedProjectId: string | null = null;
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let activeDropdownIndex = -1;
+let dropdownItems: HTMLLIElement[] = [];
 
+// ==================== SETTINGS APPLICATION ====================
 function applySettings(settings: ExtensionSettings) {
   API_BASE = settings.backendUrl;
   if (settings.network === 'mainnet') {
@@ -23,154 +30,50 @@ function applySettings(settings: ExtensionSettings) {
     horizonUrl = 'https://horizon-testnet.stellar.org';
   }
   server = new Horizon.Server(horizonUrl);
+  updateNetworkBadge(settings.network);
 }
 
-// ==================== BADGE HELPERS ====================
-function abbreviateNumber(num: number): string {
-  if (num < 1000) return Math.floor(num).toString();
-  if (num < 1000000) return Math.floor(num / 1000) + 'K';
-  return (num / 1000000).toFixed(1) + 'M';
-}
-
-async function updateDonationBadge(totalXLM: number) {
-  const text = abbreviateNumber(totalXLM);
-  try {
-    await chrome.action.setBadgeText({ text });
-    await chrome.action.setBadgeBackgroundColor({ color: '#10b981' });
-    console.log(`[IndigoPay Badge] Updated: ${text} (${totalXLM} XLM)`);
-  } catch (e) {
-    console.error('Badge update failed:', e);
+function updateNetworkBadge(network: 'testnet' | 'mainnet') {
+  const badge = document.getElementById('network-badge');
+  if (!badge) return;
+  if (network === 'mainnet') {
+    badge.textContent = 'Mainnet';
+    badge.classList.remove('network-badge-testnet');
+    badge.classList.add('network-badge-mainnet');
+  } else {
+    badge.textContent = 'Testnet';
+    badge.classList.remove('network-badge-mainnet');
+    badge.classList.add('network-badge-testnet');
   }
 }
 
-async function signWithFreighter(xdr: string): Promise<string> {
-  const freighter = (window as any).freighter;
-  if (!freighter) throw new Error('Freighter extension not found');
-
-  const signedXdr: string = await freighter.signTransaction(xdr, {
-    networkPassphrase: NETWORK_PASSPHRASE,
-  });
-  return signedXdr;
-}
-
-async function submitTransaction(signedXdr: string): Promise<string> {
-  const tx = TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASE);
-  const result = await server.submitTransaction(tx as any);
-  return (result as any).hash;
-}
-
-// --- Project search autocomplete ---
-
-interface ProjectResult {
-  id: string;
-  name: string;
-  category: string;
-  walletAddress?: string;
-}
-
-let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-let activeDropdownIndex = -1;
-let dropdownItems: HTMLLIElement[] = [];
-let selectedProjectId: string | null = null;
-
-// --- Project list keyboard navigation ---
-
-let projectListItems: HTMLLIElement[] = [];
-let activeProjectListIndex = -1;
-
-/**
- * Render a list of projects into the #project-list element and wire up
- * keyboard navigation (ArrowDown/Up, Enter, Escape).
- *
- * Keyboard contract (issue #489):
- *   ArrowDown  — move focus to the next project item
- *   ArrowUp    — move focus to the previous project item
- *   Enter      — open the focused project in a new tab or trigger donation
- *   Escape     — close the popup window
- */
-function renderProjectList(projects: ProjectResult[]) {
-  const list = document.getElementById('project-list') as HTMLUListElement | null;
-  if (!list) return;
-
-  list.innerHTML = '';
-  projectListItems = [];
-  activeProjectListIndex = -1;
-
-  if (projects.length === 0) {
-    const empty = document.createElement('li');
-    empty.className = 'glass-panel project-item';
-    empty.textContent = 'No saved projects yet.';
-    list.appendChild(empty);
-    return;
-  }
-
-  projects.forEach((p) => {
-    const li = document.createElement('li');
-    li.className = 'glass-panel project-item';
-    li.setAttribute('tabindex', '0');
-    li.setAttribute('role', 'option');
-    li.setAttribute('aria-label', `${escapeHtml(p.name)}, ${escapeHtml(p.category)}`);
-    li.innerHTML = `
-      <div class="project-avatar" aria-hidden="true">
-        <span style="font-size:20px">${getProjectEmoji(p.category)}</span>
-      </div>
-      <div class="project-info">
-        <div class="project-name">${escapeHtml(p.name)}</div>
-        <div class="project-desc">${escapeHtml(p.category)}</div>
-      </div>
-    `;
-
-    // Mouse click — select this project for donation
-    li.addEventListener('click', () => {
-      selectProjectListItem(li, p);
-    });
-
-    // Allow keyboard activation via Enter/Space
-    li.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        selectProjectListItem(li, p);
-      }
-    });
-
-    list.appendChild(li);
-    projectListItems.push(li);
-  });
-
-  // Update badge count
-  const badge = document.querySelector('.section-header .badge');
-  if (badge) badge.textContent = String(projects.length);
-}
-
-function selectProjectListItem(li: HTMLLIElement, p: ProjectResult) {
-  // Highlight the selected item
-  projectListItems.forEach((el) => el.classList.remove('active'));
-  li.classList.add('active');
-
-  // Pre-fill the destination address field
-  const destInput = document.getElementById('destination') as HTMLInputElement | null;
-  const searchInput = document.getElementById('project-search') as HTMLInputElement | null;
-  if (p.walletAddress && destInput) {
-    destInput.value = p.walletAddress;
-    selectedProjectId = p.id;
-  }
-  if (searchInput) {
-    searchInput.value = p.name;
-  }
-}
-
-function highlightProjectListItem(index: number) {
-  projectListItems.forEach((el, i) => {
-    if (i === index) {
-      el.classList.add('active');
-      el.focus();
-    } else {
-      el.classList.remove('active');
+// ==================== HELPERS ====================
+function escapeHtml(input: string): string {
+  return input.replace(/[&<>"']/g, (ch) => {
+    switch (ch) {
+      case '&':
+        return '&amp;';
+      case '<':
+        return '&lt;';
+      case '>':
+        return '&gt;';
+      case '"':
+        return '&quot;';
+      case "'":
+        return '&#39;';
+      default:
+        return ch;
     }
   });
 }
 
-/** Map a project category to a representative emoji. */
+function setStatus(msg: string, kind: 'success' | 'error' | 'info' = 'info') {
+  const el = document.getElementById('status-message');
+  if (!el) return;
+  el.textContent = msg;
+  el.className = 'status-message' + (kind === 'error' ? ' error' : kind === 'success' ? ' success' : '');
+}
+
 function getProjectEmoji(category: string): string {
   const map: Record<string, string> = {
     'Reforestation': '🌳',
@@ -185,38 +88,101 @@ function getProjectEmoji(category: string): string {
   return map[category] ?? '🌿';
 }
 
-function initProjectListKeyNav() {
-  const list = document.getElementById('project-list') as HTMLUListElement | null;
-  if (!list) return;
+// ==================== BADGE ====================
+function abbreviateNumber(num: number): string {
+  if (num < 1000) return Math.floor(num).toString();
+  if (num < 1000000) return Math.floor(num / 1000) + 'K';
+  return (num / 1000000).toFixed(1) + 'M';
+}
 
-  list.setAttribute('role', 'listbox');
-  list.setAttribute('aria-label', 'Saved projects');
+async function updateDonationBadge(totalXLM: number) {
+  const text = abbreviateNumber(totalXLM);
+  try {
+    await chrome.action.setBadgeText({ text });
+    await chrome.action.setBadgeBackgroundColor({ color: '#10b981' });
+  } catch (e) {
+    console.error('Badge update failed:', e);
+  }
+}
 
-  list.addEventListener('keydown', (e) => {
-    if (projectListItems.length === 0) return;
-
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      activeProjectListIndex = Math.min(
-        activeProjectListIndex + 1,
-        projectListItems.length - 1,
-      );
-      highlightProjectListItem(activeProjectListIndex);
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      activeProjectListIndex = Math.max(activeProjectListIndex - 1, 0);
-      highlightProjectListItem(activeProjectListIndex);
-    } else if (e.key === 'Enter' && activeProjectListIndex >= 0) {
-      projectListItems[activeProjectListIndex]?.click();
-    } else if (e.key === 'Escape') {
-      window.close();
-    }
+async function saveTotalDonated(total: number) {
+  return new Promise<void>((resolve) => {
+    chrome.storage.local.set({ totalDonatedXLM: Math.max(0, total) }, () => {
+      updateDonationBadge(total);
+      resolve();
+    });
   });
 }
 
-function debounce(fn: () => void, ms: number) {
-  if (searchDebounceTimer !== null) clearTimeout(searchDebounceTimer);
-  searchDebounceTimer = setTimeout(fn, ms);
+// ==================== FREIGHTER / WALLET ====================
+async function connectWallet() {
+  try {
+    const freighter = (window as any).freighter;
+    if (!freighter) {
+      setStatus('Please install the Freighter wallet extension.', 'error');
+      return;
+    }
+
+    const publicKey: string = await freighter.getPublicKey();
+    currentPublicKey = publicKey;
+
+    const addressEl = document.getElementById('wallet-address');
+    if (addressEl) addressEl.textContent = `${publicKey.slice(0, 8)}...${publicKey.slice(-4)}`;
+
+    const walletInfo = document.getElementById('wallet-info');
+    if (walletInfo) walletInfo.classList.remove('hidden');
+
+    const connectBtn = document.getElementById('connect-btn') as HTMLButtonElement | null;
+    if (connectBtn) {
+      connectBtn.textContent = '✓ Connected';
+      connectBtn.disabled = true;
+    }
+
+    const sourceInput = document.getElementById('source-address') as HTMLInputElement | null;
+    if (sourceInput) sourceInput.value = publicKey;
+
+    const profile = await fetchProfile(publicKey);
+    let total = 0;
+    if (profile?.data?.totalDonatedXLM) {
+      total = parseFloat(profile.data.totalDonatedXLM) || 0;
+    } else if (profile?.totalDonatedXLM) {
+      total = parseFloat(profile.totalDonatedXLM) || 0;
+    }
+    await saveTotalDonated(total);
+    setStatus('Wallet connected.', 'success');
+  } catch (err: any) {
+    console.error('Wallet connect error:', err);
+    setStatus('Failed to connect wallet: ' + (err.message || 'Unknown error'), 'error');
+  }
+}
+
+async function fetchProfile(publicKey: string): Promise<any> {
+  try {
+    const res = await fetch(`${API_BASE}/api/profiles/${encodeURIComponent(publicKey)}`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+// ==================== PROJECT SEARCH & LIST ====================
+interface ProjectResult {
+  id: string;
+  name: string;
+  category: string;
+  walletAddress?: string;
+}
+
+async function searchProjects(query: string): Promise<ProjectResult[]> {
+  try {
+    const res = await fetch(`${API_BASE}/api/projects?q=${encodeURIComponent(query)}`);
+    if (!res.ok) return [];
+    const json = await res.json();
+    return Array.isArray(json?.data) ? json.data : [];
+  } catch {
+    return [];
+  }
 }
 
 function renderDropdown(projects: ProjectResult[], dropdown: HTMLUListElement) {
@@ -235,7 +201,11 @@ function renderDropdown(projects: ProjectResult[], dropdown: HTMLUListElement) {
 
   projects.forEach((p) => {
     const li = document.createElement('li');
+    li.setAttribute('role', 'option');
     li.innerHTML = `
+      <div class="project-avatar" aria-hidden="true">
+        <span style="font-size:18px">${getProjectEmoji(p.category)}</span>
+      </div>
       <div>
         <div class="search-result-name">${escapeHtml(p.name)}</div>
         <div class="search-result-cat">${escapeHtml(p.category)}</div>
@@ -243,107 +213,282 @@ function renderDropdown(projects: ProjectResult[], dropdown: HTMLUListElement) {
     `;
     li.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      const destInput = document.getElementById('destination') as HTMLInputElement | null;
-      const searchInput = document.getElementById('project-search') as HTMLInputElement | null;
-      if (p.walletAddress && destInput) {
-        destInput.value = p.walletAddress;
-        selectedProjectId = p.id;
-      }
-      if (searchInput) {
-        searchInput.value = p.name;
-      }
+      selectProject(p);
       dropdown.classList.add('hidden');
     });
+    dropdown.appendChild(li);
+    dropdownItems.push(li);
   });
 }
 
-async function saveTotalDonated(total: number) {
-  return new Promise<void>((resolve) => {
-    chrome.storage.local.set({ totalDonatedXLM: Math.max(0, total) }, () => {
-      updateDonationBadge(total);
-      resolve();
+function selectProject(p: ProjectResult) {
+  selectedProjectId = p.id;
+  const searchInput = document.getElementById('project-search') as HTMLInputElement | null;
+  if (searchInput) searchInput.value = p.name;
+  const destInput = document.getElementById('destination') as HTMLInputElement | null;
+  if (destInput && p.walletAddress) destInput.value = p.walletAddress;
+}
+
+function renderProjectList(projects: ProjectResult[]) {
+  const list = document.getElementById('project-list');
+  if (!list) return;
+  list.innerHTML = '';
+
+  if (projects.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'glass-panel project-item';
+    empty.textContent = 'No saved projects yet.';
+    list.appendChild(empty);
+    return;
+  }
+
+  projects.forEach((p) => {
+    const li = document.createElement('li');
+    li.className = 'glass-panel project-item';
+    li.setAttribute('tabindex', '0');
+    li.setAttribute('role', 'option');
+    li.setAttribute('aria-label', `${p.name}, ${p.category}`);
+    li.innerHTML = `
+      <div class="project-avatar" aria-hidden="true">
+        <span style="font-size:20px">${getProjectEmoji(p.category)}</span>
+      </div>
+      <div class="project-info">
+        <div class="project-name">${escapeHtml(p.name)}</div>
+        <div class="project-desc">${escapeHtml(p.category)}</div>
+      </div>
+    `;
+    li.addEventListener('click', () => selectProject(p));
+    li.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        selectProject(p);
+      }
+    });
+    list.appendChild(li);
+  });
+
+  const badge = document.querySelector('.section-header .badge');
+  if (badge) badge.textContent = String(projects.length);
+}
+
+function debounceSearch(fn: () => void, ms: number) {
+  if (searchDebounceTimer !== null) clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(fn, ms);
+}
+
+function initProjectSearch() {
+  const input = document.getElementById('project-search') as HTMLInputElement | null;
+  const dropdown = document.getElementById('search-dropdown') as HTMLUListElement | null;
+  if (!input || !dropdown) return;
+
+  input.addEventListener('input', () => {
+    const q = input.value.trim();
+    if (!q) {
+      dropdown.classList.add('hidden');
+      return;
+    }
+    debounceSearch(async () => {
+      const results = await searchProjects(q);
+      renderDropdown(results, dropdown);
+    }, 250);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (dropdownItems.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      activeDropdownIndex = Math.min(activeDropdownIndex + 1, dropdownItems.length - 1);
+      highlightDropdown();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      activeDropdownIndex = Math.max(activeDropdownIndex - 1, 0);
+      highlightDropdown();
+    } else if (e.key === 'Enter' && activeDropdownIndex >= 0) {
+      e.preventDefault();
+      dropdownItems[activeDropdownIndex]?.dispatchEvent(new MouseEvent('mousedown'));
+    } else if (e.key === 'Escape') {
+      dropdown.classList.add('hidden');
+    }
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!(e.target instanceof Node) || (input.parentElement && !input.parentElement.contains(e.target))) {
+      dropdown.classList.add('hidden');
+    }
+  });
+}
+
+function highlightDropdown() {
+  dropdownItems.forEach((el, i) => {
+    el.classList.toggle('active', i === activeDropdownIndex);
+  });
+}
+
+// ==================== DONATION SUBMISSION ====================
+const STELLAR_ADDRESS_REGEX = /^G[A-Z2-7]{55}$/;
+
+async function signWithFreighter(xdr: string): Promise<string> {
+  const freighter = (window as any).freighter;
+  if (!freighter) throw new Error('Freighter extension not found');
+  return await freighter.signTransaction(xdr, { networkPassphrase: NETWORK_PASSPHRASE });
+}
+
+async function submitTransaction(signedXdr: string): Promise<string> {
+  const tx = TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASE);
+  const result: any = await server.submitTransaction(tx as any);
+  return result.hash;
+}
+
+async function sendDonation(
+  source: string,
+  destination: string,
+  amount: string,
+  memo: string,
+): Promise<string> {
+  const account = await server.loadAccount(source);
+  const native = Asset.native();
+
+  const txBuilder = new TransactionBuilder(account, {
+    fee: String(await server.fetchBaseFee()),
+    networkPassphrase: NETWORK_PASSPHRASE,
+  }).addOperation(
+    Operation.payment({
+      destination,
+      asset: native,
+      amount,
+    }),
+  );
+
+  if (memo) {
+    txBuilder.addMemo(Memo.text(memo));
+  }
+
+  const tx = txBuilder.setTimeout(180).build();
+  const xdr = tx.toXDR();
+
+  const signedXdr = await signWithFreighter(xdr);
+  return await submitTransaction(signedXdr);
+}
+
+function updateDonateButtonState() {
+  const amountInput = document.getElementById('amount') as HTMLInputElement | null;
+  const destinationInput = document.getElementById('destination') as HTMLInputElement | null;
+  const submit = document.getElementById('donate-submit') as HTMLButtonElement | null;
+  if (!submit || !amountInput || !destinationInput) return;
+
+  const amount = parseFloat(amountInput.value);
+  const valid = !!currentPublicKey && STELLAR_ADDRESS_REGEX.test(destinationInput.value.trim()) && amount > 0;
+  submit.disabled = !valid;
+}
+
+function handleDonateSubmit(e: Event) {
+  e.preventDefault();
+  const destination = (document.getElementById('destination') as HTMLInputElement).value.trim();
+  const amount = (document.getElementById('amount') as HTMLInputElement).value.trim();
+  const memo = (document.getElementById('memo') as HTMLInputElement).value.trim();
+
+  if (!currentPublicKey) {
+    setStatus('Connect your wallet first.', 'error');
+    return;
+  }
+  if (!STELLAR_ADDRESS_REGEX.test(destination)) {
+    setStatus('Destination is not a valid Stellar address.', 'error');
+    return;
+  }
+  if (!amount || parseFloat(amount) <= 0) {
+    setStatus('Enter a valid amount.', 'error');
+    return;
+  }
+
+  setStatus('Awaiting signature…', 'info');
+  sendDonation(currentPublicKey, destination, amount, memo)
+    .then((hash) => {
+      setStatus(`Sent! tx ${hash.slice(0, 8)}…`, 'success');
+      chrome.storage.local.get(['totalDonatedXLM'], (res) => {
+        const current = (res.totalDonatedXLM as number) || 0;
+        saveTotalDonated(current + parseFloat(amount));
+      });
+    })
+    .catch((err) => {
+      console.error(err);
+      setStatus(`Donate failed: ${err?.message || err}`, 'error');
+    });
+}
+
+function initPresetButtons() {
+  document.querySelectorAll<HTMLButtonElement>('.preset-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const amount = btn.dataset['amount'];
+      const amountInput = document.getElementById('amount') as HTMLInputElement | null;
+      if (amount && amountInput) {
+        amountInput.value = amount;
+        updateDonateButtonState();
+      }
     });
   });
 }
 
-async function updateTotalAfterDonation(amount: number) {
-  chrome.storage.local.get(['totalDonatedXLM'], async (result) => {
-    const current = (result.totalDonatedXLM as number) || 0;
-    await saveTotalDonated(current + amount);
+async function handlePendingDonations() {
+  const res = await new Promise<Record<string, any>>((resolve) => {
+    chrome.storage.local.get(
+      ['pendingDonationProjectId', 'pendingDonationAddress', 'pendingOverlayDonation'],
+      (r) => resolve(r as Record<string, any>),
+    );
   });
-}
 
-// ==================== PROFILE API ====================
-async function fetchProfile(publicKey: string): Promise<any> {
-  try {
-    const res = await fetch(`${API_BASE}/api/profiles/${encodeURIComponent(publicKey)}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json();
-  } catch (e) {
-    console.warn('Profile fetch failed (using local storage fallback):', e);
-    return null;
+  if (res.pendingOverlayDonation) {
+    chrome.storage.local.remove('pendingOverlayDonation');
+    const overlay = res.pendingOverlayDonation;
+    const destInput = document.getElementById('destination') as HTMLInputElement | null;
+    const amountInput = document.getElementById('amount') as HTMLInputElement | null;
+    const memoInput = document.getElementById('memo') as HTMLInputElement | null;
+    const searchInput = document.getElementById('project-search') as HTMLInputElement | null;
+    if (destInput && overlay.address) destInput.value = String(overlay.address);
+    if (amountInput && overlay.amount) amountInput.value = String(overlay.amount);
+    if (memoInput && overlay.memo) memoInput.value = String(overlay.memo);
+    if (searchInput && overlay.label) searchInput.value = String(overlay.label);
+    setStatus('Inline donate details pre-filled — review and confirm.', 'info');
+    return;
+  }
+
+  if (res.pendingDonationProjectId) {
+    chrome.storage.local.remove('pendingDonationProjectId');
+    try {
+      const response = await fetch(`${API_BASE}/api/projects/${res.pendingDonationProjectId}`);
+      if (response.ok) {
+        const json = await response.json();
+        selectProject({
+          id: json.data.id,
+          name: json.data.name,
+          category: json.data.category,
+          walletAddress: json.data.walletAddress,
+        });
+      }
+    } catch (err) {
+      console.error('Failed to pre-fill from context menu', err);
+    }
+    return;
+  }
+
+  if (res.pendingDonationAddress) {
+    chrome.storage.local.remove('pendingDonationAddress');
+    const destInput = document.getElementById('destination') as HTMLInputElement | null;
+    if (destInput) destInput.value = res.pendingDonationAddress;
   }
 }
-
-// ==================== WALLET CONNECT ====================
-let currentPublicKey: string | null = null;
-
-async function connectWallet() {
-  try {
-    const freighter = (window as any).freighter;
-    if (!freighter) {
-      alert('Please install the Freighter wallet extension.');
-      return;
-    }
-
-    const publicKey = await freighter.getPublicKey();
-    currentPublicKey = publicKey;
-
-    // UI Updates
-    const addressEl = document.getElementById('wallet-address') as HTMLSpanElement | null;
-    if (addressEl) addressEl.textContent = `${publicKey.slice(0, 8)}...${publicKey.slice(-4)}`;
-
-    const walletInfo = document.getElementById('wallet-info') as HTMLElement | null;
-    if (walletInfo) walletInfo.classList.remove('hidden');
-
-    const connectBtn = document.getElementById('connect-btn') as HTMLButtonElement | null;
-    if (connectBtn) {
-      connectBtn.textContent = '✓ Connected';
-      connectBtn.disabled = true;
-    }
-
-    // Fetch total donated from backend
-    const profile = await fetchProfile(publicKey);
-    let total = 0;
-    if (profile?.data?.totalDonatedXLM || profile?.totalDonatedXLM) {
-      total = parseFloat(profile.data?.totalDonatedXLM || profile.totalDonatedXLM) || 0;
-    }
-    await saveTotalDonated(total);
-
-  } catch (err: any) {
-    console.error('Wallet connect error:', err);
-    alert('Failed to connect wallet: ' + (err.message || 'Unknown error'));
-  }
-}
-
-// ==================== DONATION HELPERS (keep your existing ones) ====================
-// buildDonationTransaction, signWithFreighter, submitTransaction, recordDonation, etc.
-
-// After successful donation in your submit handler, add:
-// await updateTotalAfterDonation(parseFloat(amount));
 
 // ==================== MAIN INIT ====================
 document.addEventListener('DOMContentLoaded', async () => {
   const settings = await loadSettings();
   applySettings(settings);
 
-  // Pre-fill donation amount from saved default
-  const amountInput = document.getElementById('custom-amount-input') as HTMLInputElement | null;
+  // Pre-fill default amount
+  const amountInput = document.getElementById('amount') as HTMLInputElement | null;
   if (amountInput && settings.defaultDonationAmount) {
     amountInput.value = settings.defaultDonationAmount;
   }
 
-  // Wire settings button
+  // Settings button
   const settingsBtn = document.getElementById('settings-btn');
   if (settingsBtn) {
     settingsBtn.addEventListener('click', () => {
@@ -351,69 +496,25 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  initProjectSearch();
-  initProjectListKeyNav();
-
-  // Check for pending context-menu donation
-  chrome.storage.local.get(['pendingDonationProjectId', 'pendingDonationAddress'], async (res) => {
-    if (res.pendingDonationProjectId) {
-      chrome.storage.local.remove('pendingDonationProjectId');
-      try {
-        const response = await fetch(`${API_BASE}/api/projects/${res.pendingDonationProjectId}`);
-        if (response.ok) {
-          const json = await response.json();
-          const projectData = json.data;
-          
-          const destInput = document.getElementById('destination') as HTMLInputElement | null;
-          const searchInput = document.getElementById('project-search') as HTMLInputElement | null;
-          
-          if (destInput && projectData.walletAddress) {
-            destInput.value = projectData.walletAddress;
-            selectedProjectId = projectData.id;
-          }
-          if (searchInput && projectData.name) {
-            searchInput.value = projectData.name;
-          }
-        }
-      } catch (err) {
-        console.error('Failed to pre-fill project from context menu', err);
-      }
-    } else if (res.pendingDonationAddress) {
-      chrome.storage.local.remove('pendingDonationAddress');
-      const destInput = document.getElementById('destination') as HTMLInputElement | null;
-      if (destInput) {
-        destInput.value = res.pendingDonationAddress;
-      }
-    }
-  });
-
-  const form = document.getElementById('donation-form');
-  if (!form) return;
-
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const sourceAddress = ((document.getElementById('source-address') as HTMLInputElement)?.value ?? '').trim();
-    const destination = ((document.getElementById('destination') as HTMLInputElement)?.value ?? '').trim();
-    const amount = ((document.getElementById('amount') as HTMLInputElement)?.value ?? '').trim();
-    const memo = ((document.getElementById('memo') as HTMLInputElement)?.value ?? '').trim();
-
-    if (!sourceAddress || !destination || !amount) {
-      setStatus('Please fill in all required fields.', true);
-      return;
-    }
-  } catch {
-    // Silently ignore — the skeleton loader remains visible
-  }
-
   // Connect button
-  const connectBtn = document.getElementById('connect-btn') as HTMLButtonElement | null;
+  const connectBtn = document.getElementById('connect-btn');
   if (connectBtn) connectBtn.addEventListener('click', connectWallet);
 
-  // Settings button
-  const settingsBtn = document.getElementById('settings-btn');
-  if (settingsBtn) {
-    settingsBtn.addEventListener('click', () => window.location.href = 'settings.html');
-  }
+  // Donation form
+  const form = document.getElementById('donation-form');
+  if (form) form.addEventListener('submit', handleDonateSubmit);
 
-  console.log('🌿 IndigoPay Extension initialized with donation badge (#490)');
+  // Amount/destination live validation for donate button
+  ['amount', 'destination'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', updateDonateButtonState);
+  });
+
+  initPresetButtons();
+  initProjectSearch();
+  await handlePendingDonations();
+  renderProjectList([]); // Will be replaced with real data once backend is wired
+  updateDonateButtonState();
+
+  console.log('🌿 IndigoPay popup initialized with inline donate support');
 });

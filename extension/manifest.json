@@ -13,13 +13,15 @@
   },
   "host_permissions": [
     "https://app.indigopay.io/*",
-    "https://testnet.indigopay.io/*"
+    "https://testnet.indigopay.io/*",
+    "<all_urls>"
   ],
   "content_scripts": [
     {
       "matches": [
         "https://app.indigopay.io/*",
-        "https://testnet.indigopay.io/*"
+        "https://testnet.indigopay.io/*",
+        "<all_urls>"
       ],
       "js": ["dist/content-script.js"],
       "run_at": "document_end"
