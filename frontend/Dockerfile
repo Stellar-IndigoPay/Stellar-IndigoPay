@@ -5,7 +5,7 @@
 #   docker buildx imagetools inspect node:20.18.1-alpine
 # Pinning to a digest prevents a compromised upstream from silently
 # shipping a new image under the same tag.
-FROM node:20-alpine AS builder
+FROM node:26-alpine AS builder
 
 WORKDIR /app
 
@@ -16,7 +16,7 @@ COPY . .
 RUN npm run build
 
 # 2. Production Runner Stage
-FROM node:20-alpine AS runner
+FROM node:26-alpine AS runner
 
 WORKDIR /app
 
