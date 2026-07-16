@@ -13,7 +13,8 @@
     "test:watch": "jest --watch",
     "test:smoke": "jest --ci --colors=false --testPathPattern='(Tabs|MonthlyGivingSetup)\\.test'",
     "test:smoke:install": "node -e \"require.resolve('jest-axe'); require.resolve('axe-core'); console.log('jest-axe + axe-core resolved cleanly')\"",
-    "a11y:scan": "node scripts/axe-scan.mjs"
+    "a11y:scan": "node scripts/axe-scan.mjs",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@sentry/nextjs": "^7.51.0",
@@ -31,6 +32,8 @@
     "sonner": "^2.0.7"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.9.0",
+    "@playwright/test": "^1.61.1",
     "@testing-library/jest-dom": "^6.4.5",
     "@testing-library/react": "^16.0.0",
     "@testing-library/user-event": "^14.6.1",
@@ -42,7 +45,6 @@
     "@typescript-eslint/eslint-plugin": "^8.64.0",
     "@typescript-eslint/parser": "^8.64.0",
     "autoprefixer": "^10.0.1",
-    "@axe-core/playwright": "4.9.0",
     "axe-core": "4.10.0",
     "eslint": "^8.57.1",
     "eslint-config-next": "^14.2.3",
