@@ -207,6 +207,26 @@ const queueLatency = new client.Gauge({
   registers: [registry],
 });
 
+const attestationBackfillUpdatesTotal = new client.Counter({
+  name: "attestation_backfill_updates_total",
+  help: "Attestation on-chain id back-fill outcomes, labelled by outcome (matched|miss|error).",
+  labelNames: ["outcome"],
+  registers: [registry],
+});
+
+const attestationBackfillPollsTotal = new client.Counter({
+  name: "attestation_backfill_polls_total",
+  help: "Attestation back-fill polling iterations, labelled by outcome (progress|idle|error).",
+  labelNames: ["outcome"],
+  registers: [registry],
+});
+
+const attestationBackfillCursorLag = new client.Gauge({
+  name: "attestation_backfill_cursor_lag",
+  help: "Ledger gap between the latest chain head and the persisted back-fill cursor.",
+  registers: [registry],
+});
+
 /**
  * Normalise an Express req.route.path / req.path to a low-cardinality
  * route label. We fall back to the literal path when no route is
@@ -291,5 +311,8 @@ module.exports = {
     queueFailed,
     queueCompleted,
     queueLatency,
+    attestationBackfillUpdatesTotal,
+    attestationBackfillPollsTotal,
+    attestationBackfillCursorLag,
   },
 };

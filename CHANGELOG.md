@@ -2,6 +2,39 @@
 
 ### Features
 
+* **backend:** add Soroban `att_new` event back-fill worker — pg-boss
+  job that polls the deployed `attestation-contract` for `att_new`
+  events and UPDATEs the matching backend `attestations.on_chain_id`
+  (replacing the placeholder `0`) with the real Soroban-assigned
+  monotonic counter. Includes:
+  - `services/attestationBackfillQueue.js` — singleton-cursor
+    worker; ledgers are saved in `attestation_backfill_state` so a
+    restart resumes exactly where the previous run left off.
+  - Click-friendly `decodeAttNew` covering base64-XDR → native-typed
+    topics (`symbol`, `address`, `string`), with graceful fall-through
+    to `null` on malformed events.
+  - Idempotent `UPDATE … WHERE on_chain_id = 0 OR on_chain_id <
+    $eventId` so a replayed or out-of-order event can't steal a
+    newer row.
+  - Three Prometheus counters: `attestation_backfill_updates_total`
+    (`matched|miss|error`), `attestation_backfill_polls_total`
+    (`progress|idle|error`), and a `attestation_backfill_cursor_lag`
+    gauge.
+  - New env vars: `ATTESTATION_CONTRACT_ID`,
+    `ATTESTATION_BACKFILL_POLL_MS` (default 30000),
+    `ATTESTATION_BACKFILL_ENABLED` (default true),
+    `ATTESTATION_RELAYER_ADDRESS`.
+  - Migration `006_attestation_backfill_state` for the singleton
+    cursor table.
+  - Jest suite covering decode, cursor, apply, RPC plumbing, and the
+    enable / disable lifecycle.
+* **scripts:** Extend `deploy-contract.sh` with `--contract-type
+  attestation|indigopay`, `--relayer <addr>`, and target
+  `wasm32v1-none` for both contracts. The attestation type also calls
+  `set_relayer(admin, relayer)` after `initialize(admin)` so the
+  selected relayer is registered against the freshly-deployed
+  contract.
+
 * **contracts:** Add `attestation-contract` — the on-chain half of the
   [Cross-Chain Donation Attestation Bridge (#125)]:
   - `contracts/attestation-contract/src/lib.rs` — new Soroban contract

@@ -58,6 +58,7 @@ const {
   stop: stopWebhookQueue,
 } = require("./services/webhookQueue");
 const { startIndexer } = require("./services/indexerService");
+const attestationBackfill = require("./services/attestationBackfillQueue");
 const lifecycle = require("./services/lifecycle");
 
 Sentry.init({
@@ -303,6 +304,19 @@ async function startServer() {
     ),
   );
 
+  // Cross-chain attestation on-chain id back-fill worker (issue #125
+  // follow-up). Self-deactivates when ATTESTATION_CONTRACT_ID is unset
+  // or ATTESTATION_BACKFILL_ENABLED=false.
+  attestationBackfill.start().catch((err) =>
+    logger.error(
+      {
+        event: "attestation_backfill_startup_error",
+        err: err.message,
+      },
+      "Attestation back-fill worker failed to start",
+    ),
+  );
+
   // The Stellar Horizon stream in the indexer holds the event loop open.
   // Register a shutdown hook so the stream is closed cleanly on SIGTERM.
   lifecycle.onShutdown(async () => {
@@ -314,6 +328,17 @@ async function startServer() {
     }
   });
 
+  // Attestation back-fill draining (issue #125 follow-up).
+  lifecycle.onShutdown(async () => {
+    try {
+      if (typeof attestationBackfill.stop === "function") {
+        await attestationBackfill.stop();
+      }
+    } catch {
+      // Already drained; swallow.
+    }
+  });
+
   // pg-boss queues: each one exposes a `stop()` method that drains in-flight
   // jobs. We register one hook per queue so a failure in one doesn't stop
   // the others from draining.
@@ -322,6 +347,7 @@ async function startServer() {
     "./services/profileQueue",
     "./services/digestQueue",
     "./services/webhookQueue",
+    "./services/attestationBackfillQueue",
   ]) {
     lifecycle.onShutdown(async () => {
       try {

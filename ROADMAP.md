@@ -90,6 +90,10 @@
 - [x] Cross-chain donation attestations — landed in #125. New
   `attestation-contract` Soroban contract, off-chain backend API at
   `/api/attestations`, frontend `/verify` page + bridge page upgrade.
+- [x] On-chain id back-fill (relayer idempotency) — landed in #125
+  follow-up. New pg-boss worker `attestationBackfillQueue` polls the
+  Soroban `att_new` events and UPDATEs the placeholder `on_chain_id`
+  on backend rows.
 - [ ] Deeper Stellar DEX integration for auto conversion
 - [ ] Push notification overhaul
 - [ ] In-app wallet (non-custodial key management)
