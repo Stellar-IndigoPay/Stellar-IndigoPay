@@ -1,0 +1,27 @@
+# Spectral API linting ruleset for Stellar-IndigoPay
+#
+# Extends the built-in `spectral:oas` ruleset which validates OpenAPI 3.x
+# structure (media examples, schema types, server URLs, path parameters,
+# trailing slashes, operation tags, typed enums, etc.).
+#
+# Custom-project-specific validations (e.g., 429 on mutation endpoints,
+# inline response descriptions) are handled by a separate Node.js script
+# in scripts/validate-openapi.js — Spectral's built-in functions cannot
+# assert on specific response status code keys, and Spectral 6.x YAML
+# rulesets do not support custom JavaScript functions out-of-the-box.
+#
+extends: "spectral:oas"
+
+rules:
+  # ── Severity overrides for intentional omissions ────────────────
+  # operationId is recommended but not required — simple or internal
+  # endpoints may omit it without reducing documentation quality.
+  operation-operationId: warn
+
+  # operation-description is recommended — if the summary is
+  # sufficiently descriptive, a separate description may be omitted.
+  operation-description: warn
+
+  # Unused components are a minor housekeeping concern, not a spec
+  # validity issue. Downgraded to info to avoid CI noise.
+  oas3-unused-component: info

@@ -19,23 +19,23 @@
  *   7. Temp container is torn down regardless of pass/fail
  */
 
-'use strict';
+"use strict";
 
-const { execSync } = require('child_process');
-const fs = require('fs');
-const crypto = require('crypto');
-const path = require('path');
+const { execSync } = require("child_process");
+const fs = require("fs");
+const crypto = require("crypto");
+const path = require("path");
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const CRITICAL_TABLES = [
-  'projects',
-  'donations',
-  'profiles',
-  'verification_requests',
-  'donation_matches',
+  "projects",
+  "donations",
+  "profiles",
+  "verification_requests",
+  "donation_matches",
 ];
 
 const MIN_ROW_COUNTS = {
@@ -44,11 +44,11 @@ const MIN_ROW_COUNTS = {
   profiles: 0,
 };
 
-const DOCKER_IMAGE = 'postgres:16-alpine';
-const CONTAINER_NAME = 'verify-pg';
-const DB_NAME = 'indigopay_verify';
-const PG_USER = 'postgres';
-const PG_PASSWORD = 'verifytest';
+const DOCKER_IMAGE = "postgres:16-alpine";
+const CONTAINER_NAME = "verify-pg";
+const DB_NAME = "indigopay_verify";
+const PG_USER = "postgres";
+const PG_PASSWORD = "verifytest";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -63,13 +63,13 @@ const PG_PASSWORD = 'verifytest';
 function run(cmd, opts = {}) {
   try {
     return execSync(cmd, {
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
       maxBuffer: 10 * 1024 * 1024,
     }).trim();
   } catch (err) {
     if (opts.ignoreError) {
-      return '';
+      return "";
     }
     throw err;
   }
@@ -81,7 +81,7 @@ function run(cmd, opts = {}) {
  * @param {string} dest
  */
 function gunzipFile(src, dest) {
-  const zlib = require('zlib');
+  const zlib = require("zlib");
   const compressed = fs.readFileSync(src);
   const decompressed = zlib.gunzipSync(compressed);
   fs.writeFileSync(dest, decompressed);
@@ -134,29 +134,29 @@ function verifyBackup(backupPath) {
     }
 
     report.checks.push({
-      name: 'file_exists',
+      name: "file_exists",
       passed: stats.size > 0,
       detail: `File size: ${(stats.size / 1024 / 1024).toFixed(2)} MB`,
     });
 
     if (stats.size === 0) {
-      return fail(report, 'Empty backup file (size = 0)', start);
+      return fail(report, "Empty backup file (size = 0)", start);
     }
 
     // ---- 2. SHA-256 checksum ----------------------------------------------
     const fileBuffer = fs.readFileSync(backupPath);
-    const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+    const checksum = crypto.createHash("sha256").update(fileBuffer).digest("hex");
     report.checksum = checksum;
     report.checks.push({
-      name: 'checksum',
+      name: "checksum",
       passed: true,
       detail: checksum,
     });
 
     // ---- 3. Determine if we need to decompress ----------------------------
     let sqlPath = backupPath;
-    if (backupPath.endsWith('.gz')) {
-      sqlPath = backupPath.replace(/\.gz$/, '');
+    if (backupPath.endsWith(".gz")) {
+      sqlPath = backupPath.replace(/\.gz$/, "");
       gunzipFile(backupPath, sqlPath);
     }
 
@@ -178,29 +178,29 @@ function verifyBackup(backupPath) {
             `docker exec ${CONTAINER_NAME} pg_isready -U ${PG_USER} -q && echo "ready" || echo "waiting"`,
             { ignoreError: true }
           );
-          if (status.includes('ready')) {
+          if (status.includes("ready")) {
             ready = true;
             break;
           }
         } catch {
           // pg_isready not ready yet
         }
-        run('sleep 1');
+        run("sleep 1");
       }
 
       if (!ready) {
-        return fail(report, 'Temporary Postgres container did not become ready', start);
+        return fail(report, "Temporary Postgres container did not become ready", start);
       }
 
       // ---- 5. Restore backup into temp DB ---------------------------------
       // Read SQL content and pipe via stdin to avoid shell injection via path
-      const sqlContent = fs.readFileSync(sqlPath, 'utf-8');
-      const restoreProc = require('child_process').spawnSync('docker', [
-        'exec', '-i', CONTAINER_NAME, 'psql',
-        '-U', PG_USER, '-d', DB_NAME,
-      ], { input: sqlContent, encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 });
+      const sqlContent = fs.readFileSync(sqlPath, "utf-8");
+      const restoreProc = require("child_process").spawnSync("docker", [
+        "exec", "-i", CONTAINER_NAME, "psql",
+        "-U", PG_USER, "-d", DB_NAME,
+      ], { input: sqlContent, encoding: "utf-8", maxBuffer: 50 * 1024 * 1024 });
       if (restoreProc.status !== 0) {
-        throw new Error(`psql restore failed: ${restoreProc.stderr || restoreProc.error || 'unknown error'}`);
+        throw new Error(`psql restore failed: ${restoreProc.stderr || restoreProc.error || "unknown error"}`);
       }
 
       // ---- 6. Verify critical tables exist --------------------------------
@@ -210,11 +210,11 @@ function verifyBackup(backupPath) {
             `-U ${PG_USER} -d ${DB_NAME} ` +
             `-tAc "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = '${table}')"`
         );
-        const exists = result === 't';
+        const exists = result === "t";
         report.checks.push({
           name: `table_${table}_exists`,
           passed: exists,
-          detail: exists ? 'exists' : 'missing',
+          detail: exists ? "exists" : "missing",
         });
       }
 
@@ -238,7 +238,7 @@ function verifyBackup(backupPath) {
           report.checks.push({
             name: `table_${table}_row_count`,
             passed: false,
-            detail: 'table not found or query failed',
+            detail: "table not found or query failed",
           });
         }
       }
@@ -247,10 +247,10 @@ function verifyBackup(backupPath) {
       const orphanDonations = run(
         `docker exec ${CONTAINER_NAME} psql ` +
           `-U ${PG_USER} -d ${DB_NAME} ` +
-          `-tAc "SELECT COUNT(*) FROM donations d LEFT JOIN projects p ON d.project_id = p.id WHERE p.id IS NULL"`
+          "-tAc \"SELECT COUNT(*) FROM donations d LEFT JOIN projects p ON d.project_id = p.id WHERE p.id IS NULL\""
       );
       report.checks.push({
-        name: 'foreign_key_donations_projects',
+        name: "foreign_key_donations_projects",
         passed: parseInt(orphanDonations, 10) === 0,
         detail: `${orphanDonations} orphaned donations`,
       });
@@ -303,10 +303,10 @@ function fail(report, reason, start) {
 
 if (require.main === module) {
   const args = process.argv.slice(2);
-  const backupIdx = args.indexOf('--backup');
+  const backupIdx = args.indexOf("--backup");
 
   if (backupIdx === -1 || backupIdx + 1 >= args.length) {
-    console.error('Usage: node backend/scripts/verify-backup.js --backup <path>');
+    console.error("Usage: node backend/scripts/verify-backup.js --backup <path>");
     process.exit(2);
   }
 
