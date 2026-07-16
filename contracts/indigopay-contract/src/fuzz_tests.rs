@@ -14,7 +14,7 @@ mod fuzz {
     extern crate std;
 
     use crate::{
-        BadgeTier, DataKey, IndigoPayContract, IndigoPayContractClient, DonorStats, MockOracle,
+        BadgeTier, DataKey, DonorStats, IndigoPayContract, IndigoPayContractClient, MockOracle,
         OracleInterface, Project,
     };
     use proptest::prelude::*;
