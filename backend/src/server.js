@@ -52,6 +52,7 @@ const { runMigrations } = require("./db/migrate");
 const { startTurretsServer } = require("./services/turrets");
 const { start: startSummaryQueue } = require("./services/summaryQueue");
 const { start: startProfileQueue } = require("./services/profileQueue");
+const { start: startMatchQueue } = require("./services/matchQueue");
 const {
   start: startWebhookQueue,
   stop: stopWebhookQueue,
@@ -254,6 +255,7 @@ async function startServer() {
   await runMigrations();
   await startSummaryQueue(io);
   await startProfileQueue(io);
+  await startMatchQueue();
   await startWebhookQueue();
 
   // digestQueue is optional in some deployments
@@ -291,6 +293,7 @@ async function startServer() {
   for (const queue of [
     "./services/summaryQueue",
     "./services/profileQueue",
+    "./services/matchQueue",
     "./services/digestQueue",
     "./services/webhookQueue",
   ]) {
