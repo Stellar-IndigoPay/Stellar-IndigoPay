@@ -6,6 +6,7 @@ import { useState, useEffect } from "react";
 import {
   buildDonationTransaction,
   buildContractDonationTransaction,
+  buildPathPaymentTransaction,
   submitTransaction,
   explorerUrl,
   getXLMBalance,
@@ -14,6 +15,7 @@ import {
   hashMessage,
   CONTRACT_ID,
 } from "@/lib/stellar";
+import { findBestPath, getAllBalances, formatConversionEstimate, formatPathForDisplay, type ConversionEstimate, type DonorAsset } from "@/lib/dex";
 import { signTransactionWithWallet } from "@/lib/wallet";
 import { recordDonation } from "@/lib/api";
 import { formatXLM, formatCO2 } from "@/utils/format";
@@ -56,6 +58,13 @@ export default function DonateForm({
   const [usdcBalance, setUsdcBalance] = useState<string | null>(null);
   const [trustlineMissing, setTrustlineMissing] = useState<boolean>(false);
   const [donorBadge, setDonorBadge] = useState<string | null>(null);
+  // DEX path-payment state
+  const [donorAssets, setDonorAssets] = useState<DonorAsset[]>([]);
+  const [selectedAsset, setSelectedAsset] = useState<DonorAsset | null>(null);
+  const [conversionEstimate, setConversionEstimate] =
+    useState<ConversionEstimate | null>(null);
+  const [conversionLoading, setConversionLoading] = useState(false);
+  const [conversionError, setConversionError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!initialAmount) return;
@@ -75,6 +84,15 @@ export default function DonateForm({
         const xlm = await getXLMBalance(publicKey);
         if (!mounted) return;
         setXlmBalance(xlm);
+
+        // Load all non-native asset balances for the DEX path-payment selector
+        try {
+          const assets = await getAllBalances(publicKey);
+          if (mounted) setDonorAssets(assets);
+        } catch {
+          // Non-critical: DEX assets are supplementary
+        }
+
         if (currency === "USDC") {
           const issuer = process.env.NEXT_PUBLIC_USDC_ISSUER;
           if (!issuer) {
@@ -104,6 +122,53 @@ export default function DonateForm({
   const amountNum = parseFloat(amount);
   const isValid = !isNaN(amountNum) && amountNum >= 1;
 
+  // ── Fetch DEX conversion estimate when asset and amount change ──────────
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchEstimate() {
+      if (!selectedAsset || !amount || isNaN(amountNum) || amountNum <= 0) {
+        setConversionEstimate(null);
+        setConversionError(null);
+        return;
+      }
+      setConversionLoading(true);
+      setConversionError(null);
+      try {
+        const estimate = await findBestPath(
+          selectedAsset.code,
+          selectedAsset.issuer,
+          amount,
+        );
+        if (cancelled) return;
+        if (estimate) {
+          estimate.sourceBalance = selectedAsset.balance;
+          setConversionEstimate(estimate);
+          setConversionError(null);
+        } else {
+          setConversionEstimate(null);
+          setConversionError(
+            `No viable conversion path found for ${selectedAsset.code} → XLM. Try a different amount or asset.`,
+          );
+        }
+      } catch (err: any) {
+        if (cancelled) return;
+        setConversionEstimate(null);
+        setConversionError(
+          err?.message || "Failed to estimate conversion. Try again.",
+        );
+      } finally {
+        if (!cancelled) setConversionLoading(false);
+      }
+    }
+
+    // Debounce: wait 600ms after the user stops typing
+    const timer = setTimeout(fetchEstimate, 600);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [selectedAsset, amount, amountNum]);
+
   // Calculate CO₂ impact for XLM donations
   const co2Impact =
     currency === "XLM" && amount && !isNaN(amountNum) && project.co2_per_xlm
@@ -126,6 +191,55 @@ export default function DonateForm({
     setError(null);
 
     try {
+      // ── DEX Path-Payment Donation (non-XLM asset → XLM via DEX) ──────
+      if (selectedAsset && conversionEstimate) {
+        const sendAmount = amountNum.toFixed(7);
+        // Use 2% slippage tolerance for the destMin
+        const estimatedDest = parseFloat(conversionEstimate.estimatedXLM);
+        const destMin = (estimatedDest * 0.98).toFixed(7);
+
+        setStep("building");
+        const tx = await buildPathPaymentTransaction({
+          fromPublicKey: publicKey,
+          toPublicKey: project.walletAddress,
+          sendAsset: {
+            code: selectedAsset.code,
+            issuer: selectedAsset.issuer,
+          },
+          sendAmount,
+          destMin,
+          path: conversionEstimate.path,
+          memo: message.trim() || undefined,
+        });
+
+        setStep("signing");
+        const { signedXDR, error: signErr } = await signTransactionWithWallet(
+          tx.toXDR(),
+        );
+        if (signErr || !signedXDR) throw new Error(signErr || "Signing failed");
+
+        setStep("submitting");
+        const result = await submitTransaction(signedXDR);
+        setTxHash(result.hash);
+
+        setStep("recording");
+        // Record in backend with conversion metadata
+        await recordDonation({
+          projectId: project.id,
+          donorAddress: publicKey,
+          amount: sendAmount,
+          currency: selectedAsset.code,
+          message: message.trim() || undefined,
+          transactionHash: result.hash,
+          sourceAsset: `${selectedAsset.code}:${selectedAsset.issuer}`,
+          conversionPath: conversionEstimate.path,
+          convertedAmountXLM: conversionEstimate.estimatedXLM,
+        });
+
+        setStep("success");
+        onSuccess?.();
+        return;
+      }
       const useContract = CONTRACT_ID && currency === "XLM";
 
       if (useContract) {
@@ -291,22 +405,107 @@ export default function DonateForm({
           <label className="label">Currency</label>
           <div className="flex gap-2">
             <button
-              onClick={() => setCurrency("XLM")}
-              className={`px-3 py-2 rounded-xl text-sm font-medium border transition-all font-body ${currency === "XLM" ? "btn-primary text-white border-0" : "bg-white dark:bg-[#14142D] border-[rgba(99,102,241,0.15)] dark:border-[rgba(129,140,248,0.20)] text-[#475569] dark:text-[#94A3B8]"}`}
+              onClick={() => {
+                setCurrency("XLM");
+                setSelectedAsset(null);
+                setConversionEstimate(null);
+                setConversionError(null);
+              }}
+              className={`px-3 py-2 rounded-xl text-sm font-medium border transition-all font-body ${(currency === "XLM" && !selectedAsset) ? "btn-primary text-white border-0" : "bg-white dark:bg-[#14142D] border-[rgba(99,102,241,0.15)] dark:border-[rgba(129,140,248,0.20)] text-[#475569] dark:text-[#94A3B8]"}`}
             >
               XLM
             </button>
             <button
-              onClick={() => setCurrency("USDC")}
-              className={`px-3 py-2 rounded-xl text-sm font-medium border transition-all font-body ${currency === "USDC" ? "btn-primary text-white border-0" : "bg-white dark:bg-[#14142D] border-[rgba(99,102,241,0.15)] dark:border-[rgba(129,140,248,0.20)] text-[#475569] dark:text-[#94A3B8]"}`}
+              onClick={() => {
+                setCurrency("USDC");
+                setSelectedAsset(null);
+                setConversionEstimate(null);
+                setConversionError(null);
+              }}
+              className={`px-3 py-2 rounded-xl text-sm font-medium border transition-all font-body ${(currency === "USDC" && !selectedAsset) ? "btn-primary text-white border-0" : "bg-white dark:bg-[#14142D] border-[rgba(99,102,241,0.15)] dark:border-[rgba(129,140,248,0.20)] text-[#475569] dark:text-[#94A3B8]"}`}
             >
               USDC
             </button>
           </div>
+
+          {/* DEX asset selector — any Stellar token via path payment */}
+          {donorAssets.length > 0 && (
+            <div className="mt-3">
+              <label className="text-xs font-medium text-[#475569] dark:text-[#94A3B8] mb-1 block">
+                Or any token you hold (auto-converted via DEX):
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {donorAssets.map((asset) => (
+                  <button
+                    key={`${asset.code}:${asset.issuer}`}
+                    onClick={() => {
+                      setSelectedAsset(
+                        selectedAsset?.code === asset.code &&
+                          selectedAsset?.issuer === asset.issuer
+                          ? null
+                          : asset,
+                      );
+                      setConversionEstimate(null);
+                      setConversionError(null);
+                      if (selectedAsset?.code !== asset.code) {
+                        setCurrency("XLM");
+                      }
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all font-body ${
+                      selectedAsset?.code === asset.code &&
+                      selectedAsset?.issuer === asset.issuer
+                        ? "btn-primary text-white border-0"
+                        : "bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)] text-[#4F46E5] dark:text-[#818CF8] border-[rgba(99,102,241,0.12)] hover:border-[rgba(99,102,241,0.30)]"
+                    }`}
+                  >
+                    {asset.code}{" "}
+                    <span className="opacity-60">
+                      ({parseFloat(asset.balance).toFixed(2)})
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
+        {/* DEX conversion estimate when an asset is selected */}
+        {selectedAsset && (
+          <div className="p-3 rounded-xl bg-[rgba(99,102,241,0.05)] dark:bg-[rgba(129,140,248,0.08)] border border-[rgba(99,102,241,0.12)] dark:border-[rgba(129,140,248,0.15)]">
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-xs font-semibold text-[#4F46E5] dark:text-[#818CF8]">
+                🔄 DEX Conversion
+              </span>
+            </div>
+            <p className="text-xs text-[#475569] dark:text-[#94A3B8]">
+              {selectedAsset.code} → XLM via Stellar DEX
+            </p>
+            {conversionLoading && (
+              <p className="text-xs text-[#64748B] mt-1 animate-pulse">
+                Finding best path…
+              </p>
+            )}
+            {conversionEstimate && (
+              <div className="mt-2 space-y-1">
+                <p className="text-xs font-medium text-[#0F172A] dark:text-[#E2E8F0]">
+                  {formatConversionEstimate(conversionEstimate)}
+                </p>
+                {conversionEstimate.path.length > 0 && (
+                  <p className="text-xs text-[#64748B]">
+                    Path: {selectedAsset.code} →{" "}
+                    {formatPathForDisplay(conversionEstimate.path)} → XLM
+                  </p>
+                )}
+              </div>
+            )}
+            {conversionError && (
+              <p className="text-xs text-red-500 mt-1">{conversionError}</p>
+            )}
+          </div>
+        )}
+
         {/* Preset amounts */}
         <div>
-          <label className="label">Choose Amount ({currency})</label>
+          <label className="label">Choose Amount ({selectedAsset ? selectedAsset.code : currency})</label>
           <div className="flex flex-wrap gap-2 mb-3">
             {(currency === "XLM" ? PRESETS_XLM : PRESETS_USDC).map((p) => (
               <button

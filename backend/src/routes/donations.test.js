@@ -21,6 +21,7 @@ const pool = require("../db/pool");
 const { computeBadges } = require("../services/store");
 const { enqueueProfileUpdate } = require("../services/profileQueue");
 const { recordDonation } = require("./donations");
+const { AppError } = require("../errors");
 
 function makePublicKey(char = "A") {
   return `G${char.repeat(55)}`;
@@ -73,9 +74,13 @@ async function invokeRecordDonation(body) {
   const res = createMockResponse();
   const next = jest.fn((err) => {
     if (err) {
-      res
-        .status(err.status || 500)
-        .json({ error: err.message || "Internal server error" });
+      if (err instanceof AppError) {
+        res.status(err.status).json(err.toJSON());
+      } else {
+        res
+          .status(err.status || 500)
+          .json({ error: err.message || "Internal server error" });
+      }
     }
   });
 
@@ -212,7 +217,7 @@ describe("POST /api/donations", () => {
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(404);
-    expect(res.body.error).toBe("Project not found");
+    expect(res.body.error.code).toBe("PROJECT_NOT_FOUND");
     expect(client.release).toHaveBeenCalledTimes(1);
   });
 
@@ -226,7 +231,7 @@ describe("POST /api/donations", () => {
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(400);
-    expect(res.body.error).toBe("Invalid Stellar public key");
+    expect(res.body.error.code).toBe("INVALID_ADDRESS");
     expect(pool.connect).not.toHaveBeenCalled();
   });
 
@@ -240,7 +245,7 @@ describe("POST /api/donations", () => {
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(400);
-    expect(res.body.error).toBe("Invalid transaction hash");
+    expect(res.body.error.code).toBe("INVALID_TX_HASH");
     expect(pool.connect).not.toHaveBeenCalled();
   });
 
@@ -373,7 +378,7 @@ describe("POST /api/donations", () => {
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(400);
-    expect(res.body.error).toBe("Transaction not confirmed on Stellar");
+    expect(res.body.error.code).toBe("TX_FAILED");
     // No DB write transaction should have been opened.
     expect(client.query).not.toHaveBeenCalledWith("BEGIN");
     expect(client.release).toHaveBeenCalledTimes(1);
@@ -395,7 +400,7 @@ describe("POST /api/donations", () => {
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(400);
-    expect(res.body.error).toBe("Transaction not found on Stellar");
+    expect(res.body.error.code).toBe("TX_NOT_FOUND");
     expect(client.query).not.toHaveBeenCalledWith("BEGIN");
     expect(client.release).toHaveBeenCalledTimes(1);
   });

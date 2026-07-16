@@ -10,3 +10,4 @@ require("../src/routes/health");
 require("../src/routes/readiness");
 require("../src/services/indexerService");
 console.log("all modules load OK");
+// test

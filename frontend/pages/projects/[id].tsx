@@ -8,7 +8,10 @@ import type { GetServerSideProps } from "next";
 import Link from "next/link";
 import DonateForm from "@/components/DonateForm";
 import DonationFeed from "@/components/DonationFeed";
-import ProjectProgressBar from "@/components/ProjectProgressBar";
+import ProjectProgressBar, {
+  ProjectProgressBarSkeleton,
+} from "@/components/ProjectProgressBar";
+import { SkeletonBox, SkeletonAvatar } from "@/components/Skeleton";
 import ToastNotification, {
   type ToastItem,
 } from "@/components/ToastNotification";
@@ -697,7 +700,7 @@ export default function ProjectDetail({
 
   if (loading || !project)
     return (
-      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10 animate-pulse">
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10 animate-pulse pointer-events-none">
         <Head>
           <title>
             {ogProject?.name
@@ -705,11 +708,29 @@ export default function ProjectDetail({
               : "Project — Stellar IndigoPay"}
           </title>
         </Head>
-        <div className="h-8 bg-forest-200 rounded w-2/3 mb-4" />
+        <SkeletonBox className="h-6 rounded w-1/4 mb-6" palette="forest" />
         <div className="card space-y-4">
-          {[1, 2, 3].map((i) => (
-            <div key={i} className="h-4 bg-forest-100 rounded" />
-          ))}
+          <div className="flex items-start gap-4 mb-5">
+            <SkeletonAvatar size="lg" palette="forest" />
+            <div className="flex-1 space-y-3">
+              <div className="flex gap-2">
+                <SkeletonBox className="h-6 rounded-full w-20" palette="forest" />
+                <SkeletonBox className="h-6 rounded-full w-16" palette="forest" />
+              </div>
+              <SkeletonBox className="h-8 rounded w-2/3" palette="forest" />
+              <SkeletonBox className="h-4 rounded w-1/3" palette="forest" />
+            </div>
+          </div>
+          <ProjectProgressBarSkeleton palette="forest" />
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {[1, 2, 3].map((i) => (
+              <div key={i} className="stat-card text-center space-y-2">
+                <SkeletonBox className="h-6 rounded w-8 mx-auto" palette="forest" />
+                <SkeletonBox className="h-5 rounded w-16 mx-auto" palette="forest" />
+                <SkeletonBox className="h-3 rounded w-12 mx-auto" palette="forest" />
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     );
@@ -921,6 +942,15 @@ export default function ProjectDetail({
                   >
                     {shareState === "copied" ? "✓ Link copied!" : "Share 🌍"}
                   </button>
+                  {/* Analytics link — visible to wallet owner only */}
+                  {publicKey && project && publicKey === project.walletAddress && (
+                    <Link
+                      href={`/projects/${project.id}/analytics`}
+                      className="text-xs py-1 px-3 rounded-lg border font-medium bg-forest-600 text-white border-forest-600 hover:bg-forest-700 transition-colors"
+                    >
+                      Analytics 📊
+                    </Link>
+                  )}
                   {/* Follow button — visible to connected wallets only */}
                   {publicKey && (
                     <button
@@ -1758,6 +1788,11 @@ export default function ProjectDetail({
             </button>
           </div>
 
+          {/* Embed Widget — visible to wallet owner only (issue #74) */}
+          {publicKey && project && publicKey === project.walletAddress && (
+            <EmbedWidgetSection projectId={project.id} projectName={project.name} />
+          )}
+
           {/* Subscribe card */}
           <div className="card bg-forest-50 border-forest-200">
             <p className="font-display font-semibold text-forest-900 mb-1">
@@ -1865,4 +1900,68 @@ function formatCountdown(deadline: string, nowMs: number) {
 
   if (days > 0) return `${days}d ${hours}h ${minutes}m`;
   return `${hours}h ${minutes}m ${seconds}s`;
+}
+
+// ── Embed Widget Section (Issue #74) ───────────────────────────────────────
+
+function EmbedWidgetSection({
+  projectId,
+  projectName,
+}: {
+  projectId: string;
+  projectName: string;
+}) {
+  const [embedCopied, setEmbedCopied] = useState(false);
+
+  const appUrl =
+    process.env.NEXT_PUBLIC_APP_URL || "https://stellar-indigopay.app";
+
+  const embedCode = `<iframe
+  src="${appUrl}/widget/${projectId}?primary=%23227239&text=%231a2e1a"
+  width="100%"
+  height="420"
+  frameborder="0"
+  style="border: none; max-width: 420px;"
+  title="Donate to ${projectName}"
+></iframe>
+<script>
+window.addEventListener('message', (event) => {
+  if (event.data.type === 'indigopay:resize') {
+    const iframe = document.querySelector('iframe[title="Donate to ${projectName}"]');
+    if (iframe) iframe.style.height = event.data.height + 'px';
+  }
+  if (event.data.type === 'indigopay:donation-complete') {
+    console.log('Donation completed:', event.data);
+  }
+});
+</script>`;
+
+  const handleCopyEmbed = async () => {
+    const success = await copyToClipboard(embedCode);
+    if (success) {
+      setEmbedCopied(true);
+      setTimeout(() => setEmbedCopied(false), 2000);
+    }
+  };
+
+  return (
+    <div className="card bg-forest-50 border-forest-200">
+      <p className="font-display font-semibold text-forest-900 mb-2">
+        Embed Donation Widget 📦
+      </p>
+      <p className="text-xs text-[#5a7a5a] dark:text-[#8aaa8a] mb-3 font-body">
+        Add this donation widget to your website so supporters can donate
+        without leaving your site.
+      </p>
+      <pre className="bg-gray-900 text-green-400 p-4 rounded-lg text-xs overflow-x-auto mb-3 whitespace-pre-wrap font-mono leading-relaxed">
+        {embedCode}
+      </pre>
+      <button
+        onClick={handleCopyEmbed}
+        className="btn-primary text-sm py-2 px-4 w-full inline-flex items-center justify-center gap-2"
+      >
+        {embedCopied ? "✓ Copied!" : "📋 Copy Embed Code"}
+      </button>
+    </div>
+  );
 }

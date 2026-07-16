@@ -21,6 +21,7 @@ const logger = require("../logger");
 const pool = require("../db/pool");
 const { isShuttingDown } = require("../services/lifecycle");
 const metrics = require("../services/metrics");
+const { withRetry, rpcServer } = require("../services/stellar");
 
 const HORIZON_URL =
   process.env.NEXT_PUBLIC_HORIZON_URL ||
@@ -32,6 +33,7 @@ const HORIZON_URL =
 // so a slow DB can never block /api/readyz past its deadline. Tune all
 // three together; default 4000ms.
 const CHECK_TIMEOUT_MS = Number(process.env.READINESS_CHECK_TIMEOUT_MS || 4000);
+const MAX_REPLICA_LAG_MS = Number(process.env.MAX_REPLICA_LAG_MS || 5000);
 
 function withTimeout(promise, ms, label) {
   // The race pattern here does NOT cancel the underlying work — for
@@ -78,16 +80,58 @@ router.get("/", async (_req, res) => {
 
   const checks = {
     db: { status: "unknown" },
+    readReplicaLag: { status: "skipped" },
     redis: { status: "skipped" },
     horizon: { status: "unknown" },
+    soroban_rpc: { status: "unknown" },
     indexer: { status: "unknown" },
   };
 
   // Postgres
-  const db = await withTimeout(pool.query("SELECT 1"), CHECK_TIMEOUT_MS, "db");
+  const db = await withTimeout(
+    pool.getWriter().query("SELECT 1"),
+    CHECK_TIMEOUT_MS,
+    "db",
+  );
   checks.db = db.ok
     ? { status: "ok" }
     : { status: "unreachable", reason: db.reason };
+
+  // Read replica lag. A missing replica is valid; excessive lag is not.
+  const replicaLag = await withTimeout(
+    pool.checkReplicaLag(),
+    CHECK_TIMEOUT_MS,
+    "readReplicaLag",
+  );
+  if (!replicaLag.ok) {
+    checks.readReplicaLag = {
+      status: "unknown",
+      reason: replicaLag.reason,
+    };
+  } else if (!replicaLag.value.hasReplica) {
+    checks.readReplicaLag = { status: "skipped", hasReplica: false };
+  } else if (replicaLag.value.lagMs === null) {
+    checks.readReplicaLag = {
+      status: "unknown",
+      hasReplica: true,
+      reason: replicaLag.value.error || "Cannot check replica lag",
+    };
+  } else if (replicaLag.value.lagMs > MAX_REPLICA_LAG_MS) {
+    checks.readReplicaLag = {
+      status: "degraded",
+      hasReplica: true,
+      lagMs: replicaLag.value.lagMs,
+      maxLagMs: MAX_REPLICA_LAG_MS,
+      reason: `Replica lag ${replicaLag.value.lagMs}ms exceeds ${MAX_REPLICA_LAG_MS}ms`,
+    };
+  } else {
+    checks.readReplicaLag = {
+      status: "ok",
+      hasReplica: true,
+      lagMs: replicaLag.value.lagMs,
+      maxLagMs: MAX_REPLICA_LAG_MS,
+    };
+  }
 
   // Redis (optional — only checked if REDIS_URL is set)
   if (process.env.REDIS_URL) {
@@ -117,6 +161,19 @@ router.get("/", async (_req, res) => {
       ? { status: "ok" }
       : { status: "unreachable", reason: horizon.reason || "non-2xx" };
 
+  // Soroban RPC (best-effort — max 1 retry so the probe stays fast)
+  // Uses withRetry with maxRetries=1 rather than 0 to account for one
+  // transient hiccup, but we don't run the full 3-retry backoff here since
+  // we want the readiness response to be snappy.
+  const sorobanResult = await withTimeout(
+    withRetry(() => rpcServer.getLatestLedger(), 1),
+    CHECK_TIMEOUT_MS,
+    "soroban_rpc",
+  );
+  checks.soroban_rpc = sorobanResult.ok
+    ? { status: "ok" }
+    : { status: "degraded", reason: sorobanResult.reason || "RPC unreachable" };
+
   // Indexer (process-local — does not block on the network)
   try {
     const indexerService = require("../services/indexerService");
@@ -126,11 +183,17 @@ router.get("/", async (_req, res) => {
     checks.indexer = { status: "unknown", reason: err.message };
   }
 
-  const requiredOk = checks.db.status === "ok";
+  const replicaOk = checks.readReplicaLag.status !== "degraded";
+  const requiredOk = checks.db.status === "ok" && replicaOk;
   const ready = requiredOk && !isShuttingDown();
 
   if (!ready) {
-    const reason = checks.db.status !== "ok" ? "db" : "draining";
+    const reason =
+      checks.db.status !== "ok"
+        ? "db"
+        : checks.readReplicaLag.status === "degraded"
+          ? "readReplicaLag"
+          : "draining";
     metrics.metrics.readinessCheckFailedTotal.inc({ reason });
     logger.warn(
       { event: "readiness_failed", checks },

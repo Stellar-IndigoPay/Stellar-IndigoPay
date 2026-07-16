@@ -23,6 +23,7 @@ const path = require("path");
 const router = express.Router();
 const { uploadFile, backendName, UPLOAD_DIR } = require("../services/storage");
 const { createRateLimiter } = require("../middleware/rateLimiter");
+const { AppError } = require("../errors");
 
 const uploadRateLimiter = createRateLimiter(20, 15); // 20 uploads per 15 min
 
@@ -55,23 +56,29 @@ router.post("/", uploadRateLimiter, (req, res, next) => {
   memory.single("file")(req, res, async (err) => {
     if (err instanceof multer.MulterError) {
       if (err.code === "LIMIT_FILE_SIZE") {
-        return res.status(413).json({
-          error: `File too large. Maximum size is ${MAX_BYTES / (1024 * 1024)} MB.`,
-        });
+        return next(
+          new AppError("FILE_TOO_LARGE", {
+            detail: `Maximum size is ${MAX_BYTES / (1024 * 1024)} MB.`,
+          }),
+        );
       }
-      return res.status(400).json({ error: err.message });
+      return next(new AppError("VALIDATION_ERROR", { detail: err.message }));
     }
     if (err) return next(err);
 
     if (!req.file) {
-      return res
-        .status(400)
-        .json({ error: "No file uploaded. Use the 'file' multipart field." });
+      return next(
+        new AppError("VALIDATION_ERROR", {
+          detail: "No file uploaded. Use the 'file' multipart field.",
+        }),
+      );
     }
     if (req.file.mimetype && !ALLOWED_MIME.has(req.file.mimetype)) {
-      return res.status(400).json({
-        error: `Unsupported file type: ${req.file.mimetype}. Allowed: PDF, images, Office docs, CSV, plain text, ZIP.`,
-      });
+      return next(
+        new AppError("UNSUPPORTED_FILE_TYPE", {
+          detail: `Unsupported file type: ${req.file.mimetype}. Allowed: PDF, images, Office docs, CSV, plain text, ZIP.`,
+        }),
+      );
     }
 
     try {
@@ -98,23 +105,25 @@ router.post("/", uploadRateLimiter, (req, res, next) => {
  * should use the URLs returned at upload time — this route only exists
  * for the local fallback to make documents reachable from the browser.
  */
-router.get("/:key", (req, res) => {
+router.get("/:key", (req, res, next) => {
   if (backendName() !== "local") {
-    return res
-      .status(404)
-      .json({ error: "Static serving disabled for this storage backend" });
+    return next(
+      new AppError("FILE_NOT_FOUND", {
+        detail: "Static serving disabled for this storage backend",
+      }),
+    );
   }
   const key = req.params.key;
   // Defence-in-depth: never let a path traversal escape the uploads dir.
   if (key.includes("/") || key.includes("..")) {
-    return res.status(400).json({ error: "Invalid key" });
+    return next(new AppError("VALIDATION_ERROR", { detail: "Invalid key" }));
   }
   const fullPath = path.join(UPLOAD_DIR, key);
   if (!fullPath.startsWith(UPLOAD_DIR + path.sep) && fullPath !== UPLOAD_DIR) {
-    return res.status(400).json({ error: "Invalid key" });
+    return next(new AppError("VALIDATION_ERROR", { detail: "Invalid key" }));
   }
   if (!fs.existsSync(fullPath)) {
-    return res.status(404).json({ error: "File not found" });
+    return next(new AppError("FILE_NOT_FOUND"));
   }
   res.sendFile(fullPath);
 });

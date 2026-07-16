@@ -27,13 +27,21 @@
 
 const express = require("express");
 const router = express.Router();
+const fs = require("fs");
+const path = require("path");
 const { v4: uuid } = require("uuid");
 const pool = require("../db/pool");
 const { adminRequired } = require("../middleware/auth");
 const { logAdminAction } = require("../services/audit");
 const { createRateLimiter } = require("../middleware/rateLimiter");
 const { sendAdminVerificationNotification } = require("../services/email");
-const { backendName } = require("../services/storage");
+const {
+  backendName,
+  uploadToIPFS,
+  isIpfsConfigured,
+  UPLOAD_DIR,
+} = require("../services/storage");
+const { AppError } = require("../errors");
 
 const submitLimiter = createRateLimiter(10, 15); // 10 submissions / 15 min / IP
 
@@ -59,6 +67,7 @@ const VALID_TRANSITIONS = {
 const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const URL_RE = /^https?:\/\/[^\s]{2,}$/i;
+const LOCAL_UPLOAD_URL_RE = /^\/api\/uploads\/[^/?#]+$/;
 
 function mapRequestRow(row) {
   if (!row) return null;
@@ -98,8 +107,12 @@ function mapRequestRow(row) {
 
 function validateDocument(doc) {
   if (!doc || typeof doc !== "object") return "each document must be an object";
-  if (typeof doc.url !== "string" || !URL_RE.test(doc.url))
-    return "document.url must be an http(s) URL";
+  if (
+    typeof doc.url !== "string" ||
+    (!URL_RE.test(doc.url) && !LOCAL_UPLOAD_URL_RE.test(doc.url))
+  ) {
+    return "document.url must be an http(s) URL or a local /api/uploads URL";
+  }
   if (
     typeof doc.name !== "string" ||
     doc.name.length < 1 ||
@@ -110,6 +123,60 @@ function validateDocument(doc) {
   if (typeof doc.size === "number" && doc.size < 0)
     return "document.size must be >= 0";
   return null;
+}
+
+function localUploadKeyFromUrl(url) {
+  const parsed = new URL(url, "http://localhost");
+  if (!parsed.pathname.startsWith("/api/uploads/")) return null;
+  const key = decodeURIComponent(path.posix.basename(parsed.pathname));
+  return key || null;
+}
+
+/**
+ * Mirror locally stored supporting documents to IPFS so the verification
+ * pipeline has a tamper-evident, content-addressed copy of each file.
+ *
+ * Only documents that resolve to a file inside backend/uploads/ are
+ * mirrored (i.e. those uploaded through POST /api/uploads with the local
+ * backend). External URLs and already-IPFS documents pass through
+ * untouched. uploadToIPFS() itself never throws while
+ * IPFS_FALLBACK_TO_LOCAL is on, so a gateway outage degrades to
+ * storage_backend: "local" instead of failing the submission.
+ */
+async function mirrorDocumentsToIPFS(documents) {
+  return Promise.all(
+    documents.map(async (doc) => {
+      if (doc.cid || doc.storage_backend === "ipfs") return doc;
+
+      // Only mirror documents served from our own /api/uploads/<key> route.
+      const key = localUploadKeyFromUrl(doc.url);
+      if (!key) {
+        return { ...doc, storage_backend: doc.storage_backend || "local" };
+      }
+      const uploadsRoot = path.resolve(UPLOAD_DIR);
+      const localPath = path.resolve(uploadsRoot, key);
+      // Defence-in-depth: basename() strips separators, but re-check that
+      // the resolved path cannot escape the uploads directory.
+      if (
+        !localPath.startsWith(uploadsRoot + path.sep) ||
+        !fs.existsSync(localPath)
+      ) {
+        return { ...doc, storage_backend: doc.storage_backend || "local" };
+      }
+
+      const ipfsResult = await uploadToIPFS(localPath, doc.name);
+      if (!ipfsResult.cid) {
+        return { ...doc, storage_backend: "local" };
+      }
+      return {
+        ...doc,
+        cid: ipfsResult.cid,
+        url: ipfsResult.url,
+        sha256: ipfsResult.sha256,
+        storage_backend: "ipfs",
+      };
+    }),
+  );
 }
 
 /**
@@ -253,7 +320,16 @@ router.post("/", submitLimiter, async (req, res, next) => {
     }
 
     if (errors.length > 0) {
-      return res.status(400).json({ error: errors.join("; ") });
+      throw new AppError("VALIDATION_ERROR", { detail: errors.join("; ") });
+    }
+
+    // Pin locally uploaded documents to IPFS (content-addressed, tamper
+    // evident). Skipped entirely when IPFS is not configured; individual
+    // failures fall back to the local copy so a gateway outage can never
+    // block a submission.
+    let processedDocs = documents;
+    if (documents.length > 0 && isIpfsConfigured()) {
+      processedDocs = await mirrorDocumentsToIPFS(documents);
     }
 
     const id = uuid();
@@ -284,7 +360,7 @@ router.post("/", submitLimiter, async (req, res, next) => {
         expectedAnnualTonnesCO2 != null
           ? expectedAnnualTonnesCO2.toFixed(7)
           : null,
-        JSON.stringify(documents),
+        JSON.stringify(processedDocs),
         backendName(),
         notes,
       ],
@@ -321,9 +397,9 @@ router.get("/me", async (req, res, next) => {
     const wallet =
       typeof req.query.wallet === "string" ? req.query.wallet.trim() : "";
     if (!STELLAR_ADDRESS_RE.test(wallet)) {
-      return res
-        .status(400)
-        .json({ error: "wallet query param must be a valid Stellar address" });
+      throw new AppError("INVALID_ADDRESS", {
+        detail: "wallet query param must be a valid Stellar address",
+      });
     }
     const result = await pool.query(
       `SELECT * FROM verification_requests
@@ -351,8 +427,7 @@ router.get("/:id", async (req, res, next) => {
       [req.params.id],
     );
     const row = result.rows[0];
-    if (!row)
-      return res.status(404).json({ error: "Verification request not found" });
+    if (!row) throw new AppError("VERIFICATION_NOT_FOUND");
 
     // Allow admin-readable without wallet guard.
     const auth = req.headers.authorization || "";
@@ -371,8 +446,8 @@ router.get("/:id", async (req, res, next) => {
     const wallet =
       typeof req.query.wallet === "string" ? req.query.wallet.trim() : "";
     if (!wallet || wallet !== row.wallet_address) {
-      return res.status(403).json({
-        error: "Provide a matching ?wallet= query param to view this request",
+      throw new AppError("FORBIDDEN", {
+        detail: "Provide a matching ?wallet= query param to view this request",
       });
     }
     res.json({ success: true, data: mapRequestRow(row) });
@@ -427,8 +502,9 @@ router.patch("/:id/status", adminRequired, async (req, res, next) => {
   try {
     const { status, reviewerNotes, reviewedBy } = req.body || {};
     if (!status || !Object.keys(VALID_TRANSITIONS).includes(status)) {
-      return res.status(400).json({
-        error: `status must be one of: ${Object.keys(VALID_TRANSITIONS).join(", ")}`,
+      throw new AppError("VALIDATION_ERROR", {
+        field: "status",
+        detail: `status must be one of: ${Object.keys(VALID_TRANSITIONS).join(", ")}`,
       });
     }
     const reviewerNotesStr =
@@ -436,9 +512,10 @@ router.patch("/:id/status", adminRequired, async (req, res, next) => {
         ? reviewerNotes.trim()
         : null;
     if (reviewerNotesStr && reviewerNotesStr.length > 2000) {
-      return res
-        .status(400)
-        .json({ error: "reviewerNotes must be at most 2000 characters" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "reviewerNotes",
+        detail: "reviewerNotes must be at most 2000 characters",
+      });
     }
 
     const existing = await pool.query(
@@ -446,18 +523,17 @@ router.patch("/:id/status", adminRequired, async (req, res, next) => {
       [req.params.id],
     );
     const row = existing.rows[0];
-    if (!row)
-      return res.status(404).json({ error: "Verification request not found" });
+    if (!row) throw new AppError("VERIFICATION_NOT_FOUND");
 
     const transitions = VALID_TRANSITIONS[row.status] || [];
     if (row.status === status) {
-      return res
-        .status(400)
-        .json({ error: `Request is already in "${status}" state` });
+      throw new AppError("INVALID_STATE_TRANSITION", {
+        detail: `Request is already in "${status}" state`,
+      });
     }
     if (!transitions.includes(status)) {
-      return res.status(400).json({
-        error: `Cannot transition from "${row.status}" to "${status}"`,
+      throw new AppError("INVALID_STATE_TRANSITION", {
+        detail: `Cannot transition from "${row.status}" to "${status}"`,
       });
     }
 

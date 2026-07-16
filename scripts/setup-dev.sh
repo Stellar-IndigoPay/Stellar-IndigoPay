@@ -25,6 +25,16 @@ npm install
 [[ ! -f ".env" ]] && cp .env.example .env && echo "   Created backend/.env" || echo "   backend/.env already exists"
 
 echo ""
+echo "📦 Installing mobile dependencies..."
+cd "$ROOT/mobile"
+npm install
+
+echo ""
+echo "📦 Installing extension dependencies..."
+cd "$ROOT/extension"
+npm install
+
+echo ""
 if command -v cargo &>/dev/null; then
   echo "✅ $(rustc --version)"
   rustup target list --installed | grep -q "wasm32-unknown-unknown" \

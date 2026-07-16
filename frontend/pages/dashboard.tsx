@@ -28,6 +28,10 @@ import type {
   MonthlySubscription,
 } from "@/utils/types";
 import { useWishlist } from "@/hooks/useWishlist";
+import {
+  SkeletonStatCard,
+  SkeletonDonationList,
+} from "@/components/Skeleton";
 
 interface DashboardProps {
   publicKey: string | null;
@@ -310,41 +314,49 @@ export default function Dashboard({ publicKey, onConnect }: DashboardProps) {
 
       {/* Stats grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-        {[
-          {
-            icon: "💚",
-            label: "Total Donated",
-            value: formatXLM(totalDonated),
-          },
-          {
-            icon: "♻️",
-            label: "Est. CO₂ Offset",
-            value: formatCO2(co2Estimate),
-          },
-          {
-            icon: "🌍",
-            label: "Projects Supported",
-            value: projectsCount.toString(),
-          },
-          {
-            icon: "💰",
-            label: "XLM Balance",
-            value: balance ? formatXLM(balance) : "—",
-          },
-        ].map((stat) => (
-          <div
-            key={stat.label}
-            className="card text-center shadow-sm border border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)]"
-          >
-            <p className="text-2xl mb-2">{stat.icon}</p>
-            <p className="font-display font-bold text-[#0F172A] dark:text-[#E2E8F0] text-lg leading-tight">
-              {loading ? "..." : stat.value}
-            </p>
-            <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-1 font-body uppercase tracking-wider font-bold opacity-60">
-              {stat.label}
-            </p>
-          </div>
-        ))}
+        {loading ? (
+          <>
+            {[1, 2, 3, 4].map((i) => (
+              <SkeletonStatCard key={i} palette="indigo" />
+            ))}
+          </>
+        ) : (
+          [
+            {
+              icon: "💚",
+              label: "Total Donated",
+              value: formatXLM(totalDonated),
+            },
+            {
+              icon: "♻️",
+              label: "Est. CO₂ Offset",
+              value: formatCO2(co2Estimate),
+            },
+            {
+              icon: "🌍",
+              label: "Projects Supported",
+              value: projectsCount.toString(),
+            },
+            {
+              icon: "💰",
+              label: "XLM Balance",
+              value: balance ? formatXLM(balance) : "—",
+            },
+          ].map((stat) => (
+            <div
+              key={stat.label}
+              className="card text-center shadow-sm border border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)]"
+            >
+              <p className="text-2xl mb-2">{stat.icon}</p>
+              <p className="font-display font-bold text-[#0F172A] dark:text-[#E2E8F0] text-lg leading-tight">
+                {stat.value}
+              </p>
+              <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-1 font-body uppercase tracking-wider font-bold opacity-60">
+                {stat.label}
+              </p>
+            </div>
+          ))
+        )}
       </div>
 
       {/* Tabs */}
@@ -494,14 +506,7 @@ export default function Dashboard({ publicKey, onConnect }: DashboardProps) {
               <span>📜</span> Donation History
             </h2>
             {loading ? (
-              <div className="space-y-3">
-                {[1, 2, 3].map((i) => (
-                  <div
-                    key={i}
-                    className="h-16 bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)] rounded-xl animate-pulse"
-                  />
-                ))}
-              </div>
+              <SkeletonDonationList rows={3} palette="indigo" />
             ) : donations.length === 0 ? (
               <div className="text-center py-12">
                 <p className="text-4xl mb-3">🌱</p>

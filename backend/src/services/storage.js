@@ -11,17 +11,32 @@
  *   - "s3"     → uploads to a configured S3-compatible bucket using the
  *                AWS SDK; requires AWS_REGION, AWS_ACCESS_KEY_ID,
  *                AWS_SECRET_ACCESS_KEY, S3_BUCKET, optionally S3_PUBLIC_URL.
- *   - "ipfs"   → POSTs a multipart file to IPFS_API_URL (/api/v0/add).
- *                Requires an IPFS_API_URL (Infura, Pinata cluster, or local
- *                IPFS daemon). Returns the content identifier (CID); the
- *                gateway URL is derived from IPFS_GATEWAY_URL or
- *                https://ipfs.io/ipfs/<cid>.
+ *   - "ipfs"   → content-addressed decentralised storage. Two transports
+ *                are supported, tried in order:
+ *                  1. web3.storage HTTP API (WEB3_STORAGE_API_KEY) — POSTs
+ *                     the raw bytes to https://api.web3.storage/upload.
+ *                  2. IPFS node HTTP API (IPFS_API_URL) — POSTs a multipart
+ *                     file to /api/v0/add (Infura, Pinata cluster, or a
+ *                     local IPFS daemon).
+ *                Returns the content identifier (CID); the gateway URL is
+ *                derived from IPFS_GATEWAY_URL or https://w3s.link/ipfs/<cid>.
+ *
+ * In addition to the STORAGE_BACKEND dispatch, this module exposes:
+ *   - uploadToIPFS(filePath, fileName)   Mirror an already-persisted local
+ *     file to IPFS. Used by routes/verification.js to pin supporting
+ *     documents at submission time. Never throws: when IPFS is not
+ *     configured or the upload fails, it returns { cid: null } so the
+ *     local copy remains the source of truth (IPFS_FALLBACK_TO_LOCAL).
+ *   - verifyIPFSDocument(cid)   Re-download a document from the IPFS
+ *     gateway and compute its SHA-256 so admins can check integrity
+ *     against the fingerprint stored at submission time.
  *
  * The active backend is selected by STORAGE_BACKEND env var. If
  * STORAGE_BACKEND is "s3" or "ipfs" but the required credentials or
  * endpoint are missing, we fall back to local storage and log a warning
  * so uploads still succeed (a misconfigured production environment
- * shouldn't silently drop submissions).
+ * shouldn't silently drop submissions). Set IPFS_FALLBACK_TO_LOCAL=false
+ * to make IPFS upload failures hard errors instead.
  *
  * LIMITATIONS:
  *   - These are lightweight, dependency-free adapters. They deliberately
@@ -132,48 +147,130 @@ async function uploadS3(buffer, originalName, contentType) {
 }
 
 async function uploadIpfs(buffer, originalName, contentType) {
-  const apiUrl = process.env.IPFS_API_URL;
-  if (!apiUrl) {
+  if (!isIpfsConfigured()) {
     logger.warn(
       { event: "storage_ipfs_env_missing" },
-      "STORAGE_BACKEND=ipfs but IPFS_API_URL is not set — falling back to local",
+      "STORAGE_BACKEND=ipfs but neither WEB3_STORAGE_API_KEY nor IPFS_API_URL is set — falling back to local",
     );
     return uploadLocal(buffer, originalName, contentType);
   }
 
-  const FormData = (() => {
-    try {
-      // Node 18+ has a global FormData/Blob implementation via undici.
-      // eslint-disable-next-line global-require
-      return globalThis.FormData || require("form-data");
-    } catch {
-      return null;
-    }
-  })();
-  const BlobCtor = (() => {
-    try {
-      return globalThis.Blob || require("buffer").Blob;
-    } catch {
-      return null;
-    }
-  })();
-  if (!FormData || !BlobCtor) {
+  try {
+    const { cid, size } = await uploadBufferToIpfs(buffer, originalName);
+    return {
+      key: cid,
+      cid,
+      url: `${ipfsGatewayBase()}/${cid}`,
+      size: size || buffer.length,
+      sha256: sha256Hex(buffer),
+      contentType: contentType || "application/octet-stream",
+      backend: "ipfs",
+    };
+  } catch (err) {
+    if (!ipfsFallbackToLocal()) throw err;
     logger.warn(
-      { event: "storage_ipfs_no_multipart" },
-      "IPFS adapter requires Node 18+ global FormData/Blob — falling back to local",
+      { event: "storage_ipfs_upload_failed", err: err.message },
+      "STORAGE_BACKEND=ipfs upload failed — falling back to local",
     );
     return uploadLocal(buffer, originalName, contentType);
   }
+}
 
-  const form = new FormData();
-  form.append("file", new BlobCtor([buffer]), originalName || "upload");
+// ── IPFS helpers ─────────────────────────────────────────────────────────────
+
+// How long we're willing to wait on the IPFS API / gateway before giving up.
+function ipfsTimeoutMs() {
+  return parseInt(process.env.IPFS_TIMEOUT_MS || "30000", 10);
+}
+
+// When true (default), a failed/unconfigured IPFS upload degrades to the
+// local copy instead of failing the whole submission.
+function ipfsFallbackToLocal() {
+  return (
+    String(process.env.IPFS_FALLBACK_TO_LOCAL || "true").toLowerCase() !==
+    "false"
+  );
+}
+
+// CIDv0 (Qm..., base58) and CIDv1 (base32/base36) are plain alphanumerics.
+// Rejecting anything else keeps user input from injecting path segments
+// into the gateway URL we fetch.
+const CID_RE = /^[a-zA-Z0-9]{10,128}$/;
+
+function isIpfsConfigured() {
+  return Boolean(process.env.WEB3_STORAGE_API_KEY || process.env.IPFS_API_URL);
+}
+
+// Gateway base including the /ipfs path prefix. Operators may configure
+// either https://w3s.link or https://w3s.link/ipfs; normalize both forms.
+function ipfsGatewayBase() {
+  const gateway = (process.env.IPFS_GATEWAY_URL || "https://w3s.link").replace(
+    /\/$/,
+    "",
+  );
+  return gateway.endsWith("/ipfs") ? gateway : `${gateway}/ipfs`;
+}
+
+function sha256Hex(buffer) {
+  return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+
+/**
+ * Upload raw bytes to the web3.storage HTTP API. Kept dependency-free
+ * (the official `web3.storage` npm client is deprecated and heavy) —
+ * POST /upload with a Bearer token returns `{ cid }`.
+ */
+async function uploadViaWeb3Storage(buffer, fileName) {
+  const base = (
+    process.env.WEB3_STORAGE_API_URL || "https://api.web3.storage"
+  ).replace(/\/$/, "");
+  const res = await fetch(`${base}/upload`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.WEB3_STORAGE_API_KEY}`,
+      "X-NAME": encodeURIComponent(fileName || "upload"),
+    },
+    body: buffer,
+    signal: AbortSignal.timeout(ipfsTimeoutMs()),
+  });
+  if (!res.ok) {
+    throw new Error(
+      `web3.storage upload failed: ${res.status} ${await res.text()}`,
+    );
+  }
+  const json = await res.json();
+  if (!json || !json.cid) {
+    throw new Error(
+      "web3.storage upload succeeded but response did not include a CID",
+    );
+  }
+  return { cid: json.cid, size: buffer.length };
+}
+
+/**
+ * Upload a file to an IPFS node HTTP API (/api/v0/add). Works with a local
+ * daemon, Infura, or a Pinata-compatible cluster endpoint.
+ */
+async function uploadViaNodeApi(buffer, fileName) {
+  const apiUrl = process.env.IPFS_API_URL;
+
+  const FormDataCtor = globalThis.FormData;
+  const BlobCtor = globalThis.Blob;
+  if (!FormDataCtor || !BlobCtor) {
+    throw new Error(
+      "IPFS adapter requires Node 18+ global FormData/Blob support",
+    );
+  }
+
+  const form = new FormDataCtor();
+  form.append("file", new BlobCtor([buffer]), fileName || "upload");
 
   const res = await fetch(
     `${apiUrl.replace(/\/$/, "")}/api/v0/add?wrap-with-directory=false`,
     {
       method: "POST",
       body: form,
-      headers: form.headers ? form.headers : undefined,
+      signal: AbortSignal.timeout(ipfsTimeoutMs()),
     },
   );
   if (!res.ok) {
@@ -196,16 +293,118 @@ async function uploadIpfs(buffer, originalName, contentType) {
   if (!last || !last.Hash) {
     throw new Error("IPFS upload succeeded but response did not include a CID");
   }
-  const gateway = (
-    process.env.IPFS_GATEWAY_URL || "https://ipfs.io/ipfs"
-  ).replace(/\/$/, "");
-  return {
-    key: last.Hash,
-    url: `${gateway}/${last.Hash}`,
-    size: parseInt(last.Size, 10) || buffer.length,
-    contentType: contentType || "application/octet-stream",
-    backend: "ipfs",
-  };
+  return { cid: last.Hash, size: parseInt(last.Size, 10) || buffer.length };
+}
+
+/**
+ * Upload a buffer to whichever IPFS transport is configured. web3.storage
+ * takes precedence; an IPFS node HTTP API is the fallback. Throws when
+ * neither transport is configured.
+ */
+async function uploadBufferToIpfs(buffer, fileName) {
+  if (process.env.WEB3_STORAGE_API_KEY) {
+    return uploadViaWeb3Storage(buffer, fileName);
+  }
+  if (process.env.IPFS_API_URL) {
+    return uploadViaNodeApi(buffer, fileName);
+  }
+  throw new Error(
+    "IPFS is not configured: set WEB3_STORAGE_API_KEY or IPFS_API_URL",
+  );
+}
+
+/**
+ * Mirror an already-persisted local file to IPFS. Used by
+ * routes/verification.js to pin supporting documents at submission time.
+ *
+ * Never throws while IPFS_FALLBACK_TO_LOCAL (default true): when IPFS is
+ * unconfigured or the upload fails, it resolves `{ cid: null,
+ * storage_backend: "local" }` so the caller keeps the local copy as the
+ * source of truth. The SHA-256 of the file content is returned so the
+ * fingerprint captured at submission time can later be compared against
+ * a fresh gateway download (see verifyIPFSDocument).
+ *
+ * @param {string} filePath - Absolute path of the locally stored file.
+ * @param {string} fileName - Display name used for the IPFS pin.
+ * @returns {Promise<{cid: string|null, url?: string, sha256?: string, size?: number, storage_backend: string}>}
+ */
+async function uploadToIPFS(filePath, fileName) {
+  if (!isIpfsConfigured()) {
+    logger.warn(
+      { event: "ipfs_no_key" },
+      "WEB3_STORAGE_API_KEY / IPFS_API_URL not set, falling back to local",
+    );
+    return { cid: null, storage_backend: "local" };
+  }
+
+  try {
+    const buffer = await fs.promises.readFile(filePath);
+    const sha256 = sha256Hex(buffer);
+    const { cid, size } = await uploadBufferToIpfs(buffer, fileName);
+    logger.info(
+      { event: "ipfs_upload_ok", cid, fileName },
+      "Supporting document pinned to IPFS",
+    );
+    return {
+      cid,
+      url: `${ipfsGatewayBase()}/${cid}`,
+      sha256,
+      size: size || buffer.length,
+      storage_backend: "ipfs",
+    };
+  } catch (err) {
+    if (!ipfsFallbackToLocal()) throw err;
+    logger.warn(
+      { event: "ipfs_upload_failed", err: err.message, fileName },
+      "IPFS upload failed — keeping local copy",
+    );
+    return { cid: null, storage_backend: "local" };
+  }
+}
+
+/**
+ * Re-download a document from the IPFS gateway and compute its SHA-256 so
+ * its integrity can be checked. IPFS URLs are content-addressed, so a
+ * successful retrieval already proves the bytes match the CID; comparing
+ * the SHA-256 against the fingerprint captured at submission time
+ * additionally guards against a misbehaving gateway.
+ *
+ * @param {string} cid - Content identifier to verify.
+ * @param {{fileName?: string, expectedSha256?: string}} [opts]
+ * @returns {Promise<{valid: boolean, cid?: string, hash?: string, size?: number, matches?: boolean, error?: string}>}
+ */
+async function verifyIPFSDocument(cid, opts = {}) {
+  if (!CID_RE.test(String(cid || ""))) {
+    return { valid: false, error: "Invalid CID" };
+  }
+
+  let url = `${ipfsGatewayBase()}/${cid}`;
+  if (opts.fileName) url += `/${encodeURIComponent(opts.fileName)}`;
+
+  try {
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(ipfsTimeoutMs()),
+    });
+    if (!response.ok) {
+      return {
+        valid: false,
+        error: `Document not retrievable (HTTP ${response.status})`,
+      };
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const hash = sha256Hex(buffer);
+    const result = { valid: true, cid, hash, size: buffer.length };
+    if (opts.expectedSha256) {
+      result.matches = hash === String(opts.expectedSha256).toLowerCase();
+      result.valid = result.matches;
+      if (!result.matches) {
+        result.error = "Content hash does not match the recorded fingerprint";
+      }
+    }
+    return result;
+  } catch (err) {
+    return { valid: false, error: `Gateway fetch failed: ${err.message}` };
+  }
 }
 
 /**
@@ -230,4 +429,11 @@ function backendName() {
   return STORAGE_BACKEND;
 }
 
-module.exports = { uploadFile, backendName, UPLOAD_DIR };
+module.exports = {
+  uploadFile,
+  backendName,
+  uploadToIPFS,
+  verifyIPFSDocument,
+  isIpfsConfigured,
+  UPLOAD_DIR,
+};

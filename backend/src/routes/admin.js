@@ -4,6 +4,8 @@ const router = express.Router();
 const pool = require("../db/pool");
 const { signToken, adminRequired } = require("../middleware/auth");
 const { createRateLimiter } = require("../middleware/rateLimiter");
+const { sendAppError } = require("../errors");
+const { buildAuditFilters } = require("./admin/audit-export");
 
 const loginLimiter = createRateLimiter(10, 15);
 
@@ -25,13 +27,13 @@ router.post("/login", loginLimiter, (req, res) => {
   const adminPass = process.env.ADMIN_PASSWORD;
 
   if (!adminPass) {
-    return res
-      .status(503)
-      .json({ error: "Admin authentication not configured on this server" });
+    return sendAppError(res, "SERVICE_UNAVAILABLE", {
+      reason: "Admin authentication not configured on this server",
+    });
   }
 
   if (username !== adminUser || password !== adminPass) {
-    return res.status(401).json({ error: "Invalid credentials" });
+    return sendAppError(res, "UNAUTHORIZED", { reason: "Invalid credentials" });
   }
 
   const token = signToken({ role: "admin", sub: username }, TOKEN_EXPIRY);
@@ -57,13 +59,15 @@ router.post("/login", loginLimiter, (req, res) => {
 router.post("/refresh", (req, res) => {
   const { refreshToken } = req.body || {};
   if (!refreshToken) {
-    return res.status(400).json({ error: "refreshToken is required" });
+    return sendAppError(res, "VALIDATION_ERROR", { field: "refreshToken" });
   }
 
   try {
     const decoded = require("../middleware/auth").verifyToken(refreshToken);
     if (decoded.type !== "refresh") {
-      return res.status(401).json({ error: "Invalid refresh token" });
+      return sendAppError(res, "UNAUTHORIZED", {
+        reason: "Invalid refresh token",
+      });
     }
     const token = signToken({ role: "admin", sub: decoded.sub }, TOKEN_EXPIRY);
     res.json({
@@ -71,7 +75,9 @@ router.post("/refresh", (req, res) => {
       data: { token, expiresIn: 3600 },
     });
   } catch {
-    return res.status(401).json({ error: "Invalid or expired refresh token" });
+    return sendAppError(res, "UNAUTHORIZED", {
+      reason: "Invalid or expired refresh token",
+    });
   }
 });
 
@@ -106,18 +112,23 @@ router.get("/me", adminRequired, (req, res) => {
  */
 router.get("/audit-log", adminRequired, async (req, res, next) => {
   try {
-    const { actor, action, page = "1", pageSize = "50" } = req.query;
-    const where = [];
-    const values = [];
+    const {
+      actor,
+      action,
+      targetType,
+      targetId,
+      ipAddress,
+      dateFrom,
+      dateTo,
+      metadataKey,
+      metadataValue,
+      page = "1",
+      pageSize = "50",
+    } = req.query;
 
-    if (actor && typeof actor === "string") {
-      values.push(actor);
-      where.push(`actor = $${values.length}`);
-    }
-    if (action && typeof action === "string") {
-      values.push(action);
-      where.push(`action = $${values.length}`);
-    }
+    const { where, values } = buildAuditFilters(
+      { actor, action, targetType, targetId, ipAddress, dateFrom, dateTo, metadataKey, metadataValue },
+    );
 
     const limit = Math.min(Number.parseInt(pageSize, 10) || 50, 200);
     const offset = (Math.max(Number.parseInt(page, 10) || 1, 1) - 1) * limit;
@@ -125,7 +136,7 @@ router.get("/audit-log", adminRequired, async (req, res, next) => {
 
     // eslint-disable-next-line sql-injection/no-sql-injection
     let query =
-      "SELECT id, actor, action, target_type, target_id, metadata, ip_address, created_at FROM admin_audit_log";
+      "SELECT id, actor, action, target_type, target_id, metadata, ip_address, created_at, prev_hash, row_hash FROM admin_audit_log";
     if (where.length) {
       // eslint-disable-next-line sql-injection/no-sql-injection
       query += " WHERE " + where.join(" AND ");
@@ -133,28 +144,41 @@ router.get("/audit-log", adminRequired, async (req, res, next) => {
     query += ` ORDER BY created_at DESC LIMIT $${values.length - 1} OFFSET $${values.length}`;
 
     // eslint-disable-next-line sql-injection/no-sql-injection
-    const result = await pool.query(query, values);
-
-    let countQuery = "SELECT COUNT(*) AS total FROM admin_audit_log";
+    let countQuery = "SELECT COUNT(*)::bigint AS total FROM admin_audit_log";
     if (where.length) {
       // eslint-disable-next-line sql-injection/no-sql-injection
       countQuery += " WHERE " + where.join(" AND ");
     }
+
+    const startedAt = Date.now();
+    // eslint-disable-next-line sql-injection/no-sql-injection
+    const result = await pool.query(query, values);
     // eslint-disable-next-line sql-injection/no-sql-injection
     const countResult = await pool.query(countQuery, values.slice(0, -2));
+    const queryTimeMs = Date.now() - startedAt;
 
     res.json({
       success: true,
       data: result.rows,
-      total: parseInt(countResult.rows[0].total),
-      page: parseInt(page),
+      total: Number(countResult.rows[0].total),
+      page: parseInt(page, 10),
       pageSize: limit,
+      queryTimeMs,
     });
   } catch (e) {
     next(e);
   }
 });
 
+// Audit log sub-resources: export + stats. Mounted before the catch-all
+// `/audit-log` GET above would otherwise shadow them — Express matches the
+// more specific registered routes first within this router.
+router.use("/audit-log", require("./admin/audit-export"));
+router.use("/audit-log", require("./admin/audit-stats"));
+
 router.use("/queues", require("./admin/queues"));
+router.use("/documents", require("./admin/documents"));
+router.use("/webhooks", require("./admin/webhooks"));
+router.use("/indexer", require("./admin/indexer"));
 
 module.exports = router;

@@ -1,0 +1,40 @@
+{
+  "name": "stellar-indigopay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Root package for Stellar-IndigoPay monorepo — adds Husky pre-commit quality gates (GrantFox #60)",
+  "scripts": {
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.1",
+    "husky": "^9.1.6",
+    "js-yaml": "^5.2.1",
+    "lint-staged": "^15.2.10",
+    "prettier": "^3.3.3"
+  },
+  "lint-staged": {
+    "backend/**/*.{js,jsx}": [
+      "npx eslint --fix"
+    ],
+    "frontend/**/*.{ts,tsx}": [
+      "npx eslint --fix"
+    ],
+    "extension/**/*.{ts,tsx,js,jsx}": [
+      "npx eslint --fix"
+    ],
+    "mobile/**/*.{ts,tsx,js,jsx}": [
+      "npx eslint --fix"
+    ],
+    "contracts/**/*.rs": [
+      "cargo fmt --check"
+    ],
+    "{backend,frontend,extension,mobile}/**/*.{json,md,yaml,yml}": [
+      "npx prettier --write"
+    ],
+    "docs/api/openapi.yaml": [
+      "npx @stoplight/spectral-cli@6.14.3 lint --ruleset .spectral.yaml",
+      "node scripts/validate-openapi.js"
+    ]
+  }
+}

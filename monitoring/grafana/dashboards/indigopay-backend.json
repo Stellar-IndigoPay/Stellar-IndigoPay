@@ -84,8 +84,139 @@
     },
     {
       "type": "row",
-      "title": "Database",
+      "title": "Rate Limiting",
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 },
+      "collapsed": false,
+      "id": 30,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "429 rate (req/s) by endpoint",
+      "id": 31,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (endpoint, method) (rate(indigopay_rate_limit_hits_total{service=\"stellar-indigopay-api\"}[1m]))",
+          "legendFormat": "{{method}} {{endpoint}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "description": "Rate of HTTP 429 responses per second, broken down by endpoint and HTTP method."
+    },
+    {
+      "type": "timeseries",
+      "title": "429 ratio (% of all requests)",
+      "id": 32,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(indigopay_rate_limit_hits_total{service=\"stellar-indigopay-api\"}[5m])) / clamp_min(sum(rate(http_requests_total{service=\"stellar-indigopay-api\"}[5m])), 1)",
+          "legendFormat": "429 ratio",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.05 },
+              { "color": "red", "value": 0.10 }
+            ]
+          }
+        }
+      },
+      "description": "Proportion of all HTTP responses that were 429 over the last 5 minutes."
+    },
+    {
+      "type": "timeseries",
+      "title": "Token bucket remaining capacity",
+      "id": 33,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "indigopay_rate_limit_remaining{service=\"stellar-indigopay-api\",strategy=\"token-bucket\"}",
+          "legendFormat": "{{endpoint}}",
+          "refId": "A"
+        }
+      ],
+      "description": "Current token-bucket fill level per endpoint. Drops to 0 when clients burst past the refill rate."
+    },
+    {
+      "type": "stat",
+      "title": "Endpoints at capacity",
+      "id": 34,
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "count(indigopay_rate_limit_remaining{service=\"stellar-indigopay-api\"} == 0)",
+          "legendFormat": "exhausted endpoints",
+          "refId": "A"
+        },
+        {
+          "expr": "count(indigopay_rate_limit_remaining{service=\"stellar-indigopay-api\",strategy=\"sliding-window\"} == 0)",
+          "legendFormat": "sliding-window exhausted",
+          "refId": "B"
+        },
+        {
+          "expr": "count(indigopay_rate_limit_remaining{service=\"stellar-indigopay-api\",strategy=\"token-bucket\"} == 0)",
+          "legendFormat": "token-bucket exhausted",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 3 }
+            ]
+          }
+        }
+      },
+      "description": "Number of rate-limited endpoints currently at zero remaining capacity, broken down by strategy."
+    },
+    {
+      "type": "stat",
+      "title": "Token bucket remaining (min)",
+      "id": 35,
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "min by (endpoint) (indigopay_rate_limit_remaining{service=\"stellar-indigopay-api\",strategy=\"token-bucket\"})",
+          "legendFormat": "{{endpoint}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 3 },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "description": "Minimum token-bucket remaining capacity per endpoint. 0 means that endpoint is fully exhausted."
+    },
+    {
+      "type": "row",
+      "title": "Database",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
       "collapsed": false,
       "id": 10,
       "panels": []
@@ -94,7 +225,7 @@
       "type": "timeseries",
       "title": "Postgres pool (total / idle / waiting)",
       "id": 11,
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 33 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
@@ -118,7 +249,7 @@
       "type": "timeseries",
       "title": "DB query p99 latency by operation (s)",
       "id": 12,
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 33 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
@@ -132,7 +263,7 @@
     {
       "type": "row",
       "title": "Process / runtime",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
       "collapsed": false,
       "id": 20,
       "panels": []
@@ -141,7 +272,7 @@
       "type": "timeseries",
       "title": "Event loop lag (s)",
       "id": 21,
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 42 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
@@ -161,7 +292,7 @@
       "type": "timeseries",
       "title": "Memory: heap used (MB)",
       "id": 22,
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 25 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 42 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {

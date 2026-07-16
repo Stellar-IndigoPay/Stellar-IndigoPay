@@ -20,6 +20,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -131,30 +132,28 @@ export function WalletProvider({ children }: WalletProviderProps) {
     };
   }, []);
 
+  // Refs provide truly synchronous guards against double-clicks, unlike
+  // setState function updaters which run asynchronously during React's
+  // commit phase. Two synchronous clicks within the same microtask would
+  // both see `alreadyInFlight === false` with a setState-based guard.
+  const connectingRef = useRef(false);
+
   const connect = useCallback(async () => {
-    // Guard against rapid double-clicks that would race two parallel
-    // `connectWallet()` awaits and stomp on each other's state writes.
-    // We use a state-updater form so the check sees the freshest value
-    // without forcing `connect` to depend on closed-over `state`.
-    let alreadyInFlight = false;
-    setState((current) => {
-      if (current === "connecting") {
-        alreadyInFlight = true;
-        return current;
-      }
-      return "connecting";
-    });
-    if (alreadyInFlight) return;
+    if (connectingRef.current) return;
+    connectingRef.current = true;
+    setState("connecting");
 
     setError(null);
     const { publicKey: pk, error: err } = await connectWallet();
     if (err) {
       setError(err);
       setState("error");
+      connectingRef.current = false;
       return;
     }
     setPublicKey(pk);
     setState(pk ? "connected" : "idle");
+    connectingRef.current = false;
   }, []);
 
   const disconnect = useCallback(() => {

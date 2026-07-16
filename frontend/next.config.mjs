@@ -93,13 +93,12 @@ const nextConfig = {
       },
       {
         // Widget pages are intentionally embeddable by third-party sites.
-        // Override frame-ancestors and X-Frame-Options for this route.
+        // Override frame-ancestors to allow cross-origin framing (issue #74).
+        // X-Frame-Options is omitted by not including it in this header set;
+        // modern browsers respect CSP frame-ancestors * instead.
         source: "/widget/:path*",
         headers: [
           { key: "Content-Security-Policy", value: buildStaticCsp(true) },
-          // X-Frame-Options has no "allow all" value; rely on CSP frame-ancestors
-          // for modern browsers and omit the legacy header for widget routes.
-          { key: "X-Frame-Options", value: "SAMEORIGIN" },
         ],
       },
     ];

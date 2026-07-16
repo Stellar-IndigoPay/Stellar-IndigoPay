@@ -57,6 +57,14 @@ jobs:
         run: |
           bash scripts/backup-db.sh
 
+      - name: Upload backup as artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-backup
+          path: /tmp/backups/stellar_indigopay_backup_*.sql.gz
+          retention-days: 7
+
       - name: Backup status check
         if: failure()
         run: |
@@ -77,10 +85,60 @@ jobs:
               core.error('❌ Database backup failed');
             }
 
+  verify-backup:
+    name: Verify Backup Integrity
+    runs-on: ubuntu-latest
+    needs: backup-database
+    if: always() && needs.backup-database.result == 'success'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download backup artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: database-backup
+          path: /tmp/backups
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Run backup verification
+        id: verify
+        run: |
+          BACKUP_FILE=$(ls /tmp/backups/*.sql.gz 2>/dev/null || ls /tmp/backups/*.sql 2>/dev/null || echo "")
+          if [ -z "$BACKUP_FILE" ]; then
+            echo "::error::No backup file found in /tmp/backups/"
+            exit 1
+          fi
+          echo "Verifying backup: $BACKUP_FILE"
+          node backend/scripts/verify-backup.js --backup "$BACKUP_FILE" > /tmp/verification-report.json
+          cat /tmp/verification-report.json
+
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-verification-report
+          path: /tmp/verification-report.json
+          retention-days: 90
+
+      - name: Send verification failure notification
+        if: failure()
+        run: |
+          echo "::error::Backup verification failed! Check the verification report above."
+          # Optionally send to PagerDuty or Slack via webhook
+          # curl -X POST "${{ secrets.PAGERDUTY_WEBHOOK_URL }}" \
+          #   -H 'Content-Type: application/json' \
+          #   -d '{"event_type":"trigger","description":"Backup verification failed","severity":"critical"}'
+
   notify-on-failure:
     name: Notify on Failure
     runs-on: ubuntu-latest
-    needs: backup-database
+    needs: [backup-database, verify-backup]
     if: failure()
 
     steps:
@@ -88,8 +146,9 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const title = '🚨 Database Backup Failed';
-            const body = `Database backup failed on ${new Date().toISOString()}.\n\nCheck the workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
+            const failedJob = '${{ needs.backup-database.result }}' === 'failure' ? 'Backup' : 'Verification';
+            const title = `🚨 Database ${failedJob} Failed`;
+            const body = `Database ${failedJob.toLowerCase()} failed on ${new Date().toISOString()}.\n\nCheck the workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
 
             github.rest.issues.create({
               owner: context.repo.owner,

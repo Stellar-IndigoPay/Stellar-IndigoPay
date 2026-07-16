@@ -118,18 +118,54 @@ export async function csrfFetch(input: RequestInfo, init: RequestInit = {}) {
  * const projects = await fetchProjects({ verified: true, limit: 12 });
  * console.log("projects:", projects.length);
  */
-export async function fetchProjects(params?: {
+export interface ProjectListFilters {
   category?: string;
   status?: string;
   verified?: boolean;
   search?: string;
+  location?: string;
+  co2Min?: number;
+  co2Max?: number;
   limit?: number;
-}): Promise<ClimateProject[]> {
+}
+
+export async function fetchProjects(
+  params?: ProjectListFilters,
+): Promise<ClimateProject[]> {
   const { data } = await api.get<{ success: boolean; data: ClimateProject[] }>(
     "/api/projects",
     { params },
   );
   return data.data;
+}
+
+export interface ProjectFacetValue {
+  value: string;
+  count: number;
+}
+
+export interface ProjectFacets {
+  category: ProjectFacetValue[];
+  location: ProjectFacetValue[];
+  status: ProjectFacetValue[];
+}
+
+/**
+ * Fetch facet counts (how many projects match each category/location/status
+ * value) scoped to the given filters, for rendering counts like
+ * "Reforestation (12)" next to filter options that aren't active yet.
+ */
+export async function fetchProjectFacets(
+  params?: ProjectListFilters,
+): Promise<ProjectFacets> {
+  const { data } = await api.get<{
+    success: boolean;
+    data: ClimateProject[];
+    facets?: ProjectFacets;
+  }>("/api/projects", {
+    params: { ...params, facets: true, limit: 1 },
+  });
+  return data.facets || { category: [], location: [], status: [] };
 }
 
 /**
@@ -231,9 +267,12 @@ export async function recordDonation(payload: {
   donorAddress: string;
   amountXLM?: string;
   amount?: string;
-  currency?: "XLM" | "USDC";
+  currency?: string;
   message?: string;
   transactionHash: string;
+  sourceAsset?: string;
+  conversionPath?: Array<{ code: string; issuer: string }>;
+  convertedAmountXLM?: string;
 }) {
   const { data } = await api.post<{ success: boolean; data: Donation }>(
     "/api/donations",
@@ -619,6 +658,80 @@ export async function fetchUpdateLikes(
   return data.data;
 }
 
+// ── Project Analytics ─────────────────────────────────────────────
+
+export interface ProjectAnalytics {
+  projectId: string;
+  projectName: string;
+  donorOverview: {
+    totalDonors: number;
+    newDonors30d: number;
+    avgDonationXLM: string;
+    medianDonationXLM: string;
+    totalRaisedXLM: string;
+    totalDonations: number;
+  };
+  topDonors: Array<{
+    donorAddress: string;
+    totalContributed: string;
+    donationCount: number;
+    lastDonationAt: string | null;
+  }>;
+  donationTimeline: Array<{
+    date: string;
+    total: string;
+    count: number;
+  }>;
+  donationDistribution: Array<{
+    bucket: string;
+    count: number;
+    total: string;
+  }>;
+  donorRetention: {
+    totalDonors: number;
+    returningDonors: number;
+    oneTimeDonors: number;
+    retentionPct: number;
+  };
+  milestones: Array<{
+    id: string;
+    title: string;
+    percentage: number;
+    reached: boolean;
+    reachedAt: string | null;
+    transactionHash: string | null;
+    currentProgress: number;
+  }>;
+  campaigns: Array<{
+    id: string;
+    title: string;
+    goalXLM: string;
+    raisedXLM: string;
+    deadline: string;
+    progressPercent: number;
+    status: string;
+  }>;
+  ratingSummary: {
+    averageRating: number;
+    totalRatings: number;
+    distribution: Record<number, number>;
+  };
+}
+
+/**
+ * Fetch project analytics. Only the project owner (wallet) can access.
+ */
+export async function fetchProjectAnalytics(
+  projectId: string,
+  wallet: string,
+): Promise<ProjectAnalytics> {
+  const { data } = await api.get<{ success: boolean; data: ProjectAnalytics }>(
+    `/api/projects/${projectId}/analytics`,
+    { params: { wallet } },
+  );
+  return data.data;
+}
+
 // ── Featured Project ─────────────────────────────────────────────
 /**
  * Fetch the featured project, if one is configured by the backend.
@@ -910,4 +1023,220 @@ export async function purgeQueue(name: string, adminKey: string): Promise<boolea
     },
   );
   return data.success;
+}
+
+// ── Admin: Webhook Dead-Letter Queue Management ──────────────────────────────
+export interface WebhookDelivery {
+  id: string;
+  projectId: string;
+  projectName: string | null;
+  eventId: string;
+  eventType: string;
+  status: "pending" | "delivered" | "failed" | "dlq";
+  attempts: number;
+  lastAttemptAt: string | null;
+  lastError: string | null;
+  nextAttemptAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function fetchDeadLetterWebhooks(
+  adminKey: string,
+  params?: { projectId?: string; limit?: number; page?: number },
+): Promise<{ data: WebhookDelivery[]; total: number; page: number; pageSize: number }> {
+  const { data } = await api.get<{
+    success: boolean;
+    data: WebhookDelivery[];
+    total: number;
+    page: number;
+    pageSize: number;
+  }>("/api/admin/webhooks/dead-letter", {
+    params,
+    headers: { "X-Admin-Key": adminKey },
+  });
+  return data;
+}
+
+export async function replayWebhookDelivery(
+  deliveryId: string,
+  adminKey: string,
+): Promise<WebhookDelivery> {
+  const { data } = await api.post<{ success: boolean; data: WebhookDelivery }>(
+    `/api/admin/webhooks/dead-letter/${deliveryId}/replay`,
+    {},
+    { headers: { "X-Admin-Key": adminKey } },
+  );
+  return data.data;
+}
+
+export async function replayAllWebhookDeliveries(
+  projectId: string,
+  adminKey: string,
+): Promise<number> {
+  const { data } = await api.post<{ success: boolean; count: number }>(
+    "/api/admin/webhooks/dead-letter/replay-all",
+    { projectId },
+    { headers: { "X-Admin-Key": adminKey } },
+  );
+  return data.count;
+}
+
+export async function fetchWebhookDeliveries(
+  adminKey: string,
+  params?: { projectId?: string; status?: string; limit?: number },
+): Promise<WebhookDelivery[]> {
+  const { data } = await api.get<{ success: boolean; data: WebhookDelivery[] }>(
+    "/api/admin/webhooks/deliveries",
+    {
+      params,
+      headers: { "X-Admin-Key": adminKey },
+    },
+  );
+  return data.data;
+}
+
+// ── Admin Analytics ────────────────────────────────────────────────
+
+export interface AdminDonationTrend {
+  day: string;
+  donationCount: number;
+  totalXLM: string;
+  uniqueDonors: number;
+  avgDonationXLM: string;
+}
+
+export interface AdminProjectPerformance {
+  id: string;
+  name: string;
+  category: string;
+  location: string;
+  raisedXLM: string;
+  donorCount: number;
+  goalXLM: string;
+  co2OffsetKg: number;
+  status: string;
+  verified: boolean;
+  progressPct: number;
+  totalDonations: number;
+  lastDonationAt: string | null;
+  createdAt: string | null;
+}
+
+export interface AdminGeographicImpact {
+  country: string;
+  projectCount: number;
+  totalXLM: string;
+  donorCount: number;
+  totalCO2Kg: number;
+}
+
+export interface AdminDonorRetention {
+  cohortMonth: string;
+  cohortSize: number;
+  activityMonth: string;
+  activeDonors: number;
+  retentionPct: number;
+}
+
+export interface AdminCategoryBreakdown {
+  category: string;
+  donationCount: number;
+  totalXLM: string;
+  donorCount: number;
+}
+
+export interface AdminGrowthData {
+  summary: {
+    totalProjects: number;
+    totalDonations: number;
+    totalDonors: number;
+    totalXLM: string;
+    activeDonors30d: number;
+    totalXLM30d: string;
+  };
+  monthlyGrowth: Array<{
+    month: string;
+    donations: number;
+    totalXLM: string;
+    donors: number;
+  }>;
+}
+
+async function fetchAdminAnalytics<T>(
+  endpoint: string,
+  adminKey: string,
+  params?: Record<string, string>,
+): Promise<T> {
+  const { data } = await api.get<{ success: boolean; data: T }>(
+    `/api/admin/analytics/${endpoint}`,
+    {
+      params,
+      headers: { "X-Admin-Key": adminKey },
+    },
+  );
+  return data.data;
+}
+
+export async function fetchAdminDonationTrends(
+  adminKey: string,
+  range?: { from?: string; to?: string },
+): Promise<AdminDonationTrend[]> {
+  return fetchAdminAnalytics<AdminDonationTrend[]>("trends", adminKey, range as Record<string, string>);
+}
+
+export async function fetchAdminProjectPerformance(
+  adminKey: string,
+): Promise<AdminProjectPerformance[]> {
+  return fetchAdminAnalytics<AdminProjectPerformance[]>("projects", adminKey);
+}
+
+export async function fetchAdminGeographicImpact(
+  adminKey: string,
+): Promise<AdminGeographicImpact[]> {
+  return fetchAdminAnalytics<AdminGeographicImpact[]>("geographic", adminKey);
+}
+
+export async function fetchAdminDonorRetention(
+  adminKey: string,
+): Promise<AdminDonorRetention[]> {
+  return fetchAdminAnalytics<AdminDonorRetention[]>("retention", adminKey);
+}
+
+export async function fetchAdminCategoryBreakdown(
+  adminKey: string,
+  range?: { from?: string; to?: string },
+): Promise<AdminCategoryBreakdown[]> {
+  return fetchAdminAnalytics<AdminCategoryBreakdown[]>("categories", adminKey, range as Record<string, string>);
+}
+
+export async function fetchAdminPlatformGrowth(
+  adminKey: string,
+): Promise<AdminGrowthData> {
+  return fetchAdminAnalytics<AdminGrowthData>("growth", adminKey);
+}
+
+export async function exportAdminAnalytics(
+  adminKey: string,
+  view: string,
+  format: "csv" | "json",
+  range?: { from?: string; to?: string },
+): Promise<void> {
+  const params = new URLSearchParams({ view, type: format });
+  if (range?.from) params.set("from", range.from);
+  if (range?.to) params.set("to", range.to);
+
+  const resp = await fetch(
+    `${api.defaults.baseURL}/api/v1/admin/analytics/export?${params.toString()}`,
+    { headers: { "X-Admin-Key": adminKey } },
+  );
+  if (!resp.ok) throw new Error(`Export failed: ${resp.status}`);
+
+  const blob = await resp.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${view}.${format}`;
+  a.click();
+  URL.revokeObjectURL(url);
 }

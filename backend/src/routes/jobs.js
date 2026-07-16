@@ -7,12 +7,11 @@ const express = require("express");
 const router = express.Router();
 const pool = require("../db/pool");
 const { mapJobRow } = require("../services/store");
+const { AppError } = require("../errors");
 
 function validateTxHash(h) {
   if (!h || !/^[a-fA-F0-9]{64}$/.test(h)) {
-    const e = new Error("Invalid transaction hash");
-    e.status = 400;
-    throw e;
+    throw new AppError("INVALID_TX_HASH");
   }
 }
 
@@ -62,14 +61,12 @@ router.patch("/:id/release", async (req, res, next) => {
       req.params.id,
     ]);
     if (!found.rows[0]) {
-      const e = new Error("Job not found");
-      e.status = 404;
-      throw e;
+      throw new AppError("JOB_NOT_FOUND");
     }
     if (found.rows[0].status !== "in_escrow") {
-      const e = new Error("Job is not awaiting release");
-      e.status = 400;
-      throw e;
+      throw new AppError("VALIDATION_ERROR", {
+        detail: "Job is not awaiting release",
+      });
     }
 
     const updated = await pool.query(
@@ -94,7 +91,7 @@ router.get("/:id", async (req, res, next) => {
       req.params.id,
     ]);
     if (!result.rows[0]) {
-      return res.status(404).json({ error: "Job not found" });
+      throw new AppError("JOB_NOT_FOUND");
     }
     res.json({ success: true, data: mapJobRow(result.rows[0]) });
   } catch (e) {

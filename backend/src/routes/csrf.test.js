@@ -27,7 +27,8 @@ describe("CSRF protection", () => {
       })
       .expect(403);
 
-    expect(res.body.error.toLowerCase()).toContain("csrf");
+    expect(res.body.error.code).toBe("FORBIDDEN");
+    expect(res.body.error.message.toLowerCase()).toContain("csrf");
   });
 
   it("allows mutating requests when a valid X-CSRF-Token header is provided", async () => {

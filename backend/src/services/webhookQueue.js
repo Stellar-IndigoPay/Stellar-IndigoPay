@@ -327,6 +327,37 @@ async function processDelivery(deliveryId, inMemoryOverrides) {
   );
 }
 
+/**
+ * Replay a dead-lettered delivery: resets its attempt counter so it gets
+ * the full retry budget again, then immediately attempts redelivery
+ * in-process (the admin-facing replay endpoints want a synchronous
+ * result rather than waiting on the queue worker).
+ *
+ * Only rows currently in the 'dlq' state are eligible — replaying a
+ * delivery that's still pending/delivered/failed would race the
+ * regular retry path.
+ *
+ * @param {string} deliveryId - webhook_deliveries.id to replay.
+ * @returns {Promise<boolean>} true if a dlq row was found and replayed, false otherwise.
+ */
+async function replayDelivery(deliveryId) {
+  const { rows } = await pool.query(
+    `UPDATE webhook_deliveries
+        SET status = 'pending',
+            attempts = 0,
+            last_error = NULL,
+            next_attempt_at = NOW(),
+            updated_at = NOW()
+      WHERE id = $1 AND status = 'dlq'
+      RETURNING id`,
+    [deliveryId],
+  );
+  if (!rows[0]) return false;
+
+  await processDelivery(deliveryId);
+  return true;
+}
+
 async function markTerminal(deliveryId, status, error) {
   await pool.query(
     `UPDATE webhook_deliveries
@@ -407,6 +438,7 @@ module.exports = {
   stop,
   enqueueWebhookDelivery,
   processDelivery,
+  replayDelivery,
   // Re-export for tests / advanced callers
   sign,
   computeEventId,

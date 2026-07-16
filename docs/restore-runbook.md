@@ -73,7 +73,34 @@ status='pending' AND next_attempt_at <= NOW()`.
 4. Update RTO/RPO numbers in `docs/disaster-recovery.md` if the
    incident was longer/shorter than the target.
 
-## Dry Run
+## Backup Verification
+
+Each nightly backup is automatically verified by the
+`scripts/verify-backup.js` script in the database-backup workflow
+(`.github/workflows/database-backup.yml`). The verification runs
+immediately after the backup is created and checks:
+
+- File integrity (existence, non-zero size, SHA-256 checksum)
+- Restore into a temporary Postgres container
+- Existence of all critical tables (`projects`, `donations`,
+  `profiles`, `verification_requests`, `donation_matches`)
+- Minimum row counts (`projects ≥ 1`, `donations ≥ 0`,
+  `profiles ≥ 0`)
+- Foreign key consistency (zero orphaned donations)
+
+A `BackupVerificationFailed` alert fires via Prometheus when
+verification fails, routed to PagerDuty (`severity: page`).
+To manually verify a specific backup:
+
+```bash
+node backend/scripts/verify-backup.js --backup /path/to/backup.sql
+node backend/scripts/verify-backup.js --backup /path/to/backup.sql.gz
+```
+
+The script outputs a JSON report with pass/fail per check and
+exits 0 on success or 1 on any failing check.
+
+## Monthly Dry Run
 
 The `restore-drill` workflow under `.github/workflows/restore-drill.yml`
 runs this runbook on a cron (1st of every month) against an
