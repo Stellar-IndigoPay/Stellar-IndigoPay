@@ -36,6 +36,7 @@ import {
 } from "@stellar/stellar-sdk";
 import { useBiometricAuth } from "../../hooks/useBiometricAuth";
 import { useTheme } from "../theme";
+import { enqueueDonation } from "../../utils/donationQueue";
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
 const HORIZON_URL =
@@ -238,12 +239,45 @@ export default function DonateScreen() {
       setSecretKey("");
     } catch (error: any) {
       console.error("Donation failed:", error);
-      setStatusType("error");
-      setStatusMessage(
-        error?.response?.data?.message ||
-          error?.message ||
-          "Donation failed. Please try again.",
-      );
+
+      // Enqueue donation for offline retry
+      const isNetworkError =
+        !error?.response &&
+        (error?.code === "ERR_NETWORK" ||
+          error?.code === "ECONNABORTED" ||
+          error?.message?.includes("Network Error") ||
+          error?.message?.includes("timeout"));
+
+      if (isNetworkError && selectedProject) {
+        try {
+          await enqueueDonation({
+            projectId: selectedProject.id,
+            projectName: selectedProject.name,
+            amount: donationAmount.toFixed(7),
+            currency: "XLM",
+            message: message.trim() || undefined,
+            donorAddress: publicKey,
+          });
+          setStatusType("info");
+          setStatusMessage(
+            "Donation queued! It will be submitted when connectivity is restored.",
+          );
+        } catch (queueErr) {
+          setStatusType("error");
+          setStatusMessage(
+            error?.response?.data?.message ||
+              error?.message ||
+              "Donation failed. Please try again.",
+          );
+        }
+      } else {
+        setStatusType("error");
+        setStatusMessage(
+          error?.response?.data?.message ||
+            error?.message ||
+            "Donation failed. Please try again.",
+        );
+      }
     } finally {
       setSubmitting(false);
     }

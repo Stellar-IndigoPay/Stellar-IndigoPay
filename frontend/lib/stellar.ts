@@ -589,6 +589,81 @@ export function isValidStellarAddress(a: string): boolean {
  * @returns Explorer URL.
  * @throws Never.
  */
+/**
+ * Builds a Stellar transaction with a PathPaymentStrictSend operation that
+ * converts a source asset to XLM and delivers it to the project wallet.
+ *
+ * This is used for DEX path-payment donations where the donor holds a
+ * non-XLM asset (e.g. yXLM, USDT, BTC-anchored tokens) and wants to
+ * donate the XLM-equivalent.
+ *
+ * The donor signs one atomic transaction containing:
+ * 1. PathPaymentStrictSend — source_asset → XLM to project wallet
+ * 2. (Optionally) a Soroban contract invocation to record on-chain
+ *
+ * @param params - Path payment parameters.
+ * @param params.fromPublicKey - Source account public key (donor).
+ * @param params.toPublicKey - Destination account public key (project wallet).
+ * @param params.sendAsset - Source asset to send (e.g. "yXLM:GB…").
+ * @param params.sendAmount - Decimal amount of the source asset to send.
+ * @param params.destMin - Minimum XLM to receive (destination floor from DEX estimate).
+ * @param params.path - Ordered list of intermediary assets for the DEX path.
+ * @returns Unsigned Stellar transaction ready to be signed by the wallet.
+ * @throws If Horizon fails to load the source account or parameters are invalid.
+ */
+export async function buildPathPaymentTransaction({
+  fromPublicKey,
+  toPublicKey,
+  sendAsset,
+  sendAmount,
+  destMin,
+  path = [],
+  memo,
+}: {
+  fromPublicKey: string;
+  toPublicKey: string;
+  sendAsset: { code: string; issuer: string };
+  sendAmount: string;
+  destMin: string;
+  path?: Array<{ code: string; issuer: string }>;
+  memo?: string;
+}) {
+  const source = await server.loadAccount(fromPublicKey);
+  const sendStellarAsset = new Asset(sendAsset.code, sendAsset.issuer);
+  const destAsset = Asset.native();
+
+  const pathAssets = path.map(
+    (p) => new Asset(p.code, p.issuer),
+  );
+
+  const builder = new TransactionBuilder(source, {
+    fee: "100",
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(
+      Operation.pathPaymentStrictSend({
+        sendAsset: sendStellarAsset,
+        sendAmount,
+        destination: toPublicKey,
+        destAsset,
+        destMin,
+        path: pathAssets,
+      }),
+    )
+    .setTimeout(60);
+
+  if (memo) builder.addMemo(Memo.text(memo.slice(0, 28)));
+
+  return builder.build();
+}
+
+/**
+ * Build a Stellar Expert transaction URL for the current network.
+ *
+ * @param hash - Transaction hash.
+ * @returns Explorer URL.
+ * @throws Never.
+ */
 export function explorerUrl(hash: string): string {
   return `https://stellar.expert/explorer/${NETWORK === "mainnet" ? "public" : "testnet"}/tx/${hash}`;
 }

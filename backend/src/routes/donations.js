@@ -59,6 +59,9 @@ async function recordDonation(req, res, next) {
       currency = "XLM",
       message,
       transactionHash,
+      sourceAsset,
+      conversionPath,
+      convertedAmountXLM,
     } = req.body;
     validateKey(donorAddress);
     validateTxHash(transactionHash);
@@ -117,19 +120,23 @@ async function recordDonation(req, res, next) {
 
     const donationResult = await client.query(
       `INSERT INTO donations (
-        id, project_id, donor_address, amount_xlm, amount, currency, message, transaction_hash, created_at
+        id, project_id, donor_address, amount_xlm, amount, currency, message,
+        transaction_hash, source_asset, conversion_path, converted_amount_xlm, created_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
       RETURNING *`,
       [
         uuid(),
         projectId,
         donorAddress,
-        currency === "XLM" ? parsedAmount : null,
+        currency === "XLM" ? parsedAmount : (convertedAmountXLM || null),
         parsedAmount,
         currency,
         message?.trim().slice(0, 100) || null,
         transactionHash,
+        sourceAsset || null,
+        conversionPath != null ? JSON.stringify(conversionPath) : null,
+        convertedAmountXLM ? parseFloat(convertedAmountXLM) : null,
       ],
     );
 
@@ -137,11 +144,14 @@ async function recordDonation(req, res, next) {
       id: uuid(),
       project_id: projectId,
       donor_address: donorAddress,
-      amount_xlm: currency === "XLM" ? parsedAmount : null,
+      amount_xlm: currency === "XLM" ? parsedAmount : (convertedAmountXLM || null),
       amount: parsedAmount,
       currency,
       message: message?.trim().slice(0, 100) || null,
       transaction_hash: transactionHash,
+      source_asset: sourceAsset || null,
+      conversion_path: conversionPath || null,
+      converted_amount_xlm: convertedAmountXLM || null,
       created_at: new Date().toISOString(),
     };
 
@@ -190,7 +200,13 @@ async function recordDonation(req, res, next) {
       }
     }
 
-    // Update project totals
+    // Update project totals — use converted XLM amount for path-payment donations
+    const xlmIncrement =
+      currency === "XLM"
+        ? parsedAmount
+        : convertedAmountXLM
+          ? parseFloat(convertedAmountXLM)
+          : 0;
     await client.query(
       `UPDATE projects
        SET raised_xlm = raised_xlm + $1::numeric,
@@ -201,7 +217,7 @@ async function recordDonation(req, res, next) {
            ),
            updated_at = NOW()
        WHERE id = $2`,
-      [currency === "XLM" ? parsedAmount : 0, projectId],
+      [xlmIncrement, projectId],
     );
 
     await client.query("COMMIT");

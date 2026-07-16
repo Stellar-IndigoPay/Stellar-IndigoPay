@@ -178,6 +178,31 @@ if (process.env.NODE_ENV !== "production") {
   }
 }
 
+// Admin event service routes — mounted BEFORE the main admin router so that
+// /api/admin/* paths for specific sub-routers are matched before the generic
+// admin catch-all.
+try {
+  const adminEventsRouter = require("./routes/admin/events");
+  app.use("/api/admin/events", adminEventsRouter);
+  app.use("/api/v1/admin/events", adminEventsRouter);
+} catch (err) {
+  logger.error(
+    { event: "route_load_failed", route: "admin/events", err: err.message },
+    "Failed to load admin events route module",
+  );
+}
+
+try {
+  const adminAnalyticsRouter = require("./routes/admin/analytics");
+  app.use("/api/admin/analytics", adminAnalyticsRouter);
+  app.use("/api/v1/admin/analytics", adminAnalyticsRouter);
+} catch (err) {
+  logger.error(
+    { event: "route_load_failed", route: "admin/analytics", err: err.message },
+    "Failed to load admin analytics route module",
+  );
+}
+
 // ── Application routes ──────────────────────────────────────────────────────
 // Each route file is mounted under both /api and /api/v1 so that the v1
 // versioned path and the legacy unversioned path stay in lockstep.
@@ -347,6 +372,15 @@ async function startServer() {
 
   lifecycle.onShutdown(async () => {
     await stopDLQWorker();
+  });
+
+  // Soroban event service: stop the polling loop and persist the cursor.
+  lifecycle.onShutdown(async () => {
+    try {
+      await stopSorobanEvents();
+    } catch {
+      // Service may already be stopped; swallow.
+    }
   });
 
   // pg-boss queues: each one exposes a `stop()` method that drains in-flight

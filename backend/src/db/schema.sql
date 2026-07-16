@@ -45,6 +45,13 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS latitude  DOUBLE PRECISION;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
 CREATE INDEX IF NOT EXISTS idx_projects_location ON projects (latitude, longitude);
 
+-- Path-payment donations: track source asset and conversion details for
+-- donations made via any Stellar asset converted to XLM through the DEX.
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS source_asset        TEXT;
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS conversion_path     JSONB;
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS converted_amount_xlm NUMERIC(20, 7);
+CREATE INDEX IF NOT EXISTS idx_donations_source_asset ON donations (source_asset) WHERE source_asset IS NOT NULL;
+
 -- Full-text search: tsvector kept current by a trigger (see migration
 -- 013_project_search) so GET /api/projects can rank matches with ts_rank
 -- instead of relying solely on ILIKE substring matching.
