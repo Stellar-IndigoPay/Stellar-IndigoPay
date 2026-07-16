@@ -100,10 +100,8 @@ describe("AdminIndex - Queue Monitoring", () => {
       expect(screen.getByRole("button", { name: "Purge" })).not.toBeDisabled();
     });
 
-    // Test purge action
-    const originalConfirm = window.confirm;
+    // Test purge action (second invocation)
     window.confirm = jest.fn().mockReturnValue(true);
-    const purgeBtn = screen.getByRole("button", { name: "Purge" });
     await act(async () => {
       fireEvent.click(purgeBtn);
     });

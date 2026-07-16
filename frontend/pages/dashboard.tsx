@@ -1,7 +1,7 @@
 /**
  * pages/dashboard.tsx — Donor impact dashboard
  */
-import { useState, useEffect, useRef, type KeyboardEvent } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import WalletConnect from "@/components/WalletConnect";
 import EditProfileForm from "@/components/EditProfileForm";
@@ -33,12 +33,6 @@ import {
   SkeletonStatCard,
   SkeletonDonationList,
 } from "@/components/Skeleton";
-
-type DashboardTab = "impact" | "saved";
-const DASHBOARD_TABS: { id: DashboardTab; label: string }[] = [
-  { id: "impact", label: "My Impact" },
-  { id: "saved", label: "Saved Projects" },
-];
 
 interface DashboardProps {
   publicKey: string | null;
@@ -167,38 +161,6 @@ export default function Dashboard({ publicKey, onConnect }: DashboardProps) {
         ? { id: p.id, name: p.name }
         : { id: projectId, name: projectId };
     });
-
-  // WAI-ARIA Tabs keyboard pattern: ArrowLeft/Right move between tabs, Home
-  // jumps to the first tab, End jumps to the last.
-  const handleTabKeyDown = (
-    e: KeyboardEvent<HTMLButtonElement>,
-    current: DashboardTab,
-  ) => {
-    const order = DASHBOARD_TABS.map((t) => t.id);
-    const idx = order.indexOf(current);
-    let next: DashboardTab | null = null;
-    switch (e.key) {
-      case "ArrowRight":
-        next = order[(idx + 1) % order.length];
-        break;
-      case "ArrowLeft":
-        next = order[(idx - 1 + order.length) % order.length];
-        break;
-      case "Home":
-        next = order[0];
-        break;
-      case "End":
-        next = order[order.length - 1];
-        break;
-      default:
-        return;
-    }
-    e.preventDefault();
-    setActiveTab(next);
-    // Move focus to the newly-selected tab so screen readers announce it.
-    if (next === "impact") impactTabRef.current?.focus();
-    if (next === "saved") savedTabRef.current?.focus();
-  };
 
   const handlePrintCertificate = () => {
     const el = document.getElementById("impact-certificate");
