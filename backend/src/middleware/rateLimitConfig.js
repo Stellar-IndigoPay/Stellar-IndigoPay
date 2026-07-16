@@ -1,23 +1,29 @@
 /**
  * src/middleware/rateLimitConfig.js
  *
- * Per-endpoint rate limit tier configuration for the Redis-backed sliding
- * window rate limiter.
+ * Per-endpoint rate limit tier configuration for the Redis-backed rate
+ * limiter. Supports two strategies:
  *
- * Each entry maps an endpoint pattern (method + path with optional wildcard)
- * to a limit config. The most specific pattern wins. Unmatched endpoints
- * fall through to the 'default' tier (150 req / 15 min).
+ *   1. Sliding window (default): `{ points, duration }`
+ *      Limits to `points` requests per `duration` seconds using a Redis
+ *      sorted set with timestamp-based sliding window.
+ *
+ *   2. Token bucket: `{ strategy: "token-bucket", capacity, refillRate }`
+ *      A burst-tolerant algorithm. `capacity` is the max burst size, and
+ *      `refillRate` is tokens added per second. Suited for endpoints that
+ *      need to absorb short bursts (e.g. analytics, exports).
  *
  * Key format for patterns:
- *   "METHOD /path"  — exact match on METHOD and path
- *   "METHOD /path/*" — wildcard match (e.g. /api/projects/anything)
- *   "default"        — catch-all when no other pattern matches
+ *   "METHOD /path"       — exact match on METHOD and path
+ *   "METHOD /path/*"     — wildcard match (e.g. /api/projects/anything)
+ *   "/api/admin/*"       — any-method wildcard (lower priority than method-specific)
+ *   "default"            — catch-all when no other pattern matches
  */
 "use strict";
 
 const RATE_LIMIT_TIERS = {
   // ── Write-heavy / mutation endpoints (strictest) ───────────────────────
-  "POST /api/donations":                   { points: 10,  duration: 60   },  // 10 req / min
+  "POST /api/donations":                   { points: 10,  duration: 60   },  // 10 req / min (sliding window)
   "POST /api/verification-requests":       { points: 10,  duration: 900  },  // 10 req / 15 min
   "POST /api/projects":                    { points: 5,   duration: 60   },  // 5  req / min (registration)
   "PATCH /api/projects/*":                 { points: 20,  duration: 60   },  // 20 req / min (updates)
@@ -36,6 +42,13 @@ const RATE_LIMIT_TIERS = {
   "GET /api/stats":                        { points: 60,  duration: 60   },
   "GET /api/impact/*":                     { points: 60,  duration: 60   },
   "GET /api/map":                          { points: 60,  duration: 60   },
+
+  // ── Analytics endpoint (token-bucket for burst tolerance) ──────────────
+  "GET /api/analytics/*":                  {
+    strategy: "token-bucket",
+    capacity: 10,
+    refillRate: 0.5,   // 1 token every 2 seconds → ~30 req / min sustained
+  },
 
   // ── Notifications (mobile push) ────────────────────────────────────────
   "POST /api/notifications":               { points: 30,  duration: 60   },

@@ -107,6 +107,8 @@ const indexerRunning = new client.Gauge({
   registers: [registry],
 });
 
+
+
 const readinessCheckFailedTotal = new client.Counter({
   name: "readiness_check_failed_total",
   help: "Count of /api/readyz responses with HTTP 503 (readiness probe failed).",

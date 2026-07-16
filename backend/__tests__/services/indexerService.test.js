@@ -305,12 +305,10 @@ describe("handleDonation error handling", () => {
     pool.connect.mockResolvedValue(client);
 
     // Override the default mock to throw on INSERT
-    const originalImpl = client.query.getMockImplementation();
     client.query.mockImplementation((sql) => {
       if (sql.startsWith("INSERT INTO donations")) {
         throw new Error("DB constraint violation");
       }
-      // Fall through to default for BEGIN/COMMIT etc.
       if (sql === "BEGIN") return { rows: [] };
       if (sql === "ROLLBACK") return { rows: [] };
       return { rows: [] };
@@ -319,9 +317,9 @@ describe("handleDonation error handling", () => {
     const op = mockXlmOp();
     await expect(
       handleDonation("proj-1", op, { isNative: true, isUSDC: false }),
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow("DB constraint violation");
 
-    // Should have tried to ROLLBACK
+    // Should have tried to ROLLBACK before rethrowing
     const rollbackCalls = client.query.mock.calls.filter(
       ([sql]) => sql === "ROLLBACK",
     );
@@ -334,8 +332,6 @@ describe("handleDonation error handling", () => {
 
     // Make every query throw
     client.query.mockReset();
-    client.query.mockRejectedValue(new Error("Connection failed"));
-    // But we still need BEGIN/COMMIT/ROLLBACK to work minimally
     client.query.mockImplementation((sql) => {
       if (sql === "ROLLBACK") return { rows: [] };
       throw new Error("Connection failed");
@@ -344,7 +340,7 @@ describe("handleDonation error handling", () => {
     const op = mockXlmOp();
     await expect(
       handleDonation("proj-1", op, { isNative: true, isUSDC: false }),
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow("Connection failed");
 
     expect(client.release).toHaveBeenCalled();
   });

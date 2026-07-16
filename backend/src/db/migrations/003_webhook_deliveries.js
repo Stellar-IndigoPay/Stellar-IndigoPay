@@ -69,7 +69,7 @@ module.exports = {
   },
 
   async down(client) {
-    await client.query(`DROP TABLE IF EXISTS webhook_dlq`);
-    await client.query(`DROP TABLE IF EXISTS webhook_deliveries`);
+    await client.query("DROP TABLE IF EXISTS webhook_dlq");
+    await client.query("DROP TABLE IF EXISTS webhook_deliveries");
   },
 };

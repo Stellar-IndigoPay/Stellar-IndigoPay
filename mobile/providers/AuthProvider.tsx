@@ -40,6 +40,7 @@ import React, {
 import { AppState, type AppStateStatus } from "react-native";
 import * as secureStore from "../lib/secureStore";
 import { authenticate } from "../hooks/useBiometricAuth";
+import { deleteSecretKey } from "../lib/wallet/sdk";
 
 const SESSION_KEY = "wallet_session";
 const AUTO_LOCK_BACKGROUND_MS = 60_000;
@@ -178,6 +179,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
   }, []);
 
   const clear = useCallback(async () => {
+    // Wipe the secret key from SecureStore (best-effort, non-fatal)
+    try { await deleteSecretKey(); } catch { /* key may not exist */ }
     await secureStore.remove(SESSION_KEY);
     if (!mountedRef.current) return;
     setSession(null);
