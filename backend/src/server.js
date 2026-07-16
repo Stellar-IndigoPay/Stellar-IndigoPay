@@ -195,6 +195,7 @@ const routeMounts = [
   "impact",
   "notifications",
   "verification",
+  "oracle",
 ];
 
 for (const name of routeMounts) {
@@ -306,18 +307,16 @@ async function startServer() {
     ),
   );
 
-  // Cross-chain attestation on-chain id back-fill worker (issue #125
-  // follow-up). Self-deactivates when ATTESTATION_CONTRACT_ID is unset
-  // or ATTESTATION_BACKFILL_ENABLED=false.
-  attestationBackfill.start().catch((err) =>
+  try {
+    const oracleService = require("./services/oracleService");
+    oracleService.start();
+    logger.info({ event: "oracle_scheduler_started" }, "Oracle service scheduler started");
+  } catch (err) {
     logger.error(
-      {
-        event: "attestation_backfill_startup_error",
-        err: err.message,
-      },
-      "Attestation back-fill worker failed to start",
-    ),
-  );
+      { event: "oracle_startup_error", err: err.message },
+      "Oracle service failed to start",
+    );
+  }
 
   // The Stellar Horizon stream in the indexer holds the event loop open.
   // Register a shutdown hook so the stream is closed cleanly on SIGTERM.
@@ -327,6 +326,12 @@ async function startServer() {
       if (typeof indexer.stop === "function") await indexer.stop();
     } catch {
       // Indexer may already be stopped; swallow.
+    }
+    try {
+      const oracleService = require("./services/oracleService");
+      if (typeof oracleService.stop === "function") oracleService.stop();
+    } catch {
+      // ignore
     }
   });
 

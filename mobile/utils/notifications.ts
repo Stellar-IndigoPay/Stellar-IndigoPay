@@ -265,7 +265,8 @@ export function setupNotificationListener(
 /**
  * Set up notification response listener for deep-link navigation (#483).
  * When the user taps a push notification that contains a projectId, navigate
- * directly to that project's detail screen.
+ * directly to that project's detail screen. Governance proposals with a
+ * proposalId deep-link to the governance screen (when available).
  *
  * @param push - router.push function from expo-router
  * @returns the subscription (call .remove() on cleanup)
@@ -279,7 +280,19 @@ export function setupNotificationResponseListener(
         string,
         unknown
       >;
+      const type = data?.type as string | undefined;
       const projectId = data?.projectId as string | undefined;
+      const proposalId = data?.proposalId as string | undefined;
+
+      if (type === "governance_proposal" && proposalId) {
+        // TODO: Replace with dedicated governance voting screen when available.
+        // For now, navigate to the project detail if a projectId is also present.
+        if (projectId) {
+          push(`/projects/${projectId}`);
+        }
+        return;
+      }
+
       if (projectId) {
         push(`/projects/${projectId}`);
       }

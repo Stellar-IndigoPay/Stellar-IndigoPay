@@ -5,12 +5,15 @@ import {
   Switch,
   TextInput,
   ScrollView,
+  TouchableOpacity,
 } from "react-native";
 import { useBiometricAuth } from "../hooks/useBiometricAuth";
 import { useTheme } from "./theme";
+import { useRouter } from "expo-router";
 
 export default function SettingsScreen() {
   const { colors } = useTheme();
+  const router = useRouter();
   const {
     isAvailable,
     biometricType,
@@ -87,6 +90,25 @@ export default function SettingsScreen() {
           </Text>
         </View>
       </View>
+
+      {/* Notification Settings */}
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: colors.primaryText }]}>
+          Notifications
+        </Text>
+        <TouchableOpacity
+          style={[styles.linkRow, { borderColor: colors.border }]}
+          onPress={() => router.push("/settings/notifications" as `${string}`)}
+          accessibilityLabel="Open notification settings"
+        >
+          <Text style={[styles.label, { color: colors.primaryText }]}>
+            Notification Preferences
+          </Text>
+          <Text style={[styles.linkArrow, { color: colors.secondaryText }]}>
+            ›
+          </Text>
+        </TouchableOpacity>
+      </View>
     </ScrollView>
   );
 }
@@ -149,5 +171,16 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "600",
     marginTop: 4,
+  },
+  linkRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+  },
+  linkArrow: {
+    fontSize: 24,
+    fontWeight: "300",
   },
 });

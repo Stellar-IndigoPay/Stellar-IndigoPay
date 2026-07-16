@@ -25,21 +25,8 @@ const envSchema = z.object({
     .default("https://horizon-testnet.stellar.org"),
   ALLOWED_ORIGINS: z.string().optional().default("http://localhost:3000"),
   CONTRACT_ID: z.string().optional().default(""),
-  // Separate contract id for the cross-chain attestation bridge so we
-  // can deploy + index events from the new contract family without
-  // pulling a deployed-wasn't-yet leg on the original donation flow.
-  ATTESTATION_CONTRACT_ID: z.string().optional().default(""),
-  // Polling cadence for the Soroban att_new event back-fill worker
-  // (milliseconds). Default 30s — small enough to be a useful UX, big
-  // enough that an idle deployment doesn't hammer the RPC endpoint.
-  ATTESTATION_BACKFILL_POLL_MS: z.string().optional().default("30000"),
-  // Set to "false" to disable the back-fill worker entirely. Useful in
-  // tests and in deployments where the Soroban RPC URL isn't reachable.
-  ATTESTATION_BACKFILL_ENABLED: z.enum(["true", "false"]).optional().default("true"),
-  // Address registered as the relayer for record_attestation. Set
-  // during the deploy script and reused here so the indexer can
-  // attribute emitted events to the relayer in logs / metrics.
-  ATTESTATION_RELAYER_ADDRESS: z.string().optional().default(""),
+  ORACLE_CONTRACT_ID: z.string().optional().default(""),
+  ORACLE_ADMIN_SECRET: z.string().optional().default(""),
   RESEND_API_KEY: z.string().optional().default(""),
   EMAIL_FROM: z
     .string()

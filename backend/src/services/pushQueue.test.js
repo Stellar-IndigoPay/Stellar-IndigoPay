@@ -22,6 +22,8 @@ jest.mock("./pushService", () => ({
   sendDonationReceipt: jest.fn().mockResolvedValue(undefined),
   sendMilestoneReachedNotifications: jest.fn().mockResolvedValue(undefined),
   sendProjectUpdateNotifications: jest.fn().mockResolvedValue(undefined),
+  sendGovernanceProposalNotifications: jest.fn().mockResolvedValue(undefined),
+  sendRecurringReminder: jest.fn().mockResolvedValue(undefined),
 }));
 
 /**
@@ -219,6 +221,60 @@ describe("pushQueue", () => {
       expect(pushService.sendDonationReceipt).not.toHaveBeenCalled();
       expect(pushService.sendMilestoneReachedNotifications).not.toHaveBeenCalled();
       expect(pushService.sendProjectUpdateNotifications).not.toHaveBeenCalled();
+    });
+
+    test("governance_proposal job calls sendGovernanceProposalNotifications", async () => {
+      const { handler, pushService } = await getWorkerHandler();
+
+      await handler({
+        data: {
+          type: "governance_proposal",
+          payload: {
+            proposalId: "prop-42",
+            title: "Increase Carbon Offset",
+            description: "A proposal description",
+            endsAt: "2026-08-01T00:00:00Z",
+          },
+        },
+      });
+
+      expect(
+        pushService.sendGovernanceProposalNotifications,
+      ).toHaveBeenCalledWith({
+        proposalId: "prop-42",
+        title: "Increase Carbon Offset",
+        description: "A proposal description",
+        endsAt: "2026-08-01T00:00:00Z",
+      });
+    });
+
+    test("recurring_reminder job calls sendRecurringReminder", async () => {
+      const { handler, pushService } = await getWorkerHandler();
+
+      await handler({
+        data: {
+          type: "recurring_reminder",
+          payload: {
+            donorAddress: "GDONOR",
+            projectName: "Mangrove Restoration",
+            amount: "50",
+            currency: "XLM",
+            projectId: "proj-1",
+            nextPaymentDate: "2026-07-17T08:00:00Z",
+            recurringId: "rec-99",
+          },
+        },
+      });
+
+      expect(pushService.sendRecurringReminder).toHaveBeenCalledWith({
+        donorAddress: "GDONOR",
+        projectName: "Mangrove Restoration",
+        amount: "50",
+        currency: "XLM",
+        projectId: "proj-1",
+        nextPaymentDate: "2026-07-17T08:00:00Z",
+        recurringId: "rec-99",
+      });
     });
   });
 });
