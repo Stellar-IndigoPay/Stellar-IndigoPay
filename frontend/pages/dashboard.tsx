@@ -1,7 +1,7 @@
 /**
  * pages/dashboard.tsx — Donor impact dashboard
  */
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import WalletConnect from "@/components/WalletConnect";
 import EditProfileForm from "@/components/EditProfileForm";
@@ -32,6 +32,7 @@ import {
   SkeletonStatCard,
   SkeletonDonationList,
 } from "@/components/Skeleton";
+import VirtualList from "@/components/VirtualList";
 
 interface DashboardProps {
   publicKey: string | null;
@@ -518,12 +519,10 @@ export default function Dashboard({ publicKey, onConnect }: DashboardProps) {
                 </Link>
               </div>
             ) : (
-              <div className="space-y-2">
-                {donations.map((d) => (
-                  <div
-                    key={d.id}
-                    className="flex items-center gap-4 p-4 rounded-xl bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)] hover:bg-[rgba(99,102,241,0.08)] dark:hover:bg-[rgba(129,140,248,0.10)] transition-colors border border-transparent hover:border-[rgba(99,102,241,0.10)] dark:hover:border-[rgba(129,140,248,0.12)]"
-                  >
+              <VirtualList
+                items={donations}
+                renderItem={(d: Donation) => (
+                  <div className="flex items-center gap-4 p-4 rounded-xl bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)] hover:bg-[rgba(99,102,241,0.08)] dark:hover:bg-[rgba(129,140,248,0.10)] transition-colors border border-transparent hover:border-[rgba(99,102,241,0.10)] dark:hover:border-[rgba(129,140,248,0.12)]">
                     <div className="w-10 h-10 rounded-full bg-[rgba(99,102,241,0.10)] dark:bg-[rgba(129,140,248,0.12)] flex items-center justify-center text-lg flex-shrink-0">
                       🌱
                     </div>
@@ -556,8 +555,15 @@ export default function Dashboard({ publicKey, onConnect }: DashboardProps) {
                       </a>
                     </div>
                   </div>
-                ))}
-              </div>
+                )}
+                estimateSize={(i) => {
+                  const d = donations[i];
+                  return d?.message ? 88 : 72;
+                }}
+                overscan={3}
+                className="max-h-[600px]"
+                itemClassName="pb-2"
+              />
             )}
           </div>
         </div>
