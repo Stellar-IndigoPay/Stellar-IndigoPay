@@ -24,6 +24,14 @@ function runTriage() {
 
   const report = loadJson(REPORT_PATH);
   if (!report) {
+    const zapTarget = process.env.ZAP_TARGET || "";
+    if (!zapTarget || zapTarget === "https://example.com") {
+      console.warn(
+        "ZAP scan report.json was not produced for the placeholder target; skipping security triage until ZAP_TARGET is configured.",
+      );
+      process.exit(0);
+    }
+
     console.error(
       "Error: ZAP scan report.json not found or is invalid. Make sure ZAP scan completed and produced report.json.",
     );

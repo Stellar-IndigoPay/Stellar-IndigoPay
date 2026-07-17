@@ -4,9 +4,9 @@
 // TODO(indigopay-272): migrate to #[contractevent] pattern.
 #![allow(deprecated)]
 #[cfg(all(test, feature = "testutils"))]
-mod fuzz_tests;
-#[cfg(all(test, feature = "testutils"))]
 mod fuzz_template;
+#[cfg(all(test, feature = "testutils"))]
+mod fuzz_tests;
 
 /**
  * contracts/indigopay-contract/src/lib.rs
@@ -910,11 +910,7 @@ impl IndigoPayContract {
         // project wallet in the same Stellar transaction.
 
         env.events().publish(
-            (
-                symbol_short!("donated"),
-                donor.clone(),
-                project_id.clone(),
-            ),
+            (symbol_short!("donated"), donor.clone(), project_id.clone()),
             (xlm_amount, donor_stats.badge.clone(), msg_hash),
         );
         env.storage()

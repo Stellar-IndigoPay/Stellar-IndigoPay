@@ -19,9 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Required to write to the GitHub dependency graph API
+      # Dependency graph submission is only attempted on trusted main pushes.
       actions: read
-      dependency-graph: write
     strategy:
       fail-fast: false
       matrix:

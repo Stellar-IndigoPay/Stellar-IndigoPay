@@ -23,11 +23,13 @@ mod fuzz {
     extern crate std;
 
     use crate::{
-        BadgeTier, DataKey, IndigoPayContract, IndigoPayContractClient, MockOracle, Project,
+        BadgeTier, DataKey, DonorStats, IndigoPayContract, IndigoPayContractClient, MockOracle,
+        OracleInterface, Project,
     };
     use proptest::prelude::*;
     use soroban_sdk::{
-        testutils::Address as _, token::StellarAssetClient, Address, Env, String as SorobanString,
+        contract, contractimpl, testutils::Address as _, token::StellarAssetClient, Address, Env,
+        String as SorobanString, Symbol,
     };
 
     // ─── Constants ───────────────────────────────────────────────────────────
@@ -60,7 +62,13 @@ mod fuzz {
 
     /// Returns (env, contract_id, client, project_id, token).
     /// Creates one registered project and one XLM token for donations.
-    fn setup() -> (Env, Address, IndigoPayContractClient<'static>, SorobanString, Address) {
+    fn setup() -> (
+        Env,
+        Address,
+        IndigoPayContractClient<'static>,
+        SorobanString,
+        Address,
+    ) {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -89,7 +97,12 @@ mod fuzz {
     }
 
     /// Returns (env, admin, client, project_id).
-    fn setup_with_admin() -> (Env, Address, IndigoPayContractClient<'static>, SorobanString) {
+    fn setup_with_admin() -> (
+        Env,
+        Address,
+        IndigoPayContractClient<'static>,
+        SorobanString,
+    ) {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -177,6 +190,31 @@ mod fuzz {
     fn mint_tokens(env: &Env, token: &Address, donor: &Address, amount: i128) {
         let token_client = StellarAssetClient::new(env, token);
         token_client.mint(donor, &amount);
+    }
+
+    fn grant_badge(env: &Env, cid: &Address, donor: &Address, total_stroops: i128) {
+        env.as_contract(cid, || {
+            env.storage().instance().set(
+                &DataKey::DonorStats(donor.clone()),
+                &DonorStats {
+                    total_donated: total_stroops,
+                    donation_count: 1,
+                    badge: BadgeTier::Seedling,
+                    co2_offset_grams: 0,
+                },
+            );
+        });
+    }
+
+    #[contract]
+    struct PriceOracleHarness;
+
+    #[contractimpl]
+    impl OracleInterface for PriceOracleHarness {
+        fn get_price(env: Env) -> i128 {
+            let key = Symbol::new(&env, "price");
+            env.storage().instance().get(&key).unwrap_or(8)
+        }
     }
 
     // ─── Existing deterministic tests ────────────────────────────────────────
@@ -822,6 +860,270 @@ mod fuzz {
                 client.donate_usdc(&usdc_token, &donor, &project_id, &usdc_amount, &MSG_HASH);
             }));
             prop_assert!(result.is_err(), "donate_usdc should panic on CO2 overflow");
+        }
+
+        #[test]
+        fn fuzz_governance_proposals(
+            num_donors in 1usize..=6,
+            num_projects in 1usize..=4,
+            ledger_offset in 0u32..=200_000u32,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let cid = env.register_contract(None, IndigoPayContract);
+            let client = IndigoPayContractClient::new(&env, &cid);
+            let admin = Address::generate(&env);
+            client.initialize(&admin);
+
+            let mut expected_for = vec![0u32; num_projects];
+            let mut expected_against = vec![0u32; num_projects];
+            let mut project_ids = Vec::new();
+            for idx in 0..num_projects {
+                let project_id = SorobanString::from_str(&env, &format!("gov-fuzz-{}", idx));
+                let wallet = Address::generate(&env);
+                client.register_project(
+                    &admin,
+                    &project_id,
+                    &SorobanString::from_str(&env, "Governance Fuzz Project"),
+                    &wallet,
+                    &100u32,
+                );
+                client.create_proposal(&admin, &project_id, &0u32);
+                project_ids.push(project_id.clone());
+            }
+
+            for donor_idx in 0..num_donors {
+                let donor = Address::generate(&env);
+                grant_badge(&env, &cid, &donor, 10 * STROOP);
+                let proposal_idx = donor_idx % num_projects;
+                let project_id = project_ids[proposal_idx].clone();
+                let approve = (donor_idx + proposal_idx) % 2 == 0;
+
+                let first_vote = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    client.vote_verify_project(&donor, &project_id, &approve);
+                }));
+                prop_assert!(first_vote.is_ok(), "badge holder should be able to vote");
+
+                let second_vote = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    client.vote_verify_project(&donor, &project_id, &approve);
+                }));
+                prop_assert!(second_vote.is_err(), "duplicate vote should be rejected");
+
+                if approve {
+                    expected_for[proposal_idx] += 1;
+                } else {
+                    expected_against[proposal_idx] += 1;
+                }
+            }
+
+            env.as_contract(&cid, || {
+                env.storage().instance().extend_ttl(crate::VOTING_WINDOW_LEDGERS * 4, crate::VOTING_WINDOW_LEDGERS * 4);
+            });
+            env.ledger().set_sequence_number(crate::VOTING_WINDOW_LEDGERS + 2 + ledger_offset);
+
+            for (idx, project_id) in project_ids.iter().enumerate() {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    client.resolve_proposal(project_id);
+                }));
+                prop_assert!(result.is_ok(), "proposal should resolve after deadline");
+                let proposal = client.get_proposal(project_id);
+                prop_assert!(proposal.resolved);
+                prop_assert_eq!(proposal.votes_for, expected_for[idx]);
+                prop_assert_eq!(proposal.votes_against, expected_against[idx]);
+                if expected_for[idx] > expected_against[idx] {
+                    prop_assert!(proposal.votes_for > proposal.votes_against);
+                } else {
+                    prop_assert!(proposal.votes_for <= proposal.votes_against);
+                }
+            }
+        }
+
+        #[test]
+        fn fuzz_upgrade_timelock(
+            proposal_ledger in 0u32..=50_000u32,
+            offset in 0u32..=50_000u32,
+            cancel_first in bool,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let cid = env.register_contract(None, IndigoPayContract);
+            let client = IndigoPayContractClient::new(&env, &cid);
+            let admin = Address::generate(&env);
+            client.initialize(&admin);
+
+            env.ledger().set_sequence_number(proposal_ledger);
+            let upgrade_wasm = env.deployer().upload_contract_wasm(IndigoPayContract);
+            client.propose_upgrade(&admin, &upgrade_wasm);
+
+            let effective_at = proposal_ledger + crate::UPGRADE_TIMELOCK_LEDGERS;
+            env.ledger().set_sequence_number(proposal_ledger + offset);
+
+            if cancel_first {
+                let cancel_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    client.cancel_upgrade(&admin);
+                }));
+                prop_assert!(cancel_result.is_ok(), "cancel_upgrade should succeed");
+                let execute_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    client.execute_upgrade();
+                }));
+                prop_assert!(execute_result.is_err(), "execute_upgrade should be rejected after cancel");
+            } else if proposal_ledger + offset < effective_at {
+                let execute_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    client.execute_upgrade();
+                }));
+                prop_assert!(execute_result.is_err(), "execute_upgrade should fail before timelock");
+            } else {
+                let execute_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    client.execute_upgrade();
+                }));
+                prop_assert!(execute_result.is_ok(), "execute_upgrade should succeed after timelock");
+                prop_assert!(client.get_pending_upgrade().is_none());
+                prop_assert!(client.get_last_executed_upgrade().is_some());
+            }
+        }
+
+        #[test]
+        fn fuzz_multi_currency_donations(
+            co2_per_xlm in 1u32..=10_000u32,
+            oracle_price in prop_oneof![Just(0i128), 1i128..=100i128],
+            use_usdc in prop::collection::vec(any::<bool>(), 1..=6),
+            amounts in prop::collection::vec(1i128..=10_000_000i128, 1..=6),
+        ) {
+            let (env, client, project_id, usdc_token) = setup_usdc(co2_per_xlm);
+            let admin = client.get_admin();
+            let donor = Address::generate(&env);
+            fund_usdc(&env, &usdc_token, &donor, &100_000_000i128);
+            let oracle_addr = env.register_contract(None, PriceOracleHarness);
+            env.as_contract(&oracle_addr, || {
+                env.storage().instance().set(&Symbol::new(&env, "price"), &oracle_price);
+            });
+            client.set_oracle(&admin, &oracle_addr);
+
+            let mut expected_total = 0i128;
+            let mut expected_co2 = 0i128;
+            for (idx, use_usdc_step) in use_usdc.iter().enumerate() {
+                let amount = amounts[idx];
+                if *use_usdc_step {
+                    let rate = oracle_price;
+                    if rate <= 0 {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            client.donate_usdc(&usdc_token, &donor, &project_id, &amount, &MSG_HASH);
+                        }));
+                        prop_assert!(result.is_err(), "zero oracle price must be rejected");
+                        continue;
+                    }
+                    let xlm_equivalent = amount.checked_mul(rate).expect("safe product");
+                    let co2_increment = (xlm_equivalent / STROOP) * (co2_per_xlm as i128);
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        client.donate_usdc(&usdc_token, &donor, &project_id, &amount, &MSG_HASH);
+                    }));
+                    prop_assert!(result.is_ok(), "USDC donation should succeed with a valid oracle price");
+                    expected_total += xlm_equivalent;
+                    expected_co2 += co2_increment;
+                } else {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        client.donate(&usdc_token, &donor, &project_id, &amount, &MSG_HASH);
+                    }));
+                    prop_assert!(result.is_ok(), "XLM donation should succeed");
+                    let xlm_units = amount / STROOP;
+                    let co2_increment = xlm_units * (co2_per_xlm as i128);
+                    expected_total += amount;
+                    expected_co2 += co2_increment;
+                }
+
+                prop_assert_eq!(client.get_global_co2(), expected_co2);
+                prop_assert_eq!(client.get_global_total(), expected_total);
+            }
+
+            prop_assert_eq!(client.get_global_co2(), expected_co2);
+            prop_assert_eq!(client.get_global_total(), expected_total);
+        }
+
+        #[test]
+        fn fuzz_project_lifecycle(
+            actions in prop::collection::vec(0u8..=3, 1..=8),
+            amount in 1i128..=10_000_000i128,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let cid = env.register_contract(None, IndigoPayContract);
+            let client = IndigoPayContractClient::new(&env, &cid);
+            let admin = Address::generate(&env);
+            client.initialize(&admin);
+
+            let project_id = SorobanString::from_str(&env, "lifecycle-fuzz");
+            let wallet = Address::generate(&env);
+            client.register_project(
+                &admin,
+                &project_id,
+                &SorobanString::from_str(&env, "Lifecycle Fuzz Project"),
+                &wallet,
+                &100u32,
+            );
+
+            let donor = Address::generate(&env);
+            let token_admin = Address::generate(&env);
+            let token = env.register_stellar_asset_contract_v2(token_admin).address();
+            mint_tokens(&env, &token, &donor, amount);
+
+            let mut active = true;
+            let mut paused = false;
+            let mut expected_total = 0i128;
+            for action in actions {
+                match action {
+                    0 => {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            client.pause_project(&admin, &project_id);
+                        }));
+                        if active && !paused {
+                            prop_assert!(result.is_ok(), "pause should succeed for an active project");
+                            paused = true;
+                        } else {
+                            prop_assert!(result.is_err(), "pause should be rejected in invalid states");
+                        }
+                    }
+                    1 => {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            client.resume_project(&admin, &project_id);
+                        }));
+                        if active && paused {
+                            prop_assert!(result.is_ok(), "resume should succeed for a paused project");
+                            paused = false;
+                        } else {
+                            prop_assert!(result.is_err(), "resume should be rejected in invalid states");
+                        }
+                    }
+                    2 => {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            client.deactivate_project(&admin, &project_id);
+                        }));
+                        if active {
+                            prop_assert!(result.is_ok(), "deactivate should succeed for an active project");
+                            active = false;
+                            paused = false;
+                        } else {
+                            prop_assert!(result.is_err(), "deactivate should be rejected after deactivation");
+                        }
+                    }
+                    _ => {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            client.donate(&token, &donor, &project_id, &amount, &MSG_HASH);
+                        }));
+                        if active && !paused {
+                            prop_assert!(result.is_ok(), "donation should succeed for an active project");
+                            expected_total += amount;
+                        } else {
+                            prop_assert!(result.is_err(), "donation should be rejected when paused or inactive");
+                        }
+                    }
+                }
+
+                let project = client.get_project(&project_id);
+                prop_assert_eq!(project.active, active);
+                prop_assert_eq!(project.paused, paused);
+            }
+
+            prop_assert_eq!(client.get_global_total(), expected_total);
         }
     }
 }
