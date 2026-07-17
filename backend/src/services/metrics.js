@@ -150,6 +150,26 @@ const webhookDeliveriesTotal = new client.Counter({
   registers: [registry],
 });
 
+const virusScanTotal = new client.Counter({
+  name: "virus_scan_total",
+  help: "ClamAV scan results, labelled by result (clean|infected|error|skipped).",
+  labelNames: ["result"],
+  registers: [registry],
+});
+
+const uploadSuccessTotal = new client.Counter({
+  name: "upload_success_total",
+  help: "Successful uploads.",
+  registers: [registry],
+});
+
+const uploadRejectedTotal = new client.Counter({
+  name: "upload_rejected_total",
+  help: "Rejected uploads, labelled by reason (mime_mismatch|virus_detected|quota_exceeded|size_limit).",
+  labelNames: ["reason"],
+  registers: [registry],
+});
+
 const webhookAttemptsTotal = new client.Counter({
   name: "webhook_attempts_total",
   help: "Number of webhook HTTP attempts, labelled by event_type.",
@@ -386,5 +406,8 @@ module.exports = {
     queueFailed,
     queueCompleted,
     queueLatency,
+    virusScanTotal,
+    uploadSuccessTotal,
+    uploadRejectedTotal,
   },
 };

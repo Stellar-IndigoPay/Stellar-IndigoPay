@@ -13,7 +13,8 @@
     "test:watch": "jest --watch",
     "test:smoke": "jest --ci --colors=false --testPathPattern='(Tabs|MonthlyGivingSetup)\\.test'",
     "test:smoke:install": "node -e \"require.resolve('jest-axe'); require.resolve('axe-core'); console.log('jest-axe + axe-core resolved cleanly')\"",
-    "a11y:scan": "node scripts/axe-scan.mjs"
+    "a11y:scan": "node scripts/axe-scan.mjs",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@sentry/nextjs": "^7.51.0",

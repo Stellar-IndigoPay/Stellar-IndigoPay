@@ -21,6 +21,14 @@ services:
       timeout: 5s
       retries: 10
 
+  clamav:
+    image: clamav/clamav:stable
+    healthcheck:
+      test: ["CMD", "clamdscan", "--ping", "127.0.0.1:3310"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   backend:
     build:
       context: ./backend
@@ -33,9 +41,13 @@ services:
       STELLAR_NETWORK: testnet
       HORIZON_URL: https://horizon-testnet.stellar.org
       ALLOWED_ORIGINS: http://localhost:3000
+      CLAMD_HOST: clamav
+      CLAMD_PORT: 3310
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      clamav:
         condition: service_healthy
     command: npm test
