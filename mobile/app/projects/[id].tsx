@@ -21,6 +21,7 @@ import {
   StyleSheet,
   TouchableOpacity,
   Animated,
+  Share,
 } from "react-native";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { useEffect, useRef, useState } from "react";
@@ -30,7 +31,9 @@ import {
   getPushToken,
   followProject,
   unfollowProject,
+  markNotificationsSeen,
 } from "../../utils/notifications";
+import * as Notifications from "expo-notifications";
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
 
@@ -76,6 +79,7 @@ function Toast({
   const opacity = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
+    let timer: NodeJS.Timeout;
     // Fade in
     Animated.timing(opacity, {
       toValue: 1,
@@ -83,7 +87,7 @@ function Toast({
       useNativeDriver: true,
     }).start(() => {
       // Hold for 2 s, then fade out
-      setTimeout(() => {
+      timer = setTimeout(() => {
         Animated.timing(opacity, {
           toValue: 0,
           duration: 300,
@@ -91,6 +95,9 @@ function Toast({
         }).start(onHide);
       }, 2000);
     });
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
   }, []);
 
   const bg = variant === "success" ? "#227239" : "#b91c1c";
@@ -148,19 +155,36 @@ export default function ProjectDetailScreen() {
   const [toast, setToast] = useState<ToastState | null>(null);
 
   useEffect(() => {
+    let active = true;
     if (id) {
       loadProject(id as string);
       initializeNotifications();
       markNotificationsSeen().then(() => {
-        Notifications.setBadgeCountAsync(0).catch(() => undefined);
+        if (active) {
+          Notifications.setBadgeCountAsync(0).catch(() => undefined);
+        }
       });
     }
+    return () => {
+      active = false;
+    };
   }, [id]);
 
   // ── helpers ────────────────────────────────────────────────────────────────
 
   const showToast = (message: string, variant: ToastVariant = "success") => {
     setToast({ message, variant });
+  };
+
+  const handleShare = async () => {
+    if (!project) return;
+    try {
+      await Share.share({
+        message: `Check out this project: ${project.name} on Stellar IndigoPay!`,
+      });
+    } catch (error) {
+      console.error("Error sharing project:", error);
+    }
   };
 
   const initializeNotifications = async () => {
@@ -288,15 +312,29 @@ export default function ProjectDetailScreen() {
       <ScrollView style={styles.container}>
         {/* Header */}
         <View style={[styles.header, { backgroundColor: colors.primary }]}>
-          <Text style={[styles.category, { color: colors.headerText }]}>
-            {project.category}
-          </Text>
-          <Text style={[styles.name, { color: colors.headerText }]}>
-            {project.name}
-          </Text>
-          <Text style={[styles.location, { color: colors.headerText }]}>
-            📍 {project.location}
-          </Text>
+          <View style={styles.headerRow}>
+            <View style={styles.headerTextGroup}>
+              <Text style={[styles.category, { color: colors.headerText }]}>
+                {project.category}
+              </Text>
+              <Text style={[styles.name, { color: colors.headerText }]}>
+                {project.name}
+              </Text>
+              <Text style={[styles.location, { color: colors.headerText }]}>
+                📍 {project.location}
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.shareButton}
+              onPress={handleShare}
+              accessibilityRole="button"
+              accessibilityLabel={`Share ${project.name}`}
+            >
+              <Text style={[styles.shareIcon, { color: colors.headerText }]}>
+                📤
+              </Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* Stats */}
@@ -424,6 +462,8 @@ export default function ProjectDetailScreen() {
             { backgroundColor: colors.buttonBackground },
           ]}
           onPress={() => router.push(`/donate/${project.id}`)}
+          accessibilityRole="button"
+          accessibilityLabel={`Donate to ${project.name}`}
         >
           <Text style={[styles.donateButtonText, { color: colors.buttonText }]}>
             🌱 Donate Now

@@ -1,12 +1,25 @@
 /**
  * app/scan.tsx
- * Scan to Donate — reads a project wallet QR code and navigates to the donate
- * screen with the scanned wallet address pre-populated as the destination.
+ * Scan to Donate — reads a project QR code, validates it against the
+ * project registry, and hands off to the donate screen with the project,
+ * amount, and memo pre-filled.
  *
- * QR format expected: a Stellar public key (G…) or a deep-link of the form
- *   indigopay://donate?wallet=G...&project=<projectId>
+ * Recognised QR payloads (see utils/qrParser.ts):
+ *   - stellar-indigopay://donate?projectId=X&amount=Y&memo=Z
+ *   - indigopay://donate?wallet=G...&project=X          (legacy)
+ *   - web+stellar:pay?destination=G...&memo=...          (web QR component)
+ *   - a raw Stellar public key, or any URL containing one
+ *
+ * Post-scan flow:
+ *   scanning → validating → found   (green: project name, auto-navigate)
+ *                         → unknown (yellow: address not in registry,
+ *                                    donor may still donate to it)
+ *                         → invalid (red: not a Stellar/IndigoPay QR)
+ *
+ * Every successful scan is persisted to AsyncStorage (last 20, newest
+ * first) and surfaced in a "Recent scans" sheet for quick re-donation.
  */
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -14,37 +27,66 @@ import {
   TouchableOpacity,
   Linking,
   Platform,
+  Modal,
+  FlatList,
+  ActivityIndicator,
 } from "react-native";
 import { useRouter } from "expo-router";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import axios from "axios";
+import { parseQRData, ParsedQR } from "../utils/qrParser";
+import {
+  addToHistory,
+  clearScanHistory,
+  getScanHistory,
+  ScanHistoryItem,
+} from "../utils/scanHistory";
 
-const STELLAR_KEY_RE = /^G[A-Z2-7]{55}$/;
-const DEEP_LINK_RE = /indigopay:\/\/donate\?(.+)/;
+const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
+const NAVIGATE_DELAY_MS = 800; // Brief pause so the success state is visible.
 
-function parseScan(
-  data: string,
-): { wallet: string; projectId?: string } | null {
-  const deepMatch = data.match(DEEP_LINK_RE);
-  if (deepMatch) {
-    const params = new URLSearchParams(deepMatch[1]);
-    const wallet = params.get("wallet") ?? "";
-    if (STELLAR_KEY_RE.test(wallet)) {
-      return { wallet, projectId: params.get("project") ?? undefined };
-    }
-    return null;
+type ValidationState =
+  | "scanning"
+  | "validating"
+  | "found"
+  | "unknown"
+  | "invalid";
+
+interface RegistryProject {
+  id: string;
+  name: string;
+  walletAddress: string;
+}
+
+/** Look up a scanned wallet address in the backend project registry. */
+async function lookupAddress(
+  address: string,
+): Promise<{ found: boolean; project?: RegistryProject }> {
+  try {
+    const res = await axios.get(
+      `${API_URL}/api/projects?wallet=${encodeURIComponent(address)}`,
+    );
+    const list: RegistryProject[] = Array.isArray(res.data?.data)
+      ? res.data.data
+      : [];
+    const project = list.find((p) => p.walletAddress === address);
+    return { found: !!project, project };
+  } catch {
+    return { found: false };
   }
-  if (STELLAR_KEY_RE.test(data.trim())) {
-    return { wallet: data.trim() };
-  }
-  return null;
 }
 
 export default function ScanScreen() {
   const router = useRouter();
   const [permission, requestPermission] = useCameraPermissions();
-  const [scanned, setScanned] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [validationState, setValidationState] =
+    useState<ValidationState>("scanning");
+  const [projectInfo, setProjectInfo] = useState<RegistryProject | null>(null);
+  const [pendingScan, setPendingScan] = useState<ParsedQR | null>(null);
+  const [historyVisible, setHistoryVisible] = useState(false);
+  const [history, setHistory] = useState<ScanHistoryItem[]>([]);
   const cooldown = useRef(false);
+  const navigateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!permission?.granted) {
@@ -52,29 +94,132 @@ export default function ScanScreen() {
     }
   }, []);
 
-  const handleBarcode = ({ data }: { data: string }) => {
-    if (cooldown.current || scanned) return;
+  useEffect(() => {
+    return () => {
+      if (navigateTimer.current) clearTimeout(navigateTimer.current);
+    };
+  }, []);
+
+  const refreshHistory = useCallback(async () => {
+    setHistory(await getScanHistory());
+  }, []);
+
+  useEffect(() => {
+    refreshHistory();
+  }, [refreshHistory]);
+
+  const resetScanner = () => {
+    if (navigateTimer.current) clearTimeout(navigateTimer.current);
+    setValidationState("scanning");
+    setProjectInfo(null);
+    setPendingScan(null);
+    cooldown.current = false;
+  };
+
+  const navigateToDonate = (
+    projectId: string,
+    params: { amount?: string; memo?: string; wallet?: string },
+  ) => {
+    const query = new URLSearchParams();
+    if (params.amount) query.set("amount", params.amount);
+    if (params.memo) query.set("memo", params.memo);
+    if (params.wallet) query.set("wallet", params.wallet);
+    const qs = query.toString();
+    router.push(`/donate/${projectId}${qs ? `?${qs}` : ""}` as `${string}`);
+  };
+
+  const scheduleNavigate = (
+    projectId: string,
+    params: { amount?: string; memo?: string; wallet?: string },
+  ) => {
+    navigateTimer.current = setTimeout(() => {
+      navigateToDonate(projectId, params);
+    }, NAVIGATE_DELAY_MS);
+  };
+
+  const handleBarcode = async ({ data }: { data: string }) => {
+    if (cooldown.current || validationState !== "scanning") return;
     cooldown.current = true;
 
-    const parsed = parseScan(data);
-    if (!parsed) {
-      setError("QR code is not a valid IndigoPay wallet address. Try again.");
-      setTimeout(() => {
-        setError(null);
-        cooldown.current = false;
-      }, 2000);
+    const parsed = parseQRData(data);
+
+    if (parsed.type === "unknown") {
+      setValidationState("invalid");
       return;
     }
 
-    setScanned(true);
+    setValidationState("validating");
+    setPendingScan(parsed);
 
-    // Build the donate route with the scanned wallet as a query param.
-    // The donate/[id] screen reads `wallet` from params to pre-fill the destination.
-    const target = parsed.projectId
-      ? `/donate/${parsed.projectId}?wallet=${encodeURIComponent(parsed.wallet)}`
-      : `/donate/scan?wallet=${encodeURIComponent(parsed.wallet)}`;
+    // Deep link with an embedded projectId: no registry lookup needed.
+    if (parsed.type === "donate_link" && parsed.projectId) {
+      setValidationState("found");
+      await addToHistory({ ...parsed, timestamp: Date.now() });
+      refreshHistory();
+      scheduleNavigate(parsed.projectId, {
+        amount: parsed.amount,
+        memo: parsed.memo,
+      });
+      return;
+    }
 
-    router.push(target as `${string}`);
+    // Otherwise validate the scanned address against the project registry.
+    if (parsed.address) {
+      const result = await lookupAddress(parsed.address);
+      if (result.found && result.project) {
+        setValidationState("found");
+        setProjectInfo(result.project);
+        await addToHistory({
+          ...parsed,
+          projectId: result.project.id,
+          projectName: result.project.name,
+          timestamp: Date.now(),
+        });
+        refreshHistory();
+        scheduleNavigate(result.project.id, {
+          amount: parsed.amount,
+          memo: parsed.memo,
+        });
+      } else {
+        setValidationState("unknown");
+      }
+      return;
+    }
+
+    setValidationState("invalid");
+  };
+
+  /** "Donate anyway" for addresses that aren't in the project registry. */
+  const donateToUnknownAddress = async () => {
+    if (!pendingScan?.address) return;
+    await addToHistory({ ...pendingScan, timestamp: Date.now() });
+    refreshHistory();
+    navigateToDonate("scan", {
+      wallet: pendingScan.address,
+      amount: pendingScan.amount,
+      memo: pendingScan.memo,
+    });
+  };
+
+  const openHistoryItem = (item: ScanHistoryItem) => {
+    setHistoryVisible(false);
+    if (item.projectId) {
+      navigateToDonate(item.projectId, {
+        amount: item.amount,
+        memo: item.memo,
+      });
+    } else if (item.address) {
+      navigateToDonate("scan", {
+        wallet: item.address,
+        amount: item.amount,
+        memo: item.memo,
+      });
+    }
+  };
+
+  const handleClearHistory = async () => {
+    await clearScanHistory();
+    refreshHistory();
   };
 
   if (!permission) {
@@ -111,7 +256,9 @@ export default function ScanScreen() {
       <CameraView
         style={StyleSheet.absoluteFillObject}
         facing="back"
-        onBarcodeScanned={scanned ? undefined : handleBarcode}
+        onBarcodeScanned={
+          validationState === "scanning" ? handleBarcode : undefined
+        }
         barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
       />
 
@@ -129,31 +276,161 @@ export default function ScanScreen() {
           <View style={styles.sideOverlay} />
         </View>
         <View style={styles.bottomOverlay}>
-          {error ? (
-            <Text style={styles.errorText}>{error}</Text>
-          ) : scanned ? (
-            <Text style={styles.successText}>
-              QR scanned — opening donation screen…
-            </Text>
-          ) : (
+          {validationState === "scanning" && (
             <Text style={styles.hint}>
               Point the camera at a project wallet QR code
             </Text>
           )}
 
-          {scanned && (
-            <TouchableOpacity
-              style={[styles.button, { marginTop: 16 }]}
-              onPress={() => {
-                setScanned(false);
-                cooldown.current = false;
-              }}
-            >
-              <Text style={styles.buttonText}>Scan Again</Text>
-            </TouchableOpacity>
+          {validationState === "validating" && (
+            <View style={styles.statusRow}>
+              <ActivityIndicator color="#c8e6c9" />
+              <Text style={[styles.hint, styles.statusRowText]}>
+                Validating scanned code…
+              </Text>
+            </View>
           )}
+
+          {validationState === "found" && (
+            <View style={styles.statusCard}>
+              <Text style={styles.foundIcon}>✅</Text>
+              <Text style={styles.successText}>
+                {projectInfo?.name
+                  ? `${projectInfo.name} verified`
+                  : "IndigoPay project QR verified"}
+              </Text>
+              {pendingScan?.amount ? (
+                <Text style={styles.successSubText}>
+                  Suggested amount: {pendingScan.amount} XLM
+                </Text>
+              ) : null}
+              <Text style={styles.successSubText}>Opening donation…</Text>
+            </View>
+          )}
+
+          {validationState === "unknown" && (
+            <View style={styles.statusCard}>
+              <Text style={styles.foundIcon}>⚠️</Text>
+              <Text style={styles.warningText}>
+                Address not in the project registry.
+              </Text>
+              <Text style={styles.warningSubText}>
+                {pendingScan?.address
+                  ? `${pendingScan.address.slice(0, 8)}…${pendingScan.address.slice(-4)}`
+                  : ""}
+              </Text>
+              <TouchableOpacity
+                style={[styles.button, { marginTop: 12 }]}
+                onPress={donateToUnknownAddress}
+                accessibilityRole="button"
+                accessibilityLabel="Donate to this address anyway"
+              >
+                <Text style={styles.buttonText}>Donate Anyway</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {validationState === "invalid" && (
+            <View style={styles.statusCard}>
+              <Text style={styles.foundIcon}>❌</Text>
+              <Text style={styles.errorText}>
+                Not a valid Stellar address or IndigoPay QR code.
+              </Text>
+            </View>
+          )}
+
+          {validationState !== "scanning" &&
+            validationState !== "validating" && (
+              <TouchableOpacity
+                style={[styles.button, styles.buttonSecondary, { marginTop: 16 }]}
+                onPress={resetScanner}
+                accessibilityRole="button"
+                accessibilityLabel="Scan another QR code"
+              >
+                <Text style={styles.buttonText}>Scan Again</Text>
+              </TouchableOpacity>
+            )}
+
+          <TouchableOpacity
+            style={styles.historyLink}
+            onPress={() => {
+              refreshHistory();
+              setHistoryVisible(true);
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="Show recent scans"
+          >
+            <Text style={styles.historyLinkText}>
+              🕘 Recent scans{history.length ? ` (${history.length})` : ""}
+            </Text>
+          </TouchableOpacity>
         </View>
       </View>
+
+      {/* Scan history sheet */}
+      <Modal
+        visible={historyVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setHistoryVisible(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Recent scans</Text>
+              <TouchableOpacity
+                onPress={() => setHistoryVisible(false)}
+                accessibilityRole="button"
+                accessibilityLabel="Close recent scans"
+              >
+                <Text style={styles.modalClose}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            {history.length === 0 ? (
+              <Text style={styles.emptyHistory}>
+                No scans yet. Scanned QR codes will show up here for quick
+                re-donation.
+              </Text>
+            ) : (
+              <FlatList
+                data={history}
+                keyExtractor={(item) => `${item.raw}-${item.timestamp}`}
+                renderItem={({ item }) => (
+                  <TouchableOpacity
+                    style={styles.historyItem}
+                    onPress={() => openHistoryItem(item)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Donate again to ${item.projectName || item.address || "scanned code"}`}
+                  >
+                    <Text style={styles.historyItemTitle}>
+                      {item.projectName ||
+                        (item.address
+                          ? `${item.address.slice(0, 8)}…${item.address.slice(-4)}`
+                          : "IndigoPay QR")}
+                    </Text>
+                    <Text style={styles.historyItemMeta}>
+                      {item.amount ? `${item.amount} XLM · ` : ""}
+                      {new Date(item.timestamp).toLocaleString()}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              />
+            )}
+
+            {history.length > 0 && (
+              <TouchableOpacity
+                style={styles.clearHistoryButton}
+                onPress={handleClearHistory}
+                accessibilityRole="button"
+                accessibilityLabel="Clear scan history"
+              >
+                <Text style={styles.clearHistoryText}>Clear history</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -226,44 +503,119 @@ const styles = StyleSheet.create({
     fontSize: 14,
     textAlign: "center",
   },
+  statusRow: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  statusRowText: {
+    marginLeft: 10,
+  },
+  statusCard: {
+    alignItems: "center",
+  },
+  foundIcon: {
+    fontSize: 28,
+    marginBottom: 6,
+  },
   errorText: {
     color: "#ff8a80",
     fontSize: 14,
     textAlign: "center",
   },
-  successText: {
-    color: "#a5d6a7",
+  warningText: {
+    color: "#ffe082",
     fontSize: 14,
+    fontWeight: "700",
     textAlign: "center",
   },
-  corner: {
-    position: "absolute",
-    width: CORNER,
-    height: CORNER,
-    borderColor: "#4caf50",
+  warningSubText: {
+    color: "#ffecb3",
+    fontSize: 12,
+    marginTop: 4,
+    textAlign: "center",
   },
-  topLeft: {
-    top: 0,
-    left: 0,
-    borderTopWidth: BORDER,
-    borderLeftWidth: BORDER,
+  successText: {
+    color: "#a5d6a7",
+    fontSize: 15,
+    fontWeight: "700",
+    textAlign: "center",
   },
-  topRight: {
-    top: 0,
-    right: 0,
-    borderTopWidth: BORDER,
-    borderRightWidth: BORDER,
+  successSubText: {
+    color: "#c8e6c9",
+    fontSize: 13,
+    marginTop: 4,
+    textAlign: "center",
   },
-  bottomLeft: {
-    bottom: 0,
-    left: 0,
-    borderBottomWidth: BORDER,
-    borderLeftWidth: BORDER,
+  historyLink: {
+    marginTop: 18,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
   },
-  bottomRight: {
-    bottom: 0,
-    right: 0,
-    borderBottomWidth: BORDER,
-    borderRightWidth: BORDER,
+  historyLinkText: {
+    color: "#c8e6c9",
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    justifyContent: "flex-end",
+  },
+  modalSheet: {
+    backgroundColor: "#fff",
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 28,
+    maxHeight: "70%",
+  },
+  modalHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: "#1a2e1a",
+  },
+  modalClose: {
+    fontSize: 18,
+    color: "#5a7a5a",
+    padding: 4,
+  },
+  emptyHistory: {
+    color: "#5a7a5a",
+    fontSize: 14,
+    paddingVertical: 20,
+    textAlign: "center",
+  },
+  historyItem: {
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#e8f0e8",
+  },
+  historyItemTitle: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#1a2e1a",
+  },
+  historyItemMeta: {
+    fontSize: 12,
+    color: "#5a7a5a",
+    marginTop: 2,
+  },
+  clearHistoryButton: {
+    marginTop: 14,
+    alignSelf: "center",
+    paddingVertical: 8,
+    paddingHorizontal: 18,
+  },
+  clearHistoryText: {
+    color: "#b23b3b",
+    fontSize: 14,
+    fontWeight: "600",
   },
 });

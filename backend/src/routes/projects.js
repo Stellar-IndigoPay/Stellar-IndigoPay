@@ -8,6 +8,11 @@ const router = express.Router();
 const { v4: uuid } = require("uuid");
 const QRCode = require("qrcode");
 const pool = require("../db/pool");
+const { validate } = require("../middleware/validate");
+const {
+  stellarAddress,
+  uuid: uuidValidator,
+} = require("../validators/schemas");
 const { logAdminAction } = require("../services/audit");
 const {
   mapProjectRow,
@@ -1074,8 +1079,8 @@ router.post("/:id/follow", async (req, res, next) => {
     // INSERT … ON CONFLICT DO NOTHING makes this idempotent.
     await pool.query(
       `INSERT INTO project_follows (project_id, wallet_address, created_at)
-       VALUES ($1, $2, NOW())
-       ON CONFLICT (project_id, wallet_address) DO NOTHING`,
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (project_id, wallet_address) DO NOTHING`,
       [req.params.id, walletAddress],
     );
 
@@ -1094,7 +1099,8 @@ router.post("/:id/follow", async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+},
+);
 
 /**
  * DELETE /api/projects/:id/follow
@@ -1136,7 +1142,8 @@ router.delete("/:id/follow", async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+},
+);
 
 /**
  * POST /api/projects/:id/generate-summary
@@ -1556,7 +1563,8 @@ router.get("/:id/badge-holders", async (req, res, next) => {
     const uuidRegex =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (!uuidRegex.test(projectId)) {
-      throw new AppError("PROJECT_NOT_FOUND");
+      const err = new AppError("PROJECT_NOT_FOUND");
+      return res.status(400).json(err.toJSON());
     }
 
     const projectResult = await pool.query(

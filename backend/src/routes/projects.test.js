@@ -408,7 +408,7 @@ describe("GET /api/projects/:id/badge-holders", () => {
   });
 
   test("returns the list of badge-holding donors for a project", async () => {
-    const validUuid = "11111111-2222-3333-4444-555555555555";
+    const validUuid = "11111111-2222-3333-8888-555555555555";
     pool.query.mockResolvedValueOnce({ rows: [{ id: validUuid }] });
     pool.query.mockResolvedValueOnce({
       rows: [
@@ -439,7 +439,7 @@ describe("GET /api/projects/:id/badge-holders", () => {
   });
 
   test("returns 404 if project does not exist", async () => {
-    const validUuid = "11111111-2222-3333-4444-555555555555";
+    const validUuid = "11111111-2222-3333-8888-555555555555";
     pool.query.mockResolvedValueOnce({ rows: [] });
 
     const res = await request(app)
@@ -449,10 +449,10 @@ describe("GET /api/projects/:id/badge-holders", () => {
     expect(res.body.error.code).toBe("PROJECT_NOT_FOUND");
   });
 
-  test("returns 404 if project ID is not a valid UUID", async () => {
+  test("returns 400 if project ID is not a valid UUID", async () => {
     const res = await request(app)
       .get("/api/projects/invalid-uuid/badge-holders")
-      .expect(404);
+      .expect(400);
 
     expect(res.body.error.code).toBe("PROJECT_NOT_FOUND");
   });

@@ -269,3 +269,119 @@ describe("POST /api/notifications/unregister", () => {
     expect(res.body.error).toBe("token is required");
   });
 });
+
+describe("PATCH /api/notifications/preferences", () => {
+  let app;
+
+  beforeEach(() => {
+    app = buildApp();
+    jest.clearAllMocks();
+  });
+
+  test("upserts a project-level preference", async () => {
+    pool.query.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .patch("/api/notifications/preferences")
+      .send({
+        walletAddress: "GDONOR",
+        projectId: "proj-1",
+        channel: "push",
+        enabled: true,
+      })
+      .expect(200);
+
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.walletAddress).toBe("GDONOR");
+    expect(res.body.data.projectId).toBe("proj-1");
+    expect(res.body.data.enabled).toBe(true);
+  });
+
+  test("rejects missing required fields", async () => {
+    const res = await request(app)
+      .patch("/api/notifications/preferences")
+      .send({ walletAddress: "GDONOR" })
+      .expect(400);
+
+    expect(res.body.error).toBe("projectId is required");
+  });
+});
+
+describe("GET /api/notifications/inbox", () => {
+  let app;
+
+  beforeEach(() => {
+    app = buildApp();
+    jest.clearAllMocks();
+  });
+
+  test("returns paginated in-app notifications for a wallet", async () => {
+    pool.query
+      .mockResolvedValueOnce({
+        rows: [
+          { id: "n1", title: "Test", body: "Body", data: {}, read: false, created_at: new Date().toISOString() },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [{ total: "1" }] })
+      .mockResolvedValueOnce({ rows: [{ unread: "1" }] });
+
+    const res = await request(app)
+      .get("/api/notifications/inbox")
+      .query({ walletAddress: "GDONOR" })
+      .expect(200);
+
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.notifications).toHaveLength(1);
+    expect(res.body.data.total).toBe(1);
+    expect(res.body.data.unread).toBe(1);
+  });
+
+  test("rejects requests without walletAddress", async () => {
+    const res = await request(app)
+      .get("/api/notifications/inbox")
+      .expect(400);
+
+    expect(res.body.error).toBe("walletAddress query parameter is required");
+  });
+});
+
+describe("POST /api/notifications/inbox/:id/read", () => {
+  let app;
+
+  beforeEach(() => {
+    app = buildApp();
+    jest.clearAllMocks();
+  });
+
+  test("marks an in-app notification as read", async () => {
+    pool.query.mockResolvedValueOnce({ rowCount: 1, rows: [{ id: "n1", read: true }] });
+
+    const res = await request(app)
+      .post("/api/notifications/inbox/n1/read")
+      .send({ walletAddress: "GDONOR" })
+      .expect(200);
+
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.read).toBe(true);
+  });
+
+  test("returns 404 when notification is not found", async () => {
+    pool.query.mockResolvedValueOnce({ rowCount: 0, rows: [] });
+
+    const res = await request(app)
+      .post("/api/notifications/inbox/n1/read")
+      .send({ walletAddress: "GDONOR" })
+      .expect(404);
+
+    expect(res.body.error).toBe("Notification not found");
+  });
+
+  test("rejects requests without walletAddress", async () => {
+    const res = await request(app)
+      .post("/api/notifications/inbox/n1/read")
+      .send({})
+      .expect(400);
+
+    expect(res.body.error).toBe("walletAddress is required in body");
+  });
+});

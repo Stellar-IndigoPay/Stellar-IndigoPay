@@ -129,6 +129,13 @@ const indexerRunning = new client.Gauge({
 
 
 
+const secretRotationLastTimestamp = new client.Gauge({
+  name: "secret_rotation_last_timestamp",
+  help: "Unix timestamp of the most recent secret rotation, labelled by status (completed|failed|rolled_back|in_progress).",
+  labelNames: ["status"],
+  registers: [registry],
+});
+
 const readinessCheckFailedTotal = new client.Counter({
   name: "readiness_check_failed_total",
   help: "Count of /api/readyz responses with HTTP 503 (readiness probe failed).",
@@ -329,11 +336,26 @@ async function refreshQueueMetrics() {
   }
 }
 
+/**
+ * Update the secret-rotation Prometheus gauge after a rotation is recorded.
+ * Called from the admin secretRotations route once the DB insert succeeds.
+ *
+ * @param {string} status — one of completed|failed|rolled_back|in_progress
+ */
+function updateSecretRotationMetrics(status) {
+  try {
+    secretRotationLastTimestamp.set({ status }, Date.now() / 1000);
+  } catch {
+    // Gauge may not be registered in test environments; swallow.
+  }
+}
+
 module.exports = {
   registry,
   normaliseRoute,
   refreshDbPoolMetrics,
   refreshQueueMetrics,
+  updateSecretRotationMetrics,
   metrics: {
     httpRequestsTotal,
     httpRequestDurationSeconds,
@@ -349,6 +371,7 @@ module.exports = {
     queueJobsTotal,
     indexerLagSeconds,
     indexerRunning,
+    secretRotationLastTimestamp,
     readinessCheckFailedTotal,
     webhookDeliveriesTotal,
     webhookAttemptsTotal,
