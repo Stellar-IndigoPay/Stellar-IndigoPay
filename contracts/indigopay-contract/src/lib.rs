@@ -80,6 +80,7 @@ pub struct Project {
     /// chain before this field existed. Per UPGRADE.md, new fields must
     /// be appended or live behind a new storage version.
     pub paused: bool,
+    pub verified: bool,
 }
 
 /// Input for registering a project via `batch_register_projects`.
@@ -229,7 +230,13 @@ pub enum DataKey {
     // `execute_upgrade` after `env.deployer().update_current_contract_wasm`
     // returns. Used by indexers to confirm which WASM is currently
     // running at the contract address.
-    LastExecutedUpgrade,
+LastExecutedUpgrade,
+    Verifier(Address),
+    VerifierCount,
+    VerificationThreshold,
+    Attestation(String, Address),
+    ProjectApprovals(String),
+    ProjectRejections(String),
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -1647,7 +1654,67 @@ impl IndigoPayContract {
             .unwrap_or(false)
     }
 
-    // ─── 48-hour upgrade timelock ────────────────────────────────────────────
+    // ─── Verifier Oracle Network ─────────────────────────────────────────
+
+    pub fn add_verifier(env: Env, admin: Address, verifier: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        let key = DataKey::Verifier(verifier.clone());
+        if env.storage().instance().has(&key) { panic!("Address is already a verifier"); }
+        env.storage().instance().set(&key, &true);
+        let count: u32 = env.storage().instance().get(&DataKey::VerifierCount).unwrap_or(0);
+        env.storage().instance().set(&DataKey::VerifierCount, &(count + 1));
+        env.events().publish((symbol_short!("ver_add"), admin), verifier);
+    }
+
+    pub fn remove_verifier(env: Env, admin: Address, verifier: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        let key = DataKey::Verifier(verifier.clone());
+        if !env.storage().instance().has(&key) { panic!("Address is not a verifier"); }
+        env.storage().instance().remove(&key);
+        let count: u32 = env.storage().instance().get(&DataKey::VerifierCount).unwrap_or(0);
+        env.storage().instance().set(&DataKey::VerifierCount, &(count - 1));
+        env.events().publish((symbol_short!("ver_rem"), admin), verifier);
+    }
+
+    pub fn update_verification_threshold(env: Env, admin: Address, threshold: u32) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::VerificationThreshold, &threshold);
+    }
+
+    pub fn get_verifier_count(env: Env) -> u32 {
+        env.storage().instance().get(&DataKey::VerifierCount).unwrap_or(0)
+    }
+
+    pub fn attest_project(env: Env, verifier: Address, project_id: String, approved: bool, evidence_hash: BytesN<32>) {
+        verifier.require_auth();
+        let is_verifier: bool = env.storage().instance().get(&DataKey::Verifier(verifier.clone())).unwrap_or(false);
+        if !is_verifier { panic!("Not a registered verifier"); }
+        if !env.storage().instance().has(&DataKey::Project(project_id.clone())) { panic!("Project not found"); }
+        let att_key = DataKey::Attestation(project_id.clone(), verifier.clone());
+        if env.storage().instance().has(&att_key) { panic!("Already attested for this project"); }
+        env.storage().instance().set(&att_key, &approved);
+        if approved {
+            let approvals: u32 = env.storage().instance().get(&DataKey::ProjectApprovals(project_id.clone())).unwrap_or(0);
+            let new_approvals = approvals + 1;
+            env.storage().instance().set(&DataKey::ProjectApprovals(project_id.clone()), &new_approvals);
+            let threshold: u32 = env.storage().instance().get(&DataKey::VerificationThreshold).unwrap_or(3);
+            if new_approvals >= threshold {
+                let mut project: Project = env.storage().instance().get(&DataKey::Project(project_id.clone())).unwrap();
+                project.verified = true;
+                env.storage().instance().set(&DataKey::Project(project_id.clone()), &project);
+                env.events().publish((symbol_short!("proj_ver"),), (project_id.clone(), new_approvals, threshold));
+            }
+        } else {
+            let rejections: u32 = env.storage().instance().get(&DataKey::ProjectRejections(project_id.clone())).unwrap_or(0);
+            env.storage().instance().set(&DataKey::ProjectRejections(project_id.clone()), &(rejections + 1));
+        }
+        env.events().publish((symbol_short!("attested"), verifier), (project_id, approved, evidence_hash));
+    }
+
+    // ─── 48-hour upgrade timelock
 
     /// Admin-only: step 1 of the 48-hour upgrade timelock. Stores the
     /// proposed WASM hash and the ledger sequence at which it becomes
