@@ -92,7 +92,13 @@ pub struct ProjectInit {
     pub wallet: Address,
     pub co2_per_xlm: u32,
 }
-
+/// Input for batch donations across multiple projects.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BatchDonation {
+    pub project_id: String,
+    pub proportion: u32,
+}
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct DonationRecord {
@@ -744,6 +750,76 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .extend_ttl(VOTING_WINDOW_LEDGERS * 4, VOTING_WINDOW_LEDGERS * 4);
+    }
+        pub fn batch_donate(
+        env: Env,
+        token: Address,
+        donor: Address,
+        donations: Vec<BatchDonation>,
+        total_amount: i128,
+        msg_hash: u32,
+    ) {
+        donor.require_auth();
+        require_not_paused(&env);
+        if total_amount <= 0 { panic!("Donation amount must be positive"); }
+        if donations.is_empty() { panic!("Must specify at least one project"); }
+        let mut proportion_sum: u32 = 0;
+        for d in donations.iter() {
+            proportion_sum = proportion_sum.checked_add(d.proportion).expect("proportion overflow");
+        }
+        if proportion_sum != 100 { panic!("Proportions must sum to 100"); }
+        let mut updates: Vec<(String, i128, i128)> = Vec::new(&env);
+        let mut total_co2: i128 = 0;
+        for d in donations.iter() {
+            let amount = total_amount.checked_mul(d.proportion as i128).expect("multiply overflow") / 100;
+            let project: Project = env.storage().instance().get(&DataKey::Project(d.project_id.clone())).expect("Project not found");
+            if !project.active { panic!("Project is not accepting donations"); }
+            if project.paused { panic!("Project is temporarily paused"); }
+            let xlm_units = amount / STROOP;
+            let co2_increment = xlm_units.checked_mul(project.co2_per_xlm as i128).expect("CO2 calculation overflow");
+            total_co2 = total_co2.checked_add(co2_increment).expect("total_co2 overflow");
+            updates.push_back((d.project_id.clone(), amount, co2_increment));
+        }
+        for (project_id, amount, co2_increment) in updates.iter() {
+            let mut project: Project = env.storage().instance().get(&DataKey::Project(project_id.clone())).expect("Project not found");
+            project.total_raised = project.total_raised.checked_add(*amount).expect("Project total_raised overflow");
+            let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
+            if !env.storage().instance().has(&donated_key) {
+                env.storage().instance().set(&donated_key, &true);
+                project.donor_count = project.donor_count.checked_add(1).expect("Project donor_count overflow");
+            }
+            env.storage().instance().set(&DataKey::Project(project_id.clone()), &project);
+            let proj_total_key = DataKey::DonorProjectTotal(project_id.clone(), donor.clone());
+            let prev: i128 = env.storage().instance().get(&proj_total_key).unwrap_or(0);
+            env.storage().instance().set(&proj_total_key, &prev.checked_add(*amount).expect("DonorProjectTotal overflow"));
+        }
+        let mut donor_stats: DonorStats = env.storage().instance().get(&DataKey::DonorStats(donor.clone())).unwrap_or(DonorStats { total_donated: 0, donation_count: 0, badge: BadgeTier::None, co2_offset_grams: 0 });
+        let prev_badge = donor_stats.badge.clone();
+        donor_stats.total_donated = donor_stats.total_donated.checked_add(total_amount).expect("Donor total_donated overflow");
+        donor_stats.donation_count = donor_stats.donation_count.checked_add(1).expect("Donor donation_count overflow");
+        donor_stats.co2_offset_grams = donor_stats.co2_offset_grams.checked_add(total_co2).expect("Donor co2_offset overflow");
+        donor_stats.badge = calculate_badge(donor_stats.total_donated);
+        env.storage().instance().set(&DataKey::DonorStats(donor.clone()), &donor_stats);
+        if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
+            let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
+            if !env.storage().instance().has(&nft_key) {
+                env.storage().instance().set(&nft_key, &ImpactNFT { owner: donor.clone(), tier: donor_stats.badge.clone(), total_donated: donor_stats.total_donated, minted_at_ledger: env.ledger().sequence() });
+                env.events().publish((symbol_short!("nft_mint"), donor.clone()), donor_stats.badge.clone());
+            }
+        }
+        let dc: u32 = env.storage().instance().get(&DataKey::DonationCount).unwrap_or(0);
+        env.storage().instance().set(&DataKey::DonationCount, &dc.checked_add(1).expect("DonationCount overflow"));
+        let gr: i128 = env.storage().instance().get(&DataKey::GlobalTotalRaised).unwrap_or(0);
+        env.storage().instance().set(&DataKey::GlobalTotalRaised, &gr.checked_add(total_amount).expect("GlobalTotalRaised overflow"));
+        let gc: i128 = env.storage().instance().get(&DataKey::GlobalCO2OffsetGrams).unwrap_or(0);
+        env.storage().instance().set(&DataKey::GlobalCO2OffsetGrams, &gc.checked_add(total_co2).expect("GlobalCO2 overflow"));
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&donor, &env.current_contract_address(), &total_amount);
+        for (project_id, amount, _) in updates.iter() {
+            let project: Project = env.storage().instance().get(&DataKey::Project(project_id.clone())).expect("Project not found");
+            token_client.transfer(&env.current_contract_address(), &project.wallet, amount);
+        }
+        env.events().publish((symbol_short!("batch_don"), donor), (donations, total_amount));
     }
 
     // ─── DEX Path-Payment Donation (any Stellar asset → XLM) ──────────────────
@@ -3115,5 +3191,44 @@ mod tests {
     fn test_cancel_upgrade_without_pending_fails() {
         let (_env, _cid, client, admin) = setup_admin_only();
         client.cancel_upgrade(&admin);
+    }
+        #[test]
+    fn test_batch_donate_50_50_split() {
+        let (env, _cid, client, admin, pid1) = setup();
+        let pid2 = String::from_str(&env, "proj-002");
+        let wallet2 = Address::generate(&env);
+        client.register_project(&admin, &pid2, &String::from_str(&env, "P2"), &wallet2, &100u32);
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        StellarAssetClient::new(&env, &token).mint(&donor, &(200 * STROOP));
+        let mut donations = Vec::new(&env);
+        donations.push_back(BatchDonation { project_id: pid1.clone(), proportion: 50 });
+        donations.push_back(BatchDonation { project_id: pid2.clone(), proportion: 50 });
+        client.batch_donate(&token, &donor, &donations, &(200 * STROOP), &0u32);
+        assert_eq!(client.get_project(&pid1).total_raised, 100 * STROOP);
+        assert_eq!(client.get_project(&pid2).total_raised, 100 * STROOP);
+    }
+
+    #[test]
+    #[should_panic(expected = "Proportions must sum to 100")]
+    fn test_batch_donate_proportions_not_100() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let mut donations = Vec::new(&env);
+        donations.push_back(BatchDonation { project_id: pid, proportion: 60 });
+        client.batch_donate(&token, &donor, &donations, &(100 * STROOP), &0u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "Must specify at least one project")]
+    fn test_batch_donate_empty_vector() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        client.batch_donate(&token, &donor, &Vec::new(&env), &(100 * STROOP), &0u32);
     }
 }
