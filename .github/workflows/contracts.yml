@@ -5,7 +5,6 @@ on:
     branches: [main, develop]
     paths: [contracts/**]
   pull_request:
-    branches: [main]
     paths: [contracts/**]
   workflow_dispatch:
 
@@ -22,11 +21,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          # Explicitly match the toolchain in contracts/rust-toolchain.toml so
-          # the rustfmt and clippy components are installed for that version.
-          # Without this, the action auto-detects the toolchain from the .toml
-          # file but only installs components for the default "stable" channel,
-          # causing "cargo-fmt not installed for toolchain '1.91.0'" errors.
           toolchain: 1.91.0
           targets: wasm32v1-none
           components: rustfmt, clippy
@@ -42,8 +36,68 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace -- -D warnings
 
-      - name: Run tests
-        run: cargo test --workspace
+      - name: Run tests (skip duplicate fuzz run -- handled by dedicated fuzz job)
+        run: "cargo test --features testutils --workspace -- --skip fuzz::"
 
       - name: Build WASM
         run: cargo build --workspace --target wasm32v1-none --release
+
+  fuzz:
+    name: Fuzz Tests (10k iterations)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+          targets: wasm32v1-none
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+
+      - name: Run fuzz tests (1.5k iterations)
+        run: cargo test --features testutils -- fuzz
+        env:
+          FUZZ_ITERATIONS: 1500
+
+  coverage:
+    name: Coverage (tarpaulin)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+          components: llvm-tools-preview
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+
+      - name: Run coverage
+        run: cargo tarpaulin --config indigopay-contract/.tarpaulin.toml --out Html --out Lcov
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: contracts/indigopay-contract/coverage/

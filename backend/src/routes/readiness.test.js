@@ -73,4 +73,30 @@ describe("GET /api/readyz (readiness)", () => {
     expect(res.body.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(res.body.checks).toBeDefined();
   });
+
+  test("returns 503 when pool waitingCount exceeds 50% of max", async () => {
+    jest.spyOn(pool.getWriter(), "query").mockResolvedValueOnce({ rows: [] });
+    // _writerPool is the pg.Pool instance; override waitingCount and max
+    Object.defineProperty(pool, "_writerPool", {
+      value: { waitingCount: 15, max: 20 },
+      writable: true,
+      configurable: true,
+    });
+    const res = await request(buildApp()).get("/api/readyz");
+    expect(res.status).toBe(503);
+    expect(res.body.checks.pool.status).toBe("degraded");
+    expect(res.body.checks.pool.reason).toBe("db_pool_degraded");
+  });
+
+  test("returns 200 when pool is healthy", async () => {
+    jest.spyOn(pool.getWriter(), "query").mockResolvedValueOnce({ rows: [] });
+    Object.defineProperty(pool, "_writerPool", {
+      value: { waitingCount: 3, max: 20 },
+      writable: true,
+      configurable: true,
+    });
+    const res = await request(buildApp()).get("/api/readyz");
+    expect(res.status).toBe(200);
+    expect(res.body.checks.pool.status).toBe("ok");
+  });
 });

@@ -3,8 +3,9 @@
  * Global Impact Dashboard — Querying aggregated data from backend API.
  */
 import { useEffect, useState } from "react";
-import Head from "next/head";
+import { useRouter } from "next/router";
 import AnimatedNumber from "@/components/AnimatedNumber";
+import PageMeta from "@/components/PageMeta";
 import DonationTicker from "@/components/DonationTicker";
 import WorldMap from "@/components/WorldMap";
 import { fetchImpactGlobal, fetchLeaderboard, fetchProjects } from "@/lib/api";
@@ -14,6 +15,7 @@ import type { LeaderboardEntry } from "@/utils/types";
 import type { ImpactGlobalStats } from "@/lib/api";
 
 export default function ImpactPage() {
+  const router = useRouter();
   const [stats, setStats] = useState<ImpactGlobalStats | null>(null);
   const [sorobanStats, setSorobanStats] = useState<{
     totalRaisedXLM: string;
@@ -47,15 +49,24 @@ export default function ImpactPage() {
     loadData();
   }, []);
 
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || "https://stellar-indigopay.app";
+  const canonicalUrl = `${appUrl}${router.asPath.split("?")[0]}`;
+  const impactJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    name: "Global Impact | Stellar IndigoPay",
+    url: canonicalUrl,
+    description: "Witness the real-time community impact of Stellar IndigoPay donors.",
+  };
+
   return (
     <div className="min-h-screen bg-[#FAFAFE] dark:bg-[#0A0A1A] font-body text-[#0F172A] dark:text-[#E2E8F0] pb-20">
-      <Head>
-        <title>Global Impact | Stellar IndigoPay</title>
-        <meta
-          name="description"
-          content="Witness the real-time community impact of Stellar IndigoPay donors."
-        />
-      </Head>
+      <PageMeta
+        title="Global Impact | Stellar IndigoPay"
+        description="Witness the real-time community impact of Stellar IndigoPay donors."
+        canonicalUrl={canonicalUrl}
+        jsonLd={impactJsonLd}
+      />
 
       <main className="max-w-7xl mx-auto px-4 py-12 sm:px-6 lg:px-8">
         {/* Header Section */}

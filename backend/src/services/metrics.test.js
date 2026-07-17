@@ -1,5 +1,17 @@
 "use strict";
 
+jest.mock("../logger", () => ({
+  error: jest.fn(),
+  warn: jest.fn(),
+  info: jest.fn(),
+}));
+
+jest.mock("../db/pool", () => ({
+  query: jest.fn().mockRejectedValue(new Error("pool not initialized")),
+  getWriter: jest.fn(() => ({ query: jest.fn() })),
+  _writerPool: { totalCount: 0, idleCount: 0, waitingCount: 0, max: 20 },
+}));
+
 const {
   registry,
   metrics,
@@ -65,7 +77,7 @@ describe("metrics service", () => {
   });
 
   test("refreshDbPoolMetrics reads the live counts from a real pool-shaped object", () => {
-    const fakePool = { totalCount: 12, idleCount: 8, waitingCount: 2 };
+    const fakePool = { totalCount: 12, idleCount: 8, waitingCount: 2, max: 20 };
     refreshDbPoolMetrics(fakePool);
     const text = require("./metrics").registry.metrics();
     // Synchronously call .then because registry.metrics is async, but the
@@ -75,6 +87,53 @@ describe("metrics service", () => {
       expect(body).toMatch(/db_pool_idle_count\{[^}]*\} 8/);
       expect(body).toMatch(/db_pool_waiting_count\{[^}]*\} 2/);
     });
+  });
+
+  test("refreshDbPoolMetrics sets utilization ratio", () => {
+    const fakePool = { totalCount: 10, idleCount: 5, waitingCount: 1, max: 20 };
+    refreshDbPoolMetrics(fakePool);
+    const text = require("./metrics").registry.metrics();
+    return text.then((body) => {
+      expect(body).toMatch(/db_pool_utilization_ratio\{[^}]*\} 0.5/);
+    });
+  });
+
+  test("db_slow_queries_total and db_connection_errors_total are registered", () => {
+    const { metrics } = require("./metrics");
+    expect(metrics.dbSlowQueriesTotal).toBeDefined();
+    expect(metrics.dbConnectionErrorsTotal).toBeDefined();
+    expect(metrics.dbSlowQueriesTotal).toHaveProperty("inc");
+    expect(metrics.dbConnectionErrorsTotal).toHaveProperty("inc");
+  });
+
+  test("refreshDbPoolMetrics logs warning when waitingCount > 0", () => {
+    const logger = require("../logger");
+    const fakePool = { totalCount: 15, idleCount: 5, waitingCount: 2, max: 20 };
+    refreshDbPoolMetrics(fakePool);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "db_pool_contention", waitingCount: 2 }),
+      expect.any(String),
+    );
+  });
+
+  test("refreshDbPoolMetrics logs error when waitingCount > 5", () => {
+    const logger = require("../logger");
+    const fakePool = { totalCount: 18, idleCount: 2, waitingCount: 6, max: 20 };
+    refreshDbPoolMetrics(fakePool);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "db_pool_high_contention", waitingCount: 6 }),
+      expect.any(String),
+    );
+  });
+
+  test("refreshDbPoolMetrics logs warning when utilization >= 90%", () => {
+    const logger = require("../logger");
+    const fakePool = { totalCount: 18, idleCount: 1, waitingCount: 3, max: 20 };
+    refreshDbPoolMetrics(fakePool);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "db_pool_high_utilization", utilizationRatio: 0.9 }),
+      expect.any(String),
+    );
   });
 
   test("registry.contentType is the Prometheus text format", () => {

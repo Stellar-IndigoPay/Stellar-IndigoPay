@@ -22,7 +22,33 @@ frontend:
 
 postgres:
   image: postgres:16-alpine
-  storage: 5Gi
+  storage: 10Gi
+  # ── Streaming Replication ─────────────────────────────────────────
+  # Enable to deploy a warm standby in a second region/zone.
+  replication:
+    enabled: false
+    # Replication user created on the primary with REPLICATION privilege.
+    user: replicator
+    # Override password via --set or values-prod.yaml.
+    password: ""
+    # Number of WAL senders and replication slots on the primary.
+    maxWalSenders: 5
+    maxReplicationSlots: 5
+    walKeepSize: 1GB
+    # WAL archiving to S3 (fallback for standby catch-up).
+    walArchive:
+      enabled: false
+      s3Bucket: ""
+      s3Prefix: "wal/"
+  # ── Standby (warm replica) ────────────────────────────────────────
+  standby:
+    enabled: false
+    # Node affinity zone — schedule the standby in a different AZ.
+    zone: us-west-2b
+    storage: 10Gi
+    # Primary host the standby connects to for streaming replication.
+    primaryHost: postgres-primary-svc
+    primaryPort: 5432
 
 config:
   stellarNetwork: testnet
@@ -38,6 +64,10 @@ secrets:
   # Never commit a real password here. Generate one with: openssl rand -base64 24
   postgresPassword: ""
   postgresDb: stellar_indigopay
+  # Replication credentials for streaming standby. Only used when
+  # postgres.replication.enabled is true.
+  postgresReplicationUser: replicator
+  postgresReplicationPassword: ""
   resendApiKey: ""
   adminApiKey: ""
   metricsBearerToken: ""

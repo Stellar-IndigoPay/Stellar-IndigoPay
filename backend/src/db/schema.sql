@@ -39,6 +39,56 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS webhook_secret TEXT;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS webhook_url    TEXT;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS webhook_secret TEXT;
 
+-- Geocoded coordinates for project.location, resolved server-side by
+-- services/geocoder.js at creation time. NULL until successfully geocoded.
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS latitude  DOUBLE PRECISION;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
+CREATE INDEX IF NOT EXISTS idx_projects_location ON projects (latitude, longitude);
+
+-- Path-payment donations: track source asset and conversion details for
+-- donations made via any Stellar asset converted to XLM through the DEX.
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS source_asset        TEXT;
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS conversion_path     JSONB;
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS converted_amount_xlm NUMERIC(20, 7);
+CREATE INDEX IF NOT EXISTS idx_donations_source_asset ON donations (source_asset) WHERE source_asset IS NOT NULL;
+
+-- Automated CO₂ offset-rate verification (see migration 018 and
+-- services/co2Verifier.js). Self-reported co2_per_xlm rates are compared
+-- against per-category industry benchmarks when a verification request is
+-- approved; the verdict lands here. Statuses: pending (not yet checked),
+-- verified (≤3× benchmark), review (3–10×), flagged (>10×, needs admin
+-- resolution), rejected (admin rejected the claimed rate).
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS co2_verification_status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS co2_verification_notes TEXT;
+ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_co2_verification_status_check;
+ALTER TABLE projects ADD CONSTRAINT projects_co2_verification_status_check
+  CHECK (co2_verification_status IN ('pending', 'verified', 'review', 'flagged', 'rejected'));
+CREATE INDEX IF NOT EXISTS idx_projects_co2_verification_status
+  ON projects (co2_verification_status)
+  WHERE co2_verification_status IN ('review', 'flagged');
+
+-- Full-text search: tsvector kept current by a trigger (see migration
+-- 013_project_search) so GET /api/projects can rank matches with ts_rank
+-- instead of relying solely on ILIKE substring matching.
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS search_vector tsvector;
+CREATE INDEX IF NOT EXISTS projects_search_idx ON projects USING GIN(search_vector);
+
+CREATE OR REPLACE FUNCTION update_project_search_vector()
+RETURNS trigger AS $$
+BEGIN
+  NEW.search_vector :=
+    setweight(to_tsvector('english', COALESCE(NEW.name, '')), 'A') ||
+    setweight(to_tsvector('english', COALESCE(NEW.location, '') || ' ' || array_to_string(NEW.tags, ' ')), 'B') ||
+    setweight(to_tsvector('english', COALESCE(NEW.description, '')), 'C');
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS project_search_update ON projects;
+CREATE TRIGGER project_search_update
+  BEFORE INSERT OR UPDATE ON projects
+  FOR EACH ROW EXECUTE FUNCTION update_project_search_vector();
+
 -- donations: immutable donation ledger. Each row is a single
 -- contribution from donor_address to a project. transaction_hash must be
 -- unique (one Stellar payment → one donation). No updated_at column —
@@ -157,6 +207,20 @@ CREATE TABLE IF NOT EXISTS donation_matches (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+
+-- idempotency_keys: stores response snapshots keyed by Idempotency-Key
+-- headers so safe retries of POST /api/donations replay the original
+-- response instead of creating duplicate donation records. Keys expire
+-- after 24 hours and are cleaned up by a background job.
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+  key TEXT PRIMARY KEY,
+  request_body_hash TEXT NOT NULL,
+  response_status INTEGER NOT NULL,
+  response_body JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '24 hours')
+);
+CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_keys (expires_at);
 
 -- device_tokens: push notification device registrations. token is the FCM /
 -- APNs device token; platform is 'ios' or 'android'. wallet_address links

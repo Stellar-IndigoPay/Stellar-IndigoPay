@@ -51,7 +51,7 @@ module.exports = {
   },
 
   async down(client) {
-    await client.query(`DROP TABLE IF EXISTS ai_summary_calls`);
-    await client.query(`DROP TABLE IF EXISTS prompt_versions`);
+    await client.query("DROP TABLE IF EXISTS ai_summary_calls");
+    await client.query("DROP TABLE IF EXISTS prompt_versions");
   },
 };

@@ -22,6 +22,8 @@ import {
 } from "@/lib/wallet";
 import type { DonorProfile, Donation, BadgeTier } from "@/utils/types";
 import { formatXLM } from "@/utils/format";
+import { SkeletonBox, SkeletonAvatar } from "@/components/Skeleton";
+import ShareButton, { donorShareText } from "@/components/ShareButton";
 
 // ── Badge helpers ─────────────────────────────────────────────────────────────
 
@@ -174,12 +176,12 @@ function ProfileNotFound({ publicKey }: { publicKey: string }) {
 
 function ProfileSkeleton() {
   return (
-    <div className="animate-pulse space-y-6 max-w-2xl mx-auto px-4 py-10">
+    <div className="animate-pulse pointer-events-none space-y-6 max-w-2xl mx-auto px-4 py-10">
       <div className="flex items-center gap-4">
-        <div className="w-16 h-16 rounded-full bg-[#c8dfc8]" />
+        <SkeletonAvatar size="lg" palette="forest" />
         <div className="space-y-2 flex-1">
-          <div className="h-5 bg-[#c8dfc8] rounded w-1/3" />
-          <div className="h-3 bg-[#c8dfc8] rounded w-1/2" />
+          <SkeletonBox className="h-5 rounded w-1/3" palette="forest" />
+          <SkeletonBox className="h-3 rounded w-1/2" palette="forest" />
         </div>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
@@ -189,52 +191,10 @@ function ProfileSkeleton() {
       </div>
       <div className="card space-y-3">
         {[0, 1, 2, 3].map((i) => (
-          <div key={i} className="h-4 bg-[#c8dfc8] rounded w-full" />
+          <SkeletonBox key={i} className="h-4 rounded w-full" palette="forest" />
         ))}
       </div>
     </div>
-  );
-}
-
-// ── Share button ──────────────────────────────────────────────────────────────
-
-function ShareButton({ url }: { url: string }) {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(url);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2200);
-    } catch {
-      // fallback for older browsers
-      const el = document.createElement("textarea");
-      el.value = url;
-      document.body.appendChild(el);
-      el.select();
-      document.execCommand("copy");
-      document.body.removeChild(el);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2200);
-    }
-  }, [url]);
-
-  return (
-    <button
-      onClick={handleCopy}
-      className="btn-secondary text-sm flex items-center gap-2"
-      aria-label="Copy profile URL to clipboard"
-    >
-      {copied ? (
-        <>
-          <span>✅</span> Copied!
-        </>
-      ) : (
-        <>
-          <span>🔗</span> Share my impact
-        </>
-      )}
-    </button>
   );
 }
 
@@ -520,15 +480,30 @@ export default function DonorProfilePage() {
 
   // ── Derived values ───────────────────────────────────────────────────────
 
+  const appUrl =
+    process.env.NEXT_PUBLIC_APP_URL || "https://stellar-indigopay.app";
+
   const displayName =
     profile?.displayName || (publicKey ? shortenKey(publicKey) : "Donor");
 
   const profileUrl = typeof window !== "undefined" ? window.location.href : "";
 
+  const ogImageUrl = publicKey
+    ? `${appUrl}/api/og/donor/${publicKey}`
+    : `${appUrl}/og-default.png`;
+
   const ogTitle = `${displayName} — Stellar IndigoPay Donor`;
   const ogDescription = profile
     ? `${displayName} has donated ${formatXLM(profile.totalDonatedXLM)} to ${profile.projectsSupported} climate project${profile.projectsSupported !== 1 ? "s" : ""} on Stellar IndigoPay.`
     : "View this donor's climate impact on Stellar IndigoPay.";
+
+  const shareText = profile
+    ? donorShareText(
+        displayName,
+        profile.totalDonatedXLM,
+        profile.projectsSupported,
+      )
+    : ogDescription;
 
   // ── Render ───────────────────────────────────────────────────────────────
 
@@ -546,10 +521,14 @@ export default function DonorProfilePage() {
         <meta property="og:description" content={ogDescription} />
         <meta property="og:type" content="profile" />
         {profileUrl && <meta property="og:url" content={profileUrl} />}
-        {/* Twitter card */}
-        <meta name="twitter:card" content="summary" />
+        <meta property="og:image" content={ogImageUrl} />
+        <meta property="og:image:width" content="1200" />
+        <meta property="og:image:height" content="630" />
+        {/* Twitter card — large image preview */}
+        <meta name="twitter:card" content="summary_large_image" />
         <meta name="twitter:title" content={ogTitle} />
         <meta name="twitter:description" content={ogDescription} />
+        <meta name="twitter:image" content={ogImageUrl} />
       </Head>
 
       <div className="min-h-screen bg-leaf">
@@ -571,7 +550,11 @@ export default function DonorProfilePage() {
                   </span>
                 </div>
               </div>
-              <ShareButton url={profileUrl} />
+              <ShareButton
+                url={profileUrl}
+                text={shareText}
+                title={`Share ${displayName}'s impact on Stellar IndigoPay`}
+              />
             </div>
 
             {profile.bio && (

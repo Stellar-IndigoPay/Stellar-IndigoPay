@@ -72,6 +72,7 @@ export default function WalletConnect({ onConnect }: WalletConnectProps) {
         onClick={handleConnect}
         disabled={loading}
         className="btn-primary w-full flex items-center justify-center gap-2"
+        data-testid="wallet-connect-button"
       >
         {loading ? (
           <>

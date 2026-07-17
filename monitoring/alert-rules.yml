@@ -32,6 +32,54 @@ groups:
         annotations:
           summary: "Backend p99 latency above 2s for 10m on {{ $labels.route }}"
 
+  - name: stellar-indigopay-rate-limit
+    interval: 30s
+    rules:
+      - alert: HighRateLimitExhaustion
+        expr: |
+          sum(rate(indigopay_rate_limit_hits_total{job="stellar-indigopay-backend"}[5m]))
+            /
+          sum(rate(http_requests_total{job="stellar-indigopay-backend"}[5m]))
+            > 0.10
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "More than 10% of requests are being rate-limited"
+          description: |
+            {{ $value | humanizePercentage }} of all HTTP requests in the last 5m
+            were rejected with HTTP 429. This may indicate a misconfigured client,
+            a DDoS attempt, or an overly aggressive retry loop.
+
+      - alert: PerEndpointRateLimitSpike
+        expr: |
+          rate(indigopay_rate_limit_hits_total{job="stellar-indigopay-backend"}[5m]) > 5
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "{{ $labels.endpoint }} is being rate-limited heavily (>5/s for 5m)"
+          description: |
+            Endpoint {{ $labels.endpoint }} (method={{ $labels.method }}, strategy={{ $labels.strategy }})
+            is being rate-limited at {{ $value | humanize }} per second. Check for
+            aggressive clients or potential abuse.
+
+      - alert: TokenBucketExhausted
+        expr: |
+          indigopay_rate_limit_remaining{job="stellar-indigopay-backend",strategy="token-bucket"} == 0
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Token bucket empty on {{ $labels.endpoint }} for 5m"
+          description: |
+            The token-bucket rate limiter on endpoint {{ $labels.endpoint }}
+            has been empty for over 5 minutes. Clients consuming at or above
+            the refill rate are keeping the bucket drained. Consider raising
+            the capacity or refill rate if this is expected traffic.
+            NOTE: This gauge only updates on request — if traffic stops, the
+            alert resolves when the next successful request updates the gauge.
+
   - name: stellar-indigopay-backend-database
     interval: 30s
     rules:
@@ -92,3 +140,52 @@ groups:
           description: |
             There are more than 100 failed jobs in queue '{{ $labels.queue }}' for the last 10 minutes.
             Check the worker logs.
+
+      - alert: OracleStale
+        expr: time() - indigopay_oracle_price_updated_timestamp > 900
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Oracle price is stale (>15 min since last update)"
+
+  - name: stellar-indigopay-secret-rotation
+    interval: 30s
+    rules:
+      - alert: SecretRotationFailed
+        expr: |
+          (time() - (secret_rotation_last_timestamp{status="failed"} or secret_rotation_last_timestamp{status="rolled_back"})) < 3600
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Secret rotation failed or was rolled back in the last hour"
+          description: |
+            The most recent automated secret rotation completed with status "failed"
+            or "rolled_back". Check the GitHub Actions run linked in the rotation
+            audit log and the /health/ready endpoint immediately.
+
+      - alert: SecretRotationStuck
+        expr: |
+          time() - secret_rotation_last_timestamp{status="in_progress"} > 1800
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Secret rotation has been in_progress for > 30 minutes"
+          description: |
+            A secret rotation started at {{ $value | humanizeTimestamp }} but never
+            completed. It may be stuck. Check the GitHub Actions workflow.
+
+      - alert: SecretRotationOverdue
+        expr: |
+          time() - (secret_rotation_last_timestamp{status="completed"}) > 95 * 24 * 3600
+        for: 24h
+        labels:
+          severity: warn
+        annotations:
+          summary: "No successful secret rotation in > 95 days"
+          description: |
+            The last successful secret rotation was {{ $value | humanizeTimestamp }}.
+            Rotations are scheduled quarterly (every 91 days). Consider running
+            the workflow manually if the automated schedule has been failing.

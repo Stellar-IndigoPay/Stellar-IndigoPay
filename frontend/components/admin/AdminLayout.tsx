@@ -3,12 +3,12 @@
  *
  * Wraps admin pages with a top navigation bar that includes links to the
  * verification queue, projects (placeholder), and logout. Checks admin
- * auth and redirects to /admin/login when no token is present.
+ * auth and redirects to /admin/login when there is no usable session.
  */
 import { useRouter } from "next/router";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { isAdminAuthenticated, adminLogout } from "@/lib/adminAuth";
+import { ensureAdminSession, adminLogout } from "@/lib/adminAuth";
 import ThemeToggle from "@/components/ThemeToggle";
 import clsx from "clsx";
 
@@ -18,7 +18,9 @@ interface AdminLayoutProps {
 
 const NAV_LINKS = [
   { href: "/admin/verification", label: "Verification Queue" },
+  { href: "/admin/co2-flags", label: "CO₂ Flags" },
   { href: "/admin", label: "Projects" },
+  { href: "/admin/audit", label: "Audit Log" },
 ];
 
 export default function AdminLayout({ children }: AdminLayoutProps) {
@@ -27,16 +29,22 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const authed = isAdminAuthenticated();
-    setAuthed(authed);
-    setLoading(false);
-    if (!authed) {
-      router.replace("/admin/login");
-    }
+    let active = true;
+    ensureAdminSession().then((ok) => {
+      if (!active) return;
+      setAuthed(ok);
+      setLoading(false);
+      if (!ok) {
+        router.replace("/admin/login");
+      }
+    });
+    return () => {
+      active = false;
+    };
   }, [router]);
 
-  const handleLogout = () => {
-    adminLogout();
+  const handleLogout = async () => {
+    await adminLogout();
     router.replace("/admin/login");
   };
 

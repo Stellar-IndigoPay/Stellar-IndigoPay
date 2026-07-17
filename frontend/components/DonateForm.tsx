@@ -6,6 +6,7 @@ import { useState, useEffect } from "react";
 import {
   buildDonationTransaction,
   buildContractDonationTransaction,
+  buildPathPaymentTransaction,
   submitTransaction,
   explorerUrl,
   getXLMBalance,
@@ -14,8 +15,11 @@ import {
   hashMessage,
   CONTRACT_ID,
 } from "@/lib/stellar";
+import { findBestPath, getAllBalances, formatConversionEstimate, formatPathForDisplay, type ConversionEstimate, type DonorAsset } from "@/lib/dex";
 import { signTransactionWithWallet } from "@/lib/wallet";
 import { recordDonation } from "@/lib/api";
+import useOnlineStatus from "@/hooks/useOnlineStatus";
+import { queueDonation, syncQueuedDonations } from "@/lib/offlineDonationQueue";
 import { formatXLM, formatCO2 } from "@/utils/format";
 import type { ClimateProject } from "@/utils/types";
 
@@ -56,6 +60,14 @@ export default function DonateForm({
   const [usdcBalance, setUsdcBalance] = useState<string | null>(null);
   const [trustlineMissing, setTrustlineMissing] = useState<boolean>(false);
   const [donorBadge, setDonorBadge] = useState<string | null>(null);
+  // DEX path-payment state
+  const [donorAssets, setDonorAssets] = useState<DonorAsset[]>([]);
+  const [selectedAsset, setSelectedAsset] = useState<DonorAsset | null>(null);
+  const [conversionEstimate, setConversionEstimate] =
+    useState<ConversionEstimate | null>(null);
+  const [conversionLoading, setConversionLoading] = useState(false);
+  const [conversionError, setConversionError] = useState<string | null>(null);
+  const isOnline = useOnlineStatus();
 
   useEffect(() => {
     if (!initialAmount) return;
@@ -75,6 +87,15 @@ export default function DonateForm({
         const xlm = await getXLMBalance(publicKey);
         if (!mounted) return;
         setXlmBalance(xlm);
+
+        // Load all non-native asset balances for the DEX path-payment selector
+        try {
+          const assets = await getAllBalances(publicKey);
+          if (mounted) setDonorAssets(assets);
+        } catch {
+          // Non-critical: DEX assets are supplementary
+        }
+
         if (currency === "USDC") {
           const issuer = process.env.NEXT_PUBLIC_USDC_ISSUER;
           if (!issuer) {
@@ -104,6 +125,53 @@ export default function DonateForm({
   const amountNum = parseFloat(amount);
   const isValid = !isNaN(amountNum) && amountNum >= 1;
 
+  // ── Fetch DEX conversion estimate when asset and amount change ──────────
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchEstimate() {
+      if (!selectedAsset || !amount || isNaN(amountNum) || amountNum <= 0) {
+        setConversionEstimate(null);
+        setConversionError(null);
+        return;
+      }
+      setConversionLoading(true);
+      setConversionError(null);
+      try {
+        const estimate = await findBestPath(
+          selectedAsset.code,
+          selectedAsset.issuer,
+          amount,
+        );
+        if (cancelled) return;
+        if (estimate) {
+          estimate.sourceBalance = selectedAsset.balance;
+          setConversionEstimate(estimate);
+          setConversionError(null);
+        } else {
+          setConversionEstimate(null);
+          setConversionError(
+            `No viable conversion path found for ${selectedAsset.code} → XLM. Try a different amount or asset.`,
+          );
+        }
+      } catch (err: any) {
+        if (cancelled) return;
+        setConversionEstimate(null);
+        setConversionError(
+          err?.message || "Failed to estimate conversion. Try again.",
+        );
+      } finally {
+        if (!cancelled) setConversionLoading(false);
+      }
+    }
+
+    // Debounce: wait 600ms after the user stops typing
+    const timer = setTimeout(fetchEstimate, 600);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [selectedAsset, amount, amountNum]);
+
   // Calculate CO₂ impact for XLM donations
   const co2Impact =
     currency === "XLM" && amount && !isNaN(amountNum) && project.co2_per_xlm
@@ -121,11 +189,97 @@ export default function DonateForm({
     return "text-[#4F46E5]";
   };
 
+  useEffect(() => {
+    if (!isOnline) return;
+
+    void syncQueuedDonations(async (payload) => {
+      try {
+        await recordDonation({
+          ...payload,
+          transactionHash: payload.transactionHash || "queued-offline",
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  }, [isOnline]);
+
   const handleDonate = async () => {
     if (!isValid || step !== "idle") return;
     setError(null);
 
+    // Generate a unique idempotency key so the backend can safely deduplicate
+    // retried donation-recording requests within 24 hours.
+    const idempotencyKey = crypto.randomUUID();
+
+    if (!isOnline) {
+      await queueDonation({
+        projectId: project.id,
+        donorAddress: publicKey,
+        amount: amountNum.toString(),
+        currency,
+        message: message.trim() || undefined,
+        idempotencyKey,
+      });
+      setStep("success");
+      setTxHash(null);
+      setError(
+        "Your donation was queued while offline. It will be sent automatically once you reconnect.",
+      );
+      return;
+    }
+
     try {
+      // ── DEX Path-Payment Donation (non-XLM asset → XLM via DEX) ──────
+      if (selectedAsset && conversionEstimate) {
+        const sendAmount = amountNum.toFixed(7);
+        // Use 2% slippage tolerance for the destMin
+        const estimatedDest = parseFloat(conversionEstimate.estimatedXLM);
+        const destMin = (estimatedDest * 0.98).toFixed(7);
+
+        setStep("building");
+        const tx = await buildPathPaymentTransaction({
+          fromPublicKey: publicKey,
+          toPublicKey: project.walletAddress,
+          sendAsset: {
+            code: selectedAsset.code,
+            issuer: selectedAsset.issuer,
+          },
+          sendAmount,
+          destMin,
+          path: conversionEstimate.path,
+          memo: message.trim() || undefined,
+        });
+
+        setStep("signing");
+        const { signedXDR, error: signErr } = await signTransactionWithWallet(
+          tx.toXDR(),
+        );
+        if (signErr || !signedXDR) throw new Error(signErr || "Signing failed");
+
+        setStep("submitting");
+        const result = await submitTransaction(signedXDR);
+        setTxHash(result.hash);
+
+        setStep("recording");
+        // Record in backend with conversion metadata
+        await recordDonation({
+          projectId: project.id,
+          donorAddress: publicKey,
+          amount: sendAmount,
+          currency: selectedAsset.code,
+          message: message.trim() || undefined,
+          transactionHash: result.hash,
+          sourceAsset: `${selectedAsset.code}:${selectedAsset.issuer}`,
+          conversionPath: conversionEstimate.path,
+          convertedAmountXLM: conversionEstimate.estimatedXLM,
+        });
+
+        setStep("success");
+        onSuccess?.();
+        return;
+      }
       const useContract = CONTRACT_ID && currency === "XLM";
 
       if (useContract) {
@@ -176,6 +330,7 @@ export default function DonateForm({
           currency: currency,
           message: message.trim() || undefined,
           transactionHash: result.hash,
+          idempotencyKey,
         });
 
         setStep("success");
@@ -226,13 +381,30 @@ export default function DonateForm({
           currency: currency,
           message: message.trim() || undefined,
           transactionHash: result.hash,
+          idempotencyKey,
         });
 
         setStep("success");
         onSuccess?.();
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "An error occurred");
+      const fallbackError =
+        err instanceof Error ? err.message : "An error occurred";
+      if (!navigator.onLine) {
+        await queueDonation({
+          projectId: project.id,
+          donorAddress: publicKey,
+          amount: amountNum.toString(),
+          currency,
+          message: message.trim() || undefined,
+          idempotencyKey,
+        });
+        setError("The donation could not be submitted right now, so it was queued for automatic retry.");
+        setStep("success");
+        setTxHash(null);
+        return;
+      }
+      setError(fallbackError);
       setStep("error");
       setTimeout(() => setStep("idle"), 3000);
     }
@@ -240,7 +412,7 @@ export default function DonateForm({
 
   if (step === "success" && txHash) {
     return (
-      <div className="card text-center animate-slide-up">
+      <div className="card text-center animate-slide-up" data-testid="donation-success">
         <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-[#4F46E5] to-[#7C3AED] flex items-center justify-center text-2xl mx-auto mb-4 shadow-lg">
           🌱
         </div>
@@ -277,7 +449,15 @@ export default function DonateForm({
     );
   }
   return (
-    <div className="card animate-fade-in">
+    <div className="card animate-fade-in" aria-busy={step !== "idle"}>
+      {/* Hidden live region describing the current donation flow status so
+          screen-reader users hear each step change without visual cues. */}
+      <p className="sr-only" aria-live="polite">
+        {step === "building" && "Building donation transaction…"}
+        {step === "signing" && "Awaiting wallet signature."}
+        {step === "submitting" && "Submitting transaction to Stellar."}
+        {step === "recording" && "Recording donation. Almost done."}
+      </p>
       <h3 className="font-display text-lg font-semibold text-[#0F172A] dark:text-[#E2E8F0] mb-1">
         Make a Donation
       </h3>
@@ -291,22 +471,107 @@ export default function DonateForm({
           <label className="label">Currency</label>
           <div className="flex gap-2">
             <button
-              onClick={() => setCurrency("XLM")}
-              className={`px-3 py-2 rounded-xl text-sm font-medium border transition-all font-body ${currency === "XLM" ? "btn-primary text-white border-0" : "bg-white dark:bg-[#14142D] border-[rgba(99,102,241,0.15)] dark:border-[rgba(129,140,248,0.20)] text-[#475569] dark:text-[#94A3B8]"}`}
+              onClick={() => {
+                setCurrency("XLM");
+                setSelectedAsset(null);
+                setConversionEstimate(null);
+                setConversionError(null);
+              }}
+              className={`px-3 py-2 rounded-xl text-sm font-medium border transition-all font-body ${(currency === "XLM" && !selectedAsset) ? "btn-primary text-white border-0" : "bg-white dark:bg-[#14142D] border-[rgba(99,102,241,0.15)] dark:border-[rgba(129,140,248,0.20)] text-[#475569] dark:text-[#94A3B8]"}`}
             >
               XLM
             </button>
             <button
-              onClick={() => setCurrency("USDC")}
-              className={`px-3 py-2 rounded-xl text-sm font-medium border transition-all font-body ${currency === "USDC" ? "btn-primary text-white border-0" : "bg-white dark:bg-[#14142D] border-[rgba(99,102,241,0.15)] dark:border-[rgba(129,140,248,0.20)] text-[#475569] dark:text-[#94A3B8]"}`}
+              onClick={() => {
+                setCurrency("USDC");
+                setSelectedAsset(null);
+                setConversionEstimate(null);
+                setConversionError(null);
+              }}
+              className={`px-3 py-2 rounded-xl text-sm font-medium border transition-all font-body ${(currency === "USDC" && !selectedAsset) ? "btn-primary text-white border-0" : "bg-white dark:bg-[#14142D] border-[rgba(99,102,241,0.15)] dark:border-[rgba(129,140,248,0.20)] text-[#475569] dark:text-[#94A3B8]"}`}
             >
               USDC
             </button>
           </div>
+
+          {/* DEX asset selector — any Stellar token via path payment */}
+          {donorAssets.length > 0 && (
+            <div className="mt-3">
+              <label className="text-xs font-medium text-[#475569] dark:text-[#94A3B8] mb-1 block">
+                Or any token you hold (auto-converted via DEX):
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {donorAssets.map((asset) => (
+                  <button
+                    key={`${asset.code}:${asset.issuer}`}
+                    onClick={() => {
+                      setSelectedAsset(
+                        selectedAsset?.code === asset.code &&
+                          selectedAsset?.issuer === asset.issuer
+                          ? null
+                          : asset,
+                      );
+                      setConversionEstimate(null);
+                      setConversionError(null);
+                      if (selectedAsset?.code !== asset.code) {
+                        setCurrency("XLM");
+                      }
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all font-body ${
+                      selectedAsset?.code === asset.code &&
+                      selectedAsset?.issuer === asset.issuer
+                        ? "btn-primary text-white border-0"
+                        : "bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)] text-[#4F46E5] dark:text-[#818CF8] border-[rgba(99,102,241,0.12)] hover:border-[rgba(99,102,241,0.30)]"
+                    }`}
+                  >
+                    {asset.code}{" "}
+                    <span className="opacity-60">
+                      ({parseFloat(asset.balance).toFixed(2)})
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
+        {/* DEX conversion estimate when an asset is selected */}
+        {selectedAsset && (
+          <div className="p-3 rounded-xl bg-[rgba(99,102,241,0.05)] dark:bg-[rgba(129,140,248,0.08)] border border-[rgba(99,102,241,0.12)] dark:border-[rgba(129,140,248,0.15)]">
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-xs font-semibold text-[#4F46E5] dark:text-[#818CF8]">
+                🔄 DEX Conversion
+              </span>
+            </div>
+            <p className="text-xs text-[#475569] dark:text-[#94A3B8]">
+              {selectedAsset.code} → XLM via Stellar DEX
+            </p>
+            {conversionLoading && (
+              <p className="text-xs text-[#64748B] mt-1 animate-pulse">
+                Finding best path…
+              </p>
+            )}
+            {conversionEstimate && (
+              <div className="mt-2 space-y-1">
+                <p className="text-xs font-medium text-[#0F172A] dark:text-[#E2E8F0]">
+                  {formatConversionEstimate(conversionEstimate)}
+                </p>
+                {conversionEstimate.path.length > 0 && (
+                  <p className="text-xs text-[#64748B]">
+                    Path: {selectedAsset.code} →{" "}
+                    {formatPathForDisplay(conversionEstimate.path)} → XLM
+                  </p>
+                )}
+              </div>
+            )}
+            {conversionError && (
+              <p className="text-xs text-red-500 mt-1">{conversionError}</p>
+            )}
+          </div>
+        )}
+
         {/* Preset amounts */}
         <div>
-          <label className="label">Choose Amount ({currency})</label>
+          <label className="label">Choose Amount ({selectedAsset ? selectedAsset.code : currency})</label>
           <div className="flex flex-wrap gap-2 mb-3">
             {(currency === "XLM" ? PRESETS_XLM : PRESETS_USDC).map((p) => (
               <button
@@ -330,9 +595,17 @@ export default function DonateForm({
             min="1"
             step="1"
             className="input-field"
+            data-testid="donation-amount"
+            aria-invalid={Boolean(amount) && !isValid}
+            aria-describedby={amount && !isValid ? "donate-amount-error" : undefined}
+            inputMode="decimal"
           />
           {amount && !isValid && (
-            <p className="mt-1 text-xs text-[#E11D48]">
+            <p
+              id="donate-amount-error"
+              className="mt-1 text-xs text-[#B91C1C] dark:text-[#FCA5A5]"
+              role="alert"
+            >
               Minimum donation is 1 {currency}
             </p>
           )}
@@ -391,7 +664,10 @@ export default function DonateForm({
       </div>
 
       {step === "error" && error && (
-        <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-600 text-sm font-body">
+        <div
+          className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-600 text-sm font-body"
+          role="alert"
+        >
           {error}
         </div>
       )}
@@ -430,6 +706,7 @@ export default function DonateForm({
         onClick={handleDonate}
         disabled={!isValid || step !== "idle"}
         className="btn-primary w-full flex items-center justify-center gap-2"
+        data-testid="donate-button"
       >
         {step === "building" && (
           <>
@@ -464,7 +741,7 @@ export default function DonateForm({
       </button>
 
       {step === "signing" && (
-        <p className="text-center text-xs text-[#475569] dark:text-[#94A3B8] animate-pulse font-body">
+        <p className="text-center text-xs text-[#475569] dark:text-[#94A3B8] animate-pulse font-body" aria-live="polite">
           Please confirm in your Freighter wallet...
         </p>
       )}

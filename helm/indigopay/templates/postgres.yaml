@@ -1,24 +1,82 @@
+# helm/indigopay/templates/postgres.yaml — PostgreSQL primary with streaming replication
+#
+# Deploys the primary PostgreSQL instance. When postgres.replication.enabled
+# is true, the primary is configured for streaming replication with archive
+# mode enabled for WAL fallback. The standby is deployed via a separate
+# template (postgres-standby.yaml).
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-primary-config
+  namespace: {{ .Values.namespace }}
+data:
+  postgresql.conf: |
+    listen_addresses = '*'
+    max_connections = 100
+    wal_level = replica
+    max_wal_senders = {{ .Values.postgres.replication.maxWalSenders }}
+    wal_keep_size = {{ .Values.postgres.replication.walKeepSize }}
+    max_replication_slots = {{ .Values.postgres.replication.maxReplicationSlots }}
+    hot_standby = on
+    archive_mode = {{ if .Values.postgres.replication.walArchive.enabled }}on{{ else }}off{{ end }}
+    {{- if .Values.postgres.replication.walArchive.enabled }}
+    archive_command = '/usr/local/bin/archive-wal.sh %p %f'
+    archive_timeout = 300
+    {{- end }}
+    shared_buffers = 256MB
+    effective_cache_size = 768MB
+    maintenance_work_mem = 64MB
+    wal_buffers = 16MB
+    random_page_cost = 1.1
+    effective_io_concurrency = 200
+    checkpoint_completion_target = 0.9
+    log_checkpoints = on
+    log_connections = on
+    log_disconnections = on
+    log_lock_waits = on
+    log_temp_files = 0
+    log_autovacuum_min_duration = 0
+    log_replication_commands = on
+  {{- if .Values.postgres.replication.walArchive.enabled }}
+  archive-wal.sh: |
+    #!/bin/sh
+    set -e
+    WAL_PATH="$1"
+    WAL_NAME="$2"
+    S3_BUCKET="{{ .Values.postgres.replication.walArchive.s3Bucket }}"
+    aws s3 cp "$WAL_PATH" "s3://${S3_BUCKET}/{{ .Values.postgres.replication.walArchive.s3Prefix }}${WAL_NAME}" \
+      --sse AES256 \
+      --storage-class STANDARD_IA
+  {{- end }}
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: postgres
+  name: postgres-primary
   namespace: {{ .Values.namespace }}
+  labels:
+    app: postgres
+    role: primary
 spec:
-  serviceName: postgres-svc
+  serviceName: postgres-primary-svc
   replicas: 1
   selector:
     matchLabels:
       app: postgres
+      role: primary
   template:
     metadata:
       labels:
         app: postgres
+        role: primary
     spec:
       containers:
         - name: postgres
           image: {{ .Values.postgres.image }}
           ports:
             - containerPort: 5432
+              name: postgres
           env:
             - name: POSTGRES_USER
               valueFrom:
@@ -35,15 +93,50 @@ spec:
                 secretKeyRef:
                   name: stellar-indigopay-secrets
                   key: POSTGRES_DB
+            {{- if .Values.postgres.replication.enabled }}
+            - name: POSTGRES_REPLICATION_USER
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: POSTGRES_REPLICATION_USER
+            - name: POSTGRES_REPLICATION_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: POSTGRES_REPLICATION_PASSWORD
+            {{- end }}
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
+            - name: postgres-config
+              mountPath: /etc/postgresql/postgresql.conf
+              subPath: postgresql.conf
+            {{- if .Values.postgres.replication.walArchive.enabled }}
+            - name: postgres-config
+              mountPath: /usr/local/bin/archive-wal.sh
+              subPath: archive-wal.sh
+            {{- end }}
+          args:
+            - "-c"
+            - "config_file=/etc/postgresql/postgresql.conf"
           readinessProbe:
             exec:
               command:
-                ["pg_isready", "-U", "postgres", "-d", "stellar_indigopay"]
-            initialDelaySeconds: 5
+                ["pg_isready", "-U", "postgres", "-d", "{{ .Values.secrets.postgresDb }}"]
+            initialDelaySeconds: 10
             periodSeconds: 5
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+      volumes:
+        - name: postgres-config
+          configMap:
+            name: postgres-primary-config
+            defaultMode: 0755
   volumeClaimTemplates:
     - metadata:
         name: postgres-data
@@ -56,12 +149,35 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: postgres-svc
+  name: postgres-primary-svc
   namespace: {{ .Values.namespace }}
+  labels:
+    app: postgres
+    role: primary
 spec:
   selector:
     app: postgres
+    role: primary
   clusterIP: None
   ports:
     - port: 5432
       targetPort: 5432
+      name: postgres
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-svc
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: postgres
+    role: primary
+spec:
+  selector:
+    app: postgres
+    role: primary
+  clusterIP: None
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres

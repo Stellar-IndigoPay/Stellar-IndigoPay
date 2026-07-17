@@ -2,7 +2,47 @@
 
 ### Features
 
+* **backend,frontend:** JWT refresh token rotation and session management for admin auth (GF-032, closes #87)
+  - Access tokens cut to 15 minutes and carry a `jti`; refresh tokens are opaque, DB-backed, and live 7 days
+  - New `refresh_tokens` and `token_blacklist` tables via migration 019
+  - `POST /api/admin/refresh` rotates the refresh token on every call; replaying a revoked token revokes its entire family
+  - `POST /api/admin/logout` revokes the session family and blacklists the access token's `jti` until natural expiry
+  - `GET /api/admin/sessions` lists active sessions; `POST /api/admin/sessions/:id/revoke` kills one
+  - Refresh token moved to an httpOnly, Secure, SameSite=Strict cookie scoped to `/api`; `/admin/refresh` and `/admin/logout` are exempt from csurf since the cookie is their only credential
+  - Hourly pg-boss cleanup cron (`blacklistCleanup`) purges expired rows from both tables (configurable via `BLACKLIST_CLEANUP_CRON`)
+  - Frontend: `adminAuth.ts` holds the access token in memory only, refreshes single-flight, and rehydrates the session on mount
+  - Rotation claims the presented token with a compare-and-swap, so two concurrent refreshes cannot both mint a successor
+  - Logout only blacklists tokens the server signed; the endpoint is unauthenticated, so decoding without verifying would let anyone write a chosen `jti` and expiry
+  - 36 backend tests (`admin.test.js`), 20 frontend tests (`adminAuth.test.ts`)
+
+* **frontend:** admin login now shows the specific failure (`reason`) instead of the canonical per-code message, so a wrong password reads "Invalid credentials" rather than "Authentication required"
+
+  **BREAKING**: `POST /api/admin/login` no longer returns `refreshToken` in the body and `expiresIn` is now 900; `POST /api/admin/refresh` reads the `refresh_token` cookie instead of a JSON body. Existing admin tokens are invalidated — admins must log in again.
+
+* **backend,frontend:** add Idempotency-Key support for donation recording (closes #148)
+  - Accept `Idempotency-Key` header (UUID v4) on `POST /api/donations`; store response and replay within 24 hours
+  - New `idempotency_keys` table via migration 016 with index on `created_at`
+  - Hourly pg-boss cleanup cron (`idempotencyCleanup`) purges expired keys (configurable via `IDEMPOTENCY_CLEANUP_CRON`)
+  - Frontend: `DonateForm` and `bridge` generate `crypto.randomUUID()` per donation attempt
+  - Documented in OpenAPI spec with 200 replay response
+  - 11 new tests: 5 unit (donations), 8 unit (cleanup), 3 integration (testcontainers)
+
 * **docs:** add CONTRIBUTORS.md to credit community work (GF-015, closes #64)
+
+* **frontend:** build admin audit log viewer with filtering and CSV export (GF-028, closes #83)
+  - Add `/admin/audit` page with filterable, paginated audit log table
+  - Add `AuditLogTable.tsx` — reusable component with filters (actor, action, target, date range, full-text search), pagination (50/page), and CSV export
+  - Add "Audit Log" link to admin navigation sidebar
+  - Fetch distinct action values from stats API for the action filter dropdown
+  - CSV export downloads via `GET /api/admin/audit-log/export/csv` with current filters
+  - 15 frontend test cases covering all filter states, pagination, export, loading/error/empty states
+
+* **frontend:** build donor impact certificate with shareable OG social preview (GF-022, closes #79)
+  - Add server-rendered OG image endpoint `/api/og/donor/[publicKey]` using `@vercel/og` (1200×630px, Edge Runtime)
+  - Generate styled impact card with donor name, XLM donated, badge tier, CO₂ offset, and CTA
+  - Add `ShareButton.tsx` — reusable component with Twitter/X, LinkedIn, and copy-link buttons with hover states
+  - Update donor profile page with `og:image`, `twitter:card=summary_large_image`, and dynamic share text
+  - Cache OG images for 1 hour via `Cache-Control: public, max-age=3600`
 
 * **backend:** implement Soroban RPC retry with exponential backoff and circuit breaker (GF-043, closes #100)
   - Add `backend/src/services/circuitBreaker.js` — reusable `CircuitBreaker` class (CLOSED / HALF_OPEN / OPEN state machine, configurable `failureThreshold` and `resetTimeout`)
@@ -169,6 +209,8 @@ RETURNING id, (xmax=0) AS inserted` on `webhook_deliveries`.
   existing `deliveryId` rather than silently re-creating a row.
 - `backend/src/services/indexerService` exposes a `stop()` method so the
   Stellar Horizon stream is closed cleanly on SIGTERM.
+
+- **scripts:** ensure `scripts/setup-dev.sh` installs `mobile` and `extension` dependencies (fix README mismatch)
 
 - **NetworkPolicies** — default-deny for the `indigopay` namespace plus
   explicit allow policies for ingress → backend, backend → postgres +

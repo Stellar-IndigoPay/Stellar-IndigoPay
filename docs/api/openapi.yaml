@@ -6,11 +6,14 @@ info:
     OpenAPI 3.0 documentation for the backend REST API used by Stellar-IndigoPay.
     The API exposes project discovery, donations, profiles, leaderboard, notifications,
     ratings, updates, jobs, stats, and admin management endpoints.
+  contact:
+    name: Stellar-IndigoPay Team
+    url: https://github.com/Stellar-IndigoPay/Stellar-IndigoPay
   license:
     name: MIT
 servers:
   - url: http://localhost:4000
-    description: Local development server
+    description: Local development server  
   - url: https://api.stellarindigopay.com
     description: Production server
 tags:
@@ -24,6 +27,10 @@ tags:
   - name: Jobs
   - name: Stats
   - name: Admin
+  - name: Attestations
+    description: Cross-chain donation attestation endpoints for verifying bridge transactions across chains.
+  - name: RateLimit
+    description: All endpoints are subject to rate limiting. See the components/responses/RateLimitExceeded response for headers and 429 response body details.
 security:
   - BearerAuth: []
 components:
@@ -32,6 +39,11 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+    RefreshCookie:
+      type: apiKey
+      in: cookie
+      name: refresh_token
+      description: Rotating admin refresh token. httpOnly, SameSite=Strict, scoped to /api.
   parameters:
     ProjectId:
       name: id
@@ -128,6 +140,37 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    RateLimitExceeded:
+      description: The request has been rate-limited. All endpoints carry rate-limit response headers (X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset) and return 429 with a Retry-After header when the limit is exceeded. See the API documentation for per-endpoint tiers.
+      headers:
+        Retry-After:
+          description: Number of seconds to wait before retrying.
+          schema:
+            type: integer
+        X-RateLimit-Limit:
+          description: Maximum requests allowed (or bucket capacity for token-bucket endpoints).
+          schema:
+            type: integer
+        X-RateLimit-Remaining:
+          description: Requests remaining in the current window (or tokens left in the bucket).
+          schema:
+            type: integer
+        X-RateLimit-Reset:
+          description: Epoch seconds when the limit resets (or next token becomes available).
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                example: Too many requests — Try again later.
+              retryAfter:
+                type: integer
+                description: Epoch seconds after which a retry may succeed.
+                example: 1742169602
     InternalError:
       description: An unexpected server error occurred.
       content:
@@ -143,12 +186,6 @@ components:
           example: Invalid request payload
       required:
         - error
-    SuccessResponse:
-      type: object
-      properties:
-        success:
-          type: boolean
-          example: true
     Project:
       type: object
       properties:
@@ -470,10 +507,10 @@ components:
           properties:
             token:
               type: string
-            refreshToken:
-              type: string
+              description: Access token. Hold it in memory only.
             expiresIn:
               type: integer
+              description: Access token lifetime in seconds.
     AdminRefreshResponse:
       type: object
       properties:
@@ -486,6 +523,29 @@ components:
               type: string
             expiresIn:
               type: integer
+    AdminSessionsResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+                description: Refresh token family identifying the session.
+              createdAt:
+                type: string
+                format: date-time
+              expiresAt:
+                type: string
+                format: date-time
+              current:
+                type: boolean
+                description: True for the session making this request.
     AdminMeResponse:
       type: object
       properties:
@@ -680,12 +740,6 @@ components:
           type: string
         password:
           type: string
-    AdminRefreshRequest:
-      type: object
-      required: [refreshToken]
-      properties:
-        refreshToken:
-          type: string
     AdminStatusRequest:
       type: object
       properties:
@@ -695,6 +749,140 @@ components:
         reason:
           type: string
         adminAddress:
+          type: string
+    Attestation:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        onChainId:
+          type: integer
+          nullable: true
+        sourceChain:
+          type: string
+          description: Source chain slug (e.g. "ethereum", "polygon", "arbitrum", "base").
+          example: ethereum
+        sourceTxHash:
+          type: string
+          description: Transaction hash on the source chain.
+          example: "0xabc123…"
+        donorAddress:
+          type: string
+          pattern: "^G[A-Z0-9]{55}$"
+        projectId:
+          type: string
+          format: uuid
+          nullable: true
+        amountUsd:
+          type: string
+          description: USD-equivalent value, 6 decimals (USDC convention).
+          example: "10.000000"
+        amountXlm:
+          type: string
+          description: XLM-equivalent value, 7 decimals (stroops stored as decimal).
+          example: "80.0000000"
+        status:
+          type: string
+          enum: [pending, verified, revoked]
+        messageHash:
+          type: integer
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        verifiedAt:
+          type: string
+          format: date-time
+          nullable: true
+    AttestationStats:
+      type: object
+      properties:
+        total:
+          type: integer
+        pending:
+          type: integer
+        verified:
+          type: integer
+        revoked:
+          type: integer
+        byChain:
+          type: array
+          items:
+            type: object
+            properties:
+              sourceChain:
+                type: string
+              count:
+                type: integer
+    BuildAttestationProofRequest:
+      type: object
+      required: [source_chain, source_tx_hash, donor_address, project_id]
+      properties:
+        source_chain:
+          type: string
+        source_tx_hash:
+          type: string
+        donor_address:
+          type: string
+          pattern: "^G[A-Z0-9]{55}$"
+        project_id:
+          type: string
+    BuildAttestationProofResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            payload:
+              type: string
+              description: Hex-encoded SHA-256 of the canonical input.
+            signature:
+              type: string
+              description: GitHub-style t=…,v1=… HMAC-SHA256 signature.
+            timestamp:
+              type: integer
+            canonical:
+              type: object
+    RecordAttestationRequest:
+      type: object
+      required:
+        - source_chain
+        - source_tx_hash
+        - donor_address
+        - project_id
+        - amount_usd
+        - amount_xlm
+        - on_chain_id
+      properties:
+        source_chain:
+          type: string
+        source_tx_hash:
+          type: string
+        donor_address:
+          type: string
+          pattern: "^G[A-Z0-9]{55}$"
+        project_id:
+          type: string
+          format: uuid
+        amount_usd:
+          type: number
+          description: USD-equivalent value, 6 decimals.
+        amount_xlm:
+          type: number
+          description: XLM-equivalent value, 7 decimals.
+        message_hash:
+          type: integer
+        on_chain_id:
+          type: integer
+          description: Soroban-assigned monotonic id returned by the relayer.
+        status:
+          type: string
+          enum: [pending, verified, revoked]
+          default: pending
+        recorded_by:
           type: string
     AdminRegisterProjectRequest:
       type: object
@@ -772,6 +960,7 @@ paths:
     get:
       tags: [Projects]
       summary: Get featured project
+      operationId: getFeaturedProject
       description: Returns the currently featured active project.
       responses:
         "200":
@@ -791,6 +980,8 @@ paths:
     get:
       tags: [Projects]
       summary: List projects
+      operationId: listProjects
+      description: Retrieve a paginated list of projects with optional filters for category, status, verification, and search.
       parameters:
         - $ref: "#/components/parameters/LimitQuery"
         - $ref: "#/components/parameters/CursorQuery"
@@ -834,6 +1025,8 @@ paths:
     post:
       tags: [Projects]
       summary: Create a project
+      operationId: createProject
+      description: Register a new climate project on the platform with name, description, location, category, and wallet address.
       requestBody:
         required: true
         content:
@@ -854,10 +1047,14 @@ paths:
                     $ref: "#/components/schemas/Project"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/projects/{id}/verify:
     get:
       tags: [Projects]
       summary: Verify a project on-chain
+      operationId: verifyProjectOnChain
+      description: Check the on-chain verification status of a project registered on the Soroban smart contract.
       parameters:
         - $ref: "#/components/parameters/ProjectId"
       responses:
@@ -886,6 +1083,8 @@ paths:
     post:
       tags: [Projects]
       summary: Create a campaign
+      operationId: createCampaign
+      description: Create a new fundraising campaign under a project with a goal, deadline, and description.
       parameters:
         - $ref: "#/components/parameters/ProjectId"
       requestBody:
@@ -910,9 +1109,13 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
     get:
       tags: [Projects]
       summary: List campaigns for a project
+      operationId: listProjectCampaigns
+      description: Retrieve all fundraising campaigns associated with a specific project.
       parameters:
         - $ref: "#/components/parameters/ProjectId"
       responses:
@@ -933,6 +1136,8 @@ paths:
     get:
       tags: [Projects]
       summary: List project milestones
+      operationId: listProjectMilestones
+      description: Retrieve all milestones defined for a project, including their completion status.
       parameters:
         - $ref: "#/components/parameters/ProjectId"
       responses:
@@ -952,6 +1157,8 @@ paths:
     post:
       tags: [Projects]
       summary: Create a milestone
+      operationId: createProjectMilestone
+      description: Add a new milestone with a percentage target to track a project's progress.
       parameters:
         - $ref: "#/components/parameters/ProjectId"
       requestBody:
@@ -974,10 +1181,14 @@ paths:
                     $ref: "#/components/schemas/Milestone"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/projects/{id}/milestones/{milestoneId}/reach:
     post:
       tags: [Projects]
       summary: Mark a milestone as reached
+      operationId: reachProjectMilestone
+      description: Mark a milestone as completed by providing the on-chain transaction hash.
       parameters:
         - $ref: "#/components/parameters/ProjectId"
         - $ref: "#/components/parameters/MilestoneId"
@@ -1001,10 +1212,14 @@ paths:
                     $ref: "#/components/schemas/Milestone"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/projects/admin/register:
     post:
       tags: [Projects]
       summary: Build a Soroban registration transaction
+      operationId: buildRegistrationTransaction
+      description: Build and return a Soroban contract registration transaction XDR for admin signing.
       requestBody:
         required: true
         content:
@@ -1023,12 +1238,16 @@ paths:
                     type: boolean
                   xdr:
                     type: string
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
         "500":
           $ref: "#/components/responses/InternalError"
   /api/projects/admin/confirm:
     post:
       tags: [Projects]
       summary: Confirm a project registration transaction
+      operationId: confirmRegistrationTransaction
+      description: Confirm a project registration by submitting the on-chain transaction hash.
       requestBody:
         required: true
         content:
@@ -1047,12 +1266,16 @@ paths:
                     type: boolean
                   data:
                     $ref: "#/components/schemas/Project"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
         "500":
           $ref: "#/components/responses/InternalError"
   /api/projects/{id}:
     get:
       tags: [Projects]
       summary: Get a project by id
+      operationId: getProjectById
+      description: Retrieve detailed information about a specific project by its unique identifier.
       parameters:
         - $ref: "#/components/parameters/ProjectId"
       responses:
@@ -1073,6 +1296,8 @@ paths:
     post:
       tags: [Projects]
       summary: Enqueue a donor-facing AI summary
+      operationId: generateProjectSummary
+      description: Request AI-powered summary generation for a project. The summary is generated asynchronously.
       parameters:
         - $ref: "#/components/parameters/ProjectId"
       requestBody:
@@ -1104,10 +1329,14 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/projects/{id}/matching:
     post:
       tags: [Projects]
       summary: Create a donation matching offer
+      operationId: createMatchingOffer
+      description: Create a donation matching offer where a matcher pledges to match donations up to a cap with a multiplier.
       parameters:
         - $ref: "#/components/parameters/ProjectId"
       requestBody:
@@ -1130,9 +1359,13 @@ paths:
                     $ref: "#/components/schemas/DonationMatch"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
     get:
       tags: [Projects]
       summary: List active matching offers for a project
+      operationId: listMatchingOffers
+      description: Retrieve all active donation matching offers associated with a project.
       parameters:
         - $ref: "#/components/parameters/ProjectId"
       responses:
@@ -1153,6 +1386,8 @@ paths:
     patch:
       tags: [Projects]
       summary: Update project status
+      operationId: updateProjectStatus
+      description: Update the status of a project (active, paused, rejected) by admin.
       parameters:
         - $ref: "#/components/parameters/ProjectId"
       requestBody:
@@ -1177,11 +1412,31 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/donations:
     post:
       tags: [Donations]
       summary: Record a donation
+      operationId: recordDonation
+      description: |
+        Record a new donation made to a project, including the transaction hash and amount.
+
+        **Idempotency:** Clients can safely retry this endpoint by supplying an
+        `Idempotency-Key` header with a UUID v4 value. The server stores the
+        response keyed by this header and replays it on subsequent requests with
+        the same key within 24 hours. If the key is missing or malformed the
+        request is processed normally (no idempotency guarantee).
       security: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: A UUID v4 that uniquely identifies this donation request. Supplying the same key within 24 hours returns the original response without creating a duplicate record.
+          schema:
+            type: string
+            format: uuid
+            example: "550e8400-e29b-41d4-a716-446655440000"
       requestBody:
         required: true
         content:
@@ -1189,6 +1444,17 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateDonationRequest"
       responses:
+        "200":
+          description: Donation already recorded (idempotent replay).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/Donation"
         "201":
           description: Donation recorded.
           content:
@@ -1204,10 +1470,14 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/donations/project/{projectId}/messages:
     get:
       tags: [Donations]
       summary: List donation messages for a project
+      operationId: listDonationMessages
+      description: Retrieve donation messages left by donors for a specific project.
       parameters:
         - $ref: "#/components/parameters/ProjectIdParam"
         - name: limit
@@ -1235,6 +1505,8 @@ paths:
     get:
       tags: [Donations]
       summary: List donations for a project
+      operationId: listProjectDonations
+      description: Retrieve a paginated list of all donations made to a specific project.
       parameters:
         - $ref: "#/components/parameters/ProjectIdParam"
         - name: limit
@@ -1269,6 +1541,8 @@ paths:
     get:
       tags: [Donations]
       summary: List donations by donor
+      operationId: listDonorDonations
+      description: Retrieve all donations made by a specific donor, identified by their Stellar public key.
       parameters:
         - $ref: "#/components/parameters/PublicKeyParam"
       responses:
@@ -1291,6 +1565,8 @@ paths:
     get:
       tags: [Profiles]
       summary: Get a profile by public key
+      operationId: getProfileByPublicKey
+      description: Retrieve a donor profile by their Stellar public key, including display name, bio, badges, and donation stats.
       parameters:
         - $ref: "#/components/parameters/PublicKeyParam"
       responses:
@@ -1309,10 +1585,14 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/profiles:
     post:
       tags: [Profiles]
       summary: Create or update a profile
+      operationId: upsertProfile
+      description: Create a new donor profile or update an existing one with display name and bio.
       security: []
       requestBody:
         required: true
@@ -1334,10 +1614,14 @@ paths:
                     $ref: "#/components/schemas/Profile"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/leaderboard:
     get:
       tags: [Leaderboard]
       summary: Get the donation leaderboard
+      operationId: getLeaderboard
+      description: Retrieve the top donors ranked by total donations, optionally filtered by time period (all, month, year).
       parameters:
         - $ref: "#/components/parameters/LimitQuery"
         - $ref: "#/components/parameters/PeriodQuery"
@@ -1359,6 +1643,8 @@ paths:
     post:
       tags: [Notifications]
       summary: Register a device token
+      operationId: registerDeviceToken
+      description: Register a push notification device token for iOS or Android to receive project updates.
       security: []
       requestBody:
         required: true
@@ -1383,10 +1669,14 @@ paths:
                         type: string
         "400":
           $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/notifications/follow:
     post:
       tags: [Notifications]
       summary: Follow a project for notifications
+      operationId: followProjectNotifications
+      description: Subscribe to push notifications for updates on a specific project.
       security: []
       requestBody:
         required: true
@@ -1410,10 +1700,14 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/notifications/unfollow:
     post:
       tags: [Notifications]
       summary: Unfollow a project
+      operationId: unfollowProjectNotifications
+      description: Unsubscribe from push notifications for a specific project.
       security: []
       requestBody:
         required: true
@@ -1433,10 +1727,14 @@ paths:
                     type: boolean
                   deleted:
                     type: boolean
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/notifications/follows:
     get:
       tags: [Notifications]
       summary: List followed projects for a device token
+      operationId: listFollowedProjects
+      description: Retrieve all projects that a device token is following for notifications.
       security: []
       parameters:
         - name: token
@@ -1466,6 +1764,8 @@ paths:
     post:
       tags: [Ratings]
       summary: Submit or update a project rating
+      operationId: submitRating
+      description: Submit a rating and optional review for a project you have donated to.
       security: []
       requestBody:
         required: true
@@ -1487,10 +1787,14 @@ paths:
                     $ref: "#/components/schemas/Rating"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/ratings/pending:
     get:
       tags: [Ratings]
       summary: Get a pending rating candidate for a donor
+      operationId: getPendingRating
+      description: Retrieve the next project a donor can rate based on their donation history.
       parameters:
         - $ref: "#/components/parameters/DonorAddressQuery"
       responses:
@@ -1515,6 +1819,8 @@ paths:
     post:
       tags: [Updates]
       summary: Create a project update
+      operationId: createProjectUpdate
+      description: Post a new text update for a project to keep donors informed.
       security:
         - BearerAuth: []
       requestBody:
@@ -1541,10 +1847,14 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/updates/{updateId}/like:
     post:
       tags: [Updates]
       summary: Toggle a like for a project update
+      operationId: toggleUpdateLike
+      description: Like or unlike a project update to show appreciation.
       security: []
       parameters:
         - $ref: "#/components/parameters/UpdateIdParam"
@@ -1575,10 +1885,14 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/updates/{updateId}/likes:
     get:
       tags: [Updates]
       summary: Get like count and current user's like status
+      operationId: getUpdateLikeStatus
+      description: Retrieve the current like count and whether a specific donor has liked an update.
       parameters:
         - $ref: "#/components/parameters/UpdateIdParam"
         - name: donorAddress
@@ -1607,6 +1921,8 @@ paths:
     get:
       tags: [Jobs]
       summary: List recent jobs
+      operationId: listJobs
+      description: Retrieve a list of recent escrow jobs on the platform.
       responses:
         "200":
           description: Job list.
@@ -1625,6 +1941,8 @@ paths:
     patch:
       tags: [Jobs]
       summary: Release escrow for a job
+      operationId: releaseJobEscrow
+      description: Release the escrowed funds for a completed job by providing the on-chain transaction hash.
       parameters:
         - $ref: "#/components/parameters/JobId"
       requestBody:
@@ -1654,10 +1972,14 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/jobs/{id}:
     get:
       tags: [Jobs]
       summary: Get a job by id
+      operationId: getJobById
+      description: Retrieve detailed information about a specific escrow job by its identifier.
       parameters:
         - $ref: "#/components/parameters/JobId"
       responses:
@@ -1678,6 +2000,8 @@ paths:
     get:
       tags: [Stats]
       summary: Get global platform stats
+      operationId: getGlobalStats
+      description: Retrieve aggregated platform statistics including total donations, XLM raised, and CO2 offset.
       responses:
         "200":
           description: Platform totals.
@@ -1694,6 +2018,8 @@ paths:
     get:
       tags: [Stats]
       summary: Get project counts by category
+      operationId: getCategoryStats
+      description: Retrieve the number of projects grouped by environmental category.
       responses:
         "200":
           description: Category counts.
@@ -1712,6 +2038,11 @@ paths:
     post:
       tags: [Admin]
       summary: Log in as an administrator
+      operationId: adminLogin
+      description: >-
+        Authenticate as an administrator using username and password
+        credentials. Returns a 15-minute access token and sets the rotating
+        refresh token as an httpOnly, SameSite=Strict cookie scoped to /api.
       security: []
       requestBody:
         required: true
@@ -1721,37 +2052,125 @@ paths:
               $ref: "#/components/schemas/AdminLoginRequest"
       responses:
         "200":
-          description: Admin authentication tokens.
+          description: Admin access token. The refresh token is set as a cookie, never returned in the body.
+          headers:
+            Set-Cookie:
+              description: refresh_token=<opaque>; HttpOnly; SameSite=Strict; Path=/api; Max-Age=604800
+              schema:
+                type: string
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/AdminLoginResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/admin/refresh:
     post:
       tags: [Admin]
-      summary: Refresh an admin token
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/AdminRefreshRequest"
+      summary: Rotate the admin session
+      operationId: adminRefreshToken
+      description: >-
+        Exchange the refresh_token cookie for a new access token. Each call
+        revokes the presented refresh token and issues a replacement in the
+        same family. Replaying an already-revoked token revokes every session
+        in that family.
+      security:
+        - RefreshCookie: []
       responses:
         "200":
-          description: Refreshed admin token.
+          description: Rotated session.
+          headers:
+            Set-Cookie:
+              description: The replacement refresh token.
+              schema:
+                type: string
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/AdminRefreshResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+  /api/admin/logout:
+    post:
+      tags: [Admin]
+      summary: End the admin session
+      operationId: adminLogout
+      description: >-
+        Revoke the refresh token family behind the refresh_token cookie,
+        blacklist the presented access token until its natural expiry, and
+        clear the cookie. Always succeeds.
+      security:
+        - BearerAuth: []
+        - RefreshCookie: []
+      responses:
+        "200":
+          description: Session ended.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+  /api/admin/sessions:
+    get:
+      tags: [Admin]
+      summary: List active admin sessions
+      operationId: listAdminSessions
+      description: List the authenticated admin's active sessions, one per refresh token family.
+      responses:
+        "200":
+          description: Active sessions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminSessionsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/admin/sessions/{id}/revoke:
+    post:
+      tags: [Admin]
+      summary: Revoke an admin session
+      operationId: revokeAdminSession
+      description: Revoke every refresh token in the given session family.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Session id (refresh token family).
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Session revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/admin/me:
     get:
       tags: [Admin]
       summary: Get current admin identity
+      operationId: getAdminMe
+      description: Retrieve the currently authenticated admin user's identity and role.
       responses:
         "200":
           description: Current admin identity.
@@ -1765,6 +2184,8 @@ paths:
     get:
       tags: [Admin]
       summary: Query admin audit log
+      operationId: queryAuditLog
+      description: Query the admin audit log with optional filters for actor, action, and pagination.
       parameters:
         - name: actor
           in: query
@@ -1800,6 +2221,7 @@ paths:
     get:
       tags: [Admin]
       summary: Verify an IPFS document
+      operationId: verifyIPFSDocument
       description: Re-fetches a pinned verification document from the configured IPFS gateway and returns its SHA-256 fingerprint.
       parameters:
         - name: cid
@@ -1850,3 +2272,287 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /api/attestations:
+    get:
+      tags: [Attestations]
+      operationId: getAttestations
+      summary: Get attestation roll-up stats
+      description: Returns platform-wide counts (total / pending / verified / revoked) plus per-source-chain breakdown (issue #125).
+      security: []
+      responses:
+        "200":
+          description: Roll-up stats.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/AttestationStats"
+    post:
+      tags: [Attestations]
+      operationId: recordAttestation
+      summary: Record a new cross-chain attestation
+      description: Called by the relayer after source-chain finality. Requires a signed proof in either the `x-attestation-signature` / `x-attestation-timestamp` headers or the legacy `x_proof_signature` / `x_proof_timestamp` aliases.
+      security: []
+      parameters:
+        - name: x-attestation-signature
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: x-attestation-timestamp
+          in: header
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecordAttestationRequest"
+      responses:
+        "201":
+          description: Attestation created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  created:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/Attestation"
+        "200":
+          description: Attestation already existed; idempotent response.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  created:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/Attestation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+  /api/attestations/build-proof:
+    post:
+      tags: [Attestations]
+      operationId: buildAttestationProof
+      summary: Mint a signed proof for a cross-chain observation
+      description: Returns `{payload, signature, timestamp, canonical}` so a partner can submit `/api/attestations` with a verifiable header pair.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BuildAttestationProofRequest"
+      responses:
+        "200":
+          description: A signed proof.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BuildAttestationProofResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+  /api/attestations/by-source:
+    get:
+      tags: [Attestations]
+      operationId: getAttestationBySource
+      summary: Look up an attestation by source-chain keys
+      description: Look up an attestation using its source-chain identifier and transaction hash.
+      security: []
+      parameters:
+        - name: source_chain
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: source_tx_hash
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The matching attestation.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/Attestation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/attestations/by-donor/{publicKey}:
+    get:
+      tags: [Attestations]
+      operationId: listAttestationsByDonor
+      summary: List every attestation for a Stellar donor
+      description: Retrieve all cross-chain attestations associated with a specific Stellar donor address.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/PublicKeyParam"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        "200":
+          description: Attestation history for the donor.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Attestation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  /api/attestations/by-id/{onChainId}:
+    get:
+      tags: [Attestations]
+      operationId: getAttestationByOnChainId
+      summary: Look up an attestation by its Soroban on-chain id
+      description: Look up an attestation by its monotonic Soroban on-chain counter.
+      security: []
+      parameters:
+        - name: onChainId
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        "200":
+          description: The matching attestation.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/Attestation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/attestations/{id}:
+    get:
+      tags: [Attestations]
+      operationId: getAttestationById
+      summary: Get an attestation by backend UUID
+      description: Retrieve a single attestation by its backend UUID identifier.
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The matching attestation.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/Attestation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/attestations/{id}/verify:
+    post:
+      tags: [Attestations]
+      operationId: verifyAttestation
+      summary: Flip a pending attestation to verified
+      description: Mark a pending attestation as verified. Only callable by the relayer after on-chain confirmation.
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Attestation updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/Attestation"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+  /api/attestations/{id}/revoke:
+    post:
+      tags: [Attestations]
+      operationId: revokeAttestation
+      summary: Revoke an attestation (admin / incident response)
+      description: Revoke an existing attestation. Restricted to admin users only.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Attestation revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/Attestation"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"

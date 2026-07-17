@@ -3,12 +3,15 @@
  */
 import { useState, useEffect } from "react";
 import { useRouter } from "next/router";
-import Head from "next/head";
 import type { GetServerSideProps } from "next";
+import PageMeta from "@/components/PageMeta";
 import Link from "next/link";
 import DonateForm from "@/components/DonateForm";
 import DonationFeed from "@/components/DonationFeed";
-import ProjectProgressBar from "@/components/ProjectProgressBar";
+import ProjectProgressBar, {
+  ProjectProgressBarSkeleton,
+} from "@/components/ProjectProgressBar";
+import { SkeletonBox, SkeletonAvatar } from "@/components/Skeleton";
 import ToastNotification, {
   type ToastItem,
 } from "@/components/ToastNotification";
@@ -56,8 +59,6 @@ import type {
 import { useWishlist } from "@/hooks/useWishlist";
 
 interface ProjectDetailProps {
-  publicKey: string | null;
-  onConnect: (pk: string) => void;
   ogProject?: {
     name: string;
     description: string;
@@ -67,15 +68,12 @@ interface ProjectDetailProps {
   } | null;
 }
 
-export default function ProjectDetail({
-  publicKey,
-  onConnect,
-  ogProject,
-}: ProjectDetailProps) {
+export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
   const router = useRouter();
   const { id } = router.query;
   const { t } = useI18n();
 
+  const [publicKey, setPublicKey] = useState<string | null>(null);
   const [project, setProject] = useState<ClimateProject | null>(null);
   const [updates, setUpdates] = useState<ProjectUpdate[]>([]);
   const [updateLikes, setUpdateLikes] = useState<
@@ -149,7 +147,7 @@ export default function ProjectDetail({
       })
       .catch(() => router.push("/projects"))
       .finally(() => setLoading(false));
-  }, [id]);
+  }, [id, publicKey, router]);
 
   useEffect(() => {
     if (!project) return;
@@ -158,6 +156,9 @@ export default function ProjectDetail({
       .then(setDiscussion)
       .catch(() => setDiscussion([]))
       .finally(() => setDiscussionLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- project object
+    // identity changes at the same frequency as walletAddress; including
+    // project in the deps array would cause spurious refetches.
   }, [project?.walletAddress]);
 
   useEffect(() => {
@@ -695,21 +696,63 @@ export default function ProjectDetail({
     }
   };
 
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || "https://stellar-indigopay.app";
+  const canonicalUrl = `${appUrl}${router.asPath.split("?")[0]}`;
+  const ogTitle = ogProject
+    ? `${ogProject.name} — Stellar IndigoPay`
+    : "Stellar IndigoPay";
+  const ogDescription = ogProject
+    ? `${ogProject.description.slice(0, 160).trimEnd()}… Support this ${ogProject.category} project on Stellar IndigoPay.`
+    : "Donate XLM directly to verified climate projects on Stellar.";
+  const ogImage = ogProject?.imageUrl
+    ? ogProject.imageUrl
+    : `${appUrl}/api/og?title=${encodeURIComponent(ogTitle)}&subtitle=${encodeURIComponent(ogDescription)}`;
+  const projectJsonLd = project
+    ? {
+        "@context": "https://schema.org",
+        "@type": "Project",
+        name: project.name,
+        description: project.description,
+        image: project.imageUrl || ogImage,
+        url: canonicalUrl,
+        location: project.location ? { "@type": "Place", name: project.location } : undefined,
+        keywords: project.tags?.join(", "),
+      }
+    : null;
+
   if (loading || !project)
     return (
-      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10 animate-pulse">
-        <Head>
-          <title>
-            {ogProject?.name
-              ? `${ogProject.name} — Stellar IndigoPay`
-              : "Project — Stellar IndigoPay"}
-          </title>
-        </Head>
-        <div className="h-8 bg-forest-200 rounded w-2/3 mb-4" />
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10 animate-pulse pointer-events-none">
+        <PageMeta
+          title={ogTitle}
+          description={ogDescription}
+          canonicalUrl={canonicalUrl}
+          ogImage={ogImage}
+          jsonLd={projectJsonLd || undefined}
+        />
+        <SkeletonBox className="h-6 rounded w-1/4 mb-6" palette="forest" />
         <div className="card space-y-4">
-          {[1, 2, 3].map((i) => (
-            <div key={i} className="h-4 bg-forest-100 rounded" />
-          ))}
+          <div className="flex items-start gap-4 mb-5">
+            <SkeletonAvatar size="lg" palette="forest" />
+            <div className="flex-1 space-y-3">
+              <div className="flex gap-2">
+                <SkeletonBox className="h-6 rounded-full w-20" palette="forest" />
+                <SkeletonBox className="h-6 rounded-full w-16" palette="forest" />
+              </div>
+              <SkeletonBox className="h-8 rounded w-2/3" palette="forest" />
+              <SkeletonBox className="h-4 rounded w-1/3" palette="forest" />
+            </div>
+          </div>
+          <ProjectProgressBarSkeleton palette="forest" />
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {[1, 2, 3].map((i) => (
+              <div key={i} className="stat-card text-center space-y-2">
+                <SkeletonBox className="h-6 rounded w-8 mx-auto" palette="forest" />
+                <SkeletonBox className="h-5 rounded w-16 mx-auto" palette="forest" />
+                <SkeletonBox className="h-3 rounded w-12 mx-auto" palette="forest" />
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     );
@@ -738,33 +781,16 @@ export default function ProjectDetail({
   else if (treesEquivalent < 50) analogy = "A growing mini-forest! 🌲";
   else analogy = "A massive impact for our planet! 🌍";
 
-  const appUrl =
-    process.env.NEXT_PUBLIC_APP_URL || "https://stellar-indigopay.app";
-  const ogTitle = ogProject
-    ? `${ogProject.name} — Stellar IndigoPay`
-    : "Stellar IndigoPay";
-  const ogDescription = ogProject
-    ? `${ogProject.description.slice(0, 160).trimEnd()}… Support this ${ogProject.category} project on Stellar IndigoPay.`
-    : "Donate XLM directly to verified climate projects on Stellar.";
-  const ogImage = ogProject?.imageUrl || `${appUrl}/og-default.png`;
-
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10 pb-24 sm:pb-10 animate-fade-in">
-      <Head>
-        <title>{ogTitle}</title>
-        <meta name="indigopay:project:id" content={project.id} />
-        <meta name="description" content={ogDescription} />
-        <meta property="og:type" content="website" />
-        <meta property="og:title" content={ogTitle} />
-        <meta property="og:description" content={ogDescription} />
-        <meta property="og:image" content={ogImage} />
-        <meta property="og:image:width" content="1200" />
-        <meta property="og:image:height" content="630" />
-        <meta name="twitter:card" content="summary_large_image" />
-        <meta name="twitter:title" content={ogTitle} />
-        <meta name="twitter:description" content={ogDescription} />
-        <meta name="twitter:image" content={ogImage} />
-      </Head>
+      <PageMeta
+        title={ogTitle}
+        description={ogDescription}
+        canonicalUrl={canonicalUrl}
+        ogType="article"
+        ogImage={ogImage}
+        jsonLd={projectJsonLd || undefined}
+      />
       <ToastNotification
         toasts={toasts}
         onDismiss={(toastId) =>
@@ -1600,7 +1626,7 @@ export default function ProjectDetail({
                 Donate to {project.name}
               </a>
             ) : (
-              <WalletConnect onConnect={onConnect} />
+              <WalletConnect onConnect={setPublicKey} />
             )}
           </div>
 
@@ -1697,7 +1723,7 @@ export default function ProjectDetail({
               <p className="text-center text-[#5a7a5a] dark:text-[#8aaa8a] text-sm mb-4 font-body">
                 Connect your wallet to donate
               </p>
-              <WalletConnect onConnect={onConnect} />
+              <WalletConnect onConnect={setPublicKey} />
             </div>
           )}
 

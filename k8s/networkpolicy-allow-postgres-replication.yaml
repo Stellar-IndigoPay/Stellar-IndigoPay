@@ -1,0 +1,71 @@
+# k8s/networkpolicy-allow-postgres-replication.yaml
+#
+# Allows streaming replication traffic between PostgreSQL primary and
+# standby pods across regions/zones.
+#
+#   - The standby initiates an egress TCP connection to the primary on
+#     port 5432 to stream WAL.
+#   - DNS lookups (kube-dns UDP 53) are allowed so the standby can
+#     resolve `postgres-primary-svc.stellar-indigopay.svc.cluster.local`.
+#
+# This policy must be layered on top of the default-deny baseline.
+# Adjust the namespace selector if the standby runs in a different
+# namespace.
+
+---
+# Allow the standby pod to reach the primary for replication
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-standby-to-primary
+  namespace: stellar-indigopay
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+      role: standby
+  policyTypes:
+    - Egress
+  egress:
+    # DNS resolution
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Reach the primary's headless service for streaming replication
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+              role: primary
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+# Allow the primary to receive replication connections from the standby
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-primary-from-standby
+  namespace: stellar-indigopay
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+      role: primary
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: postgres
+              role: standby
+      ports:
+        - protocol: TCP
+          port: 5432

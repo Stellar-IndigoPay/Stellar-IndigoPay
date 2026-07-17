@@ -37,6 +37,7 @@ const { signToken } = require("../middleware/auth");
 const verification = require("./verification");
 const email = require("../services/email");
 const storage = require("../services/storage");
+const { AppError } = require("../errors");
 
 function buildApp() {
   const app = express();
@@ -44,6 +45,9 @@ function buildApp() {
   // Bypass helmet/csrf from server.js for the unit test.
   app.use("/api/verification-requests", verification);
   app.use((err, _req, res, _next) => {
+    if (err instanceof AppError) {
+      return res.status(err.status).json(err.toJSON());
+    }
     res
       .status(err.status || 500)
       .json({ error: err.message || "Internal server error" });
@@ -156,7 +160,7 @@ describe("POST /api/verification-requests", () => {
       .post("/api/verification-requests")
       .send({ ...VALID_PAYLOAD, organizationName: "" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/organizationName/);
+    expect(res.body.error.detail).toMatch(/organizationName/);
     expect(pool.query).not.toHaveBeenCalled();
   });
 
@@ -165,7 +169,7 @@ describe("POST /api/verification-requests", () => {
       .post("/api/verification-requests")
       .send({ ...VALID_PAYLOAD, contactEmail: "not-an-email" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/contactEmail/);
+    expect(res.body.error.detail).toMatch(/contactEmail/);
   });
 
   test("rejects malformed Stellar address", async () => {
@@ -173,7 +177,7 @@ describe("POST /api/verification-requests", () => {
       .post("/api/verification-requests")
       .send({ ...VALID_PAYLOAD, walletAddress: "not-a-wallet" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/walletAddress/);
+    expect(res.body.error.detail).toMatch(/walletAddress/);
   });
 
   test("rejects project category not in the whitelist", async () => {
@@ -181,7 +185,7 @@ describe("POST /api/verification-requests", () => {
       .post("/api/verification-requests")
       .send({ ...VALID_PAYLOAD, projectCategory: "Not a real category" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/projectCategory/);
+    expect(res.body.error.detail).toMatch(/projectCategory/);
   });
 
   test("rejects negative CO₂ per XLM", async () => {
@@ -189,7 +193,7 @@ describe("POST /api/verification-requests", () => {
       .post("/api/verification-requests")
       .send({ ...VALID_PAYLOAD, co2PerXLM: "-1" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/co2PerXLM/);
+    expect(res.body.error.detail).toMatch(/co2PerXLM/);
   });
 
   test("rejects document with non-http(s) URL", async () => {
@@ -202,7 +206,7 @@ describe("POST /api/verification-requests", () => {
         ],
       });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/document.url/);
+    expect(res.body.error.detail).toMatch(/document.url/);
   });
 
   test("does not mirror external document URLs even when IPFS is configured", async () => {
@@ -386,7 +390,7 @@ describe("PATCH /api/verification-requests/:id/status (admin)", () => {
       .set("Authorization", `Bearer ${token}`)
       .send({ status: "approved" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/Cannot transition/);
+    expect(res.body.error.detail).toMatch(/Cannot transition/);
   });
 
   test("rejects an unknown target status", async () => {
@@ -396,5 +400,104 @@ describe("PATCH /api/verification-requests/:id/status (admin)", () => {
       .set("Authorization", `Bearer ${token}`)
       .send({ status: "shipped" });
     expect(res.status).toBe(400);
+  });
+
+  test("approval runs CO₂ verification and stamps the project row", async () => {
+    // 1: SELECT request, 2: UPDATE request, 3: UPDATE projects (co2Verifier).
+    pool.query
+      .mockResolvedValueOnce({
+        rows: [{ ...MOCK_DB_ROW, status: "in_review" }],
+      })
+      .mockResolvedValueOnce({ rows: [{ ...MOCK_DB_ROW, status: "approved" }] })
+      .mockResolvedValueOnce({ rows: [{ id: "project-1" }] });
+
+    const token = signToken({ role: "admin", sub: "admin" }, "1h");
+    const res = await request(app)
+      .patch(`/api/verification-requests/${MOCK_DB_ROW.id}/status`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ status: "approved" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe("approved");
+    // 0.05 kg/XLM is far below the Solar Energy benchmark → auto-verified.
+    expect(res.body.co2Verification.status).toBe("verified");
+    expect(res.body.co2Verification.projectIds).toEqual(["project-1"]);
+
+    const projectUpdate = pool.query.mock.calls[2];
+    expect(projectUpdate[0]).toMatch(/UPDATE projects/);
+    expect(projectUpdate[1][0]).toBe("verified");
+    expect(projectUpdate[1][2]).toBe(MOCK_DB_ROW.wallet_address);
+    expect(projectUpdate[1][3]).toBe(MOCK_DB_ROW.project_name);
+  });
+
+  test("approval with an implausible rate flags the project for review", async () => {
+    // 45 kg/XLM is 15× the Solar Energy benchmark of 3.0 → flagged.
+    const inflatedRow = { ...MOCK_DB_ROW, co2_per_xlm: "45.0000000" };
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ ...inflatedRow, status: "in_review" }] })
+      .mockResolvedValueOnce({ rows: [{ ...inflatedRow, status: "approved" }] })
+      .mockResolvedValueOnce({ rows: [{ id: "project-1" }] });
+
+    const token = signToken({ role: "admin", sub: "admin" }, "1h");
+    const res = await request(app)
+      .patch(`/api/verification-requests/${MOCK_DB_ROW.id}/status`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ status: "approved" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.co2Verification.status).toBe("flagged");
+    expect(res.body.co2Verification.reason).toMatch(/15\.0×/);
+    expect(pool.query.mock.calls[2][1][0]).toBe("flagged");
+  });
+
+  test("a rejected transition does not touch the projects table", async () => {
+    pool.query
+      .mockResolvedValueOnce({
+        rows: [{ ...MOCK_DB_ROW, status: "in_review" }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ ...MOCK_DB_ROW, status: "rejected" }],
+      });
+
+    const token = signToken({ role: "admin", sub: "admin" }, "1h");
+    const res = await request(app)
+      .patch(`/api/verification-requests/${MOCK_DB_ROW.id}/status`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ status: "rejected" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.co2Verification).toBeUndefined();
+    const projectUpdates = pool.query.mock.calls.filter(
+      ([sql]) => typeof sql === "string" && sql.includes("UPDATE projects"),
+    );
+    expect(projectUpdates).toHaveLength(0);
+  });
+});
+
+describe("POST /api/verification-requests CO₂ assessment", () => {
+  let app;
+
+  beforeEach(() => {
+    app = buildApp();
+    jest.clearAllMocks();
+    storage.isIpfsConfigured.mockReturnValue(false);
+    pool.query.mockResolvedValue({ rows: [MOCK_DB_ROW] });
+  });
+
+  test("includes a verified assessment for a plausible rate", async () => {
+    const res = await request(app)
+      .post("/api/verification-requests")
+      .send(VALID_PAYLOAD);
+    expect(res.status).toBe(201);
+    expect(res.body.data.co2Assessment.status).toBe("verified");
+  });
+
+  test("includes a flagged assessment for an implausible rate", async () => {
+    const res = await request(app)
+      .post("/api/verification-requests")
+      .send({ ...VALID_PAYLOAD, co2PerXLM: "50000" });
+    expect(res.status).toBe(201);
+    expect(res.body.data.co2Assessment.status).toBe("flagged");
+    expect(res.body.data.co2Assessment.reason).toMatch(/Solar Energy/);
   });
 });

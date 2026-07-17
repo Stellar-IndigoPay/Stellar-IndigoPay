@@ -338,8 +338,8 @@ describe("redisRateLimiter middleware", () => {
     const res = await request(app).get("/api/test");
 
     expect(res.status).toBe(429);
-    expect(res.body).toHaveProperty("error");
-    expect(res.body).toHaveProperty("retryAfter");
+    expect(res.body.error.code).toBe("RATE_LIMITED");
+    expect(res.body.error).toHaveProperty("retryAfter");
     expect(res.headers["retry-after"]).toBeDefined();
   });
 
@@ -376,8 +376,8 @@ describe("redisRateLimiter middleware", () => {
       .send({});
 
     expect(res.status).toBe(429);
-    expect(res.body).toHaveProperty("error");
-    expect(res.body).toHaveProperty("retryAfter");
+    expect(res.body.error.code).toBe("RATE_LIMITED");
+    expect(res.body.error).toHaveProperty("retryAfter");
   });
 });
 
@@ -411,6 +411,302 @@ describe("Redis failure fallback", () => {
     app.get("/api/test", (_req, res) => res.json({ ok: true }));
 
     const res = await request(app).get("/api/test");
+    expect(res.status).toBe(200);
+    expect(res.headers["x-ratelimit-limit"]).toBeDefined();
+    expect(res.headers["x-ratelimit-remaining"]).toBeDefined();
+  });
+});
+
+// ── Token bucket tests ─────────────────────────────────────────────────────
+
+describe("getRateLimitConfig — token-bucket strategy", () => {
+  let getRateLimitConfig;
+
+  beforeAll(() => {
+    getRateLimitConfig = require("../../src/middleware/rateLimitConfig").getRateLimitConfig;
+  });
+
+  test("returns token-bucket config for GET /api/analytics/*", () => {
+    const config = getRateLimitConfig("GET", "/api/analytics/summary");
+    expect(config.strategy).toBe("token-bucket");
+    expect(config.capacity).toBe(10);
+    expect(config.refillRate).toBe(0.5);
+  });
+
+  test("returns token-bucket config for nested analytics paths", () => {
+    const config = getRateLimitConfig("GET", "/api/analytics/project/abc-123/donations");
+    expect(config.strategy).toBe("token-bucket");
+    expect(config.capacity).toBe(10);
+  });
+
+  test("returns sliding-window config (no strategy) for default endpoints", () => {
+    const config = getRateLimitConfig("POST", "/api/donations");
+    expect(config.strategy).toBeUndefined();
+    expect(config.points).toBe(10);
+  });
+
+  test("returns default sliding-window config for unmatched paths", () => {
+    const config = getRateLimitConfig("GET", "/api/unknown");
+    expect(config.strategy).toBeUndefined();
+    expect(config.points).toBe(150);
+  });
+});
+
+describe("tokenBucketRateLimit", () => {
+  let tokenBucketRateLimit;
+
+  beforeAll(() => {
+    const mod = require("../../src/middleware/rateLimiter");
+    tokenBucketRateLimit = mod.tokenBucketRateLimit;
+    // Reset the module-scoped SHA cache so script-loading tests start clean
+    if (typeof mod._resetTokenBucketSha === "function") {
+      mod._resetTokenBucketSha();
+    }
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  /**
+   * Create a mock Redis client that supports `script("LOAD", ...)` and
+   * `evalsha(sha, numKeys, ...)`. The evalsha mock resolves to the
+   * provided Lua return value array: [allowed, tokens, nextRefill].
+   */
+  function setupMockRedisForTokenBucket(evalshaResult) {
+    const mockClient = {
+      script: jest.fn().mockResolvedValue("mock-sha"),
+      evalsha: jest.fn().mockResolvedValue(evalshaResult),
+      on: jest.fn(),
+      connect: jest.fn().mockResolvedValue(),
+      quit: jest.fn().mockResolvedValue(),
+    };
+    redisService.getClient.mockReturnValue(mockClient);
+    return mockClient;
+  }
+
+  test("loads the Lua script on first invocation", async () => {
+    const client = setupMockRedisForTokenBucket([1, 9, 0]);
+
+    await tokenBucketRateLimit("ratelimit:tb:test:lua-load", 10, 1);
+
+    expect(client.script).toHaveBeenCalledWith("LOAD", expect.stringContaining("token"));
+    expect(client.evalsha).toHaveBeenCalled();
+  });
+
+  test("caches the Lua script SHA for subsequent invocations", async () => {
+    // Use jest.isolateModules to get a fresh module with null _tokenBucketSha
+    let freshTokenBucket;
+    jest.isolateModules(() => {
+      freshTokenBucket = require("../../src/middleware/rateLimiter").tokenBucketRateLimit;
+    });
+
+    const client = setupMockRedisForTokenBucket([1, 9, 0]);
+
+    // First call should load the script
+    await freshTokenBucket("ratelimit:tb:test:cache1", 10, 1);
+    // Second call should reuse cached SHA without loading
+    await freshTokenBucket("ratelimit:tb:test:cache2", 10, 1);
+
+    // script should only be loaded once (first invocation)
+    expect(client.script).toHaveBeenCalledTimes(1);
+    // evalsha should be called for both requests
+    expect(client.evalsha).toHaveBeenCalledTimes(2);
+  });
+
+  test("allows a request when bucket is full", async () => {
+    setupMockRedisForTokenBucket([1, 9, 0]);  // allowed=1, remaining=9, nextRefill=0
+
+    const result = await tokenBucketRateLimit("ratelimit:tb:test:key", 10, 1);
+
+    expect(result.allowed).toBe(true);
+    expect(result.remaining).toBe(9);
+    expect(result.limit).toBe(10);
+    expect(result.nextRefill).toBe(0);
+  });
+
+  test("allows burst up to capacity", async () => {
+    setupMockRedisForTokenBucket([1, 0, 0]);  // allowed=1, remaining=0 (last one used)
+
+    const result = await tokenBucketRateLimit("ratelimit:tb:test:burst", 10, 1);
+
+    expect(result.allowed).toBe(true);
+    expect(result.remaining).toBe(0);
+  });
+
+  test("rejects request when bucket is empty", async () => {
+    setupMockRedisForTokenBucket([0, 0, 1742169602]);  // allowed=0, remaining=0, nextRefill=epoch
+
+    const result = await tokenBucketRateLimit("ratelimit:tb:test:empty", 10, 1);
+
+    expect(result.allowed).toBe(false);
+    expect(result.remaining).toBe(0);
+    expect(result.nextRefill).toBeGreaterThan(0);
+  });
+
+  test("handles fractional remaining tokens", async () => {
+    setupMockRedisForTokenBucket([1, 0.3, 0]);  // allowed=1, remaining=0.3 fractional
+
+    const result = await tokenBucketRateLimit("ratelimit:tb:test:fractional", 10, 1);
+
+    expect(result.allowed).toBe(true);
+    expect(result.remaining).toBe(0);  // Math.floor(0.3) = 0
+  });
+
+  test("uses evalsha with correct arguments", async () => {
+    const client = setupMockRedisForTokenBucket([1, 5, 0]);
+
+    await tokenBucketRateLimit("ratelimit:tb:test:args", 20, 0.5);
+
+    expect(client.evalsha).toHaveBeenCalledWith(
+      "mock-sha",
+      1,                    // number of keys
+      "ratelimit:tb:test:args",
+      "20",                 // capacity as string
+      "0.5",                // refillRate as string
+      expect.any(String),   // now timestamp
+      "1",                  // cost
+    );
+  });
+});
+
+describe("redisRateLimiter with token-bucket strategy", () => {
+  let redisRateLimiter;
+  let app;
+
+  beforeAll(() => {
+    redisRateLimiter = require("../../src/middleware/rateLimiter").redisRateLimiter;
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  /** Create a mock Redis + Lua client for token-bucket middleware tests. */
+  function setupTokenBucketMockRedis(evalshaResult) {
+    const mockClient = {
+      script: jest.fn().mockResolvedValue("mock-sha"),
+      evalsha: jest.fn().mockResolvedValue(evalshaResult),
+      on: jest.fn(),
+      connect: jest.fn().mockResolvedValue(),
+      quit: jest.fn().mockResolvedValue(),
+    };
+    redisService.getClient.mockReturnValue(mockClient);
+    return mockClient;
+  }
+
+  /** Build an Express app with the redisRateLimiter and analytics endpoints. */
+  function buildAnalyticsApp() {
+    const app = express();
+    app.use(express.json());
+    app.use(redisRateLimiter);
+    // /api/analytics/* uses the token-bucket strategy in config
+    app.get("/api/analytics/summary", (_req, res) => res.json({ ok: true }));
+    app.get("/api/analytics/project/abc", (_req, res) => res.json({ ok: true }));
+    return app;
+  }
+
+  test("sets X-RateLimit-* headers for token-bucket allowed request", async () => {
+    setupTokenBucketMockRedis([1, 7, 0]);
+
+    app = buildAnalyticsApp();
+    const res = await request(app).get("/api/analytics/summary");
+
+    expect(res.status).toBe(200);
+    expect(res.headers["x-ratelimit-limit"]).toBe("10");   // capacity
+    expect(res.headers["x-ratelimit-remaining"]).toBe("7");
+    expect(res.headers["x-ratelimit-reset"]).toBeDefined();
+  });
+
+  test("returns 429 for token-bucket when bucket is empty", async () => {
+    setupTokenBucketMockRedis([0, 0, Math.floor(Date.now() / 1000) + 10]);
+
+    app = buildAnalyticsApp();
+    const res = await request(app).get("/api/analytics/summary");
+
+    expect(res.status).toBe(429);
+    expect(res.body.error.code).toBe("RATE_LIMITED");
+    expect(res.body.error).toHaveProperty("retryAfter");
+    expect(res.headers["retry-after"]).toBeDefined();
+    expect(res.headers["x-ratelimit-remaining"]).toBe("0");
+  });
+
+  test("dispatches to sliding-window for non-token-bucket endpoints", async () => {
+    // For sliding window we need a pipeline, not evalsha
+    const pipeline = createMockPipeline();
+    mockPipelineExec(pipeline, [
+      [null, "ok"],
+      [null, 0],
+      [null, 3],
+      [null, 1],
+    ]);
+    redisService.getClient.mockReturnValue({
+      pipeline: jest.fn().mockReturnValue(pipeline),
+      on: jest.fn(),
+      connect: jest.fn().mockResolvedValue(),
+      quit: jest.fn().mockResolvedValue(),
+    });
+
+    // Build an app with non-token-bucket endpoint
+    app = express();
+    app.use(redisRateLimiter);
+    app.get("/api/donations", (_req, res) => res.json({ ok: true }));
+
+    const res = await request(app).get("/api/donations");
+
+    expect(res.status).toBe(200);
+    expect(res.headers["x-ratelimit-limit"]).toBeDefined();
+    expect(pipeline.zadd).toHaveBeenCalled();  // sliding window was used
+  });
+
+  test("burst capacity allows rapid requests then blocks", async () => {
+    // Simulate: first 10 requests allowed (burst full), 11th blocked
+    let callCount = 0;
+    const mockClient = {
+      script: jest.fn().mockResolvedValue("mock-sha"),
+      evalsha: jest.fn().mockImplementation(() => {
+        callCount++;
+        if (callCount <= 10) {
+          // Allowed with decreasing remaining tokens
+          return Promise.resolve([1, 10 - callCount, 0]);
+        }
+        // Blocked
+        return Promise.resolve([0, 0, Math.floor(Date.now() / 1000) + 2]);
+      }),
+      on: jest.fn(),
+      connect: jest.fn().mockResolvedValue(),
+      quit: jest.fn().mockResolvedValue(),
+    };
+    redisService.getClient.mockReturnValue(mockClient);
+
+    app = buildAnalyticsApp();
+
+    // First 10 requests should succeed (burst)
+    for (let i = 0; i < 10; i++) {
+      const res = await request(app).get("/api/analytics/summary");
+      expect(res.status).toBe(200);
+    }
+
+    // 11th request should be blocked
+    const blocked = await request(app).get("/api/analytics/summary");
+    expect(blocked.status).toBe(429);
+  });
+
+  test("handles Redis failure gracefully for token-bucket endpoints", async () => {
+    const mockClient = {
+      script: jest.fn().mockRejectedValue(new Error("Redis connection refused")),
+      evalsha: jest.fn().mockRejectedValue(new Error("Redis connection refused")),
+      on: jest.fn(),
+      connect: jest.fn().mockResolvedValue(),
+      quit: jest.fn().mockResolvedValue(),
+    };
+    redisService.getClient.mockReturnValue(mockClient);
+
+    app = buildAnalyticsApp();
+
+    const res = await request(app).get("/api/analytics/summary");
+
+    // Should fall through (degraded mode)
     expect(res.status).toBe(200);
     expect(res.headers["x-ratelimit-limit"]).toBeDefined();
     expect(res.headers["x-ratelimit-remaining"]).toBeDefined();

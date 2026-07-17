@@ -36,6 +36,10 @@ jest.mock("../utils/notifications", () => ({
   getPushToken: jest.fn().mockResolvedValue(null),
   followProject: jest.fn(),
   unfollowProject: jest.fn(),
+  setupNotificationListener: jest.fn(() => ({ remove: jest.fn() })),
+  setupNotificationResponseListener: jest.fn(() => ({ remove: jest.fn() })),
+  markNotificationsSeen: jest.fn().mockResolvedValue("2026-07-16T21:00:00Z"),
+  getUnreadNotificationCount: jest.fn().mockResolvedValue(0),
 }));
 
 jest.mock("../hooks/useBiometricAuth", () => ({

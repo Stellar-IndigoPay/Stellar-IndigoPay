@@ -2,43 +2,49 @@
 
 ## Overview
 
-Stellar-IndigoPay uses PostgreSQL 16 as its primary database for managing user accounts, transactions, and smart contract interactions.
-
-## Database Setup
+Stellar-IndigoPay uses PostgreSQL 16 as its primary database for managing user accounts, transactions, and smart contract interactions.## Database Setup
 
 ### Docker Compose (Development)
 
-The database is configured in `docker-compose.yml`:
+The database is configured in `docker-compose.yml` with a primary and warm standby:
 
 ```yaml
+# Primary (read/write)
 postgres:
   image: postgres:16-alpine
   ports:
     - "5432:5432"
-  environment:
-    - POSTGRES_USER=postgres
-    - POSTGRES_PASSWORD=postgres
-    - POSTGRES_DB=indigopay
-  volumes:
-    - postgres_data:/var/lib/postgresql/data
+  # ... with replication enabled
+
+# Warm standby (read-only, streaming replication)
+postgres-standby:
+  image: postgres:16-alpine
+  ports:
+    - "5433:5432"
+  # ... hot_standby=on, streams from primary
 ```
 
 **Default credentials** (development only):
 
 - Username: `postgres`
 - Password: `postgres`
-- Database: `indigopay`
-- Port: `5432`
+- Database: `stellar_indigopay`
+- Port: `5432` (primary), `5433` (standby)
+- Replication user: `replicator` / `replicator`
 
 ### Production Database
 
 For production deployments:
 
-- Use strong, randomly generated passwords
+- Use streaming replication with a warm standby in a different region/zone
+- Enable WAL archiving to S3 for point-in-time recovery
+- Use strong, randomly generated passwords for all users
 - Enable SSL/TLS connections
-- Configure proper firewall rules
-- Use managed database services (RDS, Cloud SQL) when possible
-- Enable automated backups
+- Configure proper firewall rules and NetworkPolicies
+- Use `external-secrets-operator` to hydrate credentials from AWS Secrets Manager
+- Enable automated nightly backups
+
+See `docs/disaster-recovery.md` for the full DR architecture.
 
 ## Database Backup Strategy
 
@@ -122,7 +128,75 @@ bash scripts/backup-db.sh
 pg_dump -h localhost -p 5432 -U postgres indigopay | gzip > indigopay_backup_$(date +%Y%m%d_%H%M%S).sql.gz
 ```
 
-## Database Restore Procedures
+## Streaming Replication & Warm Standby
+
+### Overview
+
+Stellar-IndigoPay uses PostgreSQL native streaming replication with a warm
+standby for multi-region disaster recovery. The standby continuously receives
+WAL from the primary via a replication slot, staying in sync within seconds.
+
+### Architecture
+
+```
+Primary (us-east-1)                  Standby (us-west-2)
+┌─────────────────┐                  ┌─────────────────┐
+│ postgres-primary │  streaming WAL   │ postgres-standby │
+│ wal_level=replica│ ═══════════════► │ hot_standby=on   │
+│ max_wal_senders=5│                  │ read-only        │
+└────────┬────────┘                  └─────────────────┘
+         │ WAL archive (every 5 min)
+         ▼
+   ┌──────────┐
+   │ S3 bucket │◄── fallback restore
+   └──────────┘
+```
+
+### Initial Setup
+
+Run the setup script after deploying both StatefulSets:
+
+```bash
+bash scripts/setup-replication.sh
+```
+
+### Verify Replication
+
+```bash
+# Check replication status on primary
+kubectl exec -n stellar-indigopay postgres-primary-0 -- \
+  psql -U postgres -c "SELECT application_name, state, sync_state,
+    pg_wal_lsn_diff(pg_current_wal_lsn(), sent_lsn) AS lag_bytes
+    FROM pg_stat_replication;"
+
+# Check recovery status on standby
+kubectl exec -n stellar-indigopay postgres-standby-0 -- \
+  psql -U postgres -c "SELECT pg_is_in_recovery();"
+# Should return 't' (true) — standby is in recovery mode
+```
+
+### Manual Failover
+
+See the failover procedure in `docs/disaster-recovery.md`. In a real incident:
+
+1. Promote standby: `pg_ctl promote` (or `touch /tmp/trigger_promote`)
+2. Update `DATABASE_URL` to point at the promoted standby
+3. Restart backend pods
+
+### Local Development
+
+```bash
+# Start primary + standby for local DR testing
+docker compose up -d postgres postgres-standby
+
+# Verify replication
+docker compose exec postgres psql -U postgres -c \
+  "SELECT client_addr, state FROM pg_stat_replication;"
+
+# The standby is at localhost:5433 (read-only)
+docker compose exec postgres-standby psql -U postgres -c \
+  "SELECT 1;"  # read queries work, writes fail
+```
 
 ### Prerequisites
 
@@ -373,7 +447,12 @@ psql -h localhost -U postgres indigopay \
 ## Related Files
 
 - Backup Script: [scripts/backup-db.sh](../scripts/backup-db.sh)
+- Replication Setup: [scripts/setup-replication.sh](../scripts/setup-replication.sh)
 - GitHub Actions Workflow: [.github/workflows/database-backup.yml](../.github/workflows/database-backup.yml)
+- Disaster Recovery Plan: [docs/disaster-recovery.md](../docs/disaster-recovery.md)
+- Restore Runbook: [docs/restore-runbook.md](../docs/restore-runbook.md)
+- Primary K8s Manifest: [k8s/postgres.yaml](../k8s/postgres.yaml)
+- Standby K8s Manifest: [k8s/postgres-standby.yaml](../k8s/postgres-standby.yaml)
 - Docker Compose: [docker-compose.yml](../docker-compose.yml)
 
 ## Contact & Support

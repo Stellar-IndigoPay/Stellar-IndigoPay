@@ -80,6 +80,7 @@ router.get("/", async (_req, res) => {
 
   const checks = {
     db: { status: "unknown" },
+    pool: { status: "unknown" },
     readReplicaLag: { status: "skipped" },
     redis: { status: "skipped" },
     horizon: { status: "unknown" },
@@ -96,6 +97,21 @@ router.get("/", async (_req, res) => {
   checks.db = db.ok
     ? { status: "ok" }
     : { status: "unreachable", reason: db.reason };
+
+  // Pool degradation (high queue depth)
+  const writerPool = pool._writerPool;
+  const waitingCount = writerPool.waitingCount || 0;
+  const max = writerPool.max || 1;
+  if (waitingCount > max * 0.5) {
+    checks.pool = {
+      status: "degraded",
+      reason: "db_pool_degraded",
+      waitingCount,
+      max,
+    };
+  } else {
+    checks.pool = { status: "ok", waitingCount, max };
+  }
 
   // Read replica lag. A missing replica is valid; excessive lag is not.
   const replicaLag = await withTimeout(
@@ -184,16 +200,21 @@ router.get("/", async (_req, res) => {
   }
 
   const replicaOk = checks.readReplicaLag.status !== "degraded";
-  const requiredOk = checks.db.status === "ok" && replicaOk;
+  const requiredOk =
+    checks.db.status === "ok" &&
+    checks.pool.status === "ok" &&
+    replicaOk;
   const ready = requiredOk && !isShuttingDown();
 
   if (!ready) {
     const reason =
       checks.db.status !== "ok"
         ? "db"
-        : checks.readReplicaLag.status === "degraded"
-          ? "readReplicaLag"
-          : "draining";
+        : checks.pool.status !== "ok"
+          ? "db_pool_degraded"
+          : checks.readReplicaLag.status === "degraded"
+            ? "readReplicaLag"
+            : "draining";
     metrics.metrics.readinessCheckFailedTotal.inc({ reason });
     logger.warn(
       { event: "readiness_failed", checks },

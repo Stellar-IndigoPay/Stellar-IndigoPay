@@ -12,6 +12,7 @@ import {
 import { accountUrl } from "@/lib/stellar";
 import { useXlmPrice } from "@/lib/priceContext";
 import type { LeaderboardEntry } from "@/utils/types";
+import { SkeletonList } from "./Skeleton";
 
 const AVATAR_COLORS = [
   "#4F46E5",
@@ -59,6 +60,10 @@ function Avatar({
   );
 }
 
+export function LeaderboardTableSkeleton({ rows = 5 }: { rows?: number }) {
+  return <SkeletonList rows={rows} withAvatar={true} palette="indigo" />;
+}
+
 export default function LeaderboardTable({
   limit = 20,
   period = "all",
@@ -81,23 +86,7 @@ export default function LeaderboardTable({
   }, [limit, period]);
 
   if (loading)
-    return (
-      <div className="space-y-2">
-        {Array.from({ length: 5 }).map((_, i) => (
-          <div
-            key={i}
-            className="animate-pulse flex items-center gap-4 p-4 rounded-xl bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)] border border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)]"
-          >
-            <div className="w-8 h-8 rounded-full bg-[rgba(99,102,241,0.10)] dark:bg-[rgba(129,140,248,0.12)]" />
-            <div className="flex-1 space-y-2">
-              <div className="h-3 bg-[rgba(99,102,241,0.10)] dark:bg-[rgba(129,140,248,0.12)] rounded w-1/3" />
-              <div className="h-2 bg-[rgba(99,102,241,0.06)] dark:bg-[rgba(129,140,248,0.08)] rounded w-1/4" />
-            </div>
-            <div className="h-4 bg-[rgba(99,102,241,0.10)] dark:bg-[rgba(129,140,248,0.12)] rounded w-20" />
-          </div>
-        ))}
-      </div>
-    );
+    return <LeaderboardTableSkeleton />;
 
   if (error)
     return (

@@ -25,12 +25,15 @@ const envSchema = z.object({
     .default("https://horizon-testnet.stellar.org"),
   ALLOWED_ORIGINS: z.string().optional().default("http://localhost:3000"),
   CONTRACT_ID: z.string().optional().default(""),
+  ORACLE_CONTRACT_ID: z.string().optional().default(""),
+  ORACLE_ADMIN_SECRET: z.string().optional().default(""),
   RESEND_API_KEY: z.string().optional().default(""),
   EMAIL_FROM: z
     .string()
     .optional()
     .default("Stellar-IndigoPay <updates@stellarindigopay.app>"),
   APP_URL: z.string().optional().default("http://localhost:3000"),
+  UNSUBSCRIBE_SECRET: z.string().optional().default(""),
   JWT_SECRET: z.string().optional().default(""),
   ADMIN_USERNAME: z.string().optional().default("admin"),
   ADMIN_PASSWORD: z.string().optional().default(""),

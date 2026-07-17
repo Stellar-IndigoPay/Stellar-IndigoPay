@@ -1,0 +1,138 @@
+# k8s/postgres-exporter.yaml
+#
+# PostgreSQL exporter — exposes PG metrics (including replication lag,
+# slot status, connection counts) for Prometheus scraping.
+#
+# Reference prometheus-postgres-exporter chart:
+#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#   helm install postgres-exporter prometheus-community/prometheus-postgres-exporter
+#
+# This manifest covers the PRIMARY exporter. For the standby, deploy a
+# second instance with STANDBY credentials pointing at postgres-standby-svc.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-exporter-primary
+  namespace: stellar-indigopay
+  labels:
+    app: postgres-exporter
+    role: primary
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-exporter
+      role: primary
+  template:
+    metadata:
+      labels:
+        app: postgres-exporter
+        role: primary
+    spec:
+      containers:
+        - name: postgres-exporter
+          image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+          ports:
+            - containerPort: 9187
+              name: metrics
+          env:
+            - name: DATA_SOURCE_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: DATABASE_URL
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-exporter-primary
+  namespace: stellar-indigopay
+  labels:
+    app: postgres-exporter
+    role: primary
+spec:
+  selector:
+    app: postgres-exporter
+    role: primary
+  ports:
+    - port: 9187
+      targetPort: 9187
+      name: metrics
+---
+# Standby exporter — deploys alongside the standby StatefulSet.
+# Uses the standby service for its data source.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-exporter-standby
+  namespace: stellar-indigopay
+  labels:
+    app: postgres-exporter
+    role: standby
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-exporter
+      role: standby
+  template:
+    metadata:
+      labels:
+        app: postgres-exporter
+        role: standby
+    spec:
+      containers:
+        - name: postgres-exporter
+          image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+          ports:
+            - containerPort: 9187
+              name: metrics
+          env:
+            # Get PG credentials from the secret so we can reference them in
+            # the DATA_SOURCE_NAME below via $(VAR) expansion.
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: POSTGRES_USER
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: POSTGRES_PASSWORD
+            # Connect to the standby (read-only is fine for metrics collection).
+            # Uses Kubernetes env var expansion $(PGUSER) and $(PGPASSWORD).
+            - name: DATA_SOURCE_NAME
+              value: "postgres://$(PGUSER):$(PGPASSWORD)@postgres-standby-svc.stellar-indigopay.svc.cluster.local:5432/stellar_indigopay?sslmode=disable"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-exporter-standby
+  namespace: stellar-indigopay
+  labels:
+    app: postgres-exporter
+    role: standby
+spec:
+  selector:
+    app: postgres-exporter
+    role: standby
+  ports:
+    - port: 9187
+      targetPort: 9187
+      name: metrics

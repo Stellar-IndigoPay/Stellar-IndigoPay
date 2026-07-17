@@ -2,12 +2,14 @@
  * pages/dashboard.tsx — Donor impact dashboard
  */
 import { useState, useEffect } from "react";
+import type { GetServerSideProps } from "next";
 import Link from "next/link";
 import WalletConnect from "@/components/WalletConnect";
 import EditProfileForm from "@/components/EditProfileForm";
 import ProjectCard from "@/components/ProjectCard";
 import ImpactCertificate from "@/components/ImpactCertificate";
 import ProjectRating from "@/components/ProjectRating";
+import Tabs from "@/components/Tabs";
 import { fetchProfile, fetchDonorHistory, fetchProjects } from "@/lib/api";
 import { getDueMonthlySubscriptions } from "@/lib/monthlyGiving";
 import { getXLMBalance, getFriendBotFunding, NETWORK } from "@/lib/stellar";
@@ -28,18 +30,17 @@ import type {
   MonthlySubscription,
 } from "@/utils/types";
 import { useWishlist } from "@/hooks/useWishlist";
+import {
+  SkeletonStatCard,
+  SkeletonDonationList,
+} from "@/components/Skeleton";
 
-interface DashboardProps {
-  publicKey: string | null;
-  onConnect: (pk: string) => void;
-}
-
-export default function Dashboard({ publicKey, onConnect }: DashboardProps) {
+export default function Dashboard() {
+  const [publicKey, setPublicKey] = useState<string | null>(null);
   const [profile, setProfile] = useState<DonorProfile | null>(null);
   const [donations, setDonations] = useState<Donation[]>([]);
   const [balance, setBalance] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"impact" | "saved">("impact");
   const [savedProjects, setSavedProjects] = useState<ClimateProject[]>([]);
   const [allProjects, setAllProjects] = useState<ClimateProject[]>([]);
   const [isUnfunded, setIsUnfunded] = useState(false);
@@ -138,7 +139,7 @@ export default function Dashboard({ publicKey, onConnect }: DashboardProps) {
             Connect your wallet to see your donation history and impact
           </p>
         </div>
-        <WalletConnect onConnect={onConnect} />
+        <WalletConnect onConnect={setPublicKey} />
       </div>
     );
 
@@ -216,7 +217,9 @@ export default function Dashboard({ publicKey, onConnect }: DashboardProps) {
           </h1>
           <div className="flex items-center gap-2">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="address-tag">{shortenAddress(publicKey)}</span>
+            <span className="address-tag" data-testid="wallet-address">
+              {shortenAddress(publicKey)}
+            </span>
           </div>
         </div>
         <Link
@@ -310,66 +313,60 @@ export default function Dashboard({ publicKey, onConnect }: DashboardProps) {
 
       {/* Stats grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-        {[
-          {
-            icon: "💚",
-            label: "Total Donated",
-            value: formatXLM(totalDonated),
-          },
-          {
-            icon: "♻️",
-            label: "Est. CO₂ Offset",
-            value: formatCO2(co2Estimate),
-          },
-          {
-            icon: "🌍",
-            label: "Projects Supported",
-            value: projectsCount.toString(),
-          },
-          {
-            icon: "💰",
-            label: "XLM Balance",
-            value: balance ? formatXLM(balance) : "—",
-          },
-        ].map((stat) => (
-          <div
-            key={stat.label}
-            className="card text-center shadow-sm border border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)]"
-          >
-            <p className="text-2xl mb-2">{stat.icon}</p>
-            <p className="font-display font-bold text-[#0F172A] dark:text-[#E2E8F0] text-lg leading-tight">
-              {loading ? "..." : stat.value}
-            </p>
-            <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-1 font-body uppercase tracking-wider font-bold opacity-60">
-              {stat.label}
-            </p>
-          </div>
-        ))}
+        {loading ? (
+          <>
+            {[1, 2, 3, 4].map((i) => (
+              <SkeletonStatCard key={i} palette="indigo" />
+            ))}
+          </>
+        ) : (
+          [
+            {
+              icon: "💚",
+              label: "Total Donated",
+              value: formatXLM(totalDonated),
+            },
+            {
+              icon: "♻️",
+              label: "Est. CO₂ Offset",
+              value: formatCO2(co2Estimate),
+            },
+            {
+              icon: "🌍",
+              label: "Projects Supported",
+              value: projectsCount.toString(),
+            },
+            {
+              icon: "💰",
+              label: "XLM Balance",
+              value: balance ? formatXLM(balance) : "—",
+            },
+          ].map((stat) => (
+            <div
+              key={stat.label}
+              className="card text-center shadow-sm border border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)]"
+            >
+              <p className="text-2xl mb-2">{stat.icon}</p>
+              <p className="font-display font-bold text-[#0F172A] dark:text-[#E2E8F0] text-lg leading-tight">
+                {stat.value}
+              </p>
+              <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-1 font-body uppercase tracking-wider font-bold opacity-60">
+                {stat.label}
+              </p>
+            </div>
+          ))
+        )}
       </div>
 
-      {/* Tabs */}
-      <div className="flex border-b border-[rgba(99,102,241,0.10)] dark:border-[rgba(129,140,248,0.12)] mb-6">
-        <button
-          onClick={() => setActiveTab("impact")}
-          className={`px-6 py-3 text-sm font-semibold transition-all border-b-2 ${activeTab === "impact" ? "border-[#4F46E5] dark:border-[#818CF8] text-[#0F172A] dark:text-[#E2E8F0]" : "border-transparent text-[#64748B] dark:text-[#94A3B8] hover:text-[#4F46E5] dark:hover:text-[#818CF8]"}`}
-        >
-          My Impact
-        </button>
-        <button
-          onClick={() => setActiveTab("saved")}
-          className={`px-6 py-3 text-sm font-semibold transition-all border-b-2 flex items-center gap-2 ${activeTab === "saved" ? "border-[#4F46E5] dark:border-[#818CF8] text-[#0F172A] dark:text-[#E2E8F0]" : "border-transparent text-[#64748B] dark:text-[#94A3B8] hover:text-[#4F46E5] dark:hover:text-[#818CF8]"}`}
-        >
-          Saved Projects
-          {wishlist.length > 0 && (
-            <span className="bg-[rgba(99,102,241,0.08)] dark:bg-[rgba(129,140,248,0.10)] text-[#4F46E5] dark:text-[#818CF8] px-2 py-0.5 rounded-full text-[10px]">
-              {wishlist.length}
-            </span>
-          )}
-        </button>
-      </div>
-
-      {activeTab === "impact" ? (
-        <div className="space-y-8 animate-slide-up">
+      <Tabs
+        ariaLabel="Dashboard sections"
+        defaultValue="impact"
+        tabs={[
+          {
+            id: "impact",
+            label: "My Impact",
+            content: (
+              <div className="space-y-8 animate-slide-up focus:outline-none focus-visible:ring-2 focus-visible:ring-[#818CF8] focus-visible:ring-offset-2 dark:focus-visible:ring-offset-[#0A0A1A]">
           {/* Certificate */}
           <div className="card">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -489,19 +486,15 @@ export default function Dashboard({ publicKey, onConnect }: DashboardProps) {
           )}
 
           {/* Donation history */}
-          <div className="card shadow-sm border border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)]">
+          <div
+            className="card shadow-sm border border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)]"
+            data-testid="donation-history"
+          >
             <h2 className="font-display text-lg font-semibold text-[#0F172A] dark:text-[#E2E8F0] mb-5 flex items-center gap-2">
               <span>📜</span> Donation History
             </h2>
             {loading ? (
-              <div className="space-y-3">
-                {[1, 2, 3].map((i) => (
-                  <div
-                    key={i}
-                    className="h-16 bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)] rounded-xl animate-pulse"
-                  />
-                ))}
-              </div>
+              <SkeletonDonationList rows={3} palette="indigo" />
             ) : donations.length === 0 ? (
               <div className="text-center py-12">
                 <p className="text-4xl mb-3">🌱</p>
@@ -555,31 +548,58 @@ export default function Dashboard({ publicKey, onConnect }: DashboardProps) {
               </div>
             )}
           </div>
-        </div>
-      ) : (
-        <div className="animate-slide-up">
-          {savedProjects.length === 0 ? (
-            <div className="card text-center py-20">
-              <p className="text-5xl mb-4">❤️</p>
-              <h2 className="text-xl font-display font-bold text-[#0F172A] dark:text-[#E2E8F0] mb-2">
-                No saved projects yet
-              </h2>
-              <p className="text-[#475569] dark:text-[#94A3B8] mb-8 font-body">
-                Save projects you&apos;re interested in to track their progress.
-              </p>
-              <Link href="/projects" className="btn-primary text-sm">
-                Explore Projects
-              </Link>
-            </div>
-          ) : (
-            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
-              {savedProjects.map((project) => (
-                <ProjectCard key={project.id} project={project} />
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+              </div>
+            ),
+          },
+          {
+            id: "saved",
+            label: (
+              <>
+                Saved Projects
+                {wishlist.length > 0 && (
+                  <span
+                    aria-label={`${wishlist.length} saved`}
+                    className="bg-[rgba(99,102,241,0.08)] dark:bg-[rgba(129,140,248,0.10)] text-[#4F46E5] dark:text-[#818CF8] px-2 py-0.5 rounded-full text-[10px]"
+                  >
+                    {wishlist.length}
+                  </span>
+                )}
+              </>
+            ),
+            content: (
+              <div className="animate-slide-up focus:outline-none focus-visible:ring-2 focus-visible:ring-[#818CF8] focus-visible:ring-offset-2 dark:focus-visible:ring-offset-[#0A0A1A]">
+                {savedProjects.length === 0 ? (
+                  <div className="card text-center py-20">
+                    <p className="text-5xl mb-4">❤️</p>
+                    <h2 className="text-xl font-display font-bold text-[#0F172A] dark:text-[#E2E8F0] mb-2">
+                      No saved projects yet
+                    </h2>
+                    <p className="text-[#475569] dark:text-[#94A3B8] mb-8 font-body">
+                      Save projects you&apos;re interested in to track their
+                      progress.
+                    </p>
+                    <Link href="/projects" className="btn-primary text-sm">
+                      Explore Projects
+                    </Link>
+                  </div>
+                ) : (
+                  <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {savedProjects.map((project) => (
+                      <ProjectCard key={project.id} project={project} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            ),
+          },
+        ]}
+      />
     </div>
   );
 }
+
+// Forces per-request SSR so the CSP nonce set in middleware.ts reaches
+// _document.tsx — see the matching comment in pages/index.tsx.
+export const getServerSideProps: GetServerSideProps = async () => {
+  return { props: {} };
+};

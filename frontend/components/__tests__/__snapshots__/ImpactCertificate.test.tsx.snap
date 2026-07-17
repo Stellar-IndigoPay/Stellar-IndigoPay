@@ -1,36 +1,36 @@
-// Jest Snapshot v1, https://goo.gl/fbAQLP
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
 
 exports[`ImpactCertificate matches snapshot 1`] = `
 <div>
   <div
-    class="bg-white border border-forest-200 rounded-3xl overflow-hidden shadow-lg"
+    class="bg-white dark:bg-[#14142D] border border-[rgba(99,102,241,0.12)] dark:border-[rgba(129,140,248,0.15)] rounded-3xl overflow-hidden shadow-lg"
     id="impact-certificate"
   >
     <div
-      class="bg-gradient-to-r from-forest-900 to-forest-800 text-white px-8 py-8"
+      class="card-gradient px-8 py-8"
     >
       <div
         class="flex items-center justify-between gap-6"
       >
         <div>
           <p
-            class="text-xs tracking-[0.22em] uppercase text-forest-100 font-body"
+            class="text-xs tracking-[0.22em] uppercase text-[#A5B4FC] font-body"
           >
-            Stellar IndigoPay
+            Stellar-IndigoPay
           </p>
           <h2
-            class="font-display text-3xl font-bold leading-tight"
+            class="font-display text-3xl font-bold leading-tight text-white"
           >
             Impact Certificate
           </h2>
           <p
-            class="text-forest-100 text-sm mt-2 font-body"
+            class="text-[#C7D2FE] text-sm mt-2 font-body"
           >
             This certificate recognizes climate impact achieved through on-chain donations.
           </p>
         </div>
         <div
-          class="text-5xl"
+          class="w-16 h-16 rounded-2xl bg-white/10 backdrop-blur-sm border border-white/20 flex items-center justify-center text-3xl"
         >
           🌿
         </div>
@@ -43,17 +43,17 @@ exports[`ImpactCertificate matches snapshot 1`] = `
         class="text-center mb-8"
       >
         <p
-          class="text-sm text-[#5a7a5a] font-body"
+          class="text-sm text-[#475569] dark:text-[#94A3B8] font-body"
         >
           Presented to
         </p>
         <p
-          class="font-display text-3xl font-bold text-forest-900 mt-2"
+          class="font-display text-3xl font-bold text-[#0F172A] dark:text-[#E2E8F0] mt-2"
         >
           Jane Doe
         </p>
         <p
-          class="text-xs text-[#8aaa8a] mt-2 font-body"
+          class="text-xs text-[#64748B] dark:text-[#94A3B8] mt-2 font-body"
         >
           Donor Address: 
           GABCDEFGHI...KLMNOPQRST
@@ -63,79 +63,79 @@ exports[`ImpactCertificate matches snapshot 1`] = `
         class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8"
       >
         <div
-          class="card text-center border-forest-100/50"
+          class="card text-center border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)]"
         >
-          <p
-            class="text-2xl mb-2"
+          <div
+            class="w-12 h-12 rounded-xl bg-[rgba(99,102,241,0.08)] dark:bg-[rgba(129,140,248,0.10)] flex items-center justify-center text-2xl mx-auto mb-3"
           >
             💚
-          </p>
+          </div>
           <p
-            class="font-display font-bold text-forest-900 text-lg"
+            class="font-display font-bold text-[#0F172A] dark:text-[#E2E8F0] text-lg"
           >
             1,500 XLM
           </p>
           <p
-            class="text-xs text-[#8aaa8a] mt-1 font-body uppercase tracking-wider font-bold opacity-60"
+            class="text-xs text-[#64748B] dark:text-[#94A3B8] mt-1 font-body uppercase tracking-wider font-bold opacity-60"
           >
             Total Donated
           </p>
         </div>
         <div
-          class="card text-center border-forest-100/50"
+          class="card text-center border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)]"
         >
-          <p
-            class="text-2xl mb-2"
+          <div
+            class="w-12 h-12 rounded-xl bg-[rgba(99,102,241,0.08)] dark:bg-[rgba(129,140,248,0.10)] flex items-center justify-center text-2xl mx-auto mb-3"
           >
             ♻️
-          </p>
+          </div>
           <p
-            class="font-display font-bold text-forest-900 text-lg"
+            class="font-display font-bold text-[#0F172A] dark:text-[#E2E8F0] text-lg"
           >
             2.4k kg CO₂
           </p>
           <p
-            class="text-xs text-[#8aaa8a] mt-1 font-body uppercase tracking-wider font-bold opacity-60"
+            class="text-xs text-[#64748B] dark:text-[#94A3B8] mt-1 font-body uppercase tracking-wider font-bold opacity-60"
           >
             CO₂ Offset
           </p>
         </div>
         <div
-          class="card text-center border-forest-100/50"
+          class="card text-center border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)]"
         >
-          <p
-            class="text-2xl mb-2"
+          <div
+            class="w-12 h-12 rounded-xl bg-[rgba(99,102,241,0.08)] dark:bg-[rgba(129,140,248,0.10)] flex items-center justify-center text-2xl mx-auto mb-3"
           >
             🌲
-          </p>
+          </div>
           <p
-            class="font-display font-bold text-forest-900 text-lg"
+            class="font-display font-bold text-[#0F172A] dark:text-[#E2E8F0] text-lg"
           >
             Forest
           </p>
           <p
-            class="text-xs text-[#8aaa8a] mt-1 font-body uppercase tracking-wider font-bold opacity-60"
+            class="text-xs text-[#64748B] dark:text-[#94A3B8] mt-1 font-body uppercase tracking-wider font-bold opacity-60"
           >
             Badge Tier
           </p>
         </div>
       </div>
       <div
-        class="rounded-2xl border border-forest-100 bg-forest-50 p-5"
+        class="rounded-2xl border border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)] bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)] p-5"
       >
         <h3
-          class="font-display font-bold text-forest-900 mb-2"
+          class="font-display font-bold text-[#0F172A] dark:text-[#E2E8F0] mb-2"
         >
           Projects Supported
         </h3>
         <ul
-          class="text-sm text-forest-900 font-body grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1"
+          class="text-sm text-[#0F172A] dark:text-[#E2E8F0] font-body grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1"
         >
           <li
             class="flex items-center gap-2"
           >
             <span
-              class="text-forest-600"
+              class="text-[#4F46E5] dark:text-[#818CF8]"
             >
               •
             </span>
@@ -149,7 +149,7 @@ exports[`ImpactCertificate matches snapshot 1`] = `
             class="flex items-center gap-2"
           >
             <span
-              class="text-forest-600"
+              class="text-[#4F46E5] dark:text-[#818CF8]"
             >
               •
             </span>
@@ -162,16 +162,16 @@ exports[`ImpactCertificate matches snapshot 1`] = `
         </ul>
       </div>
       <div
-        class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mt-8 pt-6 border-t border-forest-100"
+        class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mt-8 pt-6 border-t border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)]"
       >
         <p
-          class="text-xs text-[#8aaa8a] font-body"
+          class="text-xs text-[#64748B] dark:text-[#94A3B8] font-body"
         >
           Issued on 
           Jan 15, 2026
         </p>
         <p
-          class="text-xs text-[#8aaa8a] font-body"
+          class="text-xs text-[#64748B] dark:text-[#94A3B8] font-body"
         >
           Verified by on-chain donation history
         </p>
