@@ -2,6 +2,16 @@
 
 ### Features
 
+* **frontend:** build premium admin dashboard home page (closes #266)
+  - Replace minimal admin home page with a functional overview displaying real-time queue health, indexer status, and pending verifications
+  - Add `fetchIndexerStatus` and `fetchVerificationRequests` API helper functions to `frontend/lib/api.ts`
+  - Create reusable admin components: `StatusDot` (pulsating color indicator), `StatCard` (queue metrics display with loading state), and `QuickActionButton` (client-side admin navigation links)
+  - Polling implementation using React Query to auto-refresh queue metrics and indexer status every 30s, and pending verifications every 60s
+  - Graceful loading states (skeletons), empty states, and inline retry blocks for query errors
+  - Gate admin home behind session authentication check (`AdminLayout`) and require Stellar admin wallet connection
+  - Add 8 integration test cases in `frontend/__tests__/pages/admin-index.test.tsx` verifying all features, states, and action triggers
+
+
 * **frontend:** implement optimistic project follow/unfollow and update likes using React Query (closes #256)
   - Add `useProjectQuery`, `useFollowProject`, `useUnfollowProject`, and `useToggleUpdateLike` hooks in `frontend/hooks/queries.ts` utilizing React Query
   - Integrate follow/unfollow project mutations with optimistic query cache updates and automatic error rollbacks
