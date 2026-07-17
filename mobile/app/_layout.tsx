@@ -9,13 +9,19 @@ import { useEffect } from "react";
 import { useRouter } from "expo-router";
 import { ThemeProvider, themes } from "./theme";
 import { useDeepLink } from "../hooks/useDeepLink";
+import * as Notifications from "expo-notifications";
 import {
   setupNotificationListener,
-  setupNotificationResponseListener,
+  isNotificationHandled,
+  saveNotificationFromExpo,
+  navigateToNotification,
 } from "../utils/notifications";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { AuthProvider } from "../providers/AuthProvider";
 import { init as initErrorReporter } from "../lib/errorReporter";
+import ConnectivityBanner from "../components/ConnectivityBanner";
+import { initConnectivity } from "../lib/connectivity";
+import { cache } from "../lib/offlineCache";
 
 function DeepLinkHandler() {
   useDeepLink();
@@ -26,12 +32,35 @@ function NotificationHandler() {
   const router = useRouter();
 
   useEffect(() => {
-    // Foreground notification display listener
+    // 1. Cold start handling: check if the app was launched by a notification tap
+    Notifications.getLastNotificationResponseAsync().then(async (response) => {
+      if (response) {
+        const id = response.notification.request.identifier;
+        if (!isNotificationHandled(id)) {
+          await saveNotificationFromExpo(response.notification);
+          navigateToNotification(
+            response.notification.request.content.data,
+            (path) => router.push(path as any),
+          );
+        }
+      }
+    });
+
+    // 2. Foreground notifications
     const receivedSub = setupNotificationListener();
 
-    // Tap-on-notification → navigate to project detail (#483)
-    const responseSub = setupNotificationResponseListener((path) =>
-      router.push(path as any),
+    // 3. Response tap notifications (warm starts)
+    const responseSub = Notifications.addNotificationResponseReceivedListener(
+      async (response) => {
+        const id = response.notification.request.identifier;
+        if (!isNotificationHandled(id)) {
+          await saveNotificationFromExpo(response.notification);
+          navigateToNotification(
+            response.notification.request.content.data,
+            (path) => router.push(path as any),
+          );
+        }
+      },
     );
 
     return () => {
@@ -52,6 +81,9 @@ export default function RootLayout() {
   // @sentry/react-native is not installed (CI / dev / OSS forks).
   useEffect(() => {
     void initErrorReporter();
+    // Initialise offline-first subsystems
+    initConnectivity();
+    void cache.init();
   }, []);
 
   return (
@@ -65,6 +97,9 @@ export default function RootLayout() {
         <NotificationHandler />
         <AuthProvider>
           <StatusBar style={theme.statusBarStyle} />
+          {/* Connectivity banner overlays everything — renders as an
+              absolute-positioned alert bar at the very top. */}
+          <ConnectivityBanner />
           <Stack
             screenOptions={{
               headerStyle: { backgroundColor: theme.header },
@@ -96,6 +131,10 @@ export default function RootLayout() {
             <Stack.Screen
               name="recurring"
               options={{ title: "Monthly Giving" }}
+            />
+            <Stack.Screen
+              name="notifications"
+              options={{ title: "Notifications" }}
             />
             <Stack.Screen
               name="scan"

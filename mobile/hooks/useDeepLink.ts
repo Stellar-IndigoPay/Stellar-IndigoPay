@@ -11,6 +11,7 @@
 import { useEffect } from "react";
 import * as Linking from "expo-linking";
 import { useRouter } from "expo-router";
+import { parseDeepLinkUrl } from "../utils/notifications";
 
 export function useDeepLink() {
   const router = useRouter();

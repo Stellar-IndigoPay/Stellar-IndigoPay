@@ -52,6 +52,21 @@ ALTER TABLE donations ADD COLUMN IF NOT EXISTS conversion_path     JSONB;
 ALTER TABLE donations ADD COLUMN IF NOT EXISTS converted_amount_xlm NUMERIC(20, 7);
 CREATE INDEX IF NOT EXISTS idx_donations_source_asset ON donations (source_asset) WHERE source_asset IS NOT NULL;
 
+-- Automated CO₂ offset-rate verification (see migration 018 and
+-- services/co2Verifier.js). Self-reported co2_per_xlm rates are compared
+-- against per-category industry benchmarks when a verification request is
+-- approved; the verdict lands here. Statuses: pending (not yet checked),
+-- verified (≤3× benchmark), review (3–10×), flagged (>10×, needs admin
+-- resolution), rejected (admin rejected the claimed rate).
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS co2_verification_status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS co2_verification_notes TEXT;
+ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_co2_verification_status_check;
+ALTER TABLE projects ADD CONSTRAINT projects_co2_verification_status_check
+  CHECK (co2_verification_status IN ('pending', 'verified', 'review', 'flagged', 'rejected'));
+CREATE INDEX IF NOT EXISTS idx_projects_co2_verification_status
+  ON projects (co2_verification_status)
+  WHERE co2_verification_status IN ('review', 'flagged');
+
 -- Full-text search: tsvector kept current by a trigger (see migration
 -- 013_project_search) so GET /api/projects can rank matches with ts_rank
 -- instead of relying solely on ILIKE substring matching.

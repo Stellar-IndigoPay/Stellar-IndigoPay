@@ -6,8 +6,10 @@ const express = require("express");
 const router = express.Router();
 const pool = require("../db/pool");
 const { AppError } = require("../errors");
+const { validate } = require("../middleware/validate");
+const { leaderboardQuerySchema } = require("../validators/schemas");
 
-router.get("/", async (req, res, next) => {
+router.get("/", validate(leaderboardQuerySchema, "query"), async (req, res, next) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
     const period = req.query.period || "all";

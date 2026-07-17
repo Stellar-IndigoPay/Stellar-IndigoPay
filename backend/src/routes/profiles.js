@@ -4,14 +4,16 @@
 "use strict";
 const express = require("express");
 const router = express.Router();
+const { z } = require("zod");
 const pool = require("../db/pool");
 const { mapProfileRow } = require("../services/store");
 const { createRateLimiter } = require("../middleware/rateLimiter");
+const { validate } = require("../middleware/validate");
+const { stellarAddress } = require("../validators/schemas");
 const {
   sanitizedStringField,
   validateBody,
 } = require("../middleware/validation");
-const { z } = require("zod");
 const { AppError } = require("../errors");
 
 function validateKey(k) {
@@ -36,19 +38,21 @@ const profileSchema = z.object({
   }).optional(),
 });
 
-router.get("/:publicKey", async (req, res, next) => {
-  try {
-    validateKey(req.params.publicKey);
-    const result = await pool.query(
-      "SELECT * FROM profiles WHERE public_key = $1",
-      [req.params.publicKey],
-    );
-    if (!result.rows[0]) {
-      throw new AppError("PROFILE_NOT_FOUND");
-    }
+router.get(
+  "/:publicKey",
+  validate(z.object({ publicKey: stellarAddress }), "params"),
+  async (req, res, next) => {
+    try {
+      const result = await pool.query(
+        "SELECT * FROM profiles WHERE public_key = $1",
+        [req.params.publicKey],
+      );
+      if (!result.rows[0]) {
+        throw new AppError("PROFILE_NOT_FOUND");
+      }
 
-    const co2Result = await pool.query(
-      `SELECT COALESCE(
+      const co2Result = await pool.query(
+        `SELECT COALESCE(
         SUM(
           CASE
             WHEN p.raised_xlm > 0 THEN (d.amount_xlm * (p.co2_offset_kg::numeric / p.raised_xlm))
@@ -61,20 +65,20 @@ router.get("/:publicKey", async (req, res, next) => {
        JOIN projects p ON p.id = d.project_id
        WHERE d.donor_address = $1
          AND (d.currency = 'XLM' OR d.currency IS NULL)`,
-      [req.params.publicKey],
-    );
-    const totalCo2OffsetKg = Math.round(
-      Number.parseFloat(co2Result.rows[0]?.total_co2_offset_kg || "0"),
-    );
+        [req.params.publicKey],
+      );
+      const totalCo2OffsetKg = Math.round(
+        Number.parseFloat(co2Result.rows[0]?.total_co2_offset_kg || "0"),
+      );
 
-    res.json({
-      success: true,
-      data: { ...mapProfileRow(result.rows[0]), totalCo2OffsetKg },
-    });
-  } catch (e) {
-    next(e);
-  }
-});
+      res.json({
+        success: true,
+        data: { ...mapProfileRow(result.rows[0]), totalCo2OffsetKg },
+      });
+    } catch (e) {
+      next(e);
+    }
+  });
 
 router.post(
   "/",
