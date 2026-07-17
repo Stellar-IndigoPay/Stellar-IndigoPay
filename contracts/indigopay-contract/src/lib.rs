@@ -243,6 +243,7 @@ LastExecutedUpgrade,
     Attestation(String, Address),
     ProjectApprovals(String),
     ProjectRejections(String),
+    AllowlistRoot(String),
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -301,6 +302,28 @@ fn require_not_paused(env: &Env) {
     if paused {
         panic!("Contract is paused");
     }
+}
+fn verify_merkle_proof(
+    env: &Env,
+    leaf: BytesN<32>,
+    root: BytesN<32>,
+    proof: Vec<(bool, BytesN<32>)>,
+) -> bool {
+    let mut hash = leaf;
+    for (is_right, sibling) in proof.iter() {
+        let mut combined = [0u8; 64];
+        if *is_right {
+            combined[..32].copy_from_slice(&hash.to_array());
+            combined[32..].copy_from_slice(&sibling.to_array());
+        } else {
+            combined[..32].copy_from_slice(&sibling.to_array());
+            combined[32..].copy_from_slice(&hash.to_array());
+        }
+        hash = BytesN::from_array(
+            &env.crypto().sha256(&Bytes::from_slice(&env, &combined)).to_array()
+        );
+    }
+    hash == root
 }
 
 fn calculate_badge(total_stroops: i128) -> BadgeTier {
@@ -1731,7 +1754,78 @@ impl IndigoPayContract {
             .get(&DataKey::ContractPaused)
             .unwrap_or(false)
     }
+    pub fn set_allowlist(env: Env, admin: Address, project_id: String, merkle_root: BytesN<32>) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::AllowlistRoot(project_id), &merkle_root);
+    }
 
+    pub fn clear_allowlist(env: Env, admin: Address, project_id: String) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage().instance().remove(&DataKey::AllowlistRoot(project_id));
+    }
+
+    pub fn donate_with_proof(
+        env: Env,
+        token: Address,
+        donor: Address,
+        project_id: String,
+        amount: i128,
+        msg_hash: u32,
+        proof: Vec<(bool, BytesN<32>)>,
+    ) {
+        donor.require_auth();
+        require_not_paused(&env);
+        if let Some(root) = env.storage().instance().get::<DataKey, BytesN<32>>(&DataKey::AllowlistRoot(project_id.clone())) {
+            let donor_bytes: Bytes = donor.to_string().into_bytes();
+            let leaf = env.crypto().sha256(&donor_bytes);
+            let leaf_bytes = BytesN::from_array(&leaf.to_array());
+            if !verify_merkle_proof(&env, leaf_bytes, root, proof) {
+                panic!("Donor is not on the allowlist");
+            }
+        }
+        if amount <= 0 { panic!("Donation amount must be positive"); }
+        let mut project: Project = env.storage().instance().get(&DataKey::Project(project_id.clone())).expect("Project not found");
+        if !project.active { panic!("Project is not accepting donations"); }
+        if project.paused { panic!("Project is temporarily paused"); }
+        let xlm_units = amount / STROOP;
+        let co2_increment = xlm_units.checked_mul(project.co2_per_xlm as i128).expect("CO2 calculation overflow");
+        let mut donor_stats: DonorStats = env.storage().instance().get(&DataKey::DonorStats(donor.clone())).unwrap_or(DonorStats { total_donated: 0, donation_count: 0, badge: BadgeTier::None, co2_offset_grams: 0 });
+        let prev_badge = donor_stats.badge.clone();
+        project.total_raised = project.total_raised.checked_add(amount).expect("Project total_raised overflow");
+        let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
+        if !env.storage().instance().has(&donated_key) {
+            env.storage().instance().set(&donated_key, &true);
+            project.donor_count = project.donor_count.checked_add(1).expect("Project donor_count overflow");
+        }
+        env.storage().instance().set(&DataKey::Project(project_id.clone()), &project);
+        donor_stats.total_donated = donor_stats.total_donated.checked_add(amount).expect("Donor total_donated overflow");
+        donor_stats.donation_count = donor_stats.donation_count.checked_add(1).expect("Donor donation_count overflow");
+        donor_stats.co2_offset_grams = donor_stats.co2_offset_grams.checked_add(co2_increment).expect("Donor co2_offset overflow");
+        donor_stats.badge = calculate_badge(donor_stats.total_donated);
+        env.storage().instance().set(&DataKey::DonorStats(donor.clone()), &donor_stats);
+        let proj_total_key = DataKey::DonorProjectTotal(project_id.clone(), donor.clone());
+        let prev: i128 = env.storage().instance().get(&proj_total_key).unwrap_or(0);
+        env.storage().instance().set(&proj_total_key, &prev.checked_add(amount).expect("DonorProjectTotal overflow"));
+        if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
+            let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
+            if !env.storage().instance().has(&nft_key) {
+                env.storage().instance().set(&nft_key, &ImpactNFT { owner: donor.clone(), tier: donor_stats.badge.clone(), total_donated: donor_stats.total_donated, minted_at_ledger: env.ledger().sequence() });
+                env.events().publish((symbol_short!("nft_mint"), donor.clone()), donor_stats.badge.clone());
+            }
+        }
+        let dc: u32 = env.storage().instance().get(&DataKey::DonationCount).unwrap_or(0);
+        env.storage().instance().set(&DataKey::DonationCount, &dc.checked_add(1).expect("DonationCount overflow"));
+        let gr: i128 = env.storage().instance().get(&DataKey::GlobalTotalRaised).unwrap_or(0);
+        env.storage().instance().set(&DataKey::GlobalTotalRaised, &gr.checked_add(amount).expect("GlobalTotalRaised overflow"));
+        let gc: i128 = env.storage().instance().get(&DataKey::GlobalCO2OffsetGrams).unwrap_or(0);
+        env.storage().instance().set(&DataKey::GlobalCO2OffsetGrams, &gc.checked_add(co2_increment).expect("GlobalCO2 overflow"));
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&donor, &project.wallet, &amount);
+        env.events().publish((symbol_short!("donated"), donor.clone(), project_id.clone()), (amount, donor_stats.badge, msg_hash));
+        env.storage().instance().extend_ttl(VOTING_WINDOW_LEDGERS * 4, VOTING_WINDOW_LEDGERS * 4);
+    }
     // ─── Verifier Oracle Network ─────────────────────────────────────────
 
     pub fn add_verifier(env: Env, admin: Address, verifier: Address) {
