@@ -35,6 +35,7 @@ function normalizeHeading(input: string) {
 }
 
 function parseSections(description: string): Section[] | null {
+  if (!description) return null;
   const lines = description.split(/\r?\n/);
   const sections = new Map<SectionKey, string[]>();
 
@@ -121,15 +122,15 @@ function AccordionItem({
 export default function DescriptionAccordion({
   description,
 }: {
-  description: string;
+  description?: string;
 }) {
-  const sections = useMemo(() => parseSections(description), [description]);
+  const sections = useMemo(() => parseSections(description || ""), [description]);
   const [open, setOpen] = useState<SectionKey | null>("Overview");
 
   if (!sections) {
     return (
       <p className="text-[#475569] dark:text-[#94A3B8] leading-relaxed text-sm whitespace-pre-wrap font-body">
-        {description}
+        {description || ""}
       </p>
     );
   }

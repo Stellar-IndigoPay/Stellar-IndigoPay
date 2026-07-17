@@ -28,6 +28,12 @@ jest.mock("../../lib/api", () => ({
     .mockResolvedValue({ donations: [], nextCursor: null }),
 }));
 
+// Mock Stellar helper functions
+jest.mock("@/lib/stellar", () => ({
+  ...jest.requireActual("@/lib/stellar"),
+  fetchProjectDiscussion: jest.fn().mockResolvedValue([]),
+}));
+
 const mockProject = {
   id: "proj-123",
   name: "Save the Forest",
@@ -172,5 +178,81 @@ describe("ProjectDetail page integration tests", () => {
     await waitFor(() => {
       expect(likeButton).toHaveTextContent("❤️3");
     });
+  });
+
+  it("renders correctly even when walletAddress is missing to prevent runtime crash", async () => {
+    (api.fetchProject as jest.Mock).mockResolvedValue({
+      id: "proj-123",
+      name: "Ocean Cleanup",
+      // walletAddress, description are missing/undefined
+      goalXLM: "1000",
+      raisedXLM: "100",
+      donorCount: 2,
+      status: "active",
+      verified: true,
+      tags: [],
+      isFollowing: false,
+      followCount: 1,
+    });
+
+    renderWithQueryClient(
+      <ProjectDetail
+        publicKey="G_USER_WALLET"
+        onConnect={jest.fn()}
+        ogProject={null}
+      />,
+    );
+
+    expect(await screen.findByText("Ocean Cleanup")).toBeInTheDocument();
+    expect(screen.getByText("No wallet address")).toBeInTheDocument();
+  });
+
+  it("renders Unknown for discussion messages with missing from address", async () => {
+    (api.fetchProject as jest.Mock).mockResolvedValue({
+      id: "proj-123",
+      name: "Ocean Cleanup",
+      walletAddress: "G_PROJECT_WALLET",
+      goalXLM: "1000",
+      raisedXLM: "100",
+      donorCount: 2,
+      status: "active",
+      verified: true,
+      tags: [],
+      isFollowing: false,
+      followCount: 1,
+    });
+
+    (api.fetchProjectDonations as jest.Mock).mockResolvedValue({
+      donations: [
+        {
+          id: "don-1",
+          amount: "50",
+          // donorAddress is missing/undefined
+          createdAt: new Date().toISOString(),
+        },
+      ],
+      nextCursor: null,
+    });
+
+    const stellar = require("@/lib/stellar");
+    (stellar.fetchProjectDiscussion as jest.Mock).mockResolvedValue([
+      {
+        id: "disc-1",
+        amount: "10",
+        createdAt: new Date().toISOString(),
+        // from address is missing/undefined
+      },
+    ]);
+
+    renderWithQueryClient(
+      <ProjectDetail
+        publicKey="G_USER_WALLET"
+        onConnect={jest.fn()}
+        ogProject={null}
+      />,
+    );
+
+    expect(await screen.findByText("Ocean Cleanup")).toBeInTheDocument();
+    expect(await screen.findByText("Unknown")).toBeInTheDocument();
   });
 });

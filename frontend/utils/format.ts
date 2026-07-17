@@ -55,10 +55,11 @@ export function formatUSDEquivalent(
  * @example
  * formatCO2(1200) // "1.2k kg CO₂"
  */
-export function formatCO2(kg: number): string {
-  if (kg >= 1_000_000) return `${(kg / 1_000_000).toFixed(1)}M kg CO₂`;
-  if (kg >= 1_000) return `${(kg / 1_000).toFixed(1)}k kg CO₂`;
-  return `${kg.toLocaleString()} kg CO₂`;
+export function formatCO2(kg: number | undefined | null): string {
+  const val = kg || 0;
+  if (val >= 1_000_000) return `${(val / 1_000_000).toFixed(1)}M kg CO₂`;
+  if (val >= 1_000) return `${(val / 1_000).toFixed(1)}k kg CO₂`;
+  return `${val.toLocaleString()} kg CO₂`;
 }
 
 /**
@@ -74,7 +75,11 @@ export function formatCO2(kg: number): string {
  * @example
  * progressPercent("9999", "100") // 100
  */
-export function progressPercent(raised: string, goal: string): number {
+export function progressPercent(
+  raised: string | undefined | null,
+  goal: string | undefined | null,
+): number {
+  if (!raised || !goal) return 0;
   const r = parseFloat(raised),
     g = parseFloat(goal);
   if (!g || isNaN(r) || isNaN(g)) return 0;
@@ -88,7 +93,8 @@ export function progressPercent(raised: string, goal: string): number {
  * @returns Relative time string, or the original input on failure.
  * @throws {Error} Never throws.
  */
-export function timeAgo(d: string): string {
+export function timeAgo(d: string | undefined | null): string {
+  if (!d) return "";
   try {
     return formatDistanceToNow(new Date(d), { addSuffix: true });
   } catch {
@@ -103,7 +109,8 @@ export function timeAgo(d: string): string {
  * @returns Formatted date string, or the original input on failure.
  * @throws {Error} Never throws.
  */
-export function formatDate(d: string): string {
+export function formatDate(d: string | undefined | null): string {
+  if (!d) return "";
   try {
     return format(new Date(d), "MMM d, yyyy");
   } catch {

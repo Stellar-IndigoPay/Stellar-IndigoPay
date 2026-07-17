@@ -291,7 +291,7 @@ export default function ProjectDetail({
 
     const shareData = {
       title: `${project.name} - Stellar IndigoPay`,
-      text: `Support ${project.name} on Stellar IndigoPay - ${project.description.slice(0, 100)}...`,
+      text: `Support ${project.name} on Stellar IndigoPay - ${(project.description || "").slice(0, 100)}...`,
       url: window.location.href,
     };
 
@@ -835,7 +835,7 @@ export default function ProjectDetail({
     ? `${ogProject.name} — Stellar IndigoPay`
     : "Stellar IndigoPay";
   const ogDescription = ogProject
-    ? `${ogProject.description.slice(0, 160).trimEnd()}… Support this ${ogProject.category} project on Stellar IndigoPay.`
+    ? `${(ogProject.description || "").slice(0, 160).trimEnd()}… Support this ${ogProject.category} project on Stellar IndigoPay.`
     : "Donate XLM directly to verified climate projects on Stellar.";
   const ogImage = ogProject?.imageUrl || `${appUrl}/og-default.png`;
 
@@ -1173,15 +1173,21 @@ export default function ProjectDetail({
             {/* Wallet link */}
             <div className="mt-4 pt-4 border-t border-forest-100 flex items-center gap-2 text-xs text-[#8aaa8a] dark:text-forest-300 font-body">
               <span>Project wallet:</span>
-              <a
-                href={accountUrl(project.walletAddress)}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="address-tag hover:border-forest-300 transition-colors"
-              >
-                {project.walletAddress.slice(0, 8)}...
-                {project.walletAddress.slice(-6)} ↗
-              </a>
+              {project.walletAddress ? (
+                <a
+                  href={accountUrl(project.walletAddress)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="address-tag hover:border-forest-300 transition-colors"
+                >
+                  {project.walletAddress.slice(0, 8)}...
+                  {project.walletAddress.slice(-6)} ↗
+                </a>
+              ) : (
+                <span className="text-xs text-forest-500 italic">
+                  No wallet address
+                </span>
+              )}
               <button
                 onClick={handleCopyWallet}
                 className="ml-1 p-1.5 rounded hover:bg-forest-100 transition-colors focus:outline-none focus:ring-2 focus:ring-forest-300"
@@ -1595,7 +1601,7 @@ export default function ProjectDetail({
                   {
                     id: `${d.id}`,
                     title: "New donation received",
-                    description: `${shortenAddress(d.donorAddress)} just donated ${formatXLM(d.amountXLM || d.amount || "0")}`,
+                    description: `${shortenAddress(d.donorAddress || "")} just donated ${formatXLM(d.amountXLM || d.amount || "0")}`,
                     createdAt: Date.now(),
                   },
                 ]);
@@ -1630,7 +1636,10 @@ export default function ProjectDetail({
             ) : (
               <div className="space-y-3">
                 {discussion.slice(-50).map((m) => {
-                  const suggested = `Reply to ${m.from.slice(0, 6)}…: `;
+                  const fromVal = m.from || "";
+                  const suggested = fromVal
+                    ? `Reply to ${fromVal.slice(0, 6)}…: `
+                    : "";
                   const replyMemo =
                     suggested.length <= 100
                       ? suggested
@@ -1642,14 +1651,20 @@ export default function ProjectDetail({
                     >
                       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                         <div className="text-xs text-[#8aaa8a] dark:text-forest-300 font-body">
-                          <a
-                            href={accountUrl(m.from)}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="font-semibold text-forest-700 hover:underline"
-                          >
-                            {m.from.slice(0, 6)}…{m.from.slice(-6)}
-                          </a>
+                          {fromVal ? (
+                            <a
+                              href={accountUrl(fromVal)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-semibold text-forest-700 hover:underline"
+                            >
+                              {fromVal.slice(0, 6)}…{fromVal.slice(-6)}
+                            </a>
+                          ) : (
+                            <span className="font-semibold text-forest-700">
+                              Unknown
+                            </span>
+                          )}
                           <span className="mx-2">•</span>
                           <span className="font-semibold text-forest-900">
                             {formatXLM(m.amount, 2)}
