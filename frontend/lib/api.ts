@@ -537,6 +537,70 @@ export async function fetchGlobalStats(): Promise<GlobalStats> {
   return normalizeGlobalStats(data);
 }
 
+// ── Cross-Chain Attestations ────────────────────────────────────────────
+/**
+ * Cross-chain donation attestation shape returned by the backend.
+ */
+export interface CrossChainAttestation {
+  id: string;
+  onChainId: number | null;
+  sourceChain: string;
+  sourceTxHash: string;
+  donorAddress: string;
+  projectId: string | null;
+  amountUsd: string | null;
+  amountXlm: string | null;
+  status: "pending" | "verified" | "revoked";
+  messageHash: number | null;
+  createdAt: string;
+  verifiedAt: string | null;
+}
+
+/**
+ * Attestation roll-up stats returned by GET /api/attestations.
+ */
+export interface AttestationStats {
+  total: number;
+  pending: number;
+  verified: number;
+  revoked: number;
+  byChain: Array<{ sourceChain: string; count: number }>;
+}
+
+/**
+ * Look up an attestation by its source-chain (chain, tx hash) pair.
+ */
+export async function fetchAttestationBySource(
+  sourceChain: string,
+  sourceTxHash: string,
+): Promise<CrossChainAttestation | null> {
+  try {
+    const { data } = await api.get<{
+      success: boolean;
+      data: CrossChainAttestation;
+    }>("/api/attestations/by-source", {
+      params: { source_chain: sourceChain, source_tx_hash: sourceTxHash },
+    });
+    return data.data;
+  } catch (err: unknown) {
+    if (axios.isAxiosError(err) && err.response?.status === 404) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Fetch platform-wide attestation roll-up stats.
+ */
+export async function fetchAttestationStats(): Promise<AttestationStats> {
+  const { data } = await api.get<{
+    success: boolean;
+    data: AttestationStats;
+  }>("/api/attestations");
+  return data.data;
+}
+
 // ── Tag Suggestions ────────────────────────────────────────────────
 /**
  * Fetch tag suggestions for autocomplete.

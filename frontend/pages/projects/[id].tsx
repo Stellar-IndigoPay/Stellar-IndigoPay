@@ -64,8 +64,6 @@ import type {
 import { useWishlist } from "@/hooks/useWishlist";
 
 interface ProjectDetailProps {
-  publicKey?: string | null;
-  onConnect?: (pk: string) => void;
   ogProject?: {
     name: string;
     description: string;
@@ -75,15 +73,13 @@ interface ProjectDetailProps {
   } | null;
 }
 
-export default function ProjectDetail({
-  publicKey,
-  onConnect,
-  ogProject,
-}: ProjectDetailProps) {
+export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
   const router = useRouter();
   const { id } = router.query;
   const { t } = useI18n();
 
+const [publicKey, setPublicKey] = useState<string | null>(null);
+const [project, setProject] = useState<ClimateProject | null>(null);
   const [updates, setUpdates] = useState<ProjectUpdate[]>([]);
   const [apiLoading, setApiLoading] = useState(true);
 
@@ -1715,7 +1711,7 @@ export default function ProjectDetail({
                 Donate to {project.name}
               </a>
             ) : (
-              <WalletConnect onConnect={onConnect ?? (() => undefined)} />
+              <WalletConnect onConnect={setPublicKey} />
             )}
           </div>
 
@@ -1812,7 +1808,7 @@ export default function ProjectDetail({
               <p className="text-center text-[#5a7a5a] dark:text-[#8aaa8a] text-sm mb-4 font-body">
                 Connect your wallet to donate
               </p>
-              <WalletConnect onConnect={onConnect ?? (() => undefined)} />
+              <WalletConnect onConnect={setPublicKey} />
             </div>
           )}
 

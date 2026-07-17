@@ -18,6 +18,8 @@ import {
 import { findBestPath, getAllBalances, formatConversionEstimate, formatPathForDisplay, type ConversionEstimate, type DonorAsset } from "@/lib/dex";
 import { signTransactionWithWallet } from "@/lib/wallet";
 import { recordDonation } from "@/lib/api";
+import useOnlineStatus from "@/hooks/useOnlineStatus";
+import { queueDonation, syncQueuedDonations } from "@/lib/offlineDonationQueue";
 import { formatXLM, formatCO2 } from "@/utils/format";
 import type { ClimateProject } from "@/utils/types";
 
@@ -65,6 +67,7 @@ export default function DonateForm({
     useState<ConversionEstimate | null>(null);
   const [conversionLoading, setConversionLoading] = useState(false);
   const [conversionError, setConversionError] = useState<string | null>(null);
+  const isOnline = useOnlineStatus();
 
   useEffect(() => {
     if (!initialAmount) return;
@@ -186,6 +189,22 @@ export default function DonateForm({
     return "text-[#4F46E5]";
   };
 
+  useEffect(() => {
+    if (!isOnline) return;
+
+    void syncQueuedDonations(async (payload) => {
+      try {
+        await recordDonation({
+          ...payload,
+          transactionHash: payload.transactionHash || "queued-offline",
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  }, [isOnline]);
+
   const handleDonate = async () => {
     if (!isValid || step !== "idle") return;
     setError(null);
@@ -193,6 +212,23 @@ export default function DonateForm({
     // Generate a unique idempotency key so the backend can safely deduplicate
     // retried donation-recording requests within 24 hours.
     const idempotencyKey = crypto.randomUUID();
+
+    if (!isOnline) {
+      await queueDonation({
+        projectId: project.id,
+        donorAddress: publicKey,
+        amount: amountNum.toString(),
+        currency,
+        message: message.trim() || undefined,
+        idempotencyKey,
+      });
+      setStep("success");
+      setTxHash(null);
+      setError(
+        "Your donation was queued while offline. It will be sent automatically once you reconnect.",
+      );
+      return;
+    }
 
     try {
       // ── DEX Path-Payment Donation (non-XLM asset → XLM via DEX) ──────
@@ -352,7 +388,23 @@ export default function DonateForm({
         onSuccess?.();
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "An error occurred");
+      const fallbackError =
+        err instanceof Error ? err.message : "An error occurred";
+      if (!navigator.onLine) {
+        await queueDonation({
+          projectId: project.id,
+          donorAddress: publicKey,
+          amount: amountNum.toString(),
+          currency,
+          message: message.trim() || undefined,
+          idempotencyKey,
+        });
+        setError("The donation could not be submitted right now, so it was queued for automatic retry.");
+        setStep("success");
+        setTxHash(null);
+        return;
+      }
+      setError(fallbackError);
       setStep("error");
       setTimeout(() => setStep("idle"), 3000);
     }
@@ -360,7 +412,7 @@ export default function DonateForm({
 
   if (step === "success" && txHash) {
     return (
-      <div className="card text-center animate-slide-up">
+      <div className="card text-center animate-slide-up" data-testid="donation-success">
         <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-[#4F46E5] to-[#7C3AED] flex items-center justify-center text-2xl mx-auto mb-4 shadow-lg">
           🌱
         </div>
@@ -543,6 +595,7 @@ export default function DonateForm({
             min="1"
             step="1"
             className="input-field"
+            data-testid="donation-amount"
             aria-invalid={Boolean(amount) && !isValid}
             aria-describedby={amount && !isValid ? "donate-amount-error" : undefined}
             inputMode="decimal"
@@ -653,6 +706,7 @@ export default function DonateForm({
         onClick={handleDonate}
         disabled={!isValid || step !== "idle"}
         className="btn-primary w-full flex items-center justify-center gap-2"
+        data-testid="donate-button"
       >
         {step === "building" && (
           <>

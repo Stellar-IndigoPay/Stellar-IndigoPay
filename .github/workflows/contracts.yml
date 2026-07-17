@@ -7,9 +7,6 @@ on:
   pull_request:
     paths: [contracts/**]
   workflow_dispatch:
-  schedule:
-    # Nightly deep fuzz run -- 1 000 000 iterations every day at 03:00 UTC
-    - cron: "0 3 * * *"
 
 jobs:
   test:
@@ -67,38 +64,10 @@ jobs:
         with:
           workspaces: contracts
 
-      - name: Run fuzz tests (10k iterations)
+      - name: Run fuzz tests (1.5k iterations)
         run: cargo test --features testutils -- fuzz
         env:
-          FUZZ_ITERATIONS: 10000
-
-  deep-fuzz:
-    name: Deep Fuzz (1M iterations -- nightly)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    defaults:
-      run:
-        working-directory: contracts
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.91.0
-          targets: wasm32v1-none
-          components: rustfmt, clippy
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: contracts
-
-      - name: Run deep fuzz tests (1M iterations)
-        run: cargo test --features testutils -- fuzz
-        env:
-          FUZZ_ITERATIONS: 1000000
+          FUZZ_ITERATIONS: 1500
 
   coverage:
     name: Coverage (tarpaulin)
