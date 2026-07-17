@@ -1,179 +1,339 @@
 /**
  * __tests__/adminAuth.test.ts — Unit tests for lib/adminAuth.ts
  *
- * Covers: adminLogin, getAdminToken, isAdminAuthenticated, adminLogout,
- * adminFetch header injection, and token refresh/401 handling.
+ * Covers: adminLogin, in-memory token handling, ensureAdminSession
+ * rehydration, single-flight refresh, adminLogout, and adminFetch 401
+ * handling.
  *
  * @jest-environment jsdom
  */
-import {
-  adminLogin,
-  getAdminToken,
-  isAdminAuthenticated,
-  adminLogout,
-  adminFetch,
-  refreshAdminToken,
-} from "@/lib/adminAuth";
-
-const TOKEN_KEY = "indigopay:adminToken";
-const REFRESH_KEY = "indigopay:adminRefreshToken";
 const API_BASE = "http://localhost:4000";
 
-const MOCK_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiIsInJvbGUiOiJhZG1pbiJ9.mock";
-const MOCK_REFRESH = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.refresh";
+const MOCK_TOKEN =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiIsInJvbGUiOiJhZG1pbiJ9.mock";
 
 // Helper: create a mock fetch Response object
 function mockFetchResponse(
   body: unknown,
-  init?: { status?: number; headers?: Record<string, string> },
+  init?: { status?: number },
 ) {
   return {
     ok: init?.status ? init.status >= 200 && init.status < 300 : true,
     status: init?.status ?? 200,
-    headers: init?.headers ?? {},
     json: () => Promise.resolve(body),
   };
 }
 
+type AdminAuth = typeof import("@/lib/adminAuth");
+
+// The access token lives in module scope, so each test gets a fresh module
+// rather than a shared session leaking across cases.
+function loadAdminAuth(): AdminAuth {
+  let mod!: AdminAuth;
+  jest.isolateModules(() => {
+    mod = require("@/lib/adminAuth");
+  });
+  return mod;
+}
+
 beforeEach(() => {
   jest.restoreAllMocks();
-  try {
-    localStorage.clear();
-  } catch {
-    /* noop */
-  }
 });
 
 // ── adminLogin ────────────────────────────────────────────────────────
 
 describe("adminLogin", () => {
-  it("stores tokens on successful login", async () => {
+  it("keeps the access token in memory and sends credentials for the cookie", async () => {
+    const auth = loadAdminAuth();
     const mockFetch = jest.fn().mockResolvedValue(
       mockFetchResponse({
         success: true,
-        data: {
-          token: MOCK_TOKEN,
-          refreshToken: MOCK_REFRESH,
-          expiresIn: 3600,
-        },
+        data: { token: MOCK_TOKEN, expiresIn: 900 },
       }),
     );
     global.fetch = mockFetch;
 
-    const result = await adminLogin("admin", "password123");
+    const result = await auth.adminLogin("admin", "password123");
+
     expect(result.token).toBe(MOCK_TOKEN);
-    expect(result.refreshToken).toBe(MOCK_REFRESH);
-    expect(result.expiresIn).toBe(3600);
+    expect(result.expiresIn).toBe(900);
+    expect(auth.getAdminToken()).toBe(MOCK_TOKEN);
 
-    expect(localStorage.getItem(TOKEN_KEY)).toBe(MOCK_TOKEN);
-    expect(localStorage.getItem(REFRESH_KEY)).toBe(MOCK_REFRESH);
-
-    // Verify the fetch call
     expect(mockFetch).toHaveBeenCalledWith(
       `${API_BASE}/api/v1/admin/login`,
       expect.objectContaining({
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ username: "admin", password: "password123" }),
       }),
     );
   });
 
-  it("throws on invalid credentials", async () => {
+  it("never writes the token to localStorage", async () => {
+    const auth = loadAdminAuth();
+    global.fetch = jest.fn().mockResolvedValue(
+      mockFetchResponse({
+        success: true,
+        data: { token: MOCK_TOKEN, expiresIn: 900 },
+      }),
+    );
+    const setItem = jest.spyOn(Storage.prototype, "setItem");
+
+    await auth.adminLogin("admin", "password123");
+
+    expect(setItem).not.toHaveBeenCalled();
+    expect(localStorage.length).toBe(0);
+  });
+
+  // Envelope shape mirrors AppError#toJSON in backend/src/errors.js: `message`
+  // is canonical per code, `reason` is what the call site rejected.
+  it("surfaces the reason, not the canonical message, on a wrong password", async () => {
+    const auth = loadAdminAuth();
     global.fetch = jest.fn().mockResolvedValue(
       mockFetchResponse(
         {
-          success: false,
-          error: "Invalid credentials",
+          error: {
+            code: "UNAUTHORIZED",
+            message: "Authentication required",
+            reason: "Invalid credentials",
+          },
         },
         { status: 401 },
       ),
     );
 
-    await expect(adminLogin("admin", "wrong")).rejects.toThrow(
+    await expect(auth.adminLogin("admin", "wrong")).rejects.toThrow(
       "Invalid credentials",
     );
-    expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
+    expect(auth.getAdminToken()).toBeNull();
   });
 
-  it("throws on server error (503)", async () => {
+  it("falls back to the canonical message when there is no reason", async () => {
+    const auth = loadAdminAuth();
+    global.fetch = jest.fn().mockResolvedValue(
+      mockFetchResponse(
+        { error: { code: "RATE_LIMITED", message: "Too many requests" } },
+        { status: 429 },
+      ),
+    );
+
+    await expect(auth.adminLogin("admin", "pass")).rejects.toThrow(
+      "Too many requests",
+    );
+  });
+
+  it("throws a fallback message when the response body is empty", async () => {
+    const auth = loadAdminAuth();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(mockFetchResponse(null, { status: 500 }));
+
+    await expect(auth.adminLogin("admin", "pass")).rejects.toThrow(
+      "Login failed. Please try again.",
+    );
+  });
+
+  it("surfaces the 503 reason when admin auth is not configured", async () => {
+    const auth = loadAdminAuth();
     global.fetch = jest.fn().mockResolvedValue(
       mockFetchResponse(
         {
-          success: false,
-          error: "Admin authentication not configured on this server",
+          error: {
+            code: "SERVICE_UNAVAILABLE",
+            message: "Service temporarily unavailable",
+            reason: "Admin authentication not configured on this server",
+          },
         },
         { status: 503 },
       ),
     );
 
-    await expect(adminLogin("admin", "pass")).rejects.toThrow(
+    await expect(auth.adminLogin("admin", "pass")).rejects.toThrow(
       "Admin authentication not configured on this server",
-    );
-  });
-
-  it("throws with a fallback message when response body is empty", async () => {
-    global.fetch = jest.fn().mockResolvedValue(
-      mockFetchResponse(null, { status: 500 }),
-    );
-
-    await expect(adminLogin("admin", "pass")).rejects.toThrow(
-      "Login failed. Please try again.",
     );
   });
 });
 
-// ── getAdminToken / isAdminAuthenticated / adminLogout ────────────────
+// ── token helpers ─────────────────────────────────────────────────────
 
 describe("token helpers", () => {
-  it("getAdminToken returns null when no token is stored", () => {
-    expect(getAdminToken()).toBeNull();
+  it("getAdminToken returns null before a session exists", () => {
+    const auth = loadAdminAuth();
+    expect(auth.getAdminToken()).toBeNull();
   });
 
-  it("getAdminToken returns the stored token", () => {
-    localStorage.setItem(TOKEN_KEY, MOCK_TOKEN);
-    expect(getAdminToken()).toBe(MOCK_TOKEN);
+  it("isAdminAuthenticated reflects the in-memory token", async () => {
+    const auth = loadAdminAuth();
+    expect(auth.isAdminAuthenticated()).toBe(false);
+
+    global.fetch = jest.fn().mockResolvedValue(
+      mockFetchResponse({
+        success: true,
+        data: { token: MOCK_TOKEN, expiresIn: 900 },
+      }),
+    );
+    await auth.adminLogin("admin", "pass");
+
+    expect(auth.isAdminAuthenticated()).toBe(true);
+  });
+});
+
+// ── ensureAdminSession ────────────────────────────────────────────────
+
+describe("ensureAdminSession", () => {
+  it("rehydrates from the refresh cookie when no token is loaded", async () => {
+    const auth = loadAdminAuth();
+    const mockFetch = jest.fn().mockResolvedValue(
+      mockFetchResponse({ success: true, data: { token: "restored.token" } }),
+    );
+    global.fetch = mockFetch;
+
+    await expect(auth.ensureAdminSession()).resolves.toBe(true);
+    expect(auth.getAdminToken()).toBe("restored.token");
+    expect(mockFetch).toHaveBeenCalledWith(
+      `${API_BASE}/api/v1/admin/refresh`,
+      expect.objectContaining({ method: "POST", credentials: "include" }),
+    );
   });
 
-  it("isAdminAuthenticated returns false when no token", () => {
-    expect(isAdminAuthenticated()).toBe(false);
+  it("resolves false when the refresh cookie is gone", async () => {
+    const auth = loadAdminAuth();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(mockFetchResponse({ error: "no" }, { status: 401 }));
+
+    await expect(auth.ensureAdminSession()).resolves.toBe(false);
+    expect(auth.getAdminToken()).toBeNull();
   });
 
-  it("isAdminAuthenticated returns true when token exists", () => {
-    localStorage.setItem(TOKEN_KEY, MOCK_TOKEN);
-    expect(isAdminAuthenticated()).toBe(true);
+  it("does not call refresh when a token is already loaded", async () => {
+    const auth = loadAdminAuth();
+    const mockFetch = jest.fn().mockResolvedValue(
+      mockFetchResponse({
+        success: true,
+        data: { token: MOCK_TOKEN, expiresIn: 900 },
+      }),
+    );
+    global.fetch = mockFetch;
+    await auth.adminLogin("admin", "pass");
+    mockFetch.mockClear();
+
+    await expect(auth.ensureAdminSession()).resolves.toBe(true);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+// ── refreshAdminToken ─────────────────────────────────────────────────
+
+describe("refreshAdminToken", () => {
+  it("collapses concurrent callers into a single request", async () => {
+    const auth = loadAdminAuth();
+    const mockFetch = jest.fn().mockResolvedValue(
+      mockFetchResponse({ success: true, data: { token: "rotated.token" } }),
+    );
+    global.fetch = mockFetch;
+
+    const results = await Promise.all([
+      auth.refreshAdminToken(),
+      auth.refreshAdminToken(),
+      auth.refreshAdminToken(),
+    ]);
+
+    expect(results).toEqual(["rotated.token", "rotated.token", "rotated.token"]);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
-  it("isAdminAuthenticated returns false for empty string token", () => {
-    localStorage.setItem(TOKEN_KEY, "");
-    expect(isAdminAuthenticated()).toBe(false);
+  it("allows a new request once the previous one settled", async () => {
+    const auth = loadAdminAuth();
+    const mockFetch = jest.fn().mockResolvedValue(
+      mockFetchResponse({ success: true, data: { token: "rotated.token" } }),
+    );
+    global.fetch = mockFetch;
+
+    await auth.refreshAdminToken();
+    await auth.refreshAdminToken();
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
-  it("adminLogout clears both tokens", () => {
-    localStorage.setItem(TOKEN_KEY, MOCK_TOKEN);
-    localStorage.setItem(REFRESH_KEY, MOCK_REFRESH);
-    adminLogout();
-    expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
-    expect(localStorage.getItem(REFRESH_KEY)).toBeNull();
+  it("returns null and clears the token when refresh fails", async () => {
+    const auth = loadAdminAuth();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(mockFetchResponse({ error: "gone" }, { status: 401 }));
+
+    await expect(auth.refreshAdminToken()).resolves.toBeNull();
+    expect(auth.getAdminToken()).toBeNull();
+  });
+});
+
+// ── adminLogout ───────────────────────────────────────────────────────
+
+describe("adminLogout", () => {
+  it("revokes the session server-side and drops the local token", async () => {
+    const auth = loadAdminAuth();
+    const mockFetch = jest.fn().mockResolvedValue(
+      mockFetchResponse({
+        success: true,
+        data: { token: MOCK_TOKEN, expiresIn: 900 },
+      }),
+    );
+    global.fetch = mockFetch;
+    await auth.adminLogin("admin", "pass");
+    mockFetch.mockClear();
+
+    await auth.adminLogout();
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      `${API_BASE}/api/v1/admin/logout`,
+      expect.objectContaining({
+        method: "POST",
+        credentials: "include",
+        headers: { Authorization: `Bearer ${MOCK_TOKEN}` },
+      }),
+    );
+    expect(auth.getAdminToken()).toBeNull();
+  });
+
+  it("still clears the token when the logout call fails", async () => {
+    const auth = loadAdminAuth();
+    global.fetch = jest.fn().mockResolvedValue(
+      mockFetchResponse({
+        success: true,
+        data: { token: MOCK_TOKEN, expiresIn: 900 },
+      }),
+    );
+    await auth.adminLogin("admin", "pass");
+
+    global.fetch = jest.fn().mockRejectedValue(new Error("network down"));
+    await auth.adminLogout();
+
+    expect(auth.getAdminToken()).toBeNull();
   });
 });
 
 // ── adminFetch ────────────────────────────────────────────────────────
 
 describe("adminFetch", () => {
-  it("injects Bearer token header when token is present", async () => {
-    localStorage.setItem(TOKEN_KEY, MOCK_TOKEN);
-
+  it("attaches the access token and includes the cookie", async () => {
+    const auth = loadAdminAuth();
     const mockFetch = jest.fn().mockResolvedValue(
-      mockFetchResponse({ success: true, data: [] }),
+      mockFetchResponse({
+        success: true,
+        data: { token: MOCK_TOKEN, expiresIn: 900 },
+      }),
     );
     global.fetch = mockFetch;
+    await auth.adminLogin("admin", "pass");
+    mockFetch.mockClear();
+    mockFetch.mockResolvedValue(mockFetchResponse({ success: true, data: [] }));
 
-    await adminFetch("/api/v1/verification-requests");
+    await auth.adminFetch("/api/v1/verification-requests");
 
     expect(mockFetch).toHaveBeenCalledWith(
       `${API_BASE}/api/v1/verification-requests`,
       expect.objectContaining({
+        credentials: "include",
         headers: expect.objectContaining({
           Authorization: `Bearer ${MOCK_TOKEN}`,
           "Content-Type": "application/json",
@@ -182,127 +342,55 @@ describe("adminFetch", () => {
     );
   });
 
-  it("sends request without auth header when no token", async () => {
-    const mockFetch = jest.fn().mockResolvedValue(
-      mockFetchResponse({ success: true, data: [] }),
-    );
+  it("sends no Authorization header when no token is loaded", async () => {
+    const auth = loadAdminAuth();
+    const mockFetch = jest
+      .fn()
+      .mockResolvedValue(mockFetchResponse({ success: true, data: [] }));
     global.fetch = mockFetch;
 
-    await adminFetch("/api/v1/verification-requests");
+    await auth.adminFetch("/api/v1/verification-requests");
 
-    expect(mockFetch).toHaveBeenCalledWith(
-      `${API_BASE}/api/v1/verification-requests`,
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          "Content-Type": "application/json",
-        }),
-      }),
-    );
-    // The header should NOT contain Authorization
     const callHeaders = (mockFetch.mock.calls[0][1] as RequestInit)
       .headers as Record<string, string>;
     expect(callHeaders["Authorization"]).toBeUndefined();
   });
 
-  it("handles 401 by clearing token and redirecting when refresh fails", async () => {
-    localStorage.setItem(TOKEN_KEY, MOCK_TOKEN);
-
-    // First call returns 401
-    const mockFetch = jest
-      .fn()
-      .mockResolvedValueOnce(
-        mockFetchResponse({ error: "Unauthorized" }, { status: 401 }),
-      )
-      // Refresh attempt also fails (no refresh token stored)
-      .mockResolvedValueOnce(
-        mockFetchResponse({ error: "Invalid refresh token" }, { status: 401 }),
-      );
-    global.fetch = mockFetch;
-
-    const res = await adminFetch("/api/v1/verification-requests");
-
-    expect(res.status).toBe(401);
-    expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
-    // jsdom does not implement navigation (except hash changes), so we
-    // verify the behaviour indirectly: token was cleared (above) and the
-    // response was returned. The redirect logic was executed.
-    expect(localStorage.getItem(REFRESH_KEY)).toBeNull();
-  });
-
-  it("retries request after successful token refresh on 401", async () => {
-    localStorage.setItem(TOKEN_KEY, MOCK_TOKEN);
-    localStorage.setItem(REFRESH_KEY, MOCK_REFRESH);
-
+  it("refreshes once and retries after a 401", async () => {
+    const auth = loadAdminAuth();
     const NEW_TOKEN = "new.jwt.token";
     let callCount = 0;
 
-    const mockFetch = jest.fn().mockImplementation(
-      async (url: RequestInfo | URL, _init?: RequestInit) => {
-        const urlStr = url.toString();
-        callCount++;
-
-        // First call returns 401
-        if (callCount === 1 && urlStr.includes("/verification-requests")) {
-          return mockFetchResponse({ error: "Unauthorized" }, { status: 401 });
-        }
-
-        // Second call: refresh endpoint
-        if (urlStr.includes("/admin/refresh")) {
-          return mockFetchResponse({
-            success: true,
-            data: { token: NEW_TOKEN },
-          });
-        }
-
-        // Third call: retry with new token
-        return mockFetchResponse({ success: true, data: [{ id: "test" }] });
-      },
-    );
+    const mockFetch = jest.fn().mockImplementation(async (url: string) => {
+      callCount++;
+      if (url.includes("/admin/refresh")) {
+        return mockFetchResponse({ success: true, data: { token: NEW_TOKEN } });
+      }
+      if (callCount === 1) {
+        return mockFetchResponse({ error: "Unauthorized" }, { status: 401 });
+      }
+      return mockFetchResponse({ success: true, data: [{ id: "test" }] });
+    });
     global.fetch = mockFetch;
 
-    const res = await adminFetch("/api/v1/verification-requests");
+    const res = await auth.adminFetch("/api/v1/verification-requests");
 
     expect(res.ok).toBe(true);
-    expect(localStorage.getItem(TOKEN_KEY)).toBe(NEW_TOKEN);
+    expect(auth.getAdminToken()).toBe(NEW_TOKEN);
     expect(callCount).toBe(3);
   });
-});
 
-// ── refreshAdminToken ─────────────────────────────────────────────────
+  it("clears the session when the refresh after a 401 fails", async () => {
+    const auth = loadAdminAuth();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(
+        mockFetchResponse({ error: "Unauthorized" }, { status: 401 }),
+      );
 
-describe("refreshAdminToken", () => {
-  it("returns null when no refresh token is stored", async () => {
-    const result = await refreshAdminToken();
-    expect(result).toBeNull();
-  });
+    const res = await auth.adminFetch("/api/v1/verification-requests");
 
-  it("successfully refreshes token and stores the new one", async () => {
-    localStorage.setItem(REFRESH_KEY, MOCK_REFRESH);
-    const NEW_TOKEN = "refreshed.jwt.token";
-
-    global.fetch = jest.fn().mockResolvedValue(
-      mockFetchResponse({
-        success: true,
-        data: { token: NEW_TOKEN },
-      }),
-    );
-
-    const result = await refreshAdminToken();
-    expect(result).toBe(NEW_TOKEN);
-    expect(localStorage.getItem(TOKEN_KEY)).toBe(NEW_TOKEN);
-  });
-
-  it("clears tokens and returns null when refresh fails", async () => {
-    localStorage.setItem(TOKEN_KEY, MOCK_TOKEN);
-    localStorage.setItem(REFRESH_KEY, MOCK_REFRESH);
-
-    global.fetch = jest.fn().mockResolvedValue(
-      mockFetchResponse({ error: "Invalid token" }, { status: 401 }),
-    );
-
-    const result = await refreshAdminToken();
-    expect(result).toBeNull();
-    expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
-    expect(localStorage.getItem(REFRESH_KEY)).toBeNull();
+    expect(res.status).toBe(401);
+    expect(auth.getAdminToken()).toBeNull();
   });
 });

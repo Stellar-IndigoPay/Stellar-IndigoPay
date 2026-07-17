@@ -234,7 +234,9 @@ describe("Widget Page", () => {
       expect(screen.getByText("Amazon Reforestation")).toBeInTheDocument();
     });
 
-    const rootDiv = container.firstChild as HTMLElement;
+    // The first child inside the container is the <meta> from <Head>.
+    // The widget div with the CSS custom properties is the second child.
+    const rootDiv = container.children[1] as HTMLElement;
     expect(rootDiv.style.getPropertyValue("--igp-primary")).toBe("#4F46E5");
     expect(rootDiv.style.getPropertyValue("--igp-text")).toBe("#0F172A");
     expect(rootDiv.style.getPropertyValue("--igp-bg")).toBe("#FFFFFF");
@@ -256,7 +258,7 @@ describe("Widget Page", () => {
       expect(screen.getByText("Amazon Reforestation")).toBeInTheDocument();
     });
 
-    const rootDiv = container.firstChild as HTMLElement;
+    const rootDiv = container.children[1] as HTMLElement;
     expect(rootDiv.style.getPropertyValue("--igp-primary")).toBe("#227239");
     expect(rootDiv.style.getPropertyValue("--igp-text")).toBe("#1a2e1a");
     expect(rootDiv.style.getPropertyValue("--igp-bg")).toBe("#f0f7f0");
@@ -283,7 +285,7 @@ describe("Widget Page", () => {
       );
     });
 
-    const rootDiv = container.firstChild as HTMLElement;
+    const rootDiv = container.children[1] as HTMLElement;
     expect(rootDiv.style.getPropertyValue("--igp-primary")).toBe("#ff0000");
   });
 });

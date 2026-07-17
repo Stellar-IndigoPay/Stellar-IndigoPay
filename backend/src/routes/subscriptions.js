@@ -8,6 +8,7 @@ const express = require("express");
 const router = express.Router();
 const { v4: uuidv4 } = require("uuid");
 const pool = require("../db/pool");
+const { AppError } = require("../errors");
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -17,18 +18,20 @@ router.post("/", async (req, res, next) => {
     const { projectId, email, donorAddress } = req.body;
 
     if (!projectId || typeof projectId !== "string") {
-      return res.status(400).json({ error: "projectId is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "projectId" });
     }
     if (!email || !EMAIL_RE.test(email)) {
-      return res.status(400).json({ error: "A valid email is required" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "email",
+        detail: "A valid email is required",
+      });
     }
 
     // Verify project exists
     const proj = await pool.query("SELECT id FROM projects WHERE id = $1", [
       projectId,
     ]);
-    if (!proj.rows[0])
-      return res.status(404).json({ error: "Project not found" });
+    if (!proj.rows[0]) throw new AppError("PROJECT_NOT_FOUND");
 
     const insertResult = await pool.query(
       `INSERT INTO project_subscriptions (id, project_id, email, donor_address)
@@ -39,9 +42,7 @@ router.post("/", async (req, res, next) => {
     );
 
     if (insertResult.rowCount === 0) {
-      return res
-        .status(409)
-        .json({ error: "Already subscribed with this email." });
+      throw new AppError("DUPLICATE_SUBSCRIPTION");
     }
 
     res.status(201).json({ success: true, message: "Subscribed successfully" });
@@ -69,9 +70,9 @@ router.delete("/:id", async (req, res, next) => {
     const { email, donorAddress } = req.body;
 
     if (!email && !donorAddress) {
-      return res
-        .status(400)
-        .json({ error: "email or donorAddress is required to unsubscribe" });
+      throw new AppError("VALIDATION_ERROR", {
+        detail: "email or donorAddress is required to unsubscribe",
+      });
     }
 
     const sub = await pool.query(
@@ -80,7 +81,7 @@ router.delete("/:id", async (req, res, next) => {
     );
 
     if (!sub.rows[0]) {
-      return res.status(404).json({ error: "Subscription not found" });
+      throw new AppError("SUBSCRIPTION_NOT_FOUND");
     }
 
     const record = sub.rows[0];
@@ -93,9 +94,9 @@ router.delete("/:id", async (req, res, next) => {
     }
 
     if (!authorized) {
-      return res
-        .status(403)
-        .json({ error: "Unauthorized to delete this subscription" });
+      throw new AppError("FORBIDDEN", {
+        detail: "Unauthorized to delete this subscription",
+      });
     }
 
     await pool.query("DELETE FROM project_subscriptions WHERE id = $1", [

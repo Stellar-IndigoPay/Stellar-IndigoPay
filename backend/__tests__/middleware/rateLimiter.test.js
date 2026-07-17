@@ -338,8 +338,8 @@ describe("redisRateLimiter middleware", () => {
     const res = await request(app).get("/api/test");
 
     expect(res.status).toBe(429);
-    expect(res.body).toHaveProperty("error");
-    expect(res.body).toHaveProperty("retryAfter");
+    expect(res.body.error.code).toBe("RATE_LIMITED");
+    expect(res.body.error).toHaveProperty("retryAfter");
     expect(res.headers["retry-after"]).toBeDefined();
   });
 
@@ -376,8 +376,8 @@ describe("redisRateLimiter middleware", () => {
       .send({});
 
     expect(res.status).toBe(429);
-    expect(res.body).toHaveProperty("error");
-    expect(res.body).toHaveProperty("retryAfter");
+    expect(res.body.error.code).toBe("RATE_LIMITED");
+    expect(res.body.error).toHaveProperty("retryAfter");
   });
 });
 
@@ -625,8 +625,8 @@ describe("redisRateLimiter with token-bucket strategy", () => {
     const res = await request(app).get("/api/analytics/summary");
 
     expect(res.status).toBe(429);
-    expect(res.body).toHaveProperty("error");
-    expect(res.body).toHaveProperty("retryAfter");
+    expect(res.body.error.code).toBe("RATE_LIMITED");
+    expect(res.body.error).toHaveProperty("retryAfter");
     expect(res.headers["retry-after"]).toBeDefined();
     expect(res.headers["x-ratelimit-remaining"]).toBe("0");
   });

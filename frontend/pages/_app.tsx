@@ -1,5 +1,6 @@
 import type { AppProps } from "next/app";
 import Head from "next/head";
+import SkipToContent from "@/components/SkipToContent";
 import { ThemeTiedToaster } from "@/components/ThemeTiedToaster";
 import { ThemeProvider } from "@/lib/theme";
 import { I18nProvider } from "@/lib/i18n";
@@ -13,6 +14,8 @@ import "@/styles/globals.css";
 // ErrorBoundary is the OUTERMOST provider so it can catch render-time
 // exceptions in any of the providers below it (Theme, I18n, Price,
 // Wallet) instead of leaving the user with a blank shell.
+// SkipToContent lives at the very top so it is the first focusable
+// element on the page (satisfies WCAG 2.4.1 Bypass Blocks).
 export default function App({ Component, pageProps }: AppProps) {
   return (
     <ErrorBoundary>
@@ -33,7 +36,10 @@ export default function App({ Component, pageProps }: AppProps) {
                   content="width=device-width, initial-scale=1"
                 />
               </Head>
-              <Component {...pageProps} />
+              <SkipToContent />
+              <main id="main-content" tabIndex={-1}>
+                <Component {...pageProps} />
+              </main>
               <ThemeTiedToaster />
             </WalletProvider>
           </PriceProvider>

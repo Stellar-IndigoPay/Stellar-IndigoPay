@@ -37,6 +37,11 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+    RefreshCookie:
+      type: apiKey
+      in: cookie
+      name: refresh_token
+      description: Rotating admin refresh token. httpOnly, SameSite=Strict, scoped to /api.
   parameters:
     ProjectId:
       name: id
@@ -528,10 +533,10 @@ components:
           properties:
             token:
               type: string
-            refreshToken:
-              type: string
+              description: Access token. Hold it in memory only.
             expiresIn:
               type: integer
+              description: Access token lifetime in seconds.
     AdminRefreshResponse:
       type: object
       properties:
@@ -544,6 +549,29 @@ components:
               type: string
             expiresIn:
               type: integer
+    AdminSessionsResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+                description: Refresh token family identifying the session.
+              createdAt:
+                type: string
+                format: date-time
+              expiresAt:
+                type: string
+                format: date-time
+              current:
+                type: boolean
+                description: True for the session making this request.
     AdminMeResponse:
       type: object
       properties:
@@ -737,12 +765,6 @@ components:
         username:
           type: string
         password:
-          type: string
-    AdminRefreshRequest:
-      type: object
-      required: [refreshToken]
-      properties:
-        refreshToken:
           type: string
     AdminStatusRequest:
       type: object
@@ -1289,8 +1311,24 @@ paths:
       tags: [Donations]
       summary: Record a donation
       operationId: recordDonation
-      description: Record a new donation made to a project, including the transaction hash and amount.
+      description: |
+        Record a new donation made to a project, including the transaction hash and amount.
+
+        **Idempotency:** Clients can safely retry this endpoint by supplying an
+        `Idempotency-Key` header with a UUID v4 value. The server stores the
+        response keyed by this header and replays it on subsequent requests with
+        the same key within 24 hours. If the key is missing or malformed the
+        request is processed normally (no idempotency guarantee).
       security: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: A UUID v4 that uniquely identifies this donation request. Supplying the same key within 24 hours returns the original response without creating a duplicate record.
+          schema:
+            type: string
+            format: uuid
+            example: "550e8400-e29b-41d4-a716-446655440000"
       requestBody:
         required: true
         content:
@@ -1298,6 +1336,17 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateDonationRequest"
       responses:
+        "200":
+          description: Donation already recorded (idempotent replay).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/Donation"
         "201":
           description: Donation recorded.
           content:
@@ -1882,7 +1931,10 @@ paths:
       tags: [Admin]
       summary: Log in as an administrator
       operationId: adminLogin
-      description: Authenticate as an administrator using username and password credentials.
+      description: >-
+        Authenticate as an administrator using username and password
+        credentials. Returns a 15-minute access token and sets the rotating
+        refresh token as an httpOnly, SameSite=Strict cookie scoped to /api.
       security: []
       requestBody:
         required: true
@@ -1892,7 +1944,12 @@ paths:
               $ref: "#/components/schemas/AdminLoginRequest"
       responses:
         "200":
-          description: Admin authentication tokens.
+          description: Admin access token. The refresh token is set as a cookie, never returned in the body.
+          headers:
+            Set-Cookie:
+              description: refresh_token=<opaque>; HttpOnly; SameSite=Strict; Path=/api; Max-Age=604800
+              schema:
+                type: string
           content:
             application/json:
               schema:
@@ -1904,25 +1961,100 @@ paths:
   /api/admin/refresh:
     post:
       tags: [Admin]
-      summary: Refresh an admin token
+      summary: Rotate the admin session
       operationId: adminRefreshToken
-      description: Refresh an expired admin authentication token using a refresh token.
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/AdminRefreshRequest"
+      description: >-
+        Exchange the refresh_token cookie for a new access token. Each call
+        revokes the presented refresh token and issues a replacement in the
+        same family. Replaying an already-revoked token revokes every session
+        in that family.
+      security:
+        - RefreshCookie: []
       responses:
         "200":
-          description: Refreshed admin token.
+          description: Rotated session.
+          headers:
+            Set-Cookie:
+              description: The replacement refresh token.
+              schema:
+                type: string
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/AdminRefreshResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+  /api/admin/logout:
+    post:
+      tags: [Admin]
+      summary: End the admin session
+      operationId: adminLogout
+      description: >-
+        Revoke the refresh token family behind the refresh_token cookie,
+        blacklist the presented access token until its natural expiry, and
+        clear the cookie. Always succeeds.
+      security:
+        - BearerAuth: []
+        - RefreshCookie: []
+      responses:
+        "200":
+          description: Session ended.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+  /api/admin/sessions:
+    get:
+      tags: [Admin]
+      summary: List active admin sessions
+      operationId: listAdminSessions
+      description: List the authenticated admin's active sessions, one per refresh token family.
+      responses:
+        "200":
+          description: Active sessions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminSessionsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/admin/sessions/{id}/revoke:
+    post:
+      tags: [Admin]
+      summary: Revoke an admin session
+      operationId: revokeAdminSession
+      description: Revoke every refresh token in the given session family.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Session id (refresh token family).
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Session revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "429":
           $ref: "#/components/responses/RateLimitExceeded"
   /api/admin/me:

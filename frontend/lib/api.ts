@@ -268,13 +268,22 @@ export async function recordDonation(payload: {
   donorAddress: string;
   amountXLM?: string;
   amount?: string;
-  currency?: "XLM" | "USDC";
+  currency?: string;
   message?: string;
   transactionHash: string;
+  sourceAsset?: string;
+  conversionPath?: Array<{ code: string; issuer: string }>;
+  convertedAmountXLM?: string;
+  idempotencyKey?: string;
 }) {
+  const headers: Record<string, string> = {};
+  if (payload.idempotencyKey) {
+    headers["Idempotency-Key"] = payload.idempotencyKey;
+  }
   const { data } = await api.post<{ success: boolean; data: Donation }>(
     "/api/donations",
     payload,
+    { headers },
   );
   return data.data;
 }
@@ -1144,4 +1153,149 @@ export async function fetchWebhookDeliveries(
     },
   );
   return data.data;
+}
+
+// ── Admin Analytics ────────────────────────────────────────────────
+
+export interface AdminDonationTrend {
+  day: string;
+  donationCount: number;
+  totalXLM: string;
+  uniqueDonors: number;
+  avgDonationXLM: string;
+}
+
+export interface AdminProjectPerformance {
+  id: string;
+  name: string;
+  category: string;
+  location: string;
+  raisedXLM: string;
+  donorCount: number;
+  goalXLM: string;
+  co2OffsetKg: number;
+  status: string;
+  verified: boolean;
+  progressPct: number;
+  totalDonations: number;
+  lastDonationAt: string | null;
+  createdAt: string | null;
+}
+
+export interface AdminGeographicImpact {
+  country: string;
+  projectCount: number;
+  totalXLM: string;
+  donorCount: number;
+  totalCO2Kg: number;
+}
+
+export interface AdminDonorRetention {
+  cohortMonth: string;
+  cohortSize: number;
+  activityMonth: string;
+  activeDonors: number;
+  retentionPct: number;
+}
+
+export interface AdminCategoryBreakdown {
+  category: string;
+  donationCount: number;
+  totalXLM: string;
+  donorCount: number;
+}
+
+export interface AdminGrowthData {
+  summary: {
+    totalProjects: number;
+    totalDonations: number;
+    totalDonors: number;
+    totalXLM: string;
+    activeDonors30d: number;
+    totalXLM30d: string;
+  };
+  monthlyGrowth: Array<{
+    month: string;
+    donations: number;
+    totalXLM: string;
+    donors: number;
+  }>;
+}
+
+async function fetchAdminAnalytics<T>(
+  endpoint: string,
+  adminKey: string,
+  params?: Record<string, string>,
+): Promise<T> {
+  const { data } = await api.get<{ success: boolean; data: T }>(
+    `/api/admin/analytics/${endpoint}`,
+    {
+      params,
+      headers: { "X-Admin-Key": adminKey },
+    },
+  );
+  return data.data;
+}
+
+export async function fetchAdminDonationTrends(
+  adminKey: string,
+  range?: { from?: string; to?: string },
+): Promise<AdminDonationTrend[]> {
+  return fetchAdminAnalytics<AdminDonationTrend[]>("trends", adminKey, range as Record<string, string>);
+}
+
+export async function fetchAdminProjectPerformance(
+  adminKey: string,
+): Promise<AdminProjectPerformance[]> {
+  return fetchAdminAnalytics<AdminProjectPerformance[]>("projects", adminKey);
+}
+
+export async function fetchAdminGeographicImpact(
+  adminKey: string,
+): Promise<AdminGeographicImpact[]> {
+  return fetchAdminAnalytics<AdminGeographicImpact[]>("geographic", adminKey);
+}
+
+export async function fetchAdminDonorRetention(
+  adminKey: string,
+): Promise<AdminDonorRetention[]> {
+  return fetchAdminAnalytics<AdminDonorRetention[]>("retention", adminKey);
+}
+
+export async function fetchAdminCategoryBreakdown(
+  adminKey: string,
+  range?: { from?: string; to?: string },
+): Promise<AdminCategoryBreakdown[]> {
+  return fetchAdminAnalytics<AdminCategoryBreakdown[]>("categories", adminKey, range as Record<string, string>);
+}
+
+export async function fetchAdminPlatformGrowth(
+  adminKey: string,
+): Promise<AdminGrowthData> {
+  return fetchAdminAnalytics<AdminGrowthData>("growth", adminKey);
+}
+
+export async function exportAdminAnalytics(
+  adminKey: string,
+  view: string,
+  format: "csv" | "json",
+  range?: { from?: string; to?: string },
+): Promise<void> {
+  const params = new URLSearchParams({ view, type: format });
+  if (range?.from) params.set("from", range.from);
+  if (range?.to) params.set("to", range.to);
+
+  const resp = await fetch(
+    `${api.defaults.baseURL}/api/v1/admin/analytics/export?${params.toString()}`,
+    { headers: { "X-Admin-Key": adminKey } },
+  );
+  if (!resp.ok) throw new Error(`Export failed: ${resp.status}`);
+
+  const blob = await resp.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${view}.${format}`;
+  a.click();
+  URL.revokeObjectURL(url);
 }

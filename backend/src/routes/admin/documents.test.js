@@ -19,6 +19,7 @@ jest.mock("../../services/storage", () => ({
 
 const { logAdminAction } = require("../../services/audit");
 const { verifyIPFSDocument } = require("../../services/storage");
+const { AppError } = require("../../errors");
 
 process.env.ADMIN_API_KEY = "test-admin-key";
 process.env.JWT_SECRET = "test-secret-for-jest";
@@ -30,6 +31,9 @@ function buildApp() {
   app.use(express.json());
   app.use("/api/admin/documents", require("./documents"));
   app.use((err, _req, res, _next) => {
+    if (err instanceof AppError) {
+      return res.status(err.status).json(err.toJSON());
+    }
     res.status(err.status || 500).json({ error: err.message });
   });
   return app;
@@ -134,7 +138,8 @@ describe("GET /api/admin/documents/:cid/verify", () => {
       .set("X-Admin-Key", "test-admin-key");
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe("Invalid CID");
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(res.body.error.detail).toBe("Invalid CID");
   });
 
   test("reports valid=false when the document is not retrievable", async () => {

@@ -205,19 +205,90 @@ export default function DonationFeed({
   return (
     <div>
       {walletAddress && (
-        <div className="flex items-center gap-2 mb-3 text-xs text-[#4F46E5] dark:text-[#818CF8] font-body">
-          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+        <div className="flex items-center gap-2 mb-1 text-xs text-[#4F46E5] dark:text-[#818CF8] font-body">
+          <span
+            className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"
+            aria-hidden="true"
+          />
           Live — new donations appear automatically
         </div>
       )}
-      <VirtualList
-        items={donations}
-        renderItem={renderDonationRow}
-        estimateSize={estimateDonationRow}
-        overscan={3}
-        className="max-h-[500px]"
-        itemClassName="pb-2"
-      />
+      {/* Hidden aggregate live region so each new donation is announced. The
+          key changes when a new donation lands so the message is re-read even
+          when only a single live region is present. */}
+      <p
+        key={donations[0]?.id ?? "empty"}
+        className="sr-only"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {donations.length > 0
+          ? `${donations.length} donation${
+              donations.length === 1 ? "" : "s"
+            } shown; most recent ${
+              donations[0]?.currency === "USDC"
+                ? `${parseFloat(donations[0].amount || "0").toFixed(2)} USDC`
+                : formatXLM(donations[0]?.amountXLM || donations[0]?.amount || "0")
+            } from ${shortenAddress(donations[0]?.donorAddress || "")}.`
+          : ""}
+      </p>
+      {donations.map((d) => (
+        <div
+          key={d.id}
+          className={`flex items-start gap-3 p-3 rounded-xl bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)] hover:bg-[rgba(99,102,241,0.08)] dark:hover:bg-[rgba(129,140,248,0.10)] transition-all duration-500 ${
+            newIds.has(d.id)
+              ? "animate-slide-in ring-2 ring-emerald-400/50 bg-emerald-50"
+              : ""
+          }`}
+        >
+          <div
+            className="w-9 h-9 rounded-full bg-[rgba(99,102,241,0.10)] dark:bg-[rgba(129,140,248,0.12)] flex items-center justify-center flex-shrink-0 text-base"
+            aria-hidden="true"
+          >
+            {newIds.has(d.id) ? "✨" : "🌱"}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-semibold text-[#0F172A] dark:text-[#E2E8F0] text-sm font-body">
+                {shortenAddress(d.donorAddress, 5)}
+              </span>
+              <span className="font-mono font-bold text-[#4F46E5] dark:text-[#818CF8] text-sm">
+                {d.currency === "USDC"
+                  ? `$${parseFloat(d.amount || "0").toFixed(2)} USDC`
+                  : formatXLM(d.amountXLM || d.amount || "0")}
+              </span>
+              {d.isMatched && (
+                <span className="text-xs bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full font-body font-semibold">
+                  Matched!
+                </span>
+              )}
+              {newIds.has(d.id) && (
+                <span className="text-xs bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-body font-semibold">
+                  NEW
+                </span>
+              )}
+            </div>
+            {d.message && (
+              <p className="text-xs text-[#475569] dark:text-[#94A3B8] mt-0.5 italic font-body">
+                &quot;{d.message}&quot;
+              </p>
+            )}
+            <div className="flex items-center gap-2 mt-1">
+              <span className="text-xs text-[#64748B] dark:text-[#94A3B8] font-body">
+                {timeAgo(d.createdAt)}
+              </span>
+              <a
+                href={explorerUrl(d.transactionHash)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-[#4F46E5] dark:text-[#818CF8] hover:text-[#6366F1] transition-colors font-body"
+              >
+                View tx ↗
+              </a>
+            </div>
+          </div>
+        </div>
+      ))}
       {nextCursor && (
         <button
           onClick={handleLoadMore}

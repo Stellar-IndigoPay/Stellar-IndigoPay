@@ -176,7 +176,7 @@ describe("Donation flow integration (testcontainers)", () => {
 
     // Helper to invoke recordDonation like the unit test does
     async function invoke(body) {
-      const req = { body, app: { get: () => null }, log: { info: () => {} } };
+      const req = { body, headers: {}, app: { get: () => null }, log: { info: () => {} } };
       const res = {
         statusCode: 200,
         body: null,
@@ -304,7 +304,7 @@ describe("Donation flow integration (testcontainers)", () => {
     const txHash = makeTxHash("d");
 
     async function invoke(body) {
-      const req = { body, app: { get: () => null }, log: { info: () => {} } };
+      const req = { body, headers: {}, app: { get: () => null }, log: { info: () => {} } };
       const res = {
         statusCode: 200,
         body: null,
@@ -388,7 +388,7 @@ describe("Donation flow integration (testcontainers)", () => {
     );
 
     async function invoke(body) {
-      const req = { body, app: { get: () => null }, log: { info: () => {} } };
+      const req = { body, headers: {}, app: { get: () => null }, log: { info: () => {} } };
       const res = {
         statusCode: 200,
         body: null,

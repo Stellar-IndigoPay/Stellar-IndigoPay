@@ -71,7 +71,7 @@ export default function ProjectsPage() {
     if (searchQuery && !search) {
       setSearch(searchQuery);
     }
-  }, [searchQuery]);
+  }, [searchQuery, search, setSearch]);
 
   // Click outside listener for autocomplete
   useEffect(() => {
@@ -82,7 +82,7 @@ export default function ProjectsPage() {
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
+  }, [setIsAutocompleteOpen]);
 
   // Debounced search effect
   useEffect(() => {
@@ -167,7 +167,7 @@ export default function ProjectsPage() {
       }, 500);
       return () => clearTimeout(timer);
     },
-    [router, router.query, setSearch],
+    [router, setSearch],
   );
 
   const handleSelectTag = (tag: string) => {

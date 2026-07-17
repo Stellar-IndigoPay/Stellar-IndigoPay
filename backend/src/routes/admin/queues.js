@@ -11,6 +11,7 @@ const {
   resumeQueue,
   purgeQueue
 } = require("../../services/queueMetrics");
+const { sendAppError } = require("../../errors");
 
 // GET /api/admin/queues
 router.get("/", adminRequired, async (req, res, next) => {
@@ -29,7 +30,10 @@ router.get("/", adminRequired, async (req, res, next) => {
 router.post("/:name/pause", adminRequired, async (req, res, next) => {
   const { name } = req.params;
   if (!isValidQueue(name)) {
-    return res.status(400).json({ error: `Invalid queue name: ${name}` });
+    return sendAppError(res, "VALIDATION_ERROR", {
+      field: "name",
+      detail: `Invalid queue name: ${name}`,
+    });
   }
 
   try {
@@ -54,7 +58,10 @@ router.post("/:name/pause", adminRequired, async (req, res, next) => {
 router.post("/:name/resume", adminRequired, async (req, res, next) => {
   const { name } = req.params;
   if (!isValidQueue(name)) {
-    return res.status(400).json({ error: `Invalid queue name: ${name}` });
+    return sendAppError(res, "VALIDATION_ERROR", {
+      field: "name",
+      detail: `Invalid queue name: ${name}`,
+    });
   }
 
   try {
@@ -79,7 +86,10 @@ router.post("/:name/resume", adminRequired, async (req, res, next) => {
 router.post("/:name/purge", adminRequired, async (req, res, next) => {
   const { name } = req.params;
   if (!isValidQueue(name)) {
-    return res.status(400).json({ error: `Invalid queue name: ${name}` });
+    return sendAppError(res, "VALIDATION_ERROR", {
+      field: "name",
+      detail: `Invalid queue name: ${name}`,
+    });
   }
 
   try {

@@ -123,6 +123,7 @@ export default function BridgePage() {
         currency: "USDC",
         message: "Donated via Circle CCTP bridge",
         transactionHash: `bridge-${Date.now()}`,
+        idempotencyKey: crypto.randomUUID(),
       });
 
       // Update bridge history

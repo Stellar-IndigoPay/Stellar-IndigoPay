@@ -36,6 +36,9 @@ import {
 } from "@stellar/stellar-sdk";
 import { useBiometricAuth } from "../../hooks/useBiometricAuth";
 import { useTheme } from "../theme";
+import { enqueueDonation } from "../../utils/donationQueue";
+import { useConnectivity } from "../../lib/connectivity";
+import SyncStatusIcon from "../../components/SyncStatusIcon";
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
 const HORIZON_URL =
@@ -59,6 +62,7 @@ type StatusKind = "success" | "error" | "info" | null;
 export default function DonateScreen() {
   const { colors } = useTheme();
   const { id } = useLocalSearchParams();
+  const { isOnline } = useConnectivity();
 
   const bio = useBiometricAuth();
   const isMountedRef = useRef(true);
@@ -85,6 +89,21 @@ export default function DonateScreen() {
   useEffect(() => {
     loadProjects();
   }, [id]);
+
+  // Scan-to-donate prefill (issue #84): the scan screen passes the amount
+  // and memo parsed from the QR code as route params so the donor lands
+  // here with everything filled in — scan → confirm → done.
+  useEffect(() => {
+    if (prefillAmount) {
+      const parsed = Number.parseFloat(String(prefillAmount));
+      if (Number.isFinite(parsed) && parsed > 0) {
+        setAmount(String(prefillAmount));
+      }
+    }
+    if (prefillMemo) {
+      setMessage(String(prefillMemo).slice(0, 100));
+    }
+  }, [prefillAmount, prefillMemo]);
 
   const loadProjects = async () => {
     setLoading(true);
@@ -238,12 +257,45 @@ export default function DonateScreen() {
       setSecretKey("");
     } catch (error: any) {
       console.error("Donation failed:", error);
-      setStatusType("error");
-      setStatusMessage(
-        error?.response?.data?.message ||
-          error?.message ||
-          "Donation failed. Please try again.",
-      );
+
+      // Enqueue donation for offline retry
+      const isNetworkError =
+        !error?.response &&
+        (error?.code === "ERR_NETWORK" ||
+          error?.code === "ECONNABORTED" ||
+          error?.message?.includes("Network Error") ||
+          error?.message?.includes("timeout"));
+
+      if (isNetworkError && selectedProject) {
+        try {
+          await enqueueDonation({
+            projectId: selectedProject.id,
+            projectName: selectedProject.name,
+            amount: donationAmount.toFixed(7),
+            currency: "XLM",
+            message: message.trim() || undefined,
+            donorAddress: publicKey,
+          });
+          setStatusType("info");
+          setStatusMessage(
+            "Donation queued! It will be submitted when connectivity is restored.",
+          );
+        } catch (queueErr) {
+          setStatusType("error");
+          setStatusMessage(
+            error?.response?.data?.message ||
+              error?.message ||
+              "Donation failed. Please try again.",
+          );
+        }
+      } else {
+        setStatusType("error");
+        setStatusMessage(
+          error?.response?.data?.message ||
+            error?.message ||
+            "Donation failed. Please try again.",
+        );
+      }
     } finally {
       setSubmitting(false);
     }
@@ -292,9 +344,12 @@ export default function DonateScreen() {
       style={[styles.container, { backgroundColor: colors.background }]}
     >
       <View style={styles.header}>
-        <Text style={[styles.title, { color: colors.primaryText }]}>
-          Donate to {selectedProject?.name || "a project"}
-        </Text>
+        <View style={styles.headerRow}>
+          <Text style={[styles.title, { color: colors.primaryText }]}>
+            Donate to {selectedProject?.name || "a project"}
+          </Text>
+          <SyncStatusIcon pendingCount={0} size={16} showLabel />
+        </View>
         <Text style={[styles.subtitle, { color: colors.secondaryText }]}>
           Choose a project and donate XLM on testnet.
         </Text>
@@ -508,6 +563,15 @@ export default function DonateScreen() {
         </View>
       ) : null}
 
+      {!isOnline && (
+        <View style={styles.offlineModeBanner}>
+          <Text style={styles.offlineModeBannerText}>
+            ⚡ Offline mode — donation will be queued and submitted when
+            connectivity is restored.
+          </Text>
+        </View>
+      )}
+
       <TouchableOpacity
         style={[
           styles.donateButton,
@@ -521,7 +585,7 @@ export default function DonateScreen() {
         onPress={handleDonate}
         disabled={submitting || !publicKey || bio.isAuthenticating}
         accessibilityRole="button"
-        accessibilityLabel={`Donate ${amount || "1"} XLM`}
+        accessibilityLabel={`${isOnline ? "Donate" : "Queue donation"} ${amount || "1"} XLM`}
       >
         {bio.isAuthenticating ? (
           <ActivityIndicator color={colors.buttonText} />
@@ -529,7 +593,9 @@ export default function DonateScreen() {
           <Text style={[styles.donateButtonText, { color: colors.buttonText }]}>
             {submitting
               ? "Sending donation..."
-              : `🌱 Donate ${amount || "1"} XLM`}
+              : isOnline
+                ? `🌱 Donate ${amount || "1"} XLM`
+                : `📤 Queue ${amount || "1"} XLM`}
           </Text>
         )}
       </TouchableOpacity>
@@ -689,6 +755,25 @@ const styles = StyleSheet.create({
   },
   statusText: {
     color: "#0f172a",
+  },
+  headerRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  offlineModeBanner: {
+    marginHorizontal: 16,
+    marginTop: 4,
+    padding: 12,
+    backgroundColor: "rgba(245, 158, 11, 0.12)",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(245, 158, 11, 0.3)",
+  },
+  offlineModeBannerText: {
+    fontSize: 13,
+    color: "#92400e",
+    lineHeight: 18,
   },
   donateButton: {
     padding: 16,

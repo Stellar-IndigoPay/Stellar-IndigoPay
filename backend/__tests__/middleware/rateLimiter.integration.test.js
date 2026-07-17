@@ -399,7 +399,7 @@ describe("Token bucket rate limiter (Redis integration)", () => {
       const blocked = await request(app).get("/api/analytics/summary");
       expect(blocked.status).toBe(429);
       expect(blocked.body).toHaveProperty("error");
-      expect(blocked.body).toHaveProperty("retryAfter");
+      expect(blocked.body.error).toHaveProperty("retryAfter");
       expect(blocked.headers["retry-after"]).toBeDefined();
       expect(blocked.headers["x-ratelimit-remaining"]).toBe("0");
     });

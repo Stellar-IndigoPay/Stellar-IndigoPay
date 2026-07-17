@@ -23,7 +23,7 @@ jest.mock("next/router", () => ({
 const mockAdminLogin = jest.fn();
 jest.mock("@/lib/adminAuth", () => ({
   adminLogin: (...args: unknown[]) => mockAdminLogin(...args),
-  isAdminAuthenticated: () => false,
+  ensureAdminSession: () => Promise.resolve(false),
 }));
 
 // Mock ThemeToggle
@@ -82,8 +82,7 @@ describe("Admin Login Page", () => {
   it("calls adminLogin and redirects on successful submission", async () => {
     mockAdminLogin.mockResolvedValue({
       token: "test-token",
-      refreshToken: "test-refresh",
-      expiresIn: 3600,
+      expiresIn: 900,
     });
 
     const AdminLoginPage = require("@/pages/admin/login").default;

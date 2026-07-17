@@ -148,3 +148,44 @@ groups:
           severity: page
         annotations:
           summary: "Oracle price is stale (>15 min since last update)"
+
+  - name: stellar-indigopay-secret-rotation
+    interval: 30s
+    rules:
+      - alert: SecretRotationFailed
+        expr: |
+          (time() - (secret_rotation_last_timestamp{status="failed"} or secret_rotation_last_timestamp{status="rolled_back"})) < 3600
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Secret rotation failed or was rolled back in the last hour"
+          description: |
+            The most recent automated secret rotation completed with status "failed"
+            or "rolled_back". Check the GitHub Actions run linked in the rotation
+            audit log and the /health/ready endpoint immediately.
+
+      - alert: SecretRotationStuck
+        expr: |
+          time() - secret_rotation_last_timestamp{status="in_progress"} > 1800
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Secret rotation has been in_progress for > 30 minutes"
+          description: |
+            A secret rotation started at {{ $value | humanizeTimestamp }} but never
+            completed. It may be stuck. Check the GitHub Actions workflow.
+
+      - alert: SecretRotationOverdue
+        expr: |
+          time() - (secret_rotation_last_timestamp{status="completed"}) > 95 * 24 * 3600
+        for: 24h
+        labels:
+          severity: warn
+        annotations:
+          summary: "No successful secret rotation in > 95 days"
+          description: |
+            The last successful secret rotation was {{ $value | humanizeTimestamp }}.
+            Rotations are scheduled quarterly (every 91 days). Consider running
+            the workflow manually if the automated schedule has been failing.

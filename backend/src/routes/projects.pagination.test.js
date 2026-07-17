@@ -42,6 +42,7 @@ const request = require("supertest");
 const pool = require("../db/pool");
 const redis = require("../services/redis");
 const projectsRouter = require("./projects");
+const { AppError } = require("../errors");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -51,6 +52,9 @@ function buildApp() {
   app.use(express.json());
   app.use("/api/projects", projectsRouter);
   app.use((err, _req, res, _next) => {
+    if (err instanceof AppError) {
+      return res.status(err.status).json(err.toJSON());
+    }
     res
       .status(err.status || 500)
       .json({ error: err.message || "Internal server error" });

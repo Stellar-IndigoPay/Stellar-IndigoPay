@@ -24,6 +24,7 @@ const express = require("express");
 const request = require("supertest");
 const projectsRouter = require("./projects");
 const donationsRouter = require("./donations");
+const { AppError } = require("../errors");
 
 function makePublicKey(char = "A") {
   return `G${char.repeat(55)}`;
@@ -57,6 +58,9 @@ function buildApp() {
   app.use("/api/projects", projectsRouter);
 
   app.use((err, _req, res, _next) => {
+    if (err instanceof AppError) {
+      return res.status(err.status).json(err.toJSON());
+    }
     res
       .status(err.status || 500)
       .json({ error: err.message || "Internal server error" });
@@ -282,12 +286,12 @@ describe("GET /api/donations/:id", () => {
     const validId = "8d9ac19b-52eb-42f7-80d9-19a88ba59e43";
     const res = await request(app).get(`/api/donations/${validId}`).expect(404);
 
-    expect(res.body.error).toBe("Donation not found");
+    expect(res.body.error.code).toBe("DONATION_NOT_FOUND");
   });
 
   test("returns 400 for invalid UUID", async () => {
     const res = await request(app).get("/api/donations/invalid-id").expect(400);
 
-    expect(res.body.error).toBe("Invalid donation ID");
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
   });
 });

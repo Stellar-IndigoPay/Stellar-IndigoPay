@@ -15,6 +15,7 @@
 "use strict";
 
 const client = require("prom-client");
+const logger = require("../logger");
 
 const registry = new client.Registry();
 
@@ -73,6 +74,25 @@ const dbPoolWaitingCount = new client.Gauge({
   registers: [registry],
 });
 
+const dbPoolUtilizationRatio = new client.Gauge({
+  name: "db_pool_utilization_ratio",
+  help: "Ratio of total connections to max connections in the Postgres pool.",
+  registers: [registry],
+});
+
+const dbSlowQueriesTotal = new client.Counter({
+  name: "db_slow_queries_total",
+  help: "Total number of slow database queries, labelled by operation.",
+  labelNames: ["operation"],
+  registers: [registry],
+});
+
+const dbConnectionErrorsTotal = new client.Counter({
+  name: "db_connection_errors_total",
+  help: "Total number of Postgres connection errors.",
+  registers: [registry],
+});
+
 const dbQueryDurationSeconds = new client.Histogram({
   name: "db_query_duration_seconds",
   help: "Postgres query duration in seconds, labelled by operation and success.",
@@ -108,6 +128,13 @@ const indexerRunning = new client.Gauge({
 });
 
 
+
+const secretRotationLastTimestamp = new client.Gauge({
+  name: "secret_rotation_last_timestamp",
+  help: "Unix timestamp of the most recent secret rotation, labelled by status (completed|failed|rolled_back|in_progress).",
+  labelNames: ["status"],
+  registers: [registry],
+});
 
 const readinessCheckFailedTotal = new client.Counter({
   name: "readiness_check_failed_total",
@@ -236,9 +263,56 @@ function normaliseRoute(req) {
 function refreshDbPoolMetrics(pool) {
   if (!pool) return;
   try {
-    dbPoolTotalCount.set(pool.totalCount ?? 0);
-    dbPoolIdleCount.set(pool.idleCount ?? 0);
-    dbPoolWaitingCount.set(pool.waitingCount ?? 0);
+    const totalCount = pool.totalCount ?? 0;
+    const idleCount = pool.idleCount ?? 0;
+    const waitingCount = pool.waitingCount ?? 0;
+    const max = pool.max || 1;
+
+    dbPoolTotalCount.set(totalCount);
+    dbPoolIdleCount.set(idleCount);
+    dbPoolWaitingCount.set(waitingCount);
+
+    const utilizationRatio = totalCount / max;
+    dbPoolUtilizationRatio.set(utilizationRatio);
+
+    if (waitingCount > 0) {
+      logger.warn(
+        {
+          event: "db_pool_contention",
+          waitingCount,
+          totalCount,
+          idleCount,
+          max,
+        },
+        `DB pool contention: ${waitingCount} queries waiting`,
+      );
+    }
+
+    if (waitingCount > 5) {
+      logger.error(
+        {
+          event: "db_pool_high_contention",
+          waitingCount,
+          totalCount,
+          idleCount,
+          max,
+        },
+        `DB pool high contention: ${waitingCount} queries waiting`,
+      );
+      readinessCheckFailedTotal.inc({ reason: "db_pool_contention" });
+    }
+
+    if (utilizationRatio >= 0.9) {
+      logger.warn(
+        {
+          event: "db_pool_high_utilization",
+          utilizationRatio,
+          totalCount,
+          max,
+        },
+        `DB pool utilization at ${(utilizationRatio * 100).toFixed(1)}%`,
+      );
+    }
   } catch {
     // Pool may be in a transitional state; swallow.
   }
@@ -262,11 +336,26 @@ async function refreshQueueMetrics() {
   }
 }
 
+/**
+ * Update the secret-rotation Prometheus gauge after a rotation is recorded.
+ * Called from the admin secretRotations route once the DB insert succeeds.
+ *
+ * @param {string} status — one of completed|failed|rolled_back|in_progress
+ */
+function updateSecretRotationMetrics(status) {
+  try {
+    secretRotationLastTimestamp.set({ status }, Date.now() / 1000);
+  } catch {
+    // Gauge may not be registered in test environments; swallow.
+  }
+}
+
 module.exports = {
   registry,
   normaliseRoute,
   refreshDbPoolMetrics,
   refreshQueueMetrics,
+  updateSecretRotationMetrics,
   metrics: {
     httpRequestsTotal,
     httpRequestDurationSeconds,
@@ -274,11 +363,15 @@ module.exports = {
     dbPoolTotalCount,
     dbPoolIdleCount,
     dbPoolWaitingCount,
+    dbPoolUtilizationRatio,
+    dbSlowQueriesTotal,
+    dbConnectionErrorsTotal,
     dbQueryDurationSeconds,
     cacheOperationsTotal,
     queueJobsTotal,
     indexerLagSeconds,
     indexerRunning,
+    secretRotationLastTimestamp,
     readinessCheckFailedTotal,
     webhookDeliveriesTotal,
     webhookAttemptsTotal,

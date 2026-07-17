@@ -15,6 +15,20 @@ jest.mock("expo-router", () => ({
 
 jest.mock("expo-status-bar", () => ({ StatusBar: () => null }));
 
+jest.mock("../app/theme", () => ({
+  useTheme: () => ({
+    colors: {
+      background: "#ffffff",
+      text: "#000000",
+      primary: "#008080",
+      headerText: "#ffffff",
+      secondaryText: "#666666",
+      buttonText: "#ffffff",
+      muted: "#999999",
+    },
+  }),
+}));
+
 import HomeScreen from "../app/index";
 
 const MOCK_PROJECT = {

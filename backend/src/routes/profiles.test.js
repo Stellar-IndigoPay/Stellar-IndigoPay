@@ -11,12 +11,16 @@ jest.mock("../middleware/rateLimiter", () => ({
 const express = require("express");
 const request = require("supertest");
 const profilesRouter = require("./profiles");
+const { AppError } = require("../errors");
 
 function buildApp() {
   const app = express();
   app.use(express.json());
   app.use("/api/profiles", profilesRouter);
   app.use((err, _req, res, _next) => {
+    if (err instanceof AppError) {
+      return res.status(err.status).json(err.toJSON());
+    }
     res
       .status(err.status || 500)
       .json({ error: err.message || "Internal server error" });
@@ -42,7 +46,8 @@ describe("POST /api/profiles", () => {
       })
       .expect(422);
 
-    expect(res.body.error).toBe("Validation failed");
-    expect(res.body.details.displayName).toBeDefined();
+    expect(res.body.error.code).toBe("SCHEMA_VALIDATION_ERROR");
+    expect(res.body.error.message).toBe("Validation failed");
+    expect(res.body.error.details.displayName).toBeDefined();
   });
 });
