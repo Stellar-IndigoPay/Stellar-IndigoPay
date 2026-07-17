@@ -15,6 +15,7 @@ import { PROJECT_CATEGORIES, CATEGORY_ICONS } from "@/utils/format";
 import type { ClimateProject } from "@/utils/types";
 import { useAutocomplete } from "@/hooks/useAutocomplete";
 import clsx from "clsx";
+import VirtualList from "@/components/VirtualList";
 
 export default function ProjectsPage() {
   const router = useRouter();
@@ -53,6 +54,17 @@ export default function ProjectsPage() {
     () => projects.filter((project) => selectedProjectIds.includes(project.id)),
     [projects, selectedProjectIds],
   );
+
+  const COL_COUNT = 3;
+  const projectRows = useMemo(() => {
+    const rows: ClimateProject[][] = [];
+    for (let i = 0; i < projects.length; i += COL_COUNT) {
+      rows.push(projects.slice(i, i + COL_COUNT));
+    }
+    return rows;
+  }, [projects]);
+
+  const estimateRow = useCallback(() => 400, []);
 
   // Initialize search from URL query parameter
   useEffect(() => {
@@ -589,35 +601,43 @@ export default function ProjectsPage() {
               )}
             </div>
           ) : (
-            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {projects.map((p) => (
-                <div key={p.id} className="relative">
-                  <label
-                    className={`absolute left-3 top-3 z-30 flex items-center gap-2 rounded-md border px-2 py-1 text-xs font-body shadow-sm ${
-                      selectedProjectIds.includes(p.id)
-                        ? "bg-forest-700 text-white border-forest-700"
-                        : "bg-white text-forest-700 border-forest-200"
-                    }`}
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selectedProjectIds.includes(p.id)}
-                      onChange={() => toggleSelection(p.id)}
-                      disabled={
-                        selectedProjectIds.length >= 3 &&
-                        !selectedProjectIds.includes(p.id)
-                      }
-                    />
-                    Compare
-                  </label>
-                  <ProjectCard project={p} />
+            <VirtualList
+              items={projectRows}
+              renderItem={(rowItems) => (
+                <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {rowItems.map((p) => (
+                    <div key={p.id} className="relative">
+                      <label
+                        className={`absolute left-3 top-3 z-30 flex items-center gap-2 rounded-md border px-2 py-1 text-xs font-body shadow-sm ${
+                          selectedProjectIds.includes(p.id)
+                            ? "bg-forest-700 text-white border-forest-700"
+                            : "bg-white text-forest-700 border-forest-200"
+                        }`}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedProjectIds.includes(p.id)}
+                          onChange={() => toggleSelection(p.id)}
+                          disabled={
+                            selectedProjectIds.length >= 3 &&
+                            !selectedProjectIds.includes(p.id)
+                          }
+                        />
+                        Compare
+                      </label>
+                      <ProjectCard project={p} />
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
+              )}
+              estimateSize={estimateRow}
+              overscan={3}
+              itemClassName="pb-4"
+            />
           )}
         </div>
       </div>

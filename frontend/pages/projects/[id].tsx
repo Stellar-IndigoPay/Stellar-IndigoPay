@@ -1705,7 +1705,7 @@ export default function ProjectDetail({
                       markMonthlySubscriptionPaid(
                         monthlySubId,
                         parsedPrefillAmount.toFixed(7),
-                      );
+                      ).catch(() => {});
                     }
                   }
                   setRefreshKey((k) => k + 1);
@@ -1840,10 +1840,11 @@ export default function ProjectDetail({
         </div>
       </div>
 
-      {showMonthlySetup && (
+      {showMonthlySetup && publicKey && (
         <MonthlyGivingSetup
           projectId={project.id}
           projectName={project.name}
+          publicKey={publicKey}
           onClose={() => setShowMonthlySetup(false)}
         />
       )}

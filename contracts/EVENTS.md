@@ -89,11 +89,41 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 
 ---
 
+## 9. `subscription_created`
+
+**Description**: Emitted when a donor creates a recurring donation subscription.
+
+| Event Name | Topics | Data | When Emitted |
+| ---------- | ------ | ---- | ------------ |
+| `subscription_created` | `["sub_new", donor, project_id]` | `{ "subscription_id": u32, "amount": i128, "interval_ledgers": u32, "max_payments": u32 }` | On successful subscription creation |
+
+---
+
+## 10. `subscription_cancelled`
+
+**Description**: Emitted when a donor cancels an active recurring subscription.
+
+| Event Name | Topics | Data | When Emitted |
+| ---------- | ------ | ---- | ------------ |
+| `subscription_cancelled` | `["sub_cncl", donor]` | `{ "subscription_id": u32, "remaining_payments": u32 }` | On subscription cancellation |
+
+---
+
+## 11. `subscription_payment_executed`
+
+**Description**: Emitted when the backend cron successfully executes a recurring payment.
+
+| Event Name | Topics | Data | When Emitted |
+| ---------- | ------ | ---- | ------------ |
+| `subscription_payment_executed` | `["sub_paid", admin]` | `{ "subscription_id": u32, "remaining_payments": u32, "active": bool }` | After payment execution confirmed on-chain |
+
+---
+
 ## Usage Notes
 
-- All events follow Soroban’s standard event format: `topics: Vec<Val>`, `data: Val`.
+- All events follow Soroban's standard event format: `topics: Vec<Val>`, `data: Val`.
 - `donor` and `project_id` are usually `Address` or `String` depending on implementation.
 - Events can be queried via Horizon or Soroban RPC tools.
 - Frontend / backend should listen to these for real-time updates, notifications, and leaderboard.
 
-**Last Updated**: June 30, 2026
+**Last Updated**: July 16, 2026

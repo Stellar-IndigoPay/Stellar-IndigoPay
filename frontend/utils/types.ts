@@ -234,7 +234,7 @@ export interface MonthlyDonationHistoryItem {
 }
 
 /**
- * Recurring monthly donation subscription state.
+ * Recurring monthly donation subscription state (legacy localStorage).
  */
 export interface MonthlySubscription {
   id: string;
@@ -248,4 +248,24 @@ export interface MonthlySubscription {
   status: "active" | "completed";
   createdAt: string;
   history: MonthlyDonationHistoryItem[];
+}
+
+/**
+ * On-chain recurring donation subscription returned by the backend API.
+ */
+export interface RecurringDonation {
+  id: number;
+  subscription_id: number;
+  donor_address: string;
+  project_id: string;
+  amount_stroops: string;
+  interval_ledgers: number;
+  next_payment_ledger: number;
+  remaining_payments: number;
+  active: boolean;
+  created_at_ledger: number;
+  last_paid_at: string | null;
+  next_payment_due_at: string | null;
+  created_at: string;
+  updated_at: string;
 }

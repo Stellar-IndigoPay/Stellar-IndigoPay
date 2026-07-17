@@ -1,7 +1,7 @@
 /**
  * components/LeaderboardTable.tsx
  */
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { fetchLeaderboard } from "@/lib/api";
 import {
   formatXLM,
@@ -13,6 +13,7 @@ import { accountUrl } from "@/lib/stellar";
 import { useXlmPrice } from "@/lib/priceContext";
 import type { LeaderboardEntry } from "@/utils/types";
 import { SkeletonList } from "./Skeleton";
+import VirtualList from "./VirtualList";
 
 const AVATAR_COLORS = [
   "#4F46E5",
@@ -85,34 +86,13 @@ export default function LeaderboardTable({
       .finally(() => setLoading(false));
   }, [limit, period]);
 
-  if (loading)
-    return <LeaderboardTableSkeleton />;
+  const estimateRow = useCallback(() => 68, []);
 
-  if (error)
-    return (
-      <p className="text-red-500 text-sm text-center py-6 font-body">{error}</p>
-    );
-
-  if (entries.length === 0)
-    return (
-      <div className="text-center py-12">
-        <p className="text-3xl mb-3">🌱</p>
-        <p className="text-[#475569] dark:text-[#94A3B8] font-body">
-          No donors yet — be the first!
-        </p>
-      </div>
-    );
-
-  const medals = ["🥇", "🥈", "🥉"];
-
-  return (
-    <div className="space-y-2">
-      {entries.map((entry) => (
-        <div
-          key={entry.publicKey}
-          className="flex items-center gap-4 p-4 rounded-xl bg-white dark:bg-[#14142D] border border-[rgba(99,102,241,0.10)] dark:border-[rgba(129,140,248,0.12)] hover:border-[rgba(99,102,241,0.25)] dark:hover:border-[rgba(129,140,248,0.30)] transition-all"
-        >
-          {/* Rank */}
+  const renderRow = useCallback(
+    (entry: LeaderboardEntry) => {
+      const medals = ["🥇", "🥈", "🥉"];
+      return (
+        <div className="flex items-center gap-4 p-4 rounded-xl bg-white dark:bg-[#14142D] border border-[rgba(99,102,241,0.10)] dark:border-[rgba(129,140,248,0.12)] hover:border-[rgba(99,102,241,0.25)] dark:hover:border-[rgba(129,140,248,0.30)] transition-all">
           <div className="w-8 text-center flex-shrink-0">
             {entry.rank <= 3 ? (
               <span className="text-lg">{medals[entry.rank - 1]}</span>
@@ -122,15 +102,11 @@ export default function LeaderboardTable({
               </span>
             )}
           </div>
-
-          {/* Badge */}
           {entry.topBadge && (
             <span className="text-xl flex-shrink-0" title={entry.topBadge}>
               {badgeEmoji(entry.topBadge)}
             </span>
           )}
-
-          {/* Name / address */}
           <div className="flex-1 min-w-0 flex items-center gap-3">
             <Avatar
               publicKey={entry.publicKey}
@@ -151,8 +127,6 @@ export default function LeaderboardTable({
               </p>
             </div>
           </div>
-
-          {/* Total donated */}
           <div className="text-right flex-shrink-0">
             <p className="font-mono font-semibold text-[#4F46E5] dark:text-[#818CF8] text-sm">
               {formatXLM(entry.totalDonatedXLM)}
@@ -167,7 +141,37 @@ export default function LeaderboardTable({
             </p>
           </div>
         </div>
-      ))}
-    </div>
+      );
+    },
+    [xlmUsd],
+  );
+
+  if (loading)
+    return <LeaderboardTableSkeleton />;
+
+  if (error)
+    return (
+      <p className="text-red-500 text-sm text-center py-6 font-body">{error}</p>
+    );
+
+  if (entries.length === 0)
+    return (
+      <div className="text-center py-12">
+        <p className="text-3xl mb-3">🌱</p>
+        <p className="text-[#475569] dark:text-[#94A3B8] font-body">
+          No donors yet — be the first!
+        </p>
+      </div>
+    );
+
+  return (
+    <VirtualList
+      items={entries}
+      renderItem={renderRow}
+      estimateSize={estimateRow}
+      overscan={5}
+      className="max-h-[600px]"
+      itemClassName="pb-2"
+    />
   );
 }

@@ -176,6 +176,34 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
   schemas:
+    RecurringDonation:
+      type: object
+      properties:
+        id:
+          type: integer
+        subscription_id:
+          type: integer
+        donor_address:
+          type: string
+        project_id:
+          type: string
+        amount_stroops:
+          type: string
+        interval_ledgers:
+          type: integer
+        next_payment_ledger:
+          type: integer
+        remaining_payments:
+          type: integer
+        active:
+          type: boolean
+        last_paid_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
     ErrorResponse:
       type: object
       properties:
@@ -2136,3 +2164,64 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /api/v1/recurring-donations:
+    post:
+      tags: [Recurring Donations]
+      summary: Create an on-chain recurring donation subscription
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                donorAddress:
+                  type: string
+                projectId:
+                  type: string
+                amount:
+                  type: number
+                intervalLedgers:
+                  type: integer
+                maxPayments:
+                  type: integer
+                signedXDR:
+                  type: string
+      responses:
+        "201":
+          description: Subscription created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/RecurringDonation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  /api/v1/recurring-donations/{donorAddress}:
+    get:
+      tags: [Recurring Donations]
+      summary: List recurring donations for a donor
+      parameters:
+        - name: donorAddress
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of subscriptions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RecurringDonation"
