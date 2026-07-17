@@ -374,6 +374,7 @@ impl IndigoPayContract {
             donor_count: 0,
             active: true,
             paused: false,
+            verified: false,
             registered_at: env.ledger().sequence(),
         };
         env.storage()
@@ -433,6 +434,7 @@ impl IndigoPayContract {
                 donor_count: 0,
                 active: true,
                 paused: false,
+                verified: false,
                 registered_at: env.ledger().sequence(),
             };
             env.storage()
