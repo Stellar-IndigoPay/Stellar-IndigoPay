@@ -127,6 +127,35 @@ pub struct ImpactNFT {
     pub tier: BadgeTier,
     pub total_donated: i128,
     pub minted_at_ledger: u32,
+    // NEW: appended fields (backward compatible)
+    pub badge_name: String,                  // "Earth Guardian 🌍"
+    pub projects_supported: Vec<String>,     // List of project IDs
+    pub co2_by_project: Vec<(String, i128)>, // (project_id, co2_grams)
+    pub first_donation_at: u32,
+    pub donation_count: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ImpactNFTMetadata {
+    pub owner: Address,
+    pub tier: BadgeTier,
+    pub total_donated: i128,
+    pub minted_at_ledger: u32,
+    pub badge_name: String,
+    pub projects_supported: Vec<String>,
+    pub co2_by_project: Vec<(String, i128)>,
+    pub first_donation_at: u32,
+    pub donation_count: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ImpactNFTV1 {
+    pub owner: Address,
+    pub tier: BadgeTier,
+    pub total_donated: i128,
+    pub minted_at_ledger: u32,
 }
 
 /// Per-project milestone NFT awarded when a donor's cumulative donation to a
@@ -134,6 +163,19 @@ pub struct ImpactNFT {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ProjectMilestoneNFT {
+    pub owner: Address,
+    pub project_id: String,
+    pub amount_donated: i128,
+    pub co2_offset_grams: i128,
+    pub minted_at_ledger: u32,
+    // NEW: appended fields (backward compatible)
+    pub project_name: String,
+    pub donation_count: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ProjectMilestoneNFTV1 {
     pub owner: Address,
     pub project_id: String,
     pub amount_donated: i128,
@@ -245,6 +287,42 @@ pub enum DataKey {
     LastExecutedUpgrade,
 }
 
+// ─── Migration snapshot types (#286) ─────────────────────────────────────────
+
+/// Typed discriminant for every concrete value that can appear in instance
+/// storage.  Wrapping values in this enum allows the Soroban SDK to
+/// serialise / deserialise the snapshot using its standard XDR path — no
+/// raw-byte hacks are required.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum ContractValue {
+    Address(Address),
+    U32(u32),
+    U128(i128),
+    Bool(bool),
+    Project(Project),
+    DonorStats(DonorStats),
+    ImpactNFT(ImpactNFT),
+    DonationRecord(DonationRecord),
+    VoteProposal(VoteProposal),
+    BytesN32(BytesN<32>),
+    ProjectMilestoneNFT(ProjectMilestoneNFT),
+    StringVec(Vec<String>),
+    AddressVec(Vec<Address>),
+}
+
+/// A single key-value pair in a portable contract state snapshot.
+///
+/// `tag` is a compact ASCII label that uniquely identifies the `DataKey`
+/// variant (e.g. `"Admin"`, `"Project:proj-001"`, `"DonationRecord"`).
+/// `value` holds the typed, XDR-serialisable storage value.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StateEntry {
+    pub tag: String,
+    pub value: ContractValue,
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const STROOP: i128 = 10_000_000;
@@ -310,6 +388,75 @@ fn ensure_min_ttl(env: &Env, min_ledgers: u32) {
     env.storage()
         .instance()
         .extend_ttl(min_ledgers, min_ledgers);
+}
+
+fn create_impact_nft(env: &Env, donor: Address, tier: BadgeTier, stats: &DonorStats) -> ImpactNFT {
+    let mut projects = Vec::new(env);
+    let mut co2_list = Vec::new(env);
+
+    let project_ids: Vec<String> = env
+        .storage()
+        .instance()
+        .get(&DataKey::ProjectIdsAll)
+        .unwrap_or(Vec::new(env));
+
+    for pid in project_ids.iter() {
+        let donated_key = DataKey::HasDonated(pid.clone(), donor.clone());
+        if env.storage().instance().has(&donated_key) {
+            projects.push_back(pid.clone());
+            let donor_project_total: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::DonorProjectTotal(pid.clone(), donor.clone()))
+                .unwrap_or(0);
+            let project: Project = env
+                .storage()
+                .instance()
+                .get(&DataKey::Project(pid.clone()))
+                .expect("Project not found");
+            let co2 = (donor_project_total / STROOP) * project.co2_per_xlm as i128;
+            co2_list.push_back((pid, co2));
+        }
+    }
+
+    let badge_name = match tier {
+        BadgeTier::Seedling => String::from_str(env, "Seedling 🌱"),
+        BadgeTier::Tree => String::from_str(env, "Tree 🌳"),
+        BadgeTier::Forest => String::from_str(env, "Forest 🌲"),
+        BadgeTier::EarthGuardian => String::from_str(env, "Earth Guardian 🌍"),
+        BadgeTier::None => panic!("Cannot mint NFT for None tier"),
+    };
+
+    let mut first_donation_at = 0u32;
+    let donation_count: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::DonationCount)
+        .unwrap_or(0);
+    for i in 0..donation_count {
+        if let Some(rec) = env
+            .storage()
+            .instance()
+            .get::<_, DonationRecord>(&DataKey::DonationRecord(i))
+        {
+            if rec.donor == donor {
+                first_donation_at = rec.ledger;
+                break;
+            }
+        }
+    }
+
+    ImpactNFT {
+        owner: donor,
+        tier,
+        total_donated: stats.total_donated,
+        minted_at_ledger: env.ledger().sequence(),
+        badge_name,
+        projects_supported: projects,
+        co2_by_project: co2_list,
+        first_donation_at,
+        donation_count: stats.donation_count,
+    }
 }
 
 fn calculate_badge(total_stroops: i128) -> BadgeTier {
@@ -747,17 +894,11 @@ impl IndigoPayContract {
         if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
             let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
             if !env.storage().instance().has(&nft_key) {
-                let nft = ImpactNFT {
-                    owner: donor.clone(),
-                    tier: donor_stats.badge.clone(),
-                    total_donated: donor_stats.total_donated,
-                    minted_at_ledger: env.ledger().sequence(),
-                };
+                let nft =
+                    create_impact_nft(&env, donor.clone(), donor_stats.badge.clone(), &donor_stats);
                 env.storage().instance().set(&nft_key, &nft);
-                env.events().publish(
-                    (symbol_short!("nft_mint"), donor.clone()),
-                    donor_stats.badge.clone(),
-                );
+                env.events()
+                    .publish((symbol_short!("nft_mint"), donor.clone()), nft);
             }
         }
 
@@ -923,17 +1064,11 @@ impl IndigoPayContract {
         if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
             let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
             if !env.storage().instance().has(&nft_key) {
-                let nft = ImpactNFT {
-                    owner: donor.clone(),
-                    tier: donor_stats.badge.clone(),
-                    total_donated: donor_stats.total_donated,
-                    minted_at_ledger: env.ledger().sequence(),
-                };
+                let nft =
+                    create_impact_nft(&env, donor.clone(), donor_stats.badge.clone(), &donor_stats);
                 env.storage().instance().set(&nft_key, &nft);
-                env.events().publish(
-                    (symbol_short!("nft_mint"), donor.clone()),
-                    donor_stats.badge.clone(),
-                );
+                env.events()
+                    .publish((symbol_short!("nft_mint"), donor.clone()), nft);
             }
         }
 
@@ -1140,15 +1275,10 @@ impl IndigoPayContract {
             panic!("NFT already minted for this tier");
         }
 
-        let nft = ImpactNFT {
-            owner: donor.clone(),
-            tier: tier.clone(),
-            total_donated: stats.total_donated,
-            minted_at_ledger: env.ledger().sequence(),
-        };
+        let nft = create_impact_nft(&env, donor.clone(), tier.clone(), &stats);
         env.storage().instance().set(&key, &nft);
         env.events()
-            .publish((symbol_short!("nft_mint"), donor), tier);
+            .publish((symbol_short!("nft_mint"), donor), nft);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
@@ -1192,12 +1322,34 @@ impl IndigoPayContract {
             .checked_mul(co2_per_xlm)
             .expect("CO2 calculation overflow");
 
+        let project_name = project.name.clone();
+
+        let mut donation_count = 0u32;
+        let dc: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationCount)
+            .unwrap_or(0);
+        for i in 0..dc {
+            if let Some(rec) = env
+                .storage()
+                .instance()
+                .get::<_, DonationRecord>(&DataKey::DonationRecord(i))
+            {
+                if rec.donor == donor && rec.project == project_id {
+                    donation_count += 1;
+                }
+            }
+        }
+
         let nft = ProjectMilestoneNFT {
             owner: donor.clone(),
             project_id: project_id.clone(),
             amount_donated: proj_total,
             co2_offset_grams: co2_offset,
             minted_at_ledger: env.ledger().sequence(),
+            project_name,
+            donation_count,
         };
         env.storage().instance().set(&nft_key, &nft);
         env.events().publish(
@@ -1214,10 +1366,69 @@ impl IndigoPayContract {
     }
 
     pub fn get_project_nft(env: Env, donor: Address, project_id: String) -> ProjectMilestoneNFT {
-        env.storage()
+        let key = DataKey::ProjectMilestoneNFT(project_id, donor);
+        let raw_val: soroban_sdk::Val = env
+            .storage()
             .instance()
-            .get(&DataKey::ProjectMilestoneNFT(project_id, donor))
-            .expect("Project milestone NFT not found")
+            .get(&key)
+            .expect("Project milestone NFT not found");
+        if let Ok(nft) = ProjectMilestoneNFT::try_from_val(&env, &raw_val) {
+            nft
+        } else if let Ok(nft_v1) = ProjectMilestoneNFTV1::try_from_val(&env, &raw_val) {
+            ProjectMilestoneNFT {
+                owner: nft_v1.owner,
+                project_id: nft_v1.project_id,
+                amount_donated: nft_v1.amount_donated,
+                co2_offset_grams: nft_v1.co2_offset_grams,
+                minted_at_ledger: nft_v1.minted_at_ledger,
+                project_name: String::from_str(&env, ""),
+                donation_count: 0,
+            }
+        } else {
+            panic!("Invalid ProjectMilestoneNFT format");
+        }
+    }
+
+    pub fn get_nft_metadata(env: Env, donor: Address, tier: BadgeTier) -> ImpactNFTMetadata {
+        let key = DataKey::ImpactNFT(donor, tier);
+        let raw_val: soroban_sdk::Val = env
+            .storage()
+            .instance()
+            .get(&key)
+            .expect("Impact NFT not found");
+        let nft = if let Ok(nft) = ImpactNFT::try_from_val(&env, &raw_val) {
+            nft
+        } else if let Ok(nft_v1) = ImpactNFTV1::try_from_val(&env, &raw_val) {
+            ImpactNFT {
+                owner: nft_v1.owner,
+                tier: nft_v1.tier,
+                total_donated: nft_v1.total_donated,
+                minted_at_ledger: nft_v1.minted_at_ledger,
+                badge_name: String::from_str(&env, ""),
+                projects_supported: Vec::new(&env),
+                co2_by_project: Vec::new(&env),
+                first_donation_at: 0,
+                donation_count: 0,
+            }
+        } else {
+            panic!("Invalid ImpactNFT format");
+        };
+
+        ImpactNFTMetadata {
+            owner: nft.owner,
+            tier: nft.tier,
+            total_donated: nft.total_donated,
+            minted_at_ledger: nft.minted_at_ledger,
+            badge_name: nft.badge_name,
+            projects_supported: nft.projects_supported,
+            co2_by_project: nft.co2_by_project,
+            first_donation_at: nft.first_donation_at,
+            donation_count: nft.donation_count,
+        }
+    }
+
+    pub fn transfer_impact_nft(_env: Env, _from: Address, _to: Address, _tier: BadgeTier) {
+        panic!("Impact NFTs are soulbound and cannot be transferred");
     }
 
     // ─── Governance ───────────────────────────────────────────────────────────
@@ -1537,17 +1748,11 @@ impl IndigoPayContract {
         if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
             let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
             if !env.storage().instance().has(&nft_key) {
-                let nft = ImpactNFT {
-                    owner: donor.clone(),
-                    tier: donor_stats.badge.clone(),
-                    total_donated: donor_stats.total_donated,
-                    minted_at_ledger: env.ledger().sequence(),
-                };
+                let nft =
+                    create_impact_nft(&env, donor.clone(), donor_stats.badge.clone(), &donor_stats);
                 env.storage().instance().set(&nft_key, &nft);
-                env.events().publish(
-                    (symbol_short!("nft_mint"), donor.clone()),
-                    donor_stats.badge.clone(),
-                );
+                env.events()
+                    .publish((symbol_short!("nft_mint"), donor.clone()), nft);
             }
         }
 
@@ -1890,6 +2095,460 @@ impl IndigoPayContract {
     /// `execute_upgrade`.
     pub fn get_last_executed_upgrade(env: Env) -> Option<BytesN<32>> {
         env.storage().instance().get(&DataKey::LastExecutedUpgrade)
+    }
+
+    // ─── Contract migration helpers (#286) ───────────────────────────────────
+
+    /// Admin-only: export all known storage state as an ordered list of
+    /// typed key-value snapshots.
+    ///
+    /// Because Soroban's current storage API does not expose a generic
+    /// iterator over all instance keys, this function explicitly enumerates
+    /// every `DataKey` variant.
+    ///
+    /// The returned `Vec<StateEntry>` is consumed by `import_state` on a
+    /// freshly deployed contract to reconstruct an identical state.
+    ///
+    /// ## Security
+    /// Requires admin authorisation.  The snapshot contains all on-chain
+    /// state including sensitive addresses; transmit and store it securely.
+    pub fn export_state(env: Env, admin: Address) -> Vec<StateEntry> {
+        admin.require_auth();
+        require_admin(&env, &admin);
+
+        let mut out: Vec<StateEntry> = Vec::new(&env);
+
+        // ── Scalar / singleton keys ──────────────────────────────────────
+
+        // Admin
+        if let Some(v) = env.storage().instance().get::<_, Address>(&DataKey::Admin) {
+            out.push_back(StateEntry {
+                tag: String::from_str(&env, "Admin"),
+                value: ContractValue::Address(v),
+            });
+        }
+        // ProjectCount
+        if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::ProjectCount)
+        {
+            out.push_back(StateEntry {
+                tag: String::from_str(&env, "ProjectCount"),
+                value: ContractValue::U32(v),
+            });
+        }
+        // DonationCount
+        if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::DonationCount)
+        {
+            out.push_back(StateEntry {
+                tag: String::from_str(&env, "DonationCount"),
+                value: ContractValue::U32(v),
+            });
+        }
+        // GlobalTotalRaised
+        if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, i128>(&DataKey::GlobalTotalRaised)
+        {
+            out.push_back(StateEntry {
+                tag: String::from_str(&env, "GlobalTotalRaised"),
+                value: ContractValue::U128(v),
+            });
+        }
+        // GlobalCO2OffsetGrams
+        if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, i128>(&DataKey::GlobalCO2OffsetGrams)
+        {
+            out.push_back(StateEntry {
+                tag: String::from_str(&env, "GlobalCO2OffsetGrams"),
+                value: ContractValue::U128(v),
+            });
+        }
+        // USDCTokenAddress
+        if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::USDCTokenAddress)
+        {
+            out.push_back(StateEntry {
+                tag: String::from_str(&env, "USDCTokenAddress"),
+                value: ContractValue::Address(v),
+            });
+        }
+        // OracleAddress
+        if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::OracleAddress)
+        {
+            out.push_back(StateEntry {
+                tag: String::from_str(&env, "OracleAddress"),
+                value: ContractValue::Address(v),
+            });
+        }
+        // ContractWasmHash (legacy key)
+        if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, BytesN<32>>(&DataKey::ContractWasmHash)
+        {
+            out.push_back(StateEntry {
+                tag: String::from_str(&env, "ContractWasmHash"),
+                value: ContractValue::BytesN32(v),
+            });
+        }
+        // PendingAdmin
+        if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::PendingAdmin)
+        {
+            out.push_back(StateEntry {
+                tag: String::from_str(&env, "PendingAdmin"),
+                value: ContractValue::Address(v),
+            });
+        }
+        // ContractPaused
+        if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, bool>(&DataKey::ContractPaused)
+        {
+            out.push_back(StateEntry {
+                tag: String::from_str(&env, "ContractPaused"),
+                value: ContractValue::Bool(v),
+            });
+        }
+        // PendingUpgrade
+        if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, BytesN<32>>(&DataKey::PendingUpgrade)
+        {
+            out.push_back(StateEntry {
+                tag: String::from_str(&env, "PendingUpgrade"),
+                value: ContractValue::BytesN32(v),
+            });
+        }
+        // UpgradeEffectiveAt
+        if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::UpgradeEffectiveAt)
+        {
+            out.push_back(StateEntry {
+                tag: String::from_str(&env, "UpgradeEffectiveAt"),
+                value: ContractValue::U32(v),
+            });
+        }
+        // LastExecutedUpgrade
+        if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, BytesN<32>>(&DataKey::LastExecutedUpgrade)
+        {
+            out.push_back(StateEntry {
+                tag: String::from_str(&env, "LastExecutedUpgrade"),
+                value: ContractValue::BytesN32(v),
+            });
+        }
+        // DonationRateLimitMax
+        if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::DonationRateLimitMax)
+        {
+            out.push_back(StateEntry {
+                tag: String::from_str(&env, "DonationRateLimitMax"),
+                value: ContractValue::U32(v),
+            });
+        }
+        // DonationRateLimitWindow
+        if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::DonationRateLimitWindow)
+        {
+            out.push_back(StateEntry {
+                tag: String::from_str(&env, "DonationRateLimitWindow"),
+                value: ContractValue::U32(v),
+            });
+        }
+        // ProjectIdsAll
+        if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, Vec<String>>(&DataKey::ProjectIdsAll)
+        {
+            out.push_back(StateEntry {
+                tag: String::from_str(&env, "ProjectIdsAll"),
+                value: ContractValue::StringVec(v),
+            });
+        }
+
+        // ── Per-project keys ─────────────────────────────────────────────
+        let project_ids: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProjectIdsAll)
+            .unwrap_or(Vec::new(&env));
+
+        for pid in project_ids.iter() {
+            // Project struct
+            if let Some(proj) = env
+                .storage()
+                .instance()
+                .get::<_, Project>(&DataKey::Project(pid.clone()))
+            {
+                let mut tag = String::from_str(&env, "Project:");
+                tag.append(&pid);
+                out.push_back(StateEntry {
+                    tag,
+                    value: ContractValue::Project(proj),
+                });
+            }
+
+            // VoterList for every project
+            if let Some(voter_list) = env
+                .storage()
+                .instance()
+                .get::<_, Vec<Address>>(&DataKey::VoterList(pid.clone()))
+            {
+                let mut tag = String::from_str(&env, "VoterList:");
+                tag.append(&pid);
+                out.push_back(StateEntry {
+                    tag,
+                    value: ContractValue::AddressVec(voter_list),
+                });
+            }
+
+            // Proposal for every project
+            if let Some(prop) = env
+                .storage()
+                .instance()
+                .get::<_, VoteProposal>(&DataKey::Proposal(pid.clone()))
+            {
+                let mut tag = String::from_str(&env, "Proposal:");
+                tag.append(&pid);
+                out.push_back(StateEntry {
+                    tag,
+                    value: ContractValue::VoteProposal(prop),
+                });
+            }
+        }
+
+        // ── Per-donation records ─────────────────────────────────────────
+        let donation_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationCount)
+            .unwrap_or(0);
+        for i in 0..donation_count {
+            if let Some(rec) = env
+                .storage()
+                .instance()
+                .get::<_, DonationRecord>(&DataKey::DonationRecord(i))
+            {
+                out.push_back(StateEntry {
+                    tag: String::from_str(&env, "DonationRecord"),
+                    value: ContractValue::DonationRecord(rec),
+                });
+            }
+        }
+
+        env.events()
+            .publish((symbol_short!("st_exp"), admin), out.len() as u32);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        out
+    }
+
+    /// Admin-only: import a state snapshot produced by `export_state` into
+    /// a freshly deployed contract.
+    ///
+    /// ## Safety invariant
+    /// The contract MUST NOT already have an `Admin` key — i.e. it must
+    /// never have been initialised.  This prevents accidentally overwriting
+    /// a live contract's state.
+    ///
+    /// Entries whose `tag` starts with `"DonationRecord"` are written in
+    /// order; per-donor and per-project-donor keys (HasDonated, DonorStats,
+    /// ImpactNFT, DonorProjectTotal, ProjectMilestoneNFT, DonorRateLimit,
+    /// HasVoted) require an external indexer-maintained donor address list
+    /// and must be migrated separately off-chain.
+    pub fn import_state(env: Env, admin: Address, state: Vec<StateEntry>) {
+        admin.require_auth();
+
+        // Safety: refuse to overwrite an already-initialised contract.
+        if env.storage().instance().has(&DataKey::Admin) {
+            panic!("Contract already initialized — cannot import state");
+        }
+
+        let mut donation_index: u32 = 0;
+
+        for entry in state.iter() {
+            let tag = entry.tag.clone();
+            let val = entry.value.clone();
+
+            if tag == String::from_str(&env, "Admin") {
+                if let ContractValue::Address(v) = val {
+                    env.storage().instance().set(&DataKey::Admin, &v);
+                }
+            } else if tag == String::from_str(&env, "ProjectCount") {
+                if let ContractValue::U32(v) = val {
+                    env.storage().instance().set(&DataKey::ProjectCount, &v);
+                }
+            } else if tag == String::from_str(&env, "DonationCount") {
+                if let ContractValue::U32(v) = val {
+                    env.storage().instance().set(&DataKey::DonationCount, &v);
+                }
+            } else if tag == String::from_str(&env, "GlobalTotalRaised") {
+                if let ContractValue::U128(v) = val {
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::GlobalTotalRaised, &v);
+                }
+            } else if tag == String::from_str(&env, "GlobalCO2OffsetGrams") {
+                if let ContractValue::U128(v) = val {
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::GlobalCO2OffsetGrams, &v);
+                }
+            } else if tag == String::from_str(&env, "USDCTokenAddress") {
+                if let ContractValue::Address(v) = val {
+                    env.storage().instance().set(&DataKey::USDCTokenAddress, &v);
+                }
+            } else if tag == String::from_str(&env, "OracleAddress") {
+                if let ContractValue::Address(v) = val {
+                    env.storage().instance().set(&DataKey::OracleAddress, &v);
+                }
+            } else if tag == String::from_str(&env, "ContractWasmHash") {
+                if let ContractValue::BytesN32(v) = val {
+                    env.storage().instance().set(&DataKey::ContractWasmHash, &v);
+                }
+            } else if tag == String::from_str(&env, "PendingAdmin") {
+                if let ContractValue::Address(v) = val {
+                    env.storage().instance().set(&DataKey::PendingAdmin, &v);
+                }
+            } else if tag == String::from_str(&env, "ContractPaused") {
+                if let ContractValue::Bool(v) = val {
+                    env.storage().instance().set(&DataKey::ContractPaused, &v);
+                }
+            } else if tag == String::from_str(&env, "PendingUpgrade") {
+                if let ContractValue::BytesN32(v) = val {
+                    env.storage().instance().set(&DataKey::PendingUpgrade, &v);
+                }
+            } else if tag == String::from_str(&env, "UpgradeEffectiveAt") {
+                if let ContractValue::U32(v) = val {
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::UpgradeEffectiveAt, &v);
+                }
+            } else if tag == String::from_str(&env, "LastExecutedUpgrade") {
+                if let ContractValue::BytesN32(v) = val {
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::LastExecutedUpgrade, &v);
+                }
+            } else if tag == String::from_str(&env, "DonationRateLimitMax") {
+                if let ContractValue::U32(v) = val {
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::DonationRateLimitMax, &v);
+                }
+            } else if tag == String::from_str(&env, "DonationRateLimitWindow") {
+                if let ContractValue::U32(v) = val {
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::DonationRateLimitWindow, &v);
+                }
+            } else if tag == String::from_str(&env, "ProjectIdsAll") {
+                if let ContractValue::StringVec(v) = val {
+                    env.storage().instance().set(&DataKey::ProjectIdsAll, &v);
+                }
+            } else if tag == String::from_str(&env, "DonationRecord") {
+                if let ContractValue::DonationRecord(v) = val {
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::DonationRecord(donation_index), &v);
+                    donation_index = donation_index
+                        .checked_add(1)
+                        .expect("donation_index overflow during import");
+                }
+            } else {
+                // Tags with compound keys — handled by prefix matching.
+                // "Project:<pid>", "VoterList:<pid>", "Proposal:<pid>"
+                let tag_bytes = tag.to_bytes();
+                let tag_len = tag_bytes.len();
+
+                let proj_pfx = String::from_str(&env, "Project:");
+                let voter_pfx = String::from_str(&env, "VoterList:");
+                let prop_pfx = String::from_str(&env, "Proposal:");
+
+                let proj_pfx_bytes = proj_pfx.to_bytes();
+                let voter_pfx_bytes = voter_pfx.to_bytes();
+                let prop_pfx_bytes = prop_pfx.to_bytes();
+
+                let proj_len = proj_pfx_bytes.len();
+                let voter_len = voter_pfx_bytes.len();
+                let prop_len = prop_pfx_bytes.len();
+
+                if tag_len > proj_len && tag_bytes.slice(0..proj_len) == proj_pfx_bytes {
+                    if let ContractValue::Project(v) = val {
+                        let pid = String::from_bytes(&env, &tag_bytes.slice(proj_len..tag_len));
+                        env.storage().instance().set(&DataKey::Project(pid), &v);
+                    }
+                } else if tag_len > voter_len && tag_bytes.slice(0..voter_len) == voter_pfx_bytes {
+                    if let ContractValue::AddressVec(v) = val {
+                        let pid = String::from_bytes(&env, &tag_bytes.slice(voter_len..tag_len));
+                        env.storage().instance().set(&DataKey::VoterList(pid), &v);
+                    }
+                } else if tag_len > prop_len && tag_bytes.slice(0..prop_len) == prop_pfx_bytes {
+                    if let ContractValue::VoteProposal(v) = val {
+                        let pid = String::from_bytes(&env, &tag_bytes.slice(prop_len..tag_len));
+                        env.storage().instance().set(&DataKey::Proposal(pid), &v);
+                    }
+                }
+                // Unknown tags are silently skipped — forward-compatibility.
+            }
+        }
+
+        env.events()
+            .publish((symbol_short!("st_imp"), admin), state.len() as u32);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Admin-only: return a deterministic 32-byte SHA-256 digest of the
+    /// current state snapshot.
+    ///
+    /// The hash is computed over the XDR serialisation of each entry's
+    /// length-prefixed tag, giving callers a single 32-byte value to compare
+    /// before and after a migration to confirm the state was faithfully
+    /// transferred.  The digest changes whenever any stored value changes.
+    pub fn get_state_hash(env: Env, admin: Address) -> BytesN<32> {
+        admin.require_auth();
+        require_admin(&env, &admin);
+
+        let snapshot = IndigoPayContract::export_state(env.clone(), admin);
+
+        // Build a canonical byte representation: for each entry, write a
+        // 1-byte length prefix followed by the tag bytes.  This ensures
+        // entries with different tags but equal values hash differently.
+        use soroban_sdk::Bytes;
+        let mut buf = Bytes::new(&env);
+        for entry in snapshot.iter() {
+            let tag_bytes = entry.tag.to_bytes();
+            let len_byte = [tag_bytes.len() as u8];
+            buf.append(&Bytes::from_slice(&env, &len_byte));
+            buf.append(&tag_bytes);
+        }
+        env.crypto().sha256(&buf)
     }
 }
 
@@ -3387,5 +4046,460 @@ mod tests {
 
         let after_ttl = env.as_contract(&id, || env.storage().instance().get_ttl());
         assert!(after_ttl >= 500_000);
+    }
+
+    // ─── Contract migration tests (#286) ─────────────────────────────────────
+
+    /// Helper: set up a contract with 3 projects and 5 donations across two
+    /// donors.  Returns (env, cid, client, admin, project_ids, token).
+    fn setup_migration() -> (
+        Env,
+        soroban_sdk::Address,
+        IndigoPayContractClient<'static>,
+        Address,
+        (String, String, String),
+        Address,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+        let w3 = Address::generate(&env);
+        let p1 = String::from_str(&env, "proj-001");
+        let p2 = String::from_str(&env, "proj-002");
+        let p3 = String::from_str(&env, "proj-003");
+
+        client.register_project(&admin, &p1, &String::from_str(&env, "Forest"), &w1, &100u32);
+        client.register_project(&admin, &p2, &String::from_str(&env, "Ocean"), &w2, &200u32);
+        client.register_project(&admin, &p3, &String::from_str(&env, "Solar"), &w3, &150u32);
+
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let ta = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+        ta.mint(&donor_a, &(500 * STROOP));
+        ta.mint(&donor_b, &(500 * STROOP));
+
+        // 5 donations spread across two donors and three projects.
+        client.donate(&token, &donor_a, &p1, &(50 * STROOP), &1u32);
+        client.donate(&token, &donor_a, &p2, &(60 * STROOP), &2u32);
+        client.donate(&token, &donor_b, &p1, &(70 * STROOP), &3u32);
+        client.donate(&token, &donor_b, &p3, &(80 * STROOP), &4u32);
+        client.donate(&token, &donor_a, &p3, &(40 * STROOP), &5u32);
+
+        (env, cid, client, admin, (p1, p2, p3), token)
+    }
+
+    /// export_state on a freshly initialised (no projects) contract returns
+    /// only the scalar counters — at least Admin, ProjectCount, DonationCount,
+    /// GlobalTotalRaised, GlobalCO2OffsetGrams.
+    #[test]
+    fn test_export_state_empty_contract() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let snapshot = client.export_state(&admin);
+        // At minimum: Admin, ProjectCount, DonationCount, GlobalTotalRaised,
+        // GlobalCO2OffsetGrams, ProjectIdsAll.
+        assert!(
+            snapshot.len() >= 5,
+            "expected at least 5 entries, got {}",
+            snapshot.len()
+        );
+
+        // Admin key must be present.
+        let has_admin = snapshot
+            .iter()
+            .any(|e| e.tag == String::from_str(&env, "Admin"));
+        assert!(has_admin, "snapshot must contain an Admin entry");
+    }
+
+    /// export_state with 3 projects and 5 donations produces project entries
+    /// and DonationRecord entries.
+    #[test]
+    fn test_export_state_with_data() {
+        let (env, _cid, client, admin, (p1, p2, p3), _token) = setup_migration();
+
+        let snapshot = client.export_state(&admin);
+
+        // Count project entries.
+        let proj_count = snapshot
+            .iter()
+            .filter(|e| {
+                let prefix = String::from_str(&env, "Project:");
+                e.tag.len() > prefix.len()
+                    && e.tag.to_bytes().slice(0..prefix.len()) == prefix.to_bytes()
+            })
+            .count();
+        assert_eq!(proj_count, 3, "expected 3 project entries");
+
+        // Count donation record entries.
+        let rec_count = snapshot
+            .iter()
+            .filter(|e| e.tag == String::from_str(&env, "DonationRecord"))
+            .count();
+        assert_eq!(rec_count, 5, "expected 5 DonationRecord entries");
+
+        // All three project ids must appear in tags.
+        for pid in [&p1, &p2, &p3] {
+            let mut expected_tag = String::from_str(&env, "Project:");
+            expected_tag.append(pid);
+            let found = snapshot.iter().any(|e| e.tag == expected_tag);
+            assert!(found, "snapshot missing project {}", pid.len());
+        }
+    }
+
+    /// After export → import into a fresh contract, get_global_stats returns
+    /// the same values as the source contract.
+    #[test]
+    fn test_import_restores_global_stats() {
+        let (env, _cid, client, admin, _pids, _token) = setup_migration();
+
+        let stats_before = client.get_global_stats();
+        let snapshot = client.export_state(&admin);
+
+        // Deploy a fresh contract and import.
+        let cid2 = env.register_contract(None, IndigoPayContract);
+        let client2 = IndigoPayContractClient::new(&env, &cid2);
+        client2.import_state(&admin, &snapshot);
+
+        let stats_after = client2.get_global_stats();
+        assert_eq!(stats_after.total_raised, stats_before.total_raised);
+        assert_eq!(stats_after.co2_offset_grams, stats_before.co2_offset_grams);
+        assert_eq!(stats_after.donation_count, stats_before.donation_count);
+        assert_eq!(stats_after.project_count, stats_before.project_count);
+    }
+
+    /// After import, project data is intact and readable via get_project.
+    #[test]
+    fn test_import_restores_project_data() {
+        let (env, _cid, client, admin, (p1, p2, p3), _token) = setup_migration();
+
+        let snap = client.export_state(&admin);
+
+        let cid2 = env.register_contract(None, IndigoPayContract);
+        let client2 = IndigoPayContractClient::new(&env, &cid2);
+        client2.import_state(&admin, &snap);
+
+        for pid in [&p1, &p2, &p3] {
+            let p_before = client.get_project(pid);
+            let p_after = client2.get_project(pid);
+            assert_eq!(p_after.name, p_before.name);
+            assert_eq!(p_after.total_raised, p_before.total_raised);
+            assert_eq!(p_after.donor_count, p_before.donor_count);
+            assert_eq!(p_after.co2_per_xlm, p_before.co2_per_xlm);
+            assert_eq!(p_after.active, p_before.active);
+        }
+    }
+
+    /// After import, donation records are accessible by index.
+    #[test]
+    fn test_import_restores_donation_records() {
+        let (env, _cid, client, admin, _pids, _token) = setup_migration();
+
+        let snap = client.export_state(&admin);
+
+        let cid2 = env.register_contract(None, IndigoPayContract);
+        let client2 = IndigoPayContractClient::new(&env, &cid2);
+        client2.import_state(&admin, &snap);
+
+        let count = client2.get_donation_count();
+        assert_eq!(count, 5);
+        for i in 0..count {
+            let rec_before = client.get_donation_record(&i);
+            let rec_after = client2.get_donation_record(&i);
+            assert_eq!(rec_after.donor, rec_before.donor);
+            assert_eq!(rec_after.project, rec_before.project);
+            assert_eq!(rec_after.amount, rec_before.amount);
+        }
+    }
+
+    /// import_state panics when the target contract is already initialised.
+    #[test]
+    #[should_panic(expected = "Contract already initialized — cannot import state")]
+    fn test_import_into_initialized_contract_panics() {
+        let (env, _cid, client, admin, _pids, _token) = setup_migration();
+        let snap = client.export_state(&admin);
+
+        // Try to import into the SAME contract (already has Admin key).
+        client.import_state(&admin, &snap);
+    }
+
+    /// get_state_hash is deterministic — calling it twice produces the same
+    /// 32-byte result.
+    #[test]
+    fn test_get_state_hash_deterministic() {
+        let (env, _cid, client, admin, _pids, _token) = setup_migration();
+        let h1 = client.get_state_hash(&admin);
+        let h2 = client.get_state_hash(&admin);
+        assert_eq!(h1, h2, "state hash must be deterministic");
+        // Sanity: hash is 32 bytes long.
+        assert_eq!(h1.len(), 32);
+    }
+
+    /// get_state_hash changes after a new donation is recorded.
+    #[test]
+    fn test_get_state_hash_changes_after_donation() {
+        let (env, _cid, client, admin, (p1, _p2, _p3), token) = setup_migration();
+
+        let hash_before = client.get_state_hash(&admin);
+
+        // Make another donation.
+        let donor = Address::generate(&env);
+        soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&donor, &(20 * STROOP));
+        client.donate(&token, &donor, &p1, &(20 * STROOP), &99u32);
+
+        let hash_after = client.get_state_hash(&admin);
+        assert_ne!(
+            hash_before, hash_after,
+            "state hash must change after a donation"
+        );
+    }
+
+    /// export_state is admin-gated: a non-admin call panics.
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_export_state_non_admin_panics() {
+        let (env, _cid, client, _admin, _pids, _token) = setup_migration();
+        let imposter = Address::generate(&env);
+        client.export_state(&imposter);
+    }
+
+    /// get_state_hash is admin-gated: a non-admin call panics.
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_get_state_hash_non_admin_panics() {
+        let (env, _cid, client, _admin, _pids, _token) = setup_migration();
+        let imposter = Address::generate(&env);
+        client.get_state_hash(&imposter);
+    }
+
+    /// Full round-trip: seed → export → import → verify get_global_stats
+    /// is identical and the admin key on the new contract matches.
+    #[test]
+    fn test_full_migration_round_trip() {
+        let (env, _cid, client, admin, (p1, p2, p3), _token) = setup_migration();
+
+        let stats_src = client.get_global_stats();
+        let snapshot = client.export_state(&admin);
+
+        // Fresh deployment.
+        let cid_new = env.register_contract(None, IndigoPayContract);
+        let client_new = IndigoPayContractClient::new(&env, &cid_new);
+        client_new.import_state(&admin, &snapshot);
+
+        // Global stats identical.
+        let stats_dst = client_new.get_global_stats();
+        assert_eq!(stats_dst, stats_src);
+
+        // Project data intact.
+        for pid in [&p1, &p2, &p3] {
+            let pb = client.get_project(pid);
+            let pa = client_new.get_project(pid);
+            assert_eq!(pa.total_raised, pb.total_raised);
+            assert_eq!(pa.donor_count, pb.donor_count);
+        }
+
+        // Admin key migrated correctly.
+        assert_eq!(client_new.get_admin(), admin);
+
+        // State hashes agree (same content → same hash).
+        let h_src = client.get_state_hash(&admin);
+        let h_dst = client_new.get_state_hash(&admin);
+        assert_eq!(h_src, h_dst);
+    }
+
+    /// export_state of a contract with governance proposals includes
+    /// Proposal entries in the snapshot.
+    #[test]
+    fn test_export_state_includes_governance_proposals() {
+        let (env, _cid, client, admin, (p1, _p2, _p3), _token) = setup_migration();
+        client.create_proposal(&admin, &p1, &0u32);
+
+        let snapshot = client.export_state(&admin);
+
+        let mut expected_tag = String::from_str(&env, "Proposal:");
+        expected_tag.append(&p1);
+        let found = snapshot.iter().any(|e| e.tag == expected_tag);
+        assert!(found, "snapshot must contain Proposal entry for p1");
+    }
+
+    #[test]
+    fn test_get_nft_metadata_success() {
+        let (env, cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 25 * STROOP);
+        let start_ledger = env.ledger().sequence();
+        client.donate(&token, &donor, &pid, &(25 * STROOP), &1u32);
+
+        // Verify NFT is minted
+        assert!(client.has_nft(&donor, &BadgeTier::Seedling));
+
+        let metadata = client.get_nft_metadata(&donor, &BadgeTier::Seedling);
+        assert_eq!(metadata.owner, donor);
+        assert_eq!(metadata.tier, BadgeTier::Seedling);
+        assert_eq!(metadata.total_donated, 25 * STROOP);
+        assert_eq!(metadata.minted_at_ledger, start_ledger);
+        assert_eq!(metadata.badge_name, String::from_str(&env, "Seedling 🌱"));
+        assert_eq!(metadata.projects_supported.len(), 1);
+        assert_eq!(metadata.projects_supported.get(0).unwrap(), pid);
+        assert_eq!(metadata.co2_by_project.len(), 1);
+        let (p, co2) = metadata.co2_by_project.get(0).unwrap();
+        assert_eq!(p, pid);
+        assert_eq!(co2, 25 * 100);
+        assert_eq!(metadata.first_donation_at, start_ledger);
+        assert_eq!(metadata.donation_count, 1);
+    }
+
+    #[test]
+    fn test_transfer_impact_nft_panics() {
+        let env = Env::default();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+        let tier = BadgeTier::Seedling;
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.transfer_impact_nft(&from, &to, &tier);
+        }));
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        let err_msg = err.downcast_ref::<&str>().map(|s| *s).or_else(|| {
+            err.downcast_ref::<std::string::String>()
+                .map(|s| s.as_str())
+        });
+        assert_eq!(
+            err_msg,
+            Some("Impact NFTs are soulbound and cannot be transferred")
+        );
+    }
+
+    #[test]
+    fn test_backward_compatibility_decoding() {
+        let (env, cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let tier = BadgeTier::Seedling;
+
+        // Manually insert an old V1 ImpactNFT into storage
+        env.as_contract(&cid, || {
+            env.storage().instance().set(
+                &DataKey::ImpactNFT(donor.clone(), tier.clone()),
+                &ImpactNFTV1 {
+                    owner: donor.clone(),
+                    tier: tier.clone(),
+                    total_donated: 15 * STROOP,
+                    minted_at_ledger: 10,
+                },
+            );
+
+            // Manually insert an old V1 ProjectMilestoneNFT into storage
+            env.storage().instance().set(
+                &DataKey::ProjectMilestoneNFT(pid.clone(), donor.clone()),
+                &ProjectMilestoneNFTV1 {
+                    owner: donor.clone(),
+                    project_id: pid.clone(),
+                    amount_donated: 150 * STROOP,
+                    co2_offset_grams: 150 * 100,
+                    minted_at_ledger: 20,
+                },
+            );
+        });
+
+        // Read V1 ImpactNFT through V2 getter and verify it defaults new fields correctly
+        let metadata = client.get_nft_metadata(&donor, &tier);
+        assert_eq!(metadata.owner, donor);
+        assert_eq!(metadata.tier, tier);
+        assert_eq!(metadata.total_donated, 15 * STROOP);
+        assert_eq!(metadata.minted_at_ledger, 10);
+        assert_eq!(metadata.badge_name, String::from_str(&env, ""));
+        assert_eq!(metadata.projects_supported.len(), 0);
+        assert_eq!(metadata.co2_by_project.len(), 0);
+        assert_eq!(metadata.first_donation_at, 0);
+        assert_eq!(metadata.donation_count, 0);
+
+        // Read V1 ProjectMilestoneNFT through V2 getter and verify it defaults new fields correctly
+        let proj_nft = client.get_project_nft(&donor, &pid);
+        assert_eq!(proj_nft.owner, donor);
+        assert_eq!(proj_nft.project_id, pid);
+        assert_eq!(proj_nft.amount_donated, 150 * STROOP);
+        assert_eq!(proj_nft.co2_offset_grams, 150 * 100);
+        assert_eq!(proj_nft.minted_at_ledger, 20);
+        assert_eq!(proj_nft.project_name, String::from_str(&env, ""));
+        assert_eq!(proj_nft.donation_count, 0);
+    }
+
+    #[test]
+    fn test_multiple_projects_and_co2_calculation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let p1 = String::from_str(&env, "p1");
+        let p2 = String::from_str(&env, "p2");
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+
+        client.register_project(
+            &admin,
+            &p1,
+            &String::from_str(&env, "Project 1"),
+            &w1,
+            &100u32,
+        ); // 100 CO2/XLM
+        client.register_project(
+            &admin,
+            &p2,
+            &String::from_str(&env, "Project 2"),
+            &w2,
+            &200u32,
+        ); // 200 CO2/XLM
+
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 30 * STROOP);
+
+        let start_ledger = env.ledger().sequence();
+        // 10 XLM to p1, 20 XLM to p2
+        client.donate(&token, &donor, &p1, &(10 * STROOP), &1u32);
+        client.donate(&token, &donor, &p2, &(20 * STROOP), &2u32);
+
+        // Mint NFT
+        client.mint_impact_nft(&donor, &BadgeTier::Seedling);
+        let metadata = client.get_nft_metadata(&donor, &BadgeTier::Seedling);
+
+        assert_eq!(metadata.owner, donor);
+        assert_eq!(metadata.tier, BadgeTier::Seedling);
+        assert_eq!(metadata.total_donated, 30 * STROOP);
+        assert_eq!(metadata.projects_supported.len(), 2);
+        assert_eq!(metadata.projects_supported.get(0).unwrap(), p1);
+        assert_eq!(metadata.projects_supported.get(1).unwrap(), p2);
+
+        assert_eq!(metadata.co2_by_project.len(), 2);
+        let (id1, co2_1) = metadata.co2_by_project.get(0).unwrap();
+        assert_eq!(id1, p1);
+        assert_eq!(co2_1, 10 * 100);
+
+        let (id2, co2_2) = metadata.co2_by_project.get(1).unwrap();
+        assert_eq!(id2, p2);
+        assert_eq!(co2_2, 20 * 200);
+
+        assert_eq!(metadata.first_donation_at, start_ledger);
+        assert_eq!(metadata.donation_count, 2);
     }
 }

@@ -23,9 +23,20 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 
 **Description**: Emitted when a donor reaches a new badge tier and receives an NFT.
 
-| Event Name | Topics                | Data                                        | When Emitted              |
-| ---------- | --------------------- | ------------------------------------------- | ------------------------- |
-| `nft_mint` | `["nft_mint", donor]` | `{ "badge_tier": String, "token_id": u32 }` | On new badge tier reached |
+| Event Name | Topics                | Data               | When Emitted              |
+| ---------- | --------------------- | ------------------ | ------------------------- |
+| `nft_mint` | `["nft_mint", donor]` | `ImpactNFT` struct | On new badge tier reached |
+
+### `ImpactNFT` Struct Format:
+- `owner`: `Address` (owner of the NFT)
+- `tier`: `BadgeTier` (`None`, `Seedling`, `Tree`, `Forest`, `EarthGuardian`)
+- `total_donated`: `i128` (total donated in stroops)
+- `minted_at_ledger`: `u32` (ledger sequence when minted)
+- `badge_name`: `String` (human-readable badge tier name with emoji)
+- `projects_supported`: `Vec<String>` (list of supported project IDs)
+- `co2_by_project`: `Vec<(String, i128)>` (vector of tuples with `(project_id, co2_grams)`)
+- `first_donation_at`: `u32` (earliest donation ledger sequence)
+- `donation_count`: `u32` (total number of donations by the donor)
 
 ---
 
