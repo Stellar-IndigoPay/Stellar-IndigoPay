@@ -13,6 +13,7 @@ import { getGlobalImpactStats } from "@/lib/stellar";
 import { formatCO2, formatXLM, shortenAddress } from "@/utils/format";
 import type { LeaderboardEntry } from "@/utils/types";
 import type { ImpactGlobalStats } from "@/lib/api";
+import ImpactSkeleton from "@/components/ImpactSkeleton";
 
 export default function ImpactPage() {
   const router = useRouter();
@@ -58,6 +59,8 @@ export default function ImpactPage() {
     url: canonicalUrl,
     description: "Witness the real-time community impact of Stellar IndigoPay donors.",
   };
+
+  if (isLoading) return <ImpactSkeleton />;
 
   return (
     <div className="min-h-screen bg-[#FAFAFE] dark:bg-[#0A0A1A] font-body text-[#0F172A] dark:text-[#E2E8F0] pb-20">

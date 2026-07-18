@@ -49,6 +49,26 @@ postgres:
     # Primary host the standby connects to for streaming replication.
     primaryHost: postgres-primary-svc
     primaryPort: 5432
+  # ── Automated Failover ────────────────────────────────────────────
+  # When enabled, a healthcheck sidecar runs in the primary pod and
+  # automatically triggers the postgres-failover Job after 30 s of
+  # continuous pg_isready failures. Requires the failover RBAC
+  # manifests (postgres-failover-rbac.yaml).
+  # Also deploys the postgres-failover-script ConfigMap and the
+  # postgres-failover Job template.
+  failover:
+    enabled: false
+    # Image for the healthcheck sidecar. Must include pg_isready.
+    healthcheckImage: postgres:16-alpine
+    # Image for the failover Job. Must include kubectl.
+    failoverImage: bitnami/kubectl:latest
+    # Shared bearer token for the backend /api/admin/failover-metric
+    # endpoint. Generate with: openssl rand -hex 16
+    # If unset, the Job reads FAILOVER_METRICS_TOKEN from the Secret.
+    failoverMetricsToken: ""
+    # Slack webhook URL for failover notifications.
+    # If unset, the Job reads SLACK_WEBHOOK_URL from the Secret.
+    slackWebhookUrl: ""
 
 config:
   stellarNetwork: testnet

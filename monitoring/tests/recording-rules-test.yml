@@ -1,0 +1,96 @@
+# monitoring/tests/recording-rules-test.yml
+#
+# promtool test rules for monitoring/recording-rules.yml
+#
+# Validates that the SLO recording rules compute correct error ratios
+# and error budget remaining percentages.
+#
+# Run with:
+#   promtool test rules monitoring/tests/recording-rules-test.yml
+
+rule_files:
+  - ../recording-rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ── Donations SLO: error ratio calculation ────────────────────────
+  - name: donations-recording-rules
+    interval: 1m
+    input_series:
+      # Simulate 10 POST /api/donations requests per second:
+      # Counter increments by 600 every 60s interval. 10 rps × 60s = 600.
+      # Total over 10 intervals: 6000 requests, 300 of which are 5xx (5% error rate).
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="200"}'
+        values: '0+600x10'
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="500"}'
+        values: '0+30x10'   # 30/600 = 5% error rate → rate = 30/60 = 0.5/s
+
+    promql_expr_test:
+      # At 5m: rate should be 0.5 errors/s ÷ 10 total/s = 0.05 error ratio
+      - expr: 'slo:donations:error_ratio'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{}'
+            value: 0.05
+
+      # Error budget remaining: (1 - 0.05/0.005) * 100 = (1 - 10) * 100 = -900
+      # This is a negative value indicating budget is heavily over-consumed at 5% error rate.
+      - expr: 'slo:donations:error_budget_remaining_pct'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{}'
+            value: -900
+
+  # ── Donations SLO: zero-error scenario ───────────────────────────
+  - name: donations-zero-errors
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="200"}'
+        values: '0+600x10'
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="500"}'
+        values: '0+0x10'    # No errors
+
+    promql_expr_test:
+      - expr: 'slo:donations:error_ratio'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{}'
+            value: 0
+
+      # Full budget remaining
+      - expr: 'slo:donations:error_budget_remaining_pct'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{}'
+            value: 100
+
+  # ── Donations SLO: high error rate ───────────────────────────────
+  - name: donations-high-errors
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="200"}'
+        values: '0+600x10'
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="500"}'
+        values: '0+300x10'  # 300/600 = 50% error rate
+
+    promql_expr_test:
+      - expr: 'slo:donations:error_ratio'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{}'
+            value: 0.5
+
+  # ── Donations SLO: no traffic (should not produce NaN) ───────────
+  - name: donations-no-traffic
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="200"}'
+        values: '0+0x10'
+
+    promql_expr_test:
+      # When there are zero requests, the denominator guard (> 0) prevents
+      # division, so the recording rule produces no output (NaN is discarded).
+      - expr: 'slo:donations:error_ratio'
+        eval_time: 5m
+        exp_samples: []

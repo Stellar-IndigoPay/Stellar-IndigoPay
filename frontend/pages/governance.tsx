@@ -22,7 +22,7 @@ import {
 } from "@/lib/wallet";
 import { fetchProjects } from "@/lib/api";
 import { shortenAddress } from "@/utils/format";
-import { SkeletonBox } from "@/components/Skeleton";
+import GovernanceSkeleton from "@/components/GovernanceSkeleton";
 import {
   Contract,
   TransactionBuilder,
@@ -271,6 +271,8 @@ export default function GovernancePage() {
       "Vote on project verification proposals with your impact badge on Stellar IndigoPay.",
   };
 
+  if (isLoading) return <GovernanceSkeleton />;
+
   return (
     <div className="min-h-screen bg-[#fcfdfc] font-body text-forest-900 pb-20">
       <PageMeta
@@ -355,26 +357,7 @@ export default function GovernancePage() {
           </div>
         )}
 
-        {isLoading ? (
-          <div className="space-y-4 py-4">
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="card rounded-2xl p-5 animate-pulse pointer-events-none">
-                <div className="flex items-start justify-between gap-4 mb-4">
-                  <div className="flex-1 space-y-2">
-                    <SkeletonBox className="h-5 rounded w-2/3" palette="indigo" />
-                    <SkeletonBox className="h-3 rounded w-1/3" palette="indigo" />
-                  </div>
-                  <SkeletonBox className="h-6 rounded-full w-16" palette="indigo" />
-                </div>
-                <SkeletonBox className="h-2 rounded-full w-full mb-4" palette="indigo" />
-                <div className="flex gap-2">
-                  <SkeletonBox className="h-10 rounded-xl flex-1" palette="indigo" />
-                  <SkeletonBox className="h-10 rounded-xl flex-1" palette="indigo" />
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : proposals.length === 0 ? (
+        {proposals.length === 0 ? (
           <div className="card rounded-2xl p-12 text-center">
             <p className="text-[#64748B] dark:text-[#94A3B8]">
               No open proposals at the moment.

@@ -22,8 +22,9 @@ import {
 } from "@/lib/wallet";
 import type { DonorProfile, Donation, BadgeTier } from "@/utils/types";
 import { formatXLM } from "@/utils/format";
-import { SkeletonBox, SkeletonAvatar } from "@/components/Skeleton";
+import DonorProfileSkeleton from "@/components/DonorProfileSkeleton";
 import ShareButton, { donorShareText } from "@/components/ShareButton";
+import { QueryErrorFallback } from "@/components/QueryErrorFallback";
 
 // ── Badge helpers ─────────────────────────────────────────────────────────────
 
@@ -168,32 +169,6 @@ function ProfileNotFound({ publicKey }: { publicKey: string }) {
       <Link href="/projects" className="btn-primary text-sm">
         Browse Projects
       </Link>
-    </div>
-  );
-}
-
-// ── Skeleton loader ───────────────────────────────────────────────────────────
-
-function ProfileSkeleton() {
-  return (
-    <div className="animate-pulse pointer-events-none space-y-6 max-w-2xl mx-auto px-4 py-10">
-      <div className="flex items-center gap-4">
-        <SkeletonAvatar size="lg" palette="forest" />
-        <div className="space-y-2 flex-1">
-          <SkeletonBox className="h-5 rounded w-1/3" palette="forest" />
-          <SkeletonBox className="h-3 rounded w-1/2" palette="forest" />
-        </div>
-      </div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-        {[0, 1, 2].map((i) => (
-          <div key={i} className="stat-card h-20" />
-        ))}
-      </div>
-      <div className="card space-y-3">
-        {[0, 1, 2, 3].map((i) => (
-          <SkeletonBox key={i} className="h-4 rounded w-full" palette="forest" />
-        ))}
-      </div>
     </div>
   );
 }
@@ -439,44 +414,73 @@ export default function DonorProfilePage() {
   const [donations, setDonations] = useState<Donation[]>([]);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  const [loadError, setLoadError] = useState<unknown>(null);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
 
-  useEffect(() => {
-    if (!publicKey) return;
-
+  const loadProfile = useCallback((publicKey: string) => {
     let cancelled = false;
     setLoading(true);
     setNotFound(false);
+    setLoadError(null);
 
-    (async () => {
-      try {
-        const [prof, hist] = await Promise.all([
-          fetchProfile(publicKey),
-          fetchDonorHistory(publicKey),
-        ]);
-        if (!cancelled) {
-          setProfile(prof);
-          setDonations(hist.slice(0, 10));
+    Promise.all([fetchProfile(publicKey), fetchDonorHistory(publicKey)])
+      .then(([prof, hist]) => {
+        if (cancelled) return;
+        setProfile(prof);
+        setDonations(hist.slice(0, 10));
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        // A 404 (or missing status) means the profile simply doesn't exist
+        // yet — show the friendly "not set up" state. Any other error is a
+        // genuine data-fetch failure surfaced via the inline retry UI.
+        const status = (err as { response?: { status?: number } })?.response
+          ?.status;
+        if (!status || status === 404) {
+          setNotFound(true);
+        } else {
+          setLoadError(err);
         }
-      } catch (err: unknown) {
-        if (!cancelled) {
-          // Treat 404 or any error fetching the profile as "not found"
-          const status = (err as { response?: { status?: number } })?.response
-            ?.status;
-          if (!status || status === 404) {
-            setNotFound(true);
-          } else {
-            setNotFound(true); // graceful fallback for other errors
-          }
-        }
-      } finally {
+      })
+      .finally(() => {
         if (!cancelled) setLoading(false);
-      }
-    })();
+      });
 
     return () => {
       cancelled = true;
     };
-  }, [publicKey]);
+  }, []);
+
+  useEffect(() => {
+    if (!publicKey) return;
+    const cancel = loadProfile(publicKey);
+    return cancel;
+  }, [publicKey, loadProfile]);
+
+  const handleRetryLoad = useCallback(() => {
+    if (isRetrying || !publicKey) return;
+    setRetryCount((c) => c + 1);
+    setIsRetrying(true);
+    setLoading(true);
+    setLoadError(null);
+    setNotFound(false);
+    Promise.all([fetchProfile(publicKey), fetchDonorHistory(publicKey)])
+      .then(([prof, hist]) => {
+        setProfile(prof);
+        setDonations(hist.slice(0, 10));
+      })
+      .catch((err: unknown) => {
+        const status = (err as { response?: { status?: number } })?.response
+          ?.status;
+        if (!status || status === 404) setNotFound(true);
+        else setLoadError(err);
+      })
+      .finally(() => {
+        setLoading(false);
+        setIsRetrying(false);
+      });
+  }, [isRetrying, publicKey]);
 
   // ── Derived values ───────────────────────────────────────────────────────
 
@@ -507,7 +511,19 @@ export default function DonorProfilePage() {
 
   // ── Render ───────────────────────────────────────────────────────────────
 
-  if (!publicKey || loading) return <ProfileSkeleton />;
+  if (!publicKey || loading) return <DonorProfileSkeleton />;
+  if (loadError || isRetrying)
+    return (
+      <div className="max-w-2xl mx-auto px-4 py-10">
+        <QueryErrorFallback
+          error={loadError}
+          onRetry={handleRetryLoad}
+          isRetrying={isRetrying}
+          retryCount={retryCount}
+          title="Couldn't load this donor"
+        />
+      </div>
+    );
   if (notFound) return <ProfileNotFound publicKey={publicKey} />;
   if (!profile) return null;
 

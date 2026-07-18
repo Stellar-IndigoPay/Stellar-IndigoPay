@@ -74,6 +74,12 @@ const dbPoolWaitingCount = new client.Gauge({
   registers: [registry],
 });
 
+const dbPoolMax = new client.Gauge({
+  name: "db_pool_max",
+  help: "Maximum number of connections allowed in the Postgres connection pool (may change with adaptive sizing).",
+  registers: [registry],
+});
+
 const dbPoolUtilizationRatio = new client.Gauge({
   name: "db_pool_utilization_ratio",
   help: "Ratio of total connections to max connections in the Postgres pool.",
@@ -253,6 +259,15 @@ const pushLatencySeconds = new client.Histogram({
   registers: [registry],
 });
 
+// ── Postgres failover metrics ─────────────────────────────────────────────
+
+const postgresFailoverTotal = new client.Counter({
+  name: "indigopay_postgres_failover_total",
+  help: "Total number of Postgres failover events, labelled by outcome.",
+  labelNames: ["outcome"], // initiated, succeeded, failed
+  registers: [registry],
+});
+
 /**
  * Normalise an Express req.route.path / req.path to a low-cardinality
  * route label. We fall back to the literal path when no route is
@@ -273,9 +288,19 @@ function normaliseRoute(req) {
   return "unknown";
 }
 
+// ── Adaptive pool sizing ──────────────────────────────────────────────────
+
+const PG_MAX_HARD_CAP = parseInt(process.env.PG_MAX_HARD_CAP || "50", 10);
+let adaptivePoolCheckCount = 0;
+
 /**
  * Update the DB-pool gauges from the live `pg.Pool`. Cheap to call —
  * node_pg exposes `totalCount` / `idleCount` / `waitingCount` directly.
+ *
+ * Also implements adaptive pool sizing: if the pool has been saturated
+ * (all connections busy with queued waiters) for 4 consecutive checks
+ * (60 s at the default 15 s interval), increase max by 25 % up to
+ * PG_MAX_HARD_CAP.
  */
 function refreshDbPoolMetrics(pool) {
   if (!pool) return;
@@ -283,14 +308,37 @@ function refreshDbPoolMetrics(pool) {
     const totalCount = pool.totalCount ?? 0;
     const idleCount = pool.idleCount ?? 0;
     const waitingCount = pool.waitingCount ?? 0;
-    const max = pool.max || 1;
+    const max = pool.max || pool.options?.max || 1;
 
     dbPoolTotalCount.set(totalCount);
     dbPoolIdleCount.set(idleCount);
     dbPoolWaitingCount.set(waitingCount);
+    dbPoolMax.set(max);
 
-    const utilizationRatio = totalCount / max;
+    const utilizationRatio = max > 0 ? totalCount / max : 0;
     dbPoolUtilizationRatio.set(utilizationRatio);
+
+    // ── Adaptive pool sizing ──────────────────────────────────────────
+    if (totalCount >= max && waitingCount > 0 && max < PG_MAX_HARD_CAP) {
+      adaptivePoolCheckCount++;
+      if (adaptivePoolCheckCount >= 4) {
+        // 4 × ≈15 s interval = 60 s of sustained saturation
+        const newMax = Math.min(Math.ceil(max * 1.25), PG_MAX_HARD_CAP);
+        logger.info(
+          { event: "adaptive_pool_sizing", oldMax: max, newMax, waitingCount },
+          `Adaptive pool sizing: increasing pool max from ${max} to ${newMax}`,
+        );
+        if (pool.options) {
+          pool.options.max = newMax;
+        } else {
+          pool.max = newMax;
+        }
+        dbPoolMax.set(newMax);
+        adaptivePoolCheckCount = 0;
+      }
+    } else {
+      adaptivePoolCheckCount = 0;
+    }
 
     if (waitingCount > 0) {
       logger.warn(
@@ -380,6 +428,7 @@ module.exports = {
     dbPoolTotalCount,
     dbPoolIdleCount,
     dbPoolWaitingCount,
+    dbPoolMax,
     dbPoolUtilizationRatio,
     dbSlowQueriesTotal,
     dbConnectionErrorsTotal,
@@ -405,5 +454,6 @@ module.exports = {
     queueLatency,
     pushSentTotal,
     pushLatencySeconds,
+    postgresFailoverTotal,
   },
 };

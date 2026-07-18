@@ -17,8 +17,15 @@ import {
   markRetrying,
   markSubmitted,
   markFailed,
+  retryDonation,
   QueuedDonation,
 } from "./donationQueue";
+import { classifyFailure, isDuplicateResponse } from "./failureClassifier";
+import {
+  subscribe as subscribeConnectivity,
+  startConnectivityWatcher,
+  stopConnectivityWatcher,
+} from "./connectivity";
 const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
 
 // Polling interval while the app is in the foreground.
@@ -28,7 +35,9 @@ const POLL_INTERVAL_MS = 30_000;
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let isRunning = false;
+let syncing = false; // guards against concurrent queue processing
 let appStateSubscription: any = null;
+let connectivitySubscription: (() => void) | null = null;
 
 // ─── Donation submission ───────────────────────────────────────────────────
 
@@ -38,7 +47,7 @@ let appStateSubscription: any = null;
  */
 async function submitDonation(
   donation: QueuedDonation,
-): Promise<{ transactionHash: string }> {
+): Promise<{ transactionHash: string; duplicate: boolean }> {
   const payload: Record<string, any> = {
     projectId: donation.projectId,
     donorAddress: donation.donorAddress,
@@ -57,19 +66,27 @@ async function submitDonation(
     res.data?.transactionHash ||
     donation.transactionHash ||
     `tx_${Date.now()}`;
-  return { transactionHash: txHash };
+  return { transactionHash: txHash, duplicate: isDuplicateResponse(res) };
 }
 
 // ─── Retry logic ──────────────────────────────────────────────────────────
 
 /**
  * Process all retry-eligible donations. Called periodically and on
- * foreground transition.
+ * foreground / connectivity-recovery transitions.
+ *
+ * A re-entrancy guard (syncing) prevents two concurrent passes from both
+ * flipping the same donation to "retrying" and double-submitting it.
  */
 export async function processQueue(): Promise<{
   submitted: number;
   failed: number;
 }> {
+  if (syncing) {
+    return { submitted: 0, failed: 0 };
+  }
+  syncing = true;
+
   let submitted = 0;
   let failed = 0;
 
@@ -82,18 +99,32 @@ export async function processQueue(): Promise<{
         await markRetrying(donation.id);
 
         const result = await submitDonation(donation);
-        await markSubmitted(donation.id, result.transactionHash);
+
+        if (result.duplicate) {
+          // Server already recorded this donation (duplicate tx hash / replay).
+          // Treat as completed using the server's response — no error.
+          await markSubmitted(donation.id, result.transactionHash);
+        } else {
+          await markSubmitted(donation.id, result.transactionHash);
+        }
         submitted++;
       } catch (err: any) {
+        const classification = classifyFailure(err);
         await markFailed(
           donation.id,
           err?.response?.data?.message || err?.message || "Unknown error",
+          {
+            permanent: classification.retryable === false,
+            errorCode: classification.errorCode,
+          },
         );
         failed++;
       }
     }
   } catch (err) {
     console.warn("[DonationQueue] Queue processing error:", err);
+  } finally {
+    syncing = false;
   }
 
   return { submitted, failed };
@@ -116,6 +147,22 @@ function handleAppStateChange(nextState: AppStateStatus) {
   }
 }
 
+// ─── Connectivity ──────────────────────────────────────────────────────────
+
+/**
+ * When connectivity is recovered, auto-retry eligible queued donations.
+ * Permanent failures remain untouched (they are excluded by the queue's
+ * eligibility filter). Failed middle donations never block later ones
+ * because processQueue iterates the whole eligible set independently.
+ */
+function handleConnectivityChange(online: boolean) {
+  if (online) {
+    processQueue().catch(() => {});
+  }
+}
+
+// ─── Polling ──────────────────────────────────────────────────────────────
+
 /**
  * Start the polling timer that processes the queue at regular intervals.
  */
@@ -137,8 +184,8 @@ function stopPolling() {
 }
 
 /**
- * Start the retry worker. Sets up AppState listener and begins polling.
- * Safe to call multiple times (idempotent).
+ * Start the retry worker. Sets up AppState + connectivity listeners and
+ * begins polling. Safe to call multiple times (idempotent).
  */
 export function startQueueWorker(): void {
   if (isRunning) return;
@@ -146,6 +193,10 @@ export function startQueueWorker(): void {
 
   // Register AppState listener
   appStateSubscription = AppState.addEventListener("change", handleAppStateChange);
+
+  // Register connectivity listener (auto-sync on reconnect)
+  connectivitySubscription = subscribeConnectivity(handleConnectivityChange);
+  startConnectivityWatcher();
 
   // Start polling for the initial foreground state
   startPolling();
@@ -165,6 +216,11 @@ export function stopQueueWorker(): void {
     appStateSubscription.remove();
     appStateSubscription = null;
   }
+  if (connectivitySubscription) {
+    connectivitySubscription();
+    connectivitySubscription = null;
+  }
+  stopConnectivityWatcher();
 
   isRunning = false;
 }
@@ -175,4 +231,21 @@ export function stopQueueWorker(): void {
  */
 export async function retryAllNow(): Promise<{ submitted: number; failed: number }> {
   return processQueue();
+}
+
+/**
+ * Re-queue a single failed donation for an immediate retry (UI "Retry" button).
+ * No-op if the donation does not exist.
+ */
+export async function retryDonationNow(donationId: string): Promise<void> {
+  await retryDonation(donationId, true);
+  await processQueue().catch(() => {});
+}
+
+/**
+ * Report whether a sync pass is currently in flight. Used by the UI to show a
+ * "syncing" indicator and to prevent duplicate manual triggers.
+ */
+export function isSyncing(): boolean {
+  return syncing;
 }

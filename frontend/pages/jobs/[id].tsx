@@ -15,7 +15,7 @@ import {
 import { signTransactionWithWallet } from "@/lib/wallet";
 import { shortenAddress, formatXLM } from "@/utils/format";
 import type { EscrowJob } from "@/utils/types";
-import { SkeletonBox } from "@/components/Skeleton";
+import JobDetailSkeleton from "@/components/JobDetailSkeleton";
 
 interface JobPageProps {
   publicKey: string | null;
@@ -137,23 +137,7 @@ export default function JobDetailPage({ publicKey, onConnect }: JobPageProps) {
   };
 
   if (!router.isReady || loading) {
-    return (
-      <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10 animate-pulse pointer-events-none">
-        <div className="card border border-forest-100/80 shadow-sm space-y-4">
-          <SkeletonBox className="h-8 rounded w-1/2" palette="forest" />
-          <SkeletonBox className="h-4 rounded w-full" palette="forest" />
-          <SkeletonBox className="h-4 rounded w-3/4" palette="forest" />
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-4">
-            {[1, 2, 3, 4].map((i) => (
-              <div key={i} className="space-y-1">
-                <SkeletonBox className="h-3 rounded w-16" palette="forest" />
-                <SkeletonBox className="h-4 rounded w-32" palette="forest" />
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    );
+    return <JobDetailSkeleton />;
   }
 
   if (!jobId || loadError || !job) {

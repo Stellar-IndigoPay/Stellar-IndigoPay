@@ -8,10 +8,8 @@ import PageMeta from "@/components/PageMeta";
 import Link from "next/link";
 import DonateForm from "@/components/DonateForm";
 import DonationFeed from "@/components/DonationFeed";
-import ProjectProgressBar, {
-  ProjectProgressBarSkeleton,
-} from "@/components/ProjectProgressBar";
-import { SkeletonBox, SkeletonAvatar } from "@/components/Skeleton";
+import ProjectProgressBar from "@/components/ProjectProgressBar";
+import ProjectDetailSkeleton from "@/components/ProjectDetailSkeleton";
 import ToastNotification, {
   type ToastItem,
 } from "@/components/ToastNotification";
@@ -57,6 +55,7 @@ import type {
   ProjectUpdate,
 } from "@/utils/types";
 import { useWishlist } from "@/hooks/useWishlist";
+import { QueryErrorFallback } from "@/components/QueryErrorFallback";
 
 interface ProjectDetailProps {
   ogProject?: {
@@ -76,6 +75,9 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
   const [publicKey, setPublicKey] = useState<string | null>(null);
   const [project, setProject] = useState<ClimateProject | null>(null);
   const [updates, setUpdates] = useState<ProjectUpdate[]>([]);
+  const [loadError, setLoadError] = useState<unknown>(null);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
   const [updateLikes, setUpdateLikes] = useState<
     Record<string, { liked: boolean; likeCount: number }>
   >({});
@@ -131,6 +133,7 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
 
   useEffect(() => {
     if (!id) return;
+    setLoadError(null);
     Promise.all([
       fetchProject(id as string, publicKey ?? undefined),
       fetchProjectUpdates(id as string),
@@ -145,9 +148,34 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
         setIsFollowing(p.isFollowing ?? false);
         setFollowCount(p.followCount ?? 0);
       })
-      .catch(() => router.push("/projects"))
+      .catch((err) => setLoadError(err))
       .finally(() => setLoading(false));
-  }, [id, publicKey, router]);
+  }, [id, publicKey]);
+
+  const handleRetryLoad = () => {
+    if (isRetrying || !id) return;
+    setRetryCount((c) => c + 1);
+    setIsRetrying(true);
+    setLoadError(null);
+    setLoading(true);
+    Promise.all([
+      fetchProject(id as string, publicKey ?? undefined),
+      fetchProjectUpdates(id as string),
+      fetchProjectMatches(id as string),
+    ])
+      .then(([p, u, m]) => {
+        setProject(p);
+        setUpdates(u);
+        setMatches(m);
+        setIsFollowing(p.isFollowing ?? false);
+        setFollowCount(p.followCount ?? 0);
+      })
+      .catch((err) => setLoadError(err))
+      .finally(() => {
+        setLoading(false);
+        setIsRetrying(false);
+      });
+  };
 
   useEffect(() => {
     if (!project) return;
@@ -696,7 +724,8 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
     }
   };
 
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL || "https://stellar-indigopay.app";
+  const appUrl =
+    process.env.NEXT_PUBLIC_APP_URL || "https://stellar-indigopay.app";
   const canonicalUrl = `${appUrl}${router.asPath.split("?")[0]}`;
   const ogTitle = ogProject
     ? `${ogProject.name} — Stellar IndigoPay`
@@ -715,14 +744,29 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
         description: project.description,
         image: project.imageUrl || ogImage,
         url: canonicalUrl,
-        location: project.location ? { "@type": "Place", name: project.location } : undefined,
+        location: project.location
+          ? { "@type": "Place", name: project.location }
+          : undefined,
         keywords: project.tags?.join(", "),
       }
     : null;
 
+  if ((loadError && !loading && !project) || isRetrying)
+    return (
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10">
+        <QueryErrorFallback
+          error={loadError}
+          onRetry={handleRetryLoad}
+          isRetrying={isRetrying}
+          retryCount={retryCount}
+          title="Couldn't load this project"
+        />
+      </div>
+    );
+
   if (loading || !project)
     return (
-      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10 animate-pulse pointer-events-none">
+      <>
         <PageMeta
           title={ogTitle}
           description={ogDescription}
@@ -730,31 +774,8 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
           ogImage={ogImage}
           jsonLd={projectJsonLd || undefined}
         />
-        <SkeletonBox className="h-6 rounded w-1/4 mb-6" palette="forest" />
-        <div className="card space-y-4">
-          <div className="flex items-start gap-4 mb-5">
-            <SkeletonAvatar size="lg" palette="forest" />
-            <div className="flex-1 space-y-3">
-              <div className="flex gap-2">
-                <SkeletonBox className="h-6 rounded-full w-20" palette="forest" />
-                <SkeletonBox className="h-6 rounded-full w-16" palette="forest" />
-              </div>
-              <SkeletonBox className="h-8 rounded w-2/3" palette="forest" />
-              <SkeletonBox className="h-4 rounded w-1/3" palette="forest" />
-            </div>
-          </div>
-          <ProjectProgressBarSkeleton palette="forest" />
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="stat-card text-center space-y-2">
-                <SkeletonBox className="h-6 rounded w-8 mx-auto" palette="forest" />
-                <SkeletonBox className="h-5 rounded w-16 mx-auto" palette="forest" />
-                <SkeletonBox className="h-3 rounded w-12 mx-auto" palette="forest" />
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
+        <ProjectDetailSkeleton />
+      </>
     );
 
   const pct = progressPercent(project.raisedXLM, project.goalXLM);
@@ -948,14 +969,16 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
                     {shareState === "copied" ? "✓ Link copied!" : "Share 🌍"}
                   </button>
                   {/* Analytics link — visible to wallet owner only */}
-                  {publicKey && project && publicKey === project.walletAddress && (
-                    <Link
-                      href={`/projects/${project.id}/analytics`}
-                      className="text-xs py-1 px-3 rounded-lg border font-medium bg-forest-600 text-white border-forest-600 hover:bg-forest-700 transition-colors"
-                    >
-                      Analytics 📊
-                    </Link>
-                  )}
+                  {publicKey &&
+                    project &&
+                    publicKey === project.walletAddress && (
+                      <Link
+                        href={`/projects/${project.id}/analytics`}
+                        className="text-xs py-1 px-3 rounded-lg border font-medium bg-forest-600 text-white border-forest-600 hover:bg-forest-700 transition-colors"
+                      >
+                        Analytics 📊
+                      </Link>
+                    )}
                   {/* Follow button — visible to connected wallets only */}
                   {publicKey && (
                     <button
@@ -1262,6 +1285,68 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
                   <> Generated {timeAgo(project.aiSummaryGeneratedAt)}.</>
                 )}
               </p>
+            </div>
+          )}
+
+          {/* CO₂ Rate Verification Status */}
+          {(project as any).co2VerificationStatus &&
+            (project as any).co2VerificationStatus !== "pending" && (
+            <div
+              className={`card border-l-4 ${
+                (project as any).co2VerificationStatus === "verified"
+                  ? "border-emerald-500 bg-emerald-50/40"
+                  : (project as any).co2VerificationStatus === "flagged"
+                    ? "border-red-500 bg-red-50/40"
+                    : "border-amber-500 bg-amber-50/40"
+              }`}
+            >
+              <div className="flex items-start gap-3">
+                <span className="text-xl mt-0.5">
+                  {(project as any).co2VerificationStatus === "verified"
+                    ? "✅"
+                    : (project as any).co2VerificationStatus === "flagged"
+                      ? "🚩"
+                      : "⚠️"}
+                </span>
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <h2 className="font-display text-base font-semibold text-forest-900">
+                      CO₂ Rate Verification
+                    </h2>
+                    <span
+                      className={`text-[10px] uppercase tracking-wider font-bold px-2 py-0.5 rounded-full ${
+                        (project as any).co2VerificationStatus === "verified"
+                          ? "bg-emerald-200 text-emerald-800"
+                          : (project as any).co2VerificationStatus === "flagged"
+                            ? "bg-red-200 text-red-800"
+                            : "bg-amber-200 text-amber-800"
+                      }`}
+                    >
+                      {(project as any).co2VerificationStatus === "verified"
+                        ? "Verified — within scientific estimates"
+                        : (project as any).co2VerificationStatus === "flagged"
+                          ? "Flagged — rate exceeds independent estimates"
+                          : "Under review"}
+                    </span>
+                  </div>
+                  {(project as any).co2VerificationNotes && (
+                    <p className="text-sm text-forest-900/80 leading-relaxed font-body mt-1">
+                      {(project as any).co2VerificationNotes}
+                    </p>
+                  )}
+                  <p className="mt-2 text-[11px] text-[#7a9a7a] font-body leading-snug">
+                    This project&apos;s claimed CO₂ offset rate has been
+                    compared against independent scientific benchmarks for its
+                    category and location.{" "}
+                    <Link
+                      href="/transparency"
+                      className="text-forest-600 hover:underline font-semibold"
+                    >
+                      Learn more about our verification methodology →
+                    </Link>
+                  </p>
+                </div>
+              </div>
             </div>
           )}
 
@@ -1795,7 +1880,10 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
 
           {/* Embed Widget — visible to wallet owner only (issue #74) */}
           {publicKey && project && publicKey === project.walletAddress && (
-            <EmbedWidgetSection projectId={project.id} projectName={project.name} />
+            <EmbedWidgetSection
+              projectId={project.id}
+              projectName={project.name}
+            />
           )}
 
           {/* Subscribe card */}
