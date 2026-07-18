@@ -1265,6 +1265,68 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
             </div>
           )}
 
+          {/* CO₂ Rate Verification Status */}
+          {(project as any).co2VerificationStatus &&
+            (project as any).co2VerificationStatus !== "pending" && (
+            <div
+              className={`card border-l-4 ${
+                (project as any).co2VerificationStatus === "verified"
+                  ? "border-emerald-500 bg-emerald-50/40"
+                  : (project as any).co2VerificationStatus === "flagged"
+                    ? "border-red-500 bg-red-50/40"
+                    : "border-amber-500 bg-amber-50/40"
+              }`}
+            >
+              <div className="flex items-start gap-3">
+                <span className="text-xl mt-0.5">
+                  {(project as any).co2VerificationStatus === "verified"
+                    ? "✅"
+                    : (project as any).co2VerificationStatus === "flagged"
+                      ? "🚩"
+                      : "⚠️"}
+                </span>
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <h2 className="font-display text-base font-semibold text-forest-900">
+                      CO₂ Rate Verification
+                    </h2>
+                    <span
+                      className={`text-[10px] uppercase tracking-wider font-bold px-2 py-0.5 rounded-full ${
+                        (project as any).co2VerificationStatus === "verified"
+                          ? "bg-emerald-200 text-emerald-800"
+                          : (project as any).co2VerificationStatus === "flagged"
+                            ? "bg-red-200 text-red-800"
+                            : "bg-amber-200 text-amber-800"
+                      }`}
+                    >
+                      {(project as any).co2VerificationStatus === "verified"
+                        ? "Verified — within scientific estimates"
+                        : (project as any).co2VerificationStatus === "flagged"
+                          ? "Flagged — rate exceeds independent estimates"
+                          : "Under review"}
+                    </span>
+                  </div>
+                  {(project as any).co2VerificationNotes && (
+                    <p className="text-sm text-forest-900/80 leading-relaxed font-body mt-1">
+                      {(project as any).co2VerificationNotes}
+                    </p>
+                  )}
+                  <p className="mt-2 text-[11px] text-[#7a9a7a] font-body leading-snug">
+                    This project&apos;s claimed CO₂ offset rate has been
+                    compared against independent scientific benchmarks for its
+                    category and location.{" "}
+                    <Link
+                      href="/transparency"
+                      className="text-forest-600 hover:underline font-semibold"
+                    >
+                      Learn more about our verification methodology →
+                    </Link>
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Description */}
           <div className="card">
             <h2 className="font-display text-lg font-semibold text-forest-900 mb-3">

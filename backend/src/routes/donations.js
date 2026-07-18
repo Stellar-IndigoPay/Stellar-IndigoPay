@@ -94,6 +94,9 @@ async function recordDonation(req, res, next) {
     if (existingResult.rows[0]) {
       return res.json({
         success: true,
+        // Flag replayed idempotency keys so the client can treat the
+        // submission as already-completed instead of re-queuing it.
+        duplicate: true,
         data: mapDonationRow(existingResult.rows[0]),
       });
     }

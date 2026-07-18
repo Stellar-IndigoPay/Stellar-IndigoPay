@@ -1,7 +1,10 @@
 import { useEffect } from "react";
 import type { AppProps } from "next/app";
 import Head from "next/head";
+import { useRouter } from "next/router";
+import { AnimatePresence } from "framer-motion";
 import SkipToContent from "@/components/SkipToContent";
+import PageTransition from "@/components/PageTransition";
 import { ThemeTiedToaster } from "@/components/ThemeTiedToaster";
 import { ThemeProvider } from "@/lib/theme";
 import { I18nProvider } from "@/lib/i18n";
@@ -24,6 +27,7 @@ import "@/styles/globals.css";
 // SkipToContent lives at the very top so it is the first focusable
 // element on the page (satisfies WCAG 2.4.1 Bypass Blocks).
 export default function App({ Component, pageProps }: AppProps) {
+  const router = useRouter();
   const isOnline = useOnlineStatus();
 
   useEffect(() => {
@@ -81,7 +85,17 @@ export default function App({ Component, pageProps }: AppProps) {
               <SkipToContent />
               <main id="main-content" tabIndex={-1}>
                 <OfflineFallback isOnline={isOnline} />
-                <Component {...pageProps} />
+                {/* `initial={false}` prevents the entrance animation on the
+                    first SSR paint; `mode="wait"` lets the outgoing page
+                    finish exiting before the incoming one mounts, which keeps
+                    route changes smooth for both forward and back/forward
+                    navigations. Keying by `router.asPath` (including the
+                    query string) ensures dynamic routes animate too. */}
+                <AnimatePresence mode="wait" initial={false}>
+                  <PageTransition key={router.asPath}>
+                    <Component {...pageProps} />
+                  </PageTransition>
+                </AnimatePresence>
               </main>
               <InstallPrompt />
               <ThemeTiedToaster />

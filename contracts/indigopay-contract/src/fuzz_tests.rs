@@ -26,9 +26,17 @@ mod fuzz {
         BadgeTier, DataKey, IndigoPayContract, IndigoPayContractClient, MockOracle, Project,
     };
     use proptest::prelude::*;
+    use soroban_sdk::Vec;
     use soroban_sdk::{
         testutils::Address as _, token::StellarAssetClient, Address, Env, String as SorobanString,
     };
+
+    /// Helper: create a single-element signer Vec for admin calls.
+    fn signers1(env: &Env, a: &Address) -> Vec<Address> {
+        let mut v = Vec::new(env);
+        v.push_back(a.clone());
+        v
+    }
 
     // ─── Constants ───────────────────────────────────────────────────────────
 
@@ -74,7 +82,7 @@ mod fuzz {
         let client = IndigoPayContractClient::new(&env, &cid);
 
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
 
         let project_id = SorobanString::from_str(&env, "proj-fuzz-1");
         let wallet = Address::generate(&env);
@@ -108,7 +116,7 @@ mod fuzz {
         let client = IndigoPayContractClient::new(&env, &cid);
 
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
 
         let project_id = SorobanString::from_str(&env, "proj-fuzz-admin");
         let wallet = Address::generate(&env);
@@ -139,7 +147,7 @@ mod fuzz {
         let client = IndigoPayContractClient::new(&env, &cid);
 
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
 
         let project_id = SorobanString::from_str(&env, "proj-usdc-fuzz");
         let wallet = Address::generate(&env);
@@ -316,9 +324,9 @@ mod fuzz {
         let (env, admin, client, _project_id) = setup_with_admin();
         let new_admin = Address::generate(&env);
 
-        client.transfer_admin(&admin, &new_admin);
+        client.transfer_admin(&signers1(&env, &admin), &admin, &new_admin);
         let pending = client.get_pending_admin();
-        assert_eq!(pending, Some(new_admin.clone()));
+        assert_eq!(pending, Some((admin.clone(), new_admin.clone())));
 
         client.accept_admin();
         let stored_admin = client.get_admin();
@@ -330,10 +338,10 @@ mod fuzz {
     fn admin_transfer_cancel() {
         let (env, admin, client, _project_id) = setup_with_admin();
         let new_admin = Address::generate(&env);
-        client.transfer_admin(&admin, &new_admin);
+        client.transfer_admin(&signers1(&env, &admin), &admin, &new_admin);
         assert!(client.get_pending_admin().is_some());
 
-        client.cancel_admin_transfer(&admin);
+        client.cancel_admin_transfer(&signers1(&env, &admin));
         assert!(client.get_pending_admin().is_none());
         assert_eq!(client.get_admin(), admin);
     }
@@ -360,11 +368,11 @@ mod fuzz {
     #[test]
     fn veto_before_resolution() {
         let (_env, admin, client, project_id) = setup_with_admin();
-        client.create_proposal(&admin, &project_id, &720u32);
+        client.create_proposal(&signers1(&_env, &admin), &project_id, &720u32);
         let proposal_before = client.get_proposal(&project_id);
         assert!(!proposal_before.resolved);
 
-        client.veto_proposal(&admin, &project_id);
+        client.veto_proposal(&signers1(&_env, &admin), &project_id);
         let proposal_after = client.get_proposal(&project_id);
         assert!(proposal_after.resolved);
     }
@@ -372,7 +380,7 @@ mod fuzz {
     #[test]
     fn proposal_default_duration() {
         let (_env, admin, client, project_id) = setup_with_admin();
-        client.create_proposal(&admin, &project_id, &0u32);
+        client.create_proposal(&signers1(&_env, &admin), &project_id, &0u32);
         let proposal = client.get_proposal(&project_id);
         assert!(!proposal.resolved);
         assert_eq!(proposal.votes_for, 0u32);
@@ -396,7 +404,7 @@ mod fuzz {
         assert!(client.get_project(&project_id).active);
         assert!(client.get_project(&project_b).active);
 
-        client.deactivate_all_projects(&admin);
+        client.deactivate_all_projects(&signers1(&env, &admin));
 
         assert!(!client.get_project(&project_id).active);
         assert!(!client.get_project(&project_b).active);
@@ -669,7 +677,7 @@ mod fuzz {
             let donor = Address::generate(&env);
             mint_tokens(&env, &token, &donor, amount);
 
-            client.pause_contract(&admin);
+            client.pause_contract(&signers1(&env, &admin));
             prop_assert!(client.is_contract_paused());
 
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -677,7 +685,7 @@ mod fuzz {
             }));
             prop_assert!(result.is_err(), "donate should panic when contract is paused");
 
-            client.unpause_contract(&admin);
+            client.unpause_contract(&signers1(&env, &admin));
             prop_assert!(!client.is_contract_paused());
 
             client.donate(&token, &donor, &project_id, &amount, &42u32);
@@ -788,7 +796,7 @@ mod fuzz {
             let cid = env.register_contract(None, IndigoPayContract);
             let client = IndigoPayContractClient::new(&env, &cid);
             let admin = Address::generate(&env);
-            client.initialize(&admin);
+            client.initialize(&signers1(&env, &admin), &1u32);
 
             let project_id = SorobanString::from_str(&env, "proj-inactive");
             let wallet = Address::generate(&env);
@@ -845,7 +853,7 @@ mod fuzz {
             amount in 10i128 * STROOP..=10_000i128 * STROOP,
         ) {
             let (env, admin, client, project_id) = setup_with_admin();
-            client.create_proposal(&admin, &project_id, &720u32);
+            client.create_proposal(&signers1(&env, &admin), &project_id, &720u32);
 
             let token_admin = Address::generate(&env);
             let token = env
@@ -930,9 +938,9 @@ mod fuzz {
         let (env, admin, client, _project_id) = setup_with_admin();
         let new_admin = Address::generate(&env);
 
-        client.transfer_admin(&admin, &new_admin);
+        client.transfer_admin(&signers1(&env, &admin), &admin, &new_admin);
         let pending = client.get_pending_admin();
-        assert_eq!(pending, Some(new_admin.clone()));
+        assert_eq!(pending, Some((admin.clone(), new_admin.clone())));
 
         client.accept_admin();
         let stored_admin = client.get_admin();
@@ -944,10 +952,10 @@ mod fuzz {
     fn test_admin_transfer_cancel() {
         let (env, admin, client, _project_id) = setup_with_admin();
         let new_admin = Address::generate(&env);
-        client.transfer_admin(&admin, &new_admin);
+        client.transfer_admin(&signers1(&env, &admin), &admin, &new_admin);
         assert!(client.get_pending_admin().is_some());
 
-        client.cancel_admin_transfer(&admin);
+        client.cancel_admin_transfer(&signers1(&env, &admin));
         assert!(client.get_pending_admin().is_none());
         assert_eq!(client.get_admin(), admin);
     }
@@ -973,20 +981,20 @@ mod fuzz {
 
     #[test]
     fn test_veto_before_resolution() {
-        let (_env, admin, client, project_id) = setup_with_admin();
-        client.create_proposal(&admin, &project_id, &720u32);
+        let (env, admin, client, project_id) = setup_with_admin();
+        client.create_proposal(&signers1(&env, &admin), &project_id, &720u32);
         let proposal_before = client.get_proposal(&project_id);
         assert!(!proposal_before.resolved);
 
-        client.veto_proposal(&admin, &project_id);
+        client.veto_proposal(&signers1(&env, &admin), &project_id);
         let proposal_after = client.get_proposal(&project_id);
         assert!(proposal_after.resolved);
     }
 
     #[test]
     fn test_proposal_default_duration() {
-        let (_env, admin, client, project_id) = setup_with_admin();
-        client.create_proposal(&admin, &project_id, &0u32);
+        let (env, admin, client, project_id) = setup_with_admin();
+        client.create_proposal(&signers1(&env, &admin), &project_id, &0u32);
         let proposal = client.get_proposal(&project_id);
         assert!(!proposal.resolved);
         assert_eq!(proposal.votes_for, 0u32);
@@ -1010,7 +1018,7 @@ mod fuzz {
         assert!(client.get_project(&project_id).active);
         assert!(client.get_project(&project_b).active);
 
-        client.deactivate_all_projects(&admin);
+        client.deactivate_all_projects(&signers1(&env, &admin));
 
         assert!(!client.get_project(&project_id).active);
         assert!(!client.get_project(&project_b).active);
@@ -1019,7 +1027,7 @@ mod fuzz {
     #[test]
     fn test_badge_weighted_voting_seedling_and_earth_guardian() {
         let (env, admin, client, project_id) = setup_with_admin();
-        client.create_proposal(&admin, &project_id, &720u32);
+        client.create_proposal(&signers1(&env, &admin), &project_id, &720u32);
 
         let token_admin = Address::generate(&env);
         let token = env
@@ -1047,7 +1055,7 @@ mod fuzz {
     #[test]
     fn test_badge_weighted_voting_none_tier_panics() {
         let (env, admin, client, project_id) = setup_with_admin();
-        client.create_proposal(&admin, &project_id, &720u32);
+        client.create_proposal(&signers1(&env, &admin), &project_id, &720u32);
 
         let voter = Address::generate(&env);
         let result = client.try_vote_verify_project(&voter, &project_id, &true);

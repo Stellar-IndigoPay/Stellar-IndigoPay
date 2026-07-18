@@ -2,6 +2,16 @@
 
 ### Features
 
+* **frontend,backend:** real-time transparency dashboard with SLO, business metrics, and donation geo-map (closes #253)
+  - New public dashboard page at `/transparency` with platform health banner, impact stat cards, live donation map, and recent donations feed
+  - Health banner polls `/api/readyz` every 30s displaying operational/degraded/outage status with expandable detail rows
+  - Impact overview with 4 animated stat cards (total donated, CO₂ offset, active projects, unique donors) using `AnimatedNumber`
+  - Enhanced `WorldMap` component supports real-time donation markers with pulse animations and fade-out effects
+  - SLO status panel with error-budget gauges for donation and project-listing SLOs, visible only when a wallet is connected
+  - Custom hooks (`useGlobalStats`, `useSLOData`) with configurable polling intervals
+  - New backend endpoint `GET /api/admin/metrics/slo` proxies Prometheus SLO recording rules with per-query error isolation
+  - 10 frontend unit tests (4 HealthBanner, 4 StatCard, 4 SLOStatusPanel) + 4 backend SLO endpoint tests
+
 * **frontend:** implement Playwright end-to-end test suite covering critical user journeys (GF-052, closes #110)
   - Set up Playwright configuration in `playwright.config.ts` with Next.js dev server and Chrome browser projects
   - Implement mock fixtures for Freighter wallet injection (`freighter.ts`), Horizon API/Soroban RPC responses (`horizon.ts`), and backend REST endpoints (`api.ts`)

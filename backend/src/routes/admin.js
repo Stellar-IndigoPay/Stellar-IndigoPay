@@ -359,5 +359,6 @@ router.use("/documents", require("./admin/documents"));
 router.use("/webhooks", require("./admin/webhooks"));
 router.use("/indexer", require("./admin/indexer"));
 router.use("/secret-rotations", require("./admin/secretRotations"));
+router.use("/metrics", require("./admin/metrics"));
 
 module.exports = router;

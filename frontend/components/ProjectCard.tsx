@@ -2,6 +2,7 @@
  * components/ProjectCard.tsx
  */
 import Link from "next/link";
+import { motion } from "framer-motion";
 import type { ClimateProject } from "@/utils/types";
 import {
   formatXLM,
@@ -31,20 +32,25 @@ export default function ProjectCard({ project }: { project: ClimateProject }) {
         className="card-hover group animate-fade-in flex flex-col h-full relative overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-[#818CF8] focus-visible:ring-offset-2 dark:focus-visible:ring-offset-[#0A0A1A]"
         aria-label={`View project: ${project.name}`}
       >
-        {/* Category icon + badges */}
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2">
-            <div className="w-10 h-10 rounded-xl bg-[rgba(99,102,241,0.08)] dark:bg-[rgba(129,140,248,0.10)] flex items-center justify-center text-xl border border-[rgba(99,102,241,0.12)] dark:border-[rgba(129,140,248,0.15)]">
-              {CATEGORY_ICONS[project.category] || "🌿"}
-            </div>
-            <div>
-              <p className="text-xs text-[#475569] dark:text-[#94A3B8] font-body">
-                {project.category}
-              </p>
-              <p className="text-xs text-[#64748B] dark:text-[#64748B] font-body">
-                {project.location}
-              </p>
-            </div>
+        <motion.div
+          whileTap={{ scale: 0.98 }}
+          transition={{ duration: 0.15, ease: "easeOut" }}
+          className="flex flex-col h-full relative overflow-hidden"
+        >
+          {/* Category icon + badges */}
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <div className="w-10 h-10 rounded-xl bg-[rgba(99,102,241,0.08)] dark:bg-[rgba(129,140,248,0.10)] flex items-center justify-center text-xl border border-[rgba(99,102,241,0.12)] dark:border-[rgba(129,140,248,0.15)]">
+                {CATEGORY_ICONS[project.category] || "🌿"}
+              </div>
+              <div>
+                <p className="text-xs text-[#475569] dark:text-[#94A3B8] font-body">
+                  {project.category}
+                </p>
+                <p className="text-xs text-[#64748B] dark:text-[#64748B] font-body">
+                  {project.location}
+                </p>
+              </div>
           </div>
           <div className="flex items-center gap-1.5">
             {isComplete ? (
@@ -129,13 +135,14 @@ export default function ProjectCard({ project }: { project: ClimateProject }) {
               </span>
             </span>
           </div>
+          </div>
           <span
             className="text-xs font-semibold text-[#4F46E5] dark:text-[#818CF8] font-body group-hover:text-[#6366F1]"
             aria-hidden="true"
           >
             Donate →
           </span>
-        </div>
+        </motion.div>
       </Link>
 
       {/* Wishlist Toggle — SIBLING of the <a>, NOT nested, so it is valid HTML. */}
