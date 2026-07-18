@@ -127,6 +127,35 @@ pub struct ImpactNFT {
     pub tier: BadgeTier,
     pub total_donated: i128,
     pub minted_at_ledger: u32,
+    // NEW: appended fields (backward compatible)
+    pub badge_name: String,                  // "Earth Guardian 🌍"
+    pub projects_supported: Vec<String>,     // List of project IDs
+    pub co2_by_project: Vec<(String, i128)>, // (project_id, co2_grams)
+    pub first_donation_at: u32,
+    pub donation_count: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ImpactNFTMetadata {
+    pub owner: Address,
+    pub tier: BadgeTier,
+    pub total_donated: i128,
+    pub minted_at_ledger: u32,
+    pub badge_name: String,
+    pub projects_supported: Vec<String>,
+    pub co2_by_project: Vec<(String, i128)>,
+    pub first_donation_at: u32,
+    pub donation_count: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ImpactNFTV1 {
+    pub owner: Address,
+    pub tier: BadgeTier,
+    pub total_donated: i128,
+    pub minted_at_ledger: u32,
 }
 
 /// Per-project milestone NFT awarded when a donor's cumulative donation to a
@@ -134,6 +163,19 @@ pub struct ImpactNFT {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ProjectMilestoneNFT {
+    pub owner: Address,
+    pub project_id: String,
+    pub amount_donated: i128,
+    pub co2_offset_grams: i128,
+    pub minted_at_ledger: u32,
+    // NEW: appended fields (backward compatible)
+    pub project_name: String,
+    pub donation_count: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ProjectMilestoneNFTV1 {
     pub owner: Address,
     pub project_id: String,
     pub amount_donated: i128,
@@ -346,6 +388,75 @@ fn ensure_min_ttl(env: &Env, min_ledgers: u32) {
     env.storage()
         .instance()
         .extend_ttl(min_ledgers, min_ledgers);
+}
+
+fn create_impact_nft(env: &Env, donor: Address, tier: BadgeTier, stats: &DonorStats) -> ImpactNFT {
+    let mut projects = Vec::new(env);
+    let mut co2_list = Vec::new(env);
+
+    let project_ids: Vec<String> = env
+        .storage()
+        .instance()
+        .get(&DataKey::ProjectIdsAll)
+        .unwrap_or(Vec::new(env));
+
+    for pid in project_ids.iter() {
+        let donated_key = DataKey::HasDonated(pid.clone(), donor.clone());
+        if env.storage().instance().has(&donated_key) {
+            projects.push_back(pid.clone());
+            let donor_project_total: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::DonorProjectTotal(pid.clone(), donor.clone()))
+                .unwrap_or(0);
+            let project: Project = env
+                .storage()
+                .instance()
+                .get(&DataKey::Project(pid.clone()))
+                .expect("Project not found");
+            let co2 = (donor_project_total / STROOP) * project.co2_per_xlm as i128;
+            co2_list.push_back((pid, co2));
+        }
+    }
+
+    let badge_name = match tier {
+        BadgeTier::Seedling => String::from_str(env, "Seedling 🌱"),
+        BadgeTier::Tree => String::from_str(env, "Tree 🌳"),
+        BadgeTier::Forest => String::from_str(env, "Forest 🌲"),
+        BadgeTier::EarthGuardian => String::from_str(env, "Earth Guardian 🌍"),
+        BadgeTier::None => panic!("Cannot mint NFT for None tier"),
+    };
+
+    let mut first_donation_at = 0u32;
+    let donation_count: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::DonationCount)
+        .unwrap_or(0);
+    for i in 0..donation_count {
+        if let Some(rec) = env
+            .storage()
+            .instance()
+            .get::<_, DonationRecord>(&DataKey::DonationRecord(i))
+        {
+            if rec.donor == donor {
+                first_donation_at = rec.ledger;
+                break;
+            }
+        }
+    }
+
+    ImpactNFT {
+        owner: donor,
+        tier,
+        total_donated: stats.total_donated,
+        minted_at_ledger: env.ledger().sequence(),
+        badge_name,
+        projects_supported: projects,
+        co2_by_project: co2_list,
+        first_donation_at,
+        donation_count: stats.donation_count,
+    }
 }
 
 fn calculate_badge(total_stroops: i128) -> BadgeTier {
@@ -783,17 +894,11 @@ impl IndigoPayContract {
         if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
             let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
             if !env.storage().instance().has(&nft_key) {
-                let nft = ImpactNFT {
-                    owner: donor.clone(),
-                    tier: donor_stats.badge.clone(),
-                    total_donated: donor_stats.total_donated,
-                    minted_at_ledger: env.ledger().sequence(),
-                };
+                let nft =
+                    create_impact_nft(&env, donor.clone(), donor_stats.badge.clone(), &donor_stats);
                 env.storage().instance().set(&nft_key, &nft);
-                env.events().publish(
-                    (symbol_short!("nft_mint"), donor.clone()),
-                    donor_stats.badge.clone(),
-                );
+                env.events()
+                    .publish((symbol_short!("nft_mint"), donor.clone()), nft);
             }
         }
 
@@ -959,17 +1064,11 @@ impl IndigoPayContract {
         if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
             let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
             if !env.storage().instance().has(&nft_key) {
-                let nft = ImpactNFT {
-                    owner: donor.clone(),
-                    tier: donor_stats.badge.clone(),
-                    total_donated: donor_stats.total_donated,
-                    minted_at_ledger: env.ledger().sequence(),
-                };
+                let nft =
+                    create_impact_nft(&env, donor.clone(), donor_stats.badge.clone(), &donor_stats);
                 env.storage().instance().set(&nft_key, &nft);
-                env.events().publish(
-                    (symbol_short!("nft_mint"), donor.clone()),
-                    donor_stats.badge.clone(),
-                );
+                env.events()
+                    .publish((symbol_short!("nft_mint"), donor.clone()), nft);
             }
         }
 
@@ -1176,15 +1275,10 @@ impl IndigoPayContract {
             panic!("NFT already minted for this tier");
         }
 
-        let nft = ImpactNFT {
-            owner: donor.clone(),
-            tier: tier.clone(),
-            total_donated: stats.total_donated,
-            minted_at_ledger: env.ledger().sequence(),
-        };
+        let nft = create_impact_nft(&env, donor.clone(), tier.clone(), &stats);
         env.storage().instance().set(&key, &nft);
         env.events()
-            .publish((symbol_short!("nft_mint"), donor), tier);
+            .publish((symbol_short!("nft_mint"), donor), nft);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
@@ -1228,12 +1322,34 @@ impl IndigoPayContract {
             .checked_mul(co2_per_xlm)
             .expect("CO2 calculation overflow");
 
+        let project_name = project.name.clone();
+
+        let mut donation_count = 0u32;
+        let dc: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationCount)
+            .unwrap_or(0);
+        for i in 0..dc {
+            if let Some(rec) = env
+                .storage()
+                .instance()
+                .get::<_, DonationRecord>(&DataKey::DonationRecord(i))
+            {
+                if rec.donor == donor && rec.project == project_id {
+                    donation_count += 1;
+                }
+            }
+        }
+
         let nft = ProjectMilestoneNFT {
             owner: donor.clone(),
             project_id: project_id.clone(),
             amount_donated: proj_total,
             co2_offset_grams: co2_offset,
             minted_at_ledger: env.ledger().sequence(),
+            project_name,
+            donation_count,
         };
         env.storage().instance().set(&nft_key, &nft);
         env.events().publish(
@@ -1250,10 +1366,69 @@ impl IndigoPayContract {
     }
 
     pub fn get_project_nft(env: Env, donor: Address, project_id: String) -> ProjectMilestoneNFT {
-        env.storage()
+        let key = DataKey::ProjectMilestoneNFT(project_id, donor);
+        let raw_val: soroban_sdk::Val = env
+            .storage()
             .instance()
-            .get(&DataKey::ProjectMilestoneNFT(project_id, donor))
-            .expect("Project milestone NFT not found")
+            .get(&key)
+            .expect("Project milestone NFT not found");
+        if let Ok(nft) = ProjectMilestoneNFT::try_from_val(&env, &raw_val) {
+            nft
+        } else if let Ok(nft_v1) = ProjectMilestoneNFTV1::try_from_val(&env, &raw_val) {
+            ProjectMilestoneNFT {
+                owner: nft_v1.owner,
+                project_id: nft_v1.project_id,
+                amount_donated: nft_v1.amount_donated,
+                co2_offset_grams: nft_v1.co2_offset_grams,
+                minted_at_ledger: nft_v1.minted_at_ledger,
+                project_name: String::from_str(&env, ""),
+                donation_count: 0,
+            }
+        } else {
+            panic!("Invalid ProjectMilestoneNFT format");
+        }
+    }
+
+    pub fn get_nft_metadata(env: Env, donor: Address, tier: BadgeTier) -> ImpactNFTMetadata {
+        let key = DataKey::ImpactNFT(donor, tier);
+        let raw_val: soroban_sdk::Val = env
+            .storage()
+            .instance()
+            .get(&key)
+            .expect("Impact NFT not found");
+        let nft = if let Ok(nft) = ImpactNFT::try_from_val(&env, &raw_val) {
+            nft
+        } else if let Ok(nft_v1) = ImpactNFTV1::try_from_val(&env, &raw_val) {
+            ImpactNFT {
+                owner: nft_v1.owner,
+                tier: nft_v1.tier,
+                total_donated: nft_v1.total_donated,
+                minted_at_ledger: nft_v1.minted_at_ledger,
+                badge_name: String::from_str(&env, ""),
+                projects_supported: Vec::new(&env),
+                co2_by_project: Vec::new(&env),
+                first_donation_at: 0,
+                donation_count: 0,
+            }
+        } else {
+            panic!("Invalid ImpactNFT format");
+        };
+
+        ImpactNFTMetadata {
+            owner: nft.owner,
+            tier: nft.tier,
+            total_donated: nft.total_donated,
+            minted_at_ledger: nft.minted_at_ledger,
+            badge_name: nft.badge_name,
+            projects_supported: nft.projects_supported,
+            co2_by_project: nft.co2_by_project,
+            first_donation_at: nft.first_donation_at,
+            donation_count: nft.donation_count,
+        }
+    }
+
+    pub fn transfer_impact_nft(_env: Env, _from: Address, _to: Address, _tier: BadgeTier) {
+        panic!("Impact NFTs are soulbound and cannot be transferred");
     }
 
     // ─── Governance ───────────────────────────────────────────────────────────
@@ -1573,17 +1748,11 @@ impl IndigoPayContract {
         if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
             let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
             if !env.storage().instance().has(&nft_key) {
-                let nft = ImpactNFT {
-                    owner: donor.clone(),
-                    tier: donor_stats.badge.clone(),
-                    total_donated: donor_stats.total_donated,
-                    minted_at_ledger: env.ledger().sequence(),
-                };
+                let nft =
+                    create_impact_nft(&env, donor.clone(), donor_stats.badge.clone(), &donor_stats);
                 env.storage().instance().set(&nft_key, &nft);
-                env.events().publish(
-                    (symbol_short!("nft_mint"), donor.clone()),
-                    donor_stats.badge.clone(),
-                );
+                env.events()
+                    .publish((symbol_short!("nft_mint"), donor.clone()), nft);
             }
         }
 
@@ -2194,10 +2363,8 @@ impl IndigoPayContract {
             }
         }
 
-        env.events().publish(
-            (symbol_short!("st_exp"), admin),
-            out.len() as u32,
-        );
+        env.events()
+            .publish((symbol_short!("st_exp"), admin), out.len() as u32);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
         out
     }
@@ -2255,9 +2422,7 @@ impl IndigoPayContract {
                 }
             } else if tag == String::from_str(&env, "USDCTokenAddress") {
                 if let ContractValue::Address(v) = val {
-                    env.storage()
-                        .instance()
-                        .set(&DataKey::USDCTokenAddress, &v);
+                    env.storage().instance().set(&DataKey::USDCTokenAddress, &v);
                 }
             } else if tag == String::from_str(&env, "OracleAddress") {
                 if let ContractValue::Address(v) = val {
@@ -2265,9 +2430,7 @@ impl IndigoPayContract {
                 }
             } else if tag == String::from_str(&env, "ContractWasmHash") {
                 if let ContractValue::BytesN32(v) = val {
-                    env.storage()
-                        .instance()
-                        .set(&DataKey::ContractWasmHash, &v);
+                    env.storage().instance().set(&DataKey::ContractWasmHash, &v);
                 }
             } else if tag == String::from_str(&env, "PendingAdmin") {
                 if let ContractValue::Address(v) = val {
@@ -3916,7 +4079,9 @@ mod tests {
         client.register_project(&admin, &p3, &String::from_str(&env, "Solar"), &w3, &150u32);
 
         let token_admin = Address::generate(&env);
-        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
         let ta = soroban_sdk::token::StellarAssetClient::new(&env, &token);
 
         let donor_a = Address::generate(&env);
@@ -4170,5 +4335,171 @@ mod tests {
         expected_tag.append(&p1);
         let found = snapshot.iter().any(|e| e.tag == expected_tag);
         assert!(found, "snapshot must contain Proposal entry for p1");
+    }
+
+    #[test]
+    fn test_get_nft_metadata_success() {
+        let (env, cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 25 * STROOP);
+        let start_ledger = env.ledger().sequence();
+        client.donate(&token, &donor, &pid, &(25 * STROOP), &1u32);
+
+        // Verify NFT is minted
+        assert!(client.has_nft(&donor, &BadgeTier::Seedling));
+
+        let metadata = client.get_nft_metadata(&donor, &BadgeTier::Seedling);
+        assert_eq!(metadata.owner, donor);
+        assert_eq!(metadata.tier, BadgeTier::Seedling);
+        assert_eq!(metadata.total_donated, 25 * STROOP);
+        assert_eq!(metadata.minted_at_ledger, start_ledger);
+        assert_eq!(metadata.badge_name, String::from_str(&env, "Seedling 🌱"));
+        assert_eq!(metadata.projects_supported.len(), 1);
+        assert_eq!(metadata.projects_supported.get(0).unwrap(), pid);
+        assert_eq!(metadata.co2_by_project.len(), 1);
+        let (p, co2) = metadata.co2_by_project.get(0).unwrap();
+        assert_eq!(p, pid);
+        assert_eq!(co2, 25 * 100);
+        assert_eq!(metadata.first_donation_at, start_ledger);
+        assert_eq!(metadata.donation_count, 1);
+    }
+
+    #[test]
+    fn test_transfer_impact_nft_panics() {
+        let env = Env::default();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+        let tier = BadgeTier::Seedling;
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.transfer_impact_nft(&from, &to, &tier);
+        }));
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        let err_msg = err.downcast_ref::<&str>().map(|s| *s).or_else(|| {
+            err.downcast_ref::<std::string::String>()
+                .map(|s| s.as_str())
+        });
+        assert_eq!(
+            err_msg,
+            Some("Impact NFTs are soulbound and cannot be transferred")
+        );
+    }
+
+    #[test]
+    fn test_backward_compatibility_decoding() {
+        let (env, cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let tier = BadgeTier::Seedling;
+
+        // Manually insert an old V1 ImpactNFT into storage
+        env.as_contract(&cid, || {
+            env.storage().instance().set(
+                &DataKey::ImpactNFT(donor.clone(), tier.clone()),
+                &ImpactNFTV1 {
+                    owner: donor.clone(),
+                    tier: tier.clone(),
+                    total_donated: 15 * STROOP,
+                    minted_at_ledger: 10,
+                },
+            );
+
+            // Manually insert an old V1 ProjectMilestoneNFT into storage
+            env.storage().instance().set(
+                &DataKey::ProjectMilestoneNFT(pid.clone(), donor.clone()),
+                &ProjectMilestoneNFTV1 {
+                    owner: donor.clone(),
+                    project_id: pid.clone(),
+                    amount_donated: 150 * STROOP,
+                    co2_offset_grams: 150 * 100,
+                    minted_at_ledger: 20,
+                },
+            );
+        });
+
+        // Read V1 ImpactNFT through V2 getter and verify it defaults new fields correctly
+        let metadata = client.get_nft_metadata(&donor, &tier);
+        assert_eq!(metadata.owner, donor);
+        assert_eq!(metadata.tier, tier);
+        assert_eq!(metadata.total_donated, 15 * STROOP);
+        assert_eq!(metadata.minted_at_ledger, 10);
+        assert_eq!(metadata.badge_name, String::from_str(&env, ""));
+        assert_eq!(metadata.projects_supported.len(), 0);
+        assert_eq!(metadata.co2_by_project.len(), 0);
+        assert_eq!(metadata.first_donation_at, 0);
+        assert_eq!(metadata.donation_count, 0);
+
+        // Read V1 ProjectMilestoneNFT through V2 getter and verify it defaults new fields correctly
+        let proj_nft = client.get_project_nft(&donor, &pid);
+        assert_eq!(proj_nft.owner, donor);
+        assert_eq!(proj_nft.project_id, pid);
+        assert_eq!(proj_nft.amount_donated, 150 * STROOP);
+        assert_eq!(proj_nft.co2_offset_grams, 150 * 100);
+        assert_eq!(proj_nft.minted_at_ledger, 20);
+        assert_eq!(proj_nft.project_name, String::from_str(&env, ""));
+        assert_eq!(proj_nft.donation_count, 0);
+    }
+
+    #[test]
+    fn test_multiple_projects_and_co2_calculation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let p1 = String::from_str(&env, "p1");
+        let p2 = String::from_str(&env, "p2");
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+
+        client.register_project(
+            &admin,
+            &p1,
+            &String::from_str(&env, "Project 1"),
+            &w1,
+            &100u32,
+        ); // 100 CO2/XLM
+        client.register_project(
+            &admin,
+            &p2,
+            &String::from_str(&env, "Project 2"),
+            &w2,
+            &200u32,
+        ); // 200 CO2/XLM
+
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 30 * STROOP);
+
+        let start_ledger = env.ledger().sequence();
+        // 10 XLM to p1, 20 XLM to p2
+        client.donate(&token, &donor, &p1, &(10 * STROOP), &1u32);
+        client.donate(&token, &donor, &p2, &(20 * STROOP), &2u32);
+
+        // Mint NFT
+        client.mint_impact_nft(&donor, &BadgeTier::Seedling);
+        let metadata = client.get_nft_metadata(&donor, &BadgeTier::Seedling);
+
+        assert_eq!(metadata.owner, donor);
+        assert_eq!(metadata.tier, BadgeTier::Seedling);
+        assert_eq!(metadata.total_donated, 30 * STROOP);
+        assert_eq!(metadata.projects_supported.len(), 2);
+        assert_eq!(metadata.projects_supported.get(0).unwrap(), p1);
+        assert_eq!(metadata.projects_supported.get(1).unwrap(), p2);
+
+        assert_eq!(metadata.co2_by_project.len(), 2);
+        let (id1, co2_1) = metadata.co2_by_project.get(0).unwrap();
+        assert_eq!(id1, p1);
+        assert_eq!(co2_1, 10 * 100);
+
+        let (id2, co2_2) = metadata.co2_by_project.get(1).unwrap();
+        assert_eq!(id2, p2);
+        assert_eq!(co2_2, 20 * 200);
+
+        assert_eq!(metadata.first_donation_at, start_ledger);
+        assert_eq!(metadata.donation_count, 2);
     }
 }
