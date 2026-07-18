@@ -171,6 +171,15 @@ pub struct GlobalStats {
     pub project_count: u32,
 }
 
+/// Immutable on-chain proof of a project update published off-chain.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectUpdate {
+    pub content_hash: BytesN<32>,
+    pub ledger: u32,
+    pub update_type: Symbol,
+}
+
 /// Record of a pending emergency withdrawal. One per project at a time
 /// (keyed by project_id only — a project holding multiple tokens must
 /// execute withdrawals sequentially, not in parallel).
@@ -277,6 +286,10 @@ pub enum DataKey {
     // balance concept. #277's deposit logic must increment this key on
     // deposit. See SECURITY.md and #277 for coordination notes.
     ProjectContractBalance(String, Address),
+    // Immutable project update proof, indexed from zero per project.
+    ProjectUpdate(String, u32),
+    // Number of update proofs published for a project; also the next index.
+    ProjectUpdateCount(String),
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -646,6 +659,51 @@ impl IndigoPayContract {
         env.events().publish(
             (symbol_short!("co2_rate"), admin),
             (project_id, co2_per_xlm),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Publish an immutable SHA-256 proof for off-chain project update content.
+    pub fn publish_project_update(
+        env: Env,
+        project_admin: Address,
+        project_id: String,
+        content_hash: BytesN<32>,
+        update_type: Symbol,
+    ) {
+        require_admin_for_routine(&env, &project_admin);
+        require_not_paused(&env);
+
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Project(project_id.clone()))
+        {
+            panic!("Project not found");
+        }
+
+        let count_key = DataKey::ProjectUpdateCount(project_id.clone());
+        let index: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
+        let next_index = index.checked_add(1).expect("ProjectUpdateCount overflow");
+        let update = ProjectUpdate {
+            content_hash: content_hash.clone(),
+            ledger: env.ledger().sequence(),
+            update_type: update_type.clone(),
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ProjectUpdate(project_id.clone(), index), &update);
+        env.storage().instance().set(&count_key, &next_index);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "update_published"),
+                project_admin,
+                project_id,
+                index,
+            ),
+            (content_hash, update.ledger, update_type),
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
@@ -1084,6 +1142,22 @@ impl IndigoPayContract {
             .instance()
             .get(&DataKey::Project(project_id))
             .expect("Project not found")
+    }
+
+    /// Retrieve an immutable project update proof by its zero-based index.
+    pub fn get_project_update(env: Env, project_id: String, index: u32) -> ProjectUpdate {
+        env.storage()
+            .instance()
+            .get(&DataKey::ProjectUpdate(project_id, index))
+            .expect("Project update not found")
+    }
+
+    /// Return the number of update proofs published for a project.
+    pub fn get_project_update_count(env: Env, project_id: String) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ProjectUpdateCount(project_id))
+            .unwrap_or(0)
     }
 
     pub fn get_donor_stats(env: Env, donor: Address) -> DonorStats {
@@ -2255,9 +2329,9 @@ impl OracleInterface for MockOracle {
 mod tests {
     extern crate std;
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
     use soroban_sdk::token::StellarAssetClient;
-    use soroban_sdk::{Address, BytesN, Env, String, Vec};
+    use soroban_sdk::{Address, BytesN, Env, IntoVal, String, Symbol, Val, Vec};
 
     /// Helper: create a single-element signer Vec for admin calls.
     fn signers1(env: &Env, a: &Address) -> Vec<Address> {
@@ -4120,5 +4194,170 @@ mod tests {
             .set_sequence_number(start + EMERGENCY_WITHDRAWAL_TIMELOCK);
 
         client.execute_emergency_withdrawal(&pid);
+    }
+
+    fn update_hash(env: &Env, byte: u8) -> BytesN<32> {
+        BytesN::from_array(env, &[byte; 32])
+    }
+
+    #[test]
+    fn test_project_update_count_starts_at_zero() {
+        let (env, _cid, client, _admin, pid) = setup();
+        assert_eq!(client.get_project_update_count(&pid), 0);
+        assert_eq!(
+            client.get_project_update_count(&String::from_str(&env, "unknown")),
+            0
+        );
+    }
+
+    #[test]
+    fn test_publish_and_retrieve_project_update() {
+        let (env, _cid, client, admin, pid) = setup();
+        let hash = update_hash(&env, 7);
+        let kind = Symbol::new(&env, "progress");
+
+        client.publish_project_update(&admin, &pid, &hash, &kind);
+
+        assert_eq!(
+            client.get_project_update(&pid, &0),
+            ProjectUpdate {
+                content_hash: hash,
+                ledger: env.ledger().sequence(),
+                update_type: kind,
+            }
+        );
+    }
+
+    #[test]
+    fn test_project_update_count_increments() {
+        let (env, _cid, client, admin, pid) = setup();
+        for i in 1..=3u8 {
+            client.publish_project_update(
+                &admin,
+                &pid,
+                &update_hash(&env, i),
+                &Symbol::new(&env, "progress"),
+            );
+            assert_eq!(client.get_project_update_count(&pid), i as u32);
+        }
+    }
+
+    #[test]
+    fn test_project_updates_use_incrementing_indices() {
+        let (env, _cid, client, admin, pid) = setup();
+        let first = update_hash(&env, 1);
+        let second = update_hash(&env, 2);
+        client.publish_project_update(&admin, &pid, &first, &Symbol::new(&env, "progress"));
+        client.publish_project_update(&admin, &pid, &second, &Symbol::new(&env, "milestone"));
+
+        assert_eq!(client.get_project_update(&pid, &0).content_hash, first);
+        assert_eq!(client.get_project_update(&pid, &1).content_hash, second);
+    }
+
+    #[test]
+    fn test_project_update_records_publication_ledger() {
+        let (env, _cid, client, admin, pid) = setup();
+        env.ledger().set_sequence_number(12_345);
+        client.publish_project_update(
+            &admin,
+            &pid,
+            &update_hash(&env, 3),
+            &Symbol::new(&env, "report"),
+        );
+
+        assert_eq!(client.get_project_update(&pid, &0).ledger, 12_345);
+    }
+
+    #[test]
+    fn test_project_update_preserves_update_type() {
+        let (env, _cid, client, admin, pid) = setup();
+        let kind = Symbol::new(&env, "financial");
+        client.publish_project_update(&admin, &pid, &update_hash(&env, 4), &kind);
+
+        assert_eq!(client.get_project_update(&pid, &0).update_type, kind);
+    }
+
+    #[test]
+    fn test_project_update_counts_are_isolated_per_project() {
+        let (env, _cid, client, admin, first_pid) = setup();
+        let second_pid = String::from_str(&env, "proj-002");
+        client.register_project(
+            &admin,
+            &second_pid,
+            &String::from_str(&env, "Second Project"),
+            &Address::generate(&env),
+            &100,
+        );
+        client.publish_project_update(
+            &admin,
+            &first_pid,
+            &update_hash(&env, 5),
+            &Symbol::new(&env, "progress"),
+        );
+        client.publish_project_update(
+            &admin,
+            &second_pid,
+            &update_hash(&env, 6),
+            &Symbol::new(&env, "report"),
+        );
+        client.publish_project_update(
+            &admin,
+            &second_pid,
+            &update_hash(&env, 7),
+            &Symbol::new(&env, "report"),
+        );
+
+        assert_eq!(client.get_project_update_count(&first_pid), 1);
+        assert_eq!(client.get_project_update_count(&second_pid), 2);
+    }
+
+    #[test]
+    fn test_publish_project_update_emits_event() {
+        let (env, cid, client, admin, pid) = setup();
+        let before = env.events().all().len();
+        client.publish_project_update(
+            &admin,
+            &pid,
+            &update_hash(&env, 8),
+            &Symbol::new(&env, "progress"),
+        );
+
+        let events = env.events().all();
+        assert_eq!(events.len(), before + 1);
+        let event = events.last().unwrap();
+        assert_eq!(event.0, cid);
+        let expected: Val = Symbol::new(&env, "update_published").into_val(&env);
+        assert_eq!(event.1.get(0).unwrap(), expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_publish_project_update_non_admin_fails() {
+        let (env, _cid, client, _admin, pid) = setup();
+        client.publish_project_update(
+            &Address::generate(&env),
+            &pid,
+            &update_hash(&env, 9),
+            &Symbol::new(&env, "progress"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Project not found")]
+    fn test_publish_project_update_unknown_project_fails() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.publish_project_update(
+            &admin,
+            &String::from_str(&env, "missing"),
+            &update_hash(&env, 10),
+            &Symbol::new(&env, "progress"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Project update not found")]
+    fn test_get_missing_project_update_fails() {
+        let (_env, _cid, client, _admin, pid) = setup();
+        client.get_project_update(&pid, &0);
     }
 }
