@@ -5,6 +5,7 @@ import { useState } from "react";
 import { useRouter } from "next/router";
 import LeaderboardTable from "@/components/LeaderboardTable";
 import Link from "next/link";
+import PageMeta from "@/components/PageMeta";
 
 type Period = "all" | "month" | "year";
 
@@ -18,8 +19,25 @@ export default function LeaderboardPage() {
     });
   };
 
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || "https://stellar-indigopay.app";
+  const canonicalUrl = `${appUrl}${router.asPath.split("?")[0]}`;
+  const leaderboardJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    name: "Top Climate Donors | Stellar IndigoPay",
+    url: canonicalUrl,
+    description:
+      "See the leading climate donors and their impact badges on Stellar IndigoPay.",
+  };
+
   return (
     <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10 animate-fade-in">
+      <PageMeta
+        title="Top Climate Donors | Stellar IndigoPay"
+        description="See the leading climate donors and their impact badges on Stellar IndigoPay."
+        canonicalUrl={canonicalUrl}
+        jsonLd={leaderboardJsonLd}
+      />
       <div className="text-center mb-10">
         <div className="text-5xl mb-4">🏆</div>
         <h1 className="font-display text-3xl sm:text-4xl font-bold text-[#0F172A] dark:text-[#E2E8F0] mb-3">

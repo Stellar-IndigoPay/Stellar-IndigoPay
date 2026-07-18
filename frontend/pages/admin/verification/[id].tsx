@@ -22,7 +22,7 @@ import {
 } from "@/components/admin/VerificationTable";
 import {
   adminFetch,
-  isAdminAuthenticated,
+  ensureAdminSession,
 } from "@/lib/adminAuth";
 import { formatDate, CATEGORY_ICONS } from "@/utils/format";
 import type { VerificationRequestResponse } from "@/lib/api";
@@ -96,9 +96,11 @@ export default function VerificationDetailPage() {
 
   // Check auth
   useEffect(() => {
-    if (!isAdminAuthenticated()) {
-      router.replace("/admin/login");
-    }
+    ensureAdminSession().then((ok) => {
+      if (!ok) {
+        router.replace("/admin/login");
+      }
+    });
   }, [router]);
 
   // Fetch request detail

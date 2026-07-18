@@ -247,9 +247,79 @@ are indexed and searchable by external consumers.
 
 **Description**: Emitted when the admin cancels a pending upgrade.
 
-| Event Type          | Topics           | Data | When Emitted            |
-| ------------------- | ---------------- | ---- | ----------------------- |
-| `UpgradeCancelled`  | `admin: Address` | —    | On upgrade cancellation |
+| Event Name             | Topics                     | Data                                                | When Emitted                  |
+| ---------------------- | -------------------------- | --------------------------------------------------- | ----------------------------- |
+| `contract_initialized` | `["contract_initialized"]` | `{ "admins": Vec<Address>, "threshold": u32 }`      | On contract deployment / init |
+
+---
+
+## 9. `rate_lim`
+
+**Description**: Emitted when the admin updates the per-donor per-project donation rate limit.
+
+| Event Name | Topics        | Data                                      | When Emitted                          |
+| ---------- | ------------- | ----------------------------------------- | ------------------------------------- |
+| `rate_lim` | `["rate_lim"]` | `{ "max_donations": u32, "window_ledgers": u32 }` | When admin calls `set_donation_rate_limit` |
+
+---
+
+## 10. `admin_add`
+
+**Description**: Emitted when a new admin address is added to the multi-sig set.
+
+| Event Name  | Topics           | Data                   | When Emitted                  |
+| ----------- | ---------------- | ---------------------- | ----------------------------- |
+| `admin_add` | `["admin_add"]` | `{ "admin": Address }` | When M-of-N admins call `add_admin` |
+
+---
+
+## 11. `admin_rmv`
+
+**Description**: Emitted when an admin address is removed from the multi-sig set.
+
+| Event Name  | Topics           | Data                   | When Emitted                    |
+| ----------- | ---------------- | ---------------------- | ------------------------------- |
+| `admin_rmv` | `["admin_rmv"]` | `{ "admin": Address }` | When M-of-N admins call `remove_admin` |
+
+---
+
+## 12. `thresh_up`
+
+**Description**: Emitted when the multi-sig threshold is changed.
+
+| Event Name  | Topics           | Data                          | When Emitted                      |
+| ----------- | ---------------- | ----------------------------- | --------------------------------- |
+| `thresh_up` | `["thresh_up"]` | `{ "threshold": u32 }`        | When M-of-N admins call `update_threshold` |
+
+---
+
+## 13. `ew_init`
+
+**Description**: Emitted when an admin initiates a 7-day timelocked emergency withdrawal.
+
+| Event Name | Topics                                | Data                                                               | When Emitted                                  |
+| ---------- | ------------------------------------- | ------------------------------------------------------------------ | --------------------------------------------- |
+| `ew_init`  | `["ew_init", admin, project_id]`     | `{ "new_wallet": Address, "amount": i128, "token": Address, "executable_at": u32 }` | When admin calls `initiate_emergency_withdrawal` |
+
+---
+
+## 14. `ew_exec`
+
+**Description**: Emitted when an emergency withdrawal is executed after the 7-day timelock.
+
+| Event Name | Topics                            | Data                                                   | When Emitted                                |
+| ---------- | --------------------------------- | ------------------------------------------------------ | ------------------------------------------- |
+| `ew_exec`  | `["ew_exec", project_id]`        | `{ "new_wallet": Address, "amount": i128, "token": Address }` | After timelock, funds transferred to new wallet |
+
+---
+
+## 15. `ew_cncl`
+
+**Description**: Emitted when an admin cancels a pending emergency withdrawal.
+
+| Event Name | Topics                              | Data | When Emitted                                |
+| ---------- | ----------------------------------- | ---- | ------------------------------------------- |
+| `ew_cncl`  | `["ew_cncl", admin, project_id]`   | `()` | When admin calls `cancel_emergency_withdrawal` |
 
 ---
 
@@ -259,4 +329,10 @@ are indexed and searchable by external consumers.
 - Events can be queried via Horizon or Soroban RPC tools.
 - Frontend / backend should listen to these for real-time updates, notifications, and leaderboard.
 
-**Last Updated**: July 16, 2026
+**Last Updated**: July 18, 2026
+
+---
+
+## Coordination Note for #277 (Matching Pool)
+
+`DataKey::ProjectContractBalance(String, Address)` is the **canonical per-project per-token balance ledger** for all contract-held funds. Any deposit/matching-pool logic (including #277) **must** increment this key on deposit and decrement it on withdrawal. Do not introduce a parallel balance concept — the compound key already supports multi-token per project. See `SECURITY.md` for the full rationale.

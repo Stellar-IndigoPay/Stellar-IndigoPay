@@ -81,6 +81,7 @@ export class ErrorBoundary extends React.Component<
     return (
       <View
         style={styles.container}
+        accessible={true}
         accessibilityRole="alert"
         accessibilityLiveRegion="assertive"
       >

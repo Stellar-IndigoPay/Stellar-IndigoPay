@@ -238,6 +238,6 @@ describe("DonateScreen – biometric auth gate (issue #481)", () => {
       expect(getByText("Donate to Amazon Reforestation")).toBeTruthy(),
     );
     // 🔒 is rendered in the bio hint row
-    expect(getByText("🔒")).toBeTruthy();
+    expect(getByText("🔒", { includeHiddenElements: true })).toBeTruthy();
   });
 });

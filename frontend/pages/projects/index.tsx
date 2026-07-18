@@ -2,6 +2,7 @@
  * pages/projects/index.tsx — Browse all climate projects
  */
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import type { GetServerSideProps } from "next";
 import { useRouter } from "next/router";
 import ProjectCard, { ProjectCardSkeleton } from "@/components/ProjectCard";
 import ProjectComparison from "@/components/ProjectComparison";
@@ -59,7 +60,7 @@ export default function ProjectsPage() {
     if (searchQuery && !search) {
       setSearch(searchQuery);
     }
-  }, [searchQuery]);
+  }, [searchQuery, search, setSearch]);
 
   // Click outside listener for autocomplete
   useEffect(() => {
@@ -70,7 +71,7 @@ export default function ProjectsPage() {
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
+  }, [setIsAutocompleteOpen]);
 
   // Debounced search effect
   useEffect(() => {
@@ -155,7 +156,7 @@ export default function ProjectsPage() {
       }, 500);
       return () => clearTimeout(timer);
     },
-    [router, router.query, setSearch],
+    [router, setSearch],
   );
 
   const handleSelectTag = (tag: string) => {
@@ -631,3 +632,9 @@ export default function ProjectsPage() {
     </div>
   );
 }
+
+// Forces per-request SSR so the CSP nonce set in middleware.ts reaches
+// _document.tsx — see the matching comment in pages/index.tsx.
+export const getServerSideProps: GetServerSideProps = async () => {
+  return { props: {} };
+};

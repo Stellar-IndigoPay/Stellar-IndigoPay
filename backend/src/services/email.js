@@ -236,6 +236,132 @@ function buildText({ project, update, projectUrl }) {
   ].join("\n");
 }
 
+function buildDigestHtml({ digest, dashboardUrl, unsubscribeUrl }) {
+  const donationRows = digest.recentDonations
+    .map(
+      (donation) =>
+        `<tr><td style="padding:8px 0;border-bottom:1px solid #E2E8F0;font-size:14px;color:#334155;">${escHtml(donation.projectName)}</td><td style="padding:8px 0;border-bottom:1px solid #E2E8F0;font-size:14px;color:#334155;">${donation.amountXLM} XLM</td><td style="padding:8px 0;border-bottom:1px solid #E2E8F0;font-size:14px;color:#334155;">${donation.co2OffsetKg} kg</td></tr>`,
+    )
+    .join("");
+
+  const donationTable = digest.recentDonations.length
+    ? `<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-top:20px;"><thead><tr><th align="left" style="padding:8px 0;color:#0F172A;font-size:13px;border-bottom:1px solid #E2E8F0;">Project</th><th align="right" style="padding:8px 0;color:#0F172A;font-size:13px;border-bottom:1px solid #E2E8F0;">Amount</th><th align="right" style="padding:8px 0;color:#0F172A;font-size:13px;border-bottom:1px solid #E2E8F0;">CO₂</th></tr></thead><tbody>${donationRows}</tbody></table>`
+    : "";
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#FAFAFE;font-family:'Inter',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#FAFAFE;padding:32px 0;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;max-width:600px;width:100%;">
+        <tr><td style="background:#4F46E5;padding:24px 32px;">
+          <p style="margin:0;color:#ffffff;font-size:20px;font-weight:700;">✦ Stellar-IndigoPay</p>
+          <p style="margin:4px 0 0;color:#C7D2FE;font-size:13px;">Your impact digest is ready</p>
+        </td></tr>
+        <tr><td style="padding:32px;">
+          <h1 style="margin:0 0 12px;font-size:22px;color:#0F172A;">Impact summary</h1>
+          <p style="margin:0 0 24px;font-size:15px;color:#334155;line-height:1.6;">Here’s what your contributions achieved over the last period.</p>
+
+          <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+            <tr>
+              <td style="background:#EEF2FF;border-radius:12px;padding:18px;text-align:center;vertical-align:top;">
+                <p style="margin:0;font-size:24px;font-weight:700;color:#4F46E5;">${digest.totalDonatedXLM.toFixed(2)} XLM</p>
+                <p style="margin:8px 0 0;font-size:12px;color:#64748B;">Total donated</p>
+              </td>
+              <td style="width:16px;"></td>
+              <td style="background:#EEF2FF;border-radius:12px;padding:18px;text-align:center;vertical-align:top;">
+                <p style="margin:0;font-size:24px;font-weight:700;color:#4F46E5;">${digest.co2OffsetKg.toFixed(2)} kg</p>
+                <p style="margin:8px 0 0;font-size:12px;color:#64748B;">Estimated CO₂ offset</p>
+              </td>
+            </tr>
+          </table>
+
+          <p style="margin:0 0 6px;font-size:13px;color:#0F172A;font-weight:700;">Projects supported</p>
+          <p style="margin:0 0 18px;font-size:14px;color:#334155;line-height:1.6;">${escHtml(digest.projectNames.join(", ") || "No projects listed")}</p>
+
+          ${donationTable}
+
+          <p style="margin:24px 0 0;font-size:14px;color:#334155;line-height:1.6;">Manage your giving and notification settings anytime on your dashboard.</p>
+          <p style="margin:8px 0 24px;font-size:14px;color:#334155;line-height:1.6;"><a href="${dashboardUrl}" style="color:#4F46E5;text-decoration:underline;">Open dashboard</a></p>
+          <p style="margin:0;font-size:12px;color:#94A3B8;">If you'd like to stop receiving digest summaries, <a href="${unsubscribeUrl}" style="color:#4F46E5;text-decoration:underline;">click here to unsubscribe</a>.</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
+function buildDigestText({ digest, dashboardUrl, unsubscribeUrl }) {
+  const lines = [
+    "Stellar-IndigoPay — Impact digest",
+    "",
+    `Total donated: ${digest.totalDonatedXLM.toFixed(2)} XLM`,
+    `Estimated CO₂ offset: ${digest.co2OffsetKg.toFixed(2)} kg`,
+    `Projects supported: ${digest.projectNames.join(", ")}`,
+    "",
+    "Recent donations:",
+  ];
+
+  if (digest.recentDonations.length) {
+    for (const donation of digest.recentDonations) {
+      lines.push(
+        `- ${donation.projectName}: ${donation.amountXLM.toFixed(2)} XLM, ${donation.co2OffsetKg.toFixed(2)} kg`,
+      );
+    }
+  } else {
+    lines.push("- No donations in this period.");
+  }
+
+  lines.push("", `Manage your account: ${dashboardUrl}`);
+  lines.push(`Unsubscribe from digest emails: ${unsubscribeUrl}`);
+  return lines.join("\n");
+}
+
+async function sendDigestEmail({
+  to,
+  digest,
+  dashboardUrl,
+  unsubscribeUrl,
+  subject,
+}) {
+  if (!RESEND_API_KEY) {
+    if (process.env.NODE_ENV !== "test") {
+      console.warn("[email] RESEND_API_KEY not set — skipping digest email");
+    }
+    return;
+  }
+
+  const html = buildDigestHtml({ digest, dashboardUrl, unsubscribeUrl });
+  const text = buildDigestText({ digest, dashboardUrl, unsubscribeUrl });
+
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: FROM_ADDRESS,
+      to: [to],
+      subject: sanitizeHeader(subject),
+      html,
+      text,
+      headers: {
+        "List-Unsubscribe": `<${unsubscribeUrl}>`,
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Resend digest email failed: ${errBody}`);
+  }
+
+  return await res.json();
+}
+
 /**
  * Strip CR/LF from a string to keep user-controlled text out of
  * RFC-822 headers (SMTP header injection). Applied everywhere we
@@ -255,4 +381,4 @@ function escHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
-module.exports = { sendUpdateNotifications, sendAdminVerificationNotification };
+module.exports = { sendUpdateNotifications, sendAdminVerificationNotification, sendDigestEmail };

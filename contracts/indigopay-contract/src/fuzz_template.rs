@@ -55,11 +55,11 @@
 /// Run:
 ///   cargo test --features testutils -- fuzz
 ///   FUZZ_ITERATIONS=100000 cargo test --features testutils -- fuzz
-
-// This file is a documentation template; it is NOT compiled as part of the
-// contract. Reference patterns live in `fuzz_tests.rs` alongside the
-// concrete fuzz implementations.
-
+///
+/// This file is a documentation template; it is NOT compiled as part of the
+/// contract. Reference patterns live in `fuzz_tests.rs` alongside the
+/// concrete fuzz implementations.
+///
 /// Fuzz-test template for any new state-mutating function.
 ///
 /// Replace `your_function_name` and the strategy ranges with real values.
@@ -102,7 +102,7 @@
 ///     }
 /// }
 /// ```
-
+///
 /// Recommended patterns for common fuzz scenarios:
 ///
 /// ## Overflow safety

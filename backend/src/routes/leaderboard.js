@@ -5,8 +5,11 @@
 const express = require("express");
 const router = express.Router();
 const pool = require("../db/pool");
+const { AppError } = require("../errors");
+const { validate } = require("../middleware/validate");
+const { leaderboardQuerySchema } = require("../validators/schemas");
 
-router.get("/", async (req, res, next) => {
+router.get("/", validate(leaderboardQuerySchema, "query"), async (req, res, next) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
     const period = req.query.period || "all";
@@ -143,7 +146,7 @@ router.post("/snapshot", async (req, res, next) => {
   try {
     const secret = req.headers["x-admin-secret"];
     if (!secret || secret !== process.env.ADMIN_SECRET) {
-      return res.status(403).json({ success: false, error: "Forbidden" });
+      throw new AppError("FORBIDDEN");
     }
 
     const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
