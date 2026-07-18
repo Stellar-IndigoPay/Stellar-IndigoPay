@@ -2,6 +2,7 @@
  * pages/dashboard.tsx — Donor impact dashboard
  */
 import { useState, useEffect } from "react";
+import type { GetServerSideProps } from "next";
 import Link from "next/link";
 import WalletConnect from "@/components/WalletConnect";
 import EditProfileForm from "@/components/EditProfileForm";
@@ -34,12 +35,8 @@ import {
   SkeletonDonationList,
 } from "@/components/Skeleton";
 
-interface DashboardProps {
-  publicKey: string | null;
-  onConnect: (pk: string) => void;
-}
-
-export default function Dashboard({ publicKey, onConnect }: DashboardProps) {
+export default function Dashboard() {
+  const [publicKey, setPublicKey] = useState<string | null>(null);
   const [profile, setProfile] = useState<DonorProfile | null>(null);
   const [donations, setDonations] = useState<Donation[]>([]);
   const [balance, setBalance] = useState<string | null>(null);
@@ -142,7 +139,7 @@ export default function Dashboard({ publicKey, onConnect }: DashboardProps) {
             Connect your wallet to see your donation history and impact
           </p>
         </div>
-        <WalletConnect onConnect={onConnect} />
+        <WalletConnect onConnect={setPublicKey} />
       </div>
     );
 
@@ -220,7 +217,9 @@ export default function Dashboard({ publicKey, onConnect }: DashboardProps) {
           </h1>
           <div className="flex items-center gap-2">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="address-tag">{shortenAddress(publicKey)}</span>
+            <span className="address-tag" data-testid="wallet-address">
+              {shortenAddress(publicKey)}
+            </span>
           </div>
         </div>
         <Link
@@ -487,7 +486,10 @@ export default function Dashboard({ publicKey, onConnect }: DashboardProps) {
           )}
 
           {/* Donation history */}
-          <div className="card shadow-sm border border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)]">
+          <div
+            className="card shadow-sm border border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)]"
+            data-testid="donation-history"
+          >
             <h2 className="font-display text-lg font-semibold text-[#0F172A] dark:text-[#E2E8F0] mb-5 flex items-center gap-2">
               <span>📜</span> Donation History
             </h2>
@@ -595,3 +597,9 @@ export default function Dashboard({ publicKey, onConnect }: DashboardProps) {
     </div>
   );
 }
+
+// Forces per-request SSR so the CSP nonce set in middleware.ts reaches
+// _document.tsx — see the matching comment in pages/index.tsx.
+export const getServerSideProps: GetServerSideProps = async () => {
+  return { props: {} };
+};

@@ -11,6 +11,7 @@ import {
   rpcServer,
   server,
   getDonorStats,
+  getVoterWeight,
   submitTransaction,
   formatTransactionError,
 } from "@/lib/stellar";
@@ -34,7 +35,7 @@ import {
 
 // Stellat ledger ≈ 5 s — approximate deadline display from ledger offset.
 const LEDGERS_PER_DAY = 17280;
-const QUORUM_THRESHOLD = 5;
+const QUORUM_THRESHOLD = 15;
 
 interface Proposal {
   projectId: string;
@@ -132,6 +133,7 @@ export default function GovernancePage() {
   const router = useRouter();
   const [publicKey, setPublicKey] = useState<string | null>(null);
   const [isBadgeHolder, setIsBadgeHolder] = useState(false);
+  const [votingWeight, setVotingWeight] = useState(0);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [votingId, setVotingId] = useState<string | null>(null);
@@ -186,8 +188,11 @@ export default function GovernancePage() {
       if (pk) {
         try {
           const stats = await getDonorStats(pk);
-          if (mounted && stats && stats.badge !== "None")
+          if (mounted && stats && stats.badge !== "None") {
             setIsBadgeHolder(true);
+            const weight = await getVoterWeight(pk);
+            if (mounted) setVotingWeight(weight);
+          }
         } catch {
           // not a badge holder yet
         }
@@ -212,7 +217,11 @@ export default function GovernancePage() {
     if (pk) {
       try {
         const stats = await getDonorStats(pk);
-        if (stats && stats.badge !== "None") setIsBadgeHolder(true);
+        if (stats && stats.badge !== "None") {
+          setIsBadgeHolder(true);
+          const weight = await getVoterWeight(pk);
+          setVotingWeight(weight);
+        }
       } catch {
         /* not a badge holder */
       }
@@ -293,15 +302,22 @@ export default function GovernancePage() {
                   {shortenAddress(publicKey)}
                 </p>
               </div>
-              <span
-                className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                  isBadgeHolder
-                    ? "bg-[rgba(99,102,241,0.08)] dark:bg-[rgba(129,140,248,0.10)] text-[#4F46E5] dark:text-[#818CF8]"
-                    : "bg-zinc-100 text-zinc-500"
-                }`}
-              >
-                {isBadgeHolder ? "Eligible to vote" : "No badge yet"}
-              </span>
+              <div className="flex gap-2">
+                <span
+                  className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                    isBadgeHolder
+                      ? "bg-[rgba(99,102,241,0.08)] dark:bg-[rgba(129,140,248,0.10)] text-[#4F46E5] dark:text-[#818CF8]"
+                      : "bg-zinc-100 text-zinc-500"
+                  }`}
+                >
+                  {isBadgeHolder ? "Eligible to vote" : "No badge yet"}
+                </span>
+                {isBadgeHolder && (
+                  <span className="rounded-full px-3 py-1 text-xs font-semibold bg-[rgba(16,185,129,0.08)] text-[#059669] dark:bg-[rgba(52,211,153,0.1)] dark:text-[#34D399]">
+                    Weight: {votingWeight}
+                  </span>
+                )}
+              </div>
             </div>
           ) : (
             <div className="flex items-center justify-between gap-4">
@@ -320,9 +336,17 @@ export default function GovernancePage() {
 
         {/* Quorum notice */}
         <div className="mb-6 rounded-xl bg-[rgba(245,158,11,0.06)] border border-[rgba(245,158,11,0.20)] px-4 py-3 text-sm text-[#B45309] dark:text-[#FBBF24]">
-          Quorum threshold: <strong>{QUORUM_THRESHOLD} votes</strong>. A
+          Quorum threshold: <strong>{QUORUM_THRESHOLD} weighted votes</strong>. A
           proposal passes when votes&nbsp;for &gt; votes&nbsp;against and the
           deadline passes.
+        </div>
+
+        <div className="mb-6 flex flex-wrap gap-3 text-xs text-[#64748B] dark:text-[#94A3B8]">
+          <span><strong>Weights:</strong></span>
+          <span>🌱 Seedling = 1</span>
+          <span>🌳 Tree = 3</span>
+          <span>🌲 Forest = 10</span>
+          <span>🌍 Earth Guardian = 25</span>
         </div>
 
         {error && (
@@ -408,7 +432,7 @@ export default function GovernancePage() {
                         </strong>
                       </span>
                       <span>
-                        <strong>{votes}</strong> total votes
+                        <strong>{votes}</strong> total weighted votes
                       </span>
                       <span>
                         Against:{" "}

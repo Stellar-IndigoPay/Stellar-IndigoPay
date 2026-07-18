@@ -88,10 +88,9 @@ const DONATION_CURRENCIES = ["XLM", "USDC", "EURT"];
 const documentSchema = z.object({
   url: z
     .string()
-    .url("document.url must be an http(s) URL")
     .refine(
-      (val) => /^https?:\/\//i.test(val),
-      "document.url must be an http(s) URL",
+      (val) => /^https?:\/\//i.test(val) || /^\/api\/uploads\//i.test(val),
+      "document.url must be an http(s) URL or a local /api/uploads URL",
     ),
   name: z
     .string()
@@ -100,6 +99,68 @@ const documentSchema = z.object({
   size: z.number().int().nonnegative("document.size must be >= 0").optional(),
   contentType: z.string().optional(),
   backend: z.string().optional(),
+});
+
+// ── Profile schema ─────────────────────────────────────────────────────────
+
+const profileSchema = z.object({
+  displayName: z
+    .string()
+    .min(2, "Display name must be between 2 and 30 characters")
+    .max(30, "Display name must be between 2 and 30 characters")
+    .regex(/^[a-zA-Z0-9_ ]+$/, "Only letters, numbers, underscores, and spaces allowed")
+    .optional()
+    .or(z.literal("")),
+  bio: z
+    .string()
+    .max(300, "Bio must be at most 300 characters")
+    .optional()
+    .or(z.literal("")),
+});
+
+// ── Project submission schema ───────────────────────────────────────────────
+
+const projectSubmissionSchema = z.object({
+  name: z
+    .string()
+    .min(3, "name must be between 3 and 120 characters")
+    .max(120, "name must be between 3 and 120 characters"),
+  category: z.enum(PROJECT_CATEGORIES, {
+    errorMap: () => ({
+      message: `category must be one of: ${PROJECT_CATEGORIES.join(", ")}`,
+    }),
+  }),
+  description: z
+    .string()
+    .min(10, "description must be between 10 and 5000 characters")
+    .max(5000, "description must be between 10 and 5000 characters"),
+  location: z
+    .string()
+    .min(2, "location must be between 2 and 200 characters")
+    .max(200, "location must be between 2 and 200 characters"),
+  goalXLM: positiveNumberString,
+  walletAddress: stellarAddress,
+  organization: z.object({
+    name: z.string().min(1, "Organization name is required"),
+    website: z
+      .string()
+      .url("Organization website must be a valid URL")
+      .optional()
+      .or(z.literal("")),
+    country: z.string().optional(),
+    contactEmail: z.string().email("Contact email must be a valid email"),
+  }),
+  co2Methodology: z.object({
+    name: z.string().min(1, "Methodology name is required"),
+    verificationBody: z.string().optional(),
+    annualTonnesCO2: positiveNumberString,
+    documentUrl: z
+      .string()
+      .url("Document URL must be a valid URL")
+      .optional()
+      .or(z.literal("")),
+  }),
+  impactMetrics: z.array(z.string()).optional().default([]),
 });
 
 // ── Donation request schema ─────────────────────────────────────────────────
@@ -190,6 +251,8 @@ module.exports = {
   donationSchema,
   verificationSchema,
   leaderboardQuerySchema,
+  profileSchema,
+  projectSubmissionSchema,
   PROJECT_CATEGORIES,
   DONATION_CURRENCIES,
 };

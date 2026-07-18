@@ -2,6 +2,12 @@
 
 ### Features
 
+* **frontend:** implement Playwright end-to-end test suite covering critical user journeys (GF-052, closes #110)
+  - Set up Playwright configuration in `playwright.config.ts` with Next.js dev server and Chrome browser projects
+  - Implement mock fixtures for Freighter wallet injection (`freighter.ts`), Horizon API/Soroban RPC responses (`horizon.ts`), and backend REST endpoints (`api.ts`)
+  - Implement E2E specs for (1) browse projects → donate XLM (`donation.spec.ts`), (2) wallet connect → view dashboard (`dashboard.spec.ts`), and (3) admin login → platform analytics (`admin-analytics.spec.ts`)
+  - Set up GitHub Actions CI integration for automated E2E test runs
+
 * **backend,frontend:** JWT refresh token rotation and session management for admin auth (GF-032, closes #87)
   - Access tokens cut to 15 minutes and carry a `jti`; refresh tokens are opaque, DB-backed, and live 7 days
   - New `refresh_tokens` and `token_blacklist` tables via migration 019

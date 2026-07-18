@@ -109,28 +109,28 @@ router.get("/export", async (req, res, next) => {
     let filename;
 
     switch (view) {
-      case "trends":
-        data = await getDonationTrends(range);
-        filename = "donation-trends";
-        break;
-      case "projects":
-        data = await getProjectPerformance();
-        filename = "project-performance";
-        break;
-      case "growth":
-        data = await getPlatformGrowth();
-        filename = "platform-growth";
-        break;
-      case "retention":
-        data = await getDonorRetention();
-        filename = "donor-retention";
-        break;
-      case "categories":
-        data = await getCategoryBreakdown(range);
-        filename = "category-breakdown";
-        break;
-      default:
-        return res.status(400).json({ error: `Unknown view: ${view}` });
+    case "trends":
+      data = await getDonationTrends(range);
+      filename = "donation-trends";
+      break;
+    case "projects":
+      data = await getProjectPerformance();
+      filename = "project-performance";
+      break;
+    case "growth":
+      data = await getPlatformGrowth();
+      filename = "platform-growth";
+      break;
+    case "retention":
+      data = await getDonorRetention();
+      filename = "donor-retention";
+      break;
+    case "categories":
+      data = await getCategoryBreakdown(range);
+      filename = "category-breakdown";
+      break;
+    default:
+      return res.status(400).json({ error: `Unknown view: ${view}` });
     }
 
     if (format === "csv") {
@@ -150,8 +150,8 @@ router.get("/export", async (req, res, next) => {
             const val = row[h];
             if (val === null || val === undefined) return "";
             const str = String(val);
-            return str.includes(",") || str.includes('"') || str.includes("\n")
-              ? `"${str.replace(/"/g, '""')}"`
+            return str.includes(",") || str.includes("\"") || str.includes("\n")
+              ? `"${str.replace(/"/g, "\"\"")}"`
               : str;
           }).join(","),
         ),

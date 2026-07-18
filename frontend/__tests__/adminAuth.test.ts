@@ -178,6 +178,83 @@ describe("token helpers", () => {
   });
 });
 
+// ── AuthState & initAuth ─────────────────────────────────────────────
+
+describe("AuthState", () => {
+  it("starts as loading", () => {
+    const auth = loadAdminAuth();
+    expect(auth.getAuthState()).toBe("loading");
+  });
+
+  it("flips to authenticated instantly when a token is already loaded", async () => {
+    const auth = loadAdminAuth();
+    global.fetch = jest.fn().mockResolvedValue(
+      mockFetchResponse({
+        success: true,
+        data: { token: MOCK_TOKEN, expiresIn: 900 },
+      }),
+    );
+    await auth.adminLogin("admin", "pass");
+
+    await auth.initAuth();
+    expect(auth.getAuthState()).toBe("authenticated");
+  });
+
+  it("flips to authenticated after a successful refresh", async () => {
+    const auth = loadAdminAuth();
+    global.fetch = jest.fn().mockResolvedValue(
+      mockFetchResponse({ success: true, data: { token: "restored.token" } }),
+    );
+
+    await auth.initAuth();
+    expect(auth.getAuthState()).toBe("authenticated");
+    expect(auth.getAdminToken()).toBe("restored.token");
+  });
+
+  it("flips to unauthenticated when refresh fails (non-401)", async () => {
+    const auth = loadAdminAuth();
+    global.fetch = jest.fn().mockRejectedValue(new Error("network error"));
+
+    await auth.initAuth();
+    expect(auth.getAuthState()).toBe("unauthenticated");
+  });
+
+  it("flips to expired when refresh returns 401", async () => {
+    const auth = loadAdminAuth();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(mockFetchResponse({ error: "gone" }, { status: 401 }));
+
+    await auth.initAuth();
+    expect(auth.getAuthState()).toBe("expired");
+  });
+
+  it("flips to unauthenticated when refresh returns 500", async () => {
+    const auth = loadAdminAuth();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(mockFetchResponse({ error: "down" }, { status: 500 }));
+
+    await auth.initAuth();
+    expect(auth.getAuthState()).toBe("unauthenticated");
+  });
+
+  it("markSessionExpired clears the token and sets expired state", async () => {
+    const auth = loadAdminAuth();
+    global.fetch = jest.fn().mockResolvedValue(
+      mockFetchResponse({
+        success: true,
+        data: { token: MOCK_TOKEN, expiresIn: 900 },
+      }),
+    );
+    await auth.adminLogin("admin", "pass");
+
+    auth.markSessionExpired();
+    expect(auth.getAuthState()).toBe("expired");
+    expect(auth.getAdminToken()).toBeNull();
+  });
+});
+
 // ── ensureAdminSession ────────────────────────────────────────────────
 
 describe("ensureAdminSession", () => {

@@ -25,7 +25,7 @@ export default function ProjectCard({ project }: { project: ClimateProject }) {
   const isWishlisted = isInWishlist(project.id);
 
   return (
-    <div className="relative group">
+    <div className="relative group" data-testid="project-card">
       <Link
         href={`/projects/${project.id}`}
         className="card-hover group animate-fade-in flex flex-col h-full relative overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-[#818CF8] focus-visible:ring-offset-2 dark:focus-visible:ring-offset-[#0A0A1A]"

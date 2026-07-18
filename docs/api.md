@@ -285,3 +285,53 @@ wallet owner via the `wallet` query parameter.
 | `tree`     | ≥ 100 XLM   | 🌳    |
 | `forest`   | ≥ 500 XLM   | 🌲    |
 | `earth`    | ≥ 2,000 XLM | 🌍    |
+
+---
+
+## Push Notification Delivery Callbacks
+
+### `POST /api/notifications/delivery-callback`
+
+Receives confirmed delivery status from APNs or FCM. Called by provider-side
+delivery pipelines, **not** end-user clients.
+
+**Authentication:** Bearer token in `Authorization` header, validated against
+the `DELIVERY_CALLBACK_SECRET` environment variable. If the env var is unset,
+authentication is skipped (useful for local development).
+
+> **Note on APNs:** Apple Push Notification service returns the `410 Unregistered`
+> status synchronously in the HTTP/2 response from `api.push.apple.com`. The
+> backend handles this inline in `ApnsProvider.send()` — no inbound webhook from
+> Apple is required. This endpoint is primarily used for FCM downstream delivery
+> receipts and any future webhook-based confirmation pipelines.
+
+**Request body:**
+
+| Field               | Type   | Required | Description |
+|---------------------|--------|----------|-------------|
+| `provider`          | string | ✓        | `apns`, `fcm`, or `expo` |
+| `status`            | string | ✓        | `delivered`, `unregistered`, or `failed` |
+| `deviceToken`       | string | –        | Device token (required if `providerMessageId` is absent) |
+| `providerMessageId` | string | –        | Provider-assigned message ID (required if `deviceToken` is absent) |
+
+**Behaviour:**
+
+- If `providerMessageId` is supplied, the matching `push_notifications.status`
+  row is updated to `delivered` or `failed`.
+- If `status = "unregistered"` and `deviceToken` is supplied, the token is
+  deactivated (`device_tokens.is_active = false`).
+- `indigopay_push_sent_total{provider, outcome}` Prometheus counter is
+  incremented for every confirmed delivery.
+
+**Response:**
+
+```json
+{ "success": true }
+```
+
+**Error responses:**
+
+| Status | Condition |
+|--------|-----------|
+| `400`  | Missing or invalid `provider`, `status`, or neither `deviceToken` nor `providerMessageId` |
+| `401`  | `DELIVERY_CALLBACK_SECRET` is set and the supplied Bearer token does not match |
