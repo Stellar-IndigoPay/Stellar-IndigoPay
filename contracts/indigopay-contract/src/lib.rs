@@ -101,6 +101,21 @@ pub struct BatchDonation {
 }
 #[contracttype]
 #[derive(Clone, Debug)]
+pub struct MatchingPool {
+    pub matcher: Address,
+    pub project_id: String,
+    pub token: Address,
+    pub total_funds: i128,
+    pub remaining_funds: i128,
+    pub multiplier: u32,
+    pub cap_per_donation: i128,
+    pub total_matched: i128,
+    pub donations_matched: u32,
+    pub expires_at: u32,
+    pub active: bool,
+}
+#[contracttype]
+#[derive(Clone, Debug)]
 pub struct DonationRecord {
     pub donor: Address,
     pub project: String,
@@ -244,6 +259,7 @@ pub enum DataKey {
     ProjectApprovals(String),
     ProjectRejections(String),
     AllowlistRoot(String),
+    MatchingPool(String),
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -327,7 +343,11 @@ fn verify_merkle_proof(
     }
     hash == root
 }
-
+fn compute_match_amount(donation: i128, multiplier: u32, cap: i128, remaining: i128) -> i128 {
+    let matched = donation.checked_mul(multiplier as i128).unwrap_or(i128::MAX);
+    let capped = if matched > cap { cap } else { matched };
+    if capped > remaining { remaining } else { capped }
+}
 fn calculate_badge(total_stroops: i128) -> BadgeTier {
     let xlm = total_stroops / STROOP;
     if xlm >= 2000 {
@@ -769,7 +789,22 @@ impl IndigoPayContract {
         // ── Interaction: external call happens after every effect is durable.
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&donor, &project.wallet, &amount);
-
+                let pool_key = DataKey::MatchingPool(project_id.clone());
+        if env.storage().instance().has(&pool_key) {
+            let mut pool: MatchingPool = env.storage().instance().get(&pool_key).unwrap();
+            if pool.active && env.ledger().sequence() <= pool.expires_at && pool.remaining_funds > 0 {
+                let match_amount = compute_match_amount(amount, pool.multiplier, pool.cap_per_donation, pool.remaining_funds);
+                if match_amount > 0 {
+                    pool.remaining_funds = pool.remaining_funds.checked_sub(match_amount).expect("remaining_funds underflow");
+                    pool.total_matched = pool.total_matched.checked_add(match_amount).expect("total_matched overflow");
+                    pool.donations_matched = pool.donations_matched.checked_add(1).expect("donations_matched overflow");
+                    env.storage().instance().set(&pool_key, &pool);
+                    let match_token_client = token::Client::new(&env, &pool.token);
+                    match_token_client.transfer(&env.current_contract_address(), &project.wallet, &match_amount);
+                    env.events().publish((symbol_short!("match_app"), donor.clone(), project_id.clone()), (amount, match_amount));
+                }
+            }
+        }
         env.events().publish(
             (symbol_short!("donated"), donor.clone(), project_id.clone()),
             (amount, donor_stats.badge.clone(), msg_hash),
@@ -2013,6 +2048,56 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .extend_ttl(VOTING_WINDOW_LEDGERS * 4, VOTING_WINDOW_LEDGERS * 4);
+    }
+        pub fn create_matching_pool(
+        env: Env,
+        matcher: Address,
+        project_id: String,
+        token: Address,
+        total_funds: i128,
+        multiplier: u32,
+        cap_per_donation: i128,
+        duration_ledgers: u32,
+    ) {
+        matcher.require_auth();
+        require_not_paused(&env);
+        let project: Project = env.storage().instance().get(&DataKey::Project(project_id.clone())).expect("Project not found");
+        if !project.active { panic!("Project is not active"); }
+        if total_funds <= 0 { panic!("Total funds must be positive"); }
+        if multiplier == 0 { panic!("Multiplier must be at least 1"); }
+        if cap_per_donation <= 0 { panic!("Cap per donation must be positive"); }
+        let pool_key = DataKey::MatchingPool(project_id.clone());
+        if env.storage().instance().has(&pool_key) { panic!("Matching pool already exists for this project"); }
+        let expires_at = env.ledger().sequence().checked_add(duration_ledgers).expect("expires_at overflow");
+        let pool = MatchingPool {
+            matcher: matcher.clone(), project_id: project_id.clone(), token: token.clone(),
+            total_funds, remaining_funds: total_funds, multiplier, cap_per_donation,
+            total_matched: 0, donations_matched: 0, expires_at, active: true,
+        };
+        env.storage().instance().set(&pool_key, &pool);
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&matcher, &env.current_contract_address(), &total_funds);
+        env.events().publish((symbol_short!("match_cr"), matcher), (project_id, total_funds, multiplier, cap_per_donation));
+    }
+
+    pub fn cancel_matching_pool(env: Env, matcher: Address, project_id: String) {
+        matcher.require_auth();
+        let pool_key = DataKey::MatchingPool(project_id.clone());
+        let mut pool: MatchingPool = env.storage().instance().get(&pool_key).expect("Matching pool not found");
+        if pool.matcher != matcher { panic!("Only the matcher can cancel the pool"); }
+        if !pool.active { panic!("Pool is not active"); }
+        pool.active = false;
+        if pool.remaining_funds > 0 {
+            let token_client = token::Client::new(&env, &pool.token);
+            token_client.transfer(&env.current_contract_address(), &matcher, &pool.remaining_funds);
+            pool.remaining_funds = 0;
+        }
+        env.storage().instance().set(&pool_key, &pool);
+        env.events().publish((symbol_short!("match_cncl"), matcher), project_id);
+    }
+
+    pub fn get_matching_pool(env: Env, project_id: String) -> Option<MatchingPool> {
+        env.storage().instance().get(&DataKey::MatchingPool(project_id))
     }
     // ─── Verifier Oracle Network ─────────────────────────────────────────
 
@@ -3608,5 +3693,64 @@ mod tests {
             .register_stellar_asset_contract_v2(token_admin)
             .address();
         client.batch_donate(&token, &donor, &Vec::new(&env), &(100 * STROOP), &0u32);
+    }
+        fn mint_token(env: &Env, donor: &Address, amount: i128) -> Address {
+        let token_admin = Address::generate(env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        StellarAssetClient::new(env, &token).mint(donor, &amount);
+        token
+    }
+
+    #[test]
+    fn test_create_matching_pool() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let matcher = Address::generate(&env);
+        let token = mint_token(&env, &matcher, 1000 * STROOP);
+        client.create_matching_pool(&matcher, &pid, &token, &(1000 * STROOP), &2u32, &(50 * STROOP), &1000u32);
+        let pool = client.get_matching_pool(&pid).expect("pool should exist");
+        assert_eq!(pool.total_funds, 1000 * STROOP);
+        assert_eq!(pool.multiplier, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Matching pool already exists")]
+    fn test_create_duplicate_matching_pool_fails() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let matcher = Address::generate(&env);
+        let token = mint_token(&env, &matcher, 1000 * STROOP);
+        client.create_matching_pool(&matcher, &pid, &token, &(1000 * STROOP), &2u32, &(50 * STROOP), &1000u32);
+        client.create_matching_pool(&matcher, &pid, &token, &(500 * STROOP), &2u32, &(50 * STROOP), &1000u32);
+    }
+
+    #[test]
+    fn test_cancel_matching_pool() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let matcher = Address::generate(&env);
+        let token = mint_token(&env, &matcher, 1000 * STROOP);
+        client.create_matching_pool(&matcher, &pid, &token, &(1000 * STROOP), &2u32, &(50 * STROOP), &1000u32);
+        client.cancel_matching_pool(&matcher, &pid);
+        let pool = client.get_matching_pool(&pid).expect("pool should exist");
+        assert!(!pool.active);
+    }
+
+    #[test]
+    fn test_extend_all_ttl() {
+        let env = Env::default();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Before extending, TTL should be some default (usually 100 in tests or determined by init).
+        // The host env starts at ledger 0. We will use testutils to check the exact TTL.
+        use soroban_sdk::testutils::storage::Instance as TestInstance;
+
+        let _before_ttl = env.as_contract(&id, || env.storage().instance().get_ttl());
+
+        // Extend TTL
+        client.extend_all_ttl(&500_000);
+
+        let after_ttl = env.as_contract(&id, || env.storage().instance().get_ttl());
+        assert!(after_ttl >= 500_000);
     }
 }
