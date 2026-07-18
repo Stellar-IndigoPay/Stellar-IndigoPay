@@ -30,8 +30,14 @@ const router = express.Router();
 const fs = require("fs");
 const path = require("path");
 const { v4: uuid } = require("uuid");
+const { z } = require("zod");
 const pool = require("../db/pool");
 const { adminRequired } = require("../middleware/auth");
+const { validate } = require("../middleware/validate");
+const {
+  stellarAddress,
+  PROJECT_CATEGORIES,
+} = require("../validators/schemas");
 const { logAdminAction } = require("../services/audit");
 const { createRateLimiter } = require("../middleware/rateLimiter");
 const { sendAdminVerificationNotification } = require("../services/email");
@@ -41,20 +47,14 @@ const {
   isIpfsConfigured,
   UPLOAD_DIR,
 } = require("../services/storage");
+const { AppError } = require("../errors");
+const {
+  verifyCO2Rate,
+  applyCO2VerificationToProject,
+} = require("../services/co2Verifier");
+const logger = require("../logger");
 
 const submitLimiter = createRateLimiter(10, 15); // 10 submissions / 15 min / IP
-
-const VALID_CATEGORIES = [
-  "Reforestation",
-  "Solar Energy",
-  "Ocean Conservation",
-  "Clean Water",
-  "Wildlife Protection",
-  "Carbon Capture",
-  "Wind Energy",
-  "Sustainable Agriculture",
-  "Other",
-];
 
 const VALID_TRANSITIONS = {
   pending: ["in_review", "rejected"],
@@ -248,9 +248,9 @@ router.post("/", submitLimiter, async (req, res, next) => {
       typeof body.projectCategory === "string"
         ? body.projectCategory.trim()
         : "";
-    if (!VALID_CATEGORIES.includes(projectCategory)) {
+    if (!PROJECT_CATEGORIES.includes(projectCategory)) {
       errors.push(
-        `projectCategory must be one of: ${VALID_CATEGORIES.join(", ")}`,
+        `projectCategory must be one of: ${PROJECT_CATEGORIES.join(", ")}`,
       );
     }
 
@@ -319,7 +319,7 @@ router.post("/", submitLimiter, async (req, res, next) => {
     }
 
     if (errors.length > 0) {
-      return res.status(400).json({ error: errors.join("; ") });
+      throw new AppError("VALIDATION_ERROR", { detail: errors.join("; ") });
     }
 
     // Pin locally uploaded documents to IPFS (content-addressed, tamper
@@ -346,38 +346,62 @@ router.post("/", submitLimiter, async (req, res, next) => {
        ) RETURNING *`,
       [
         id,
-        orgName,
-        website,
-        country,
-        email,
-        walletAddress,
-        projectName,
-        projectCategory,
-        projectLocation,
-        projectDescription,
-        co2PerXLM.toFixed(7),
-        expectedAnnualTonnesCO2 != null
-          ? expectedAnnualTonnesCO2.toFixed(7)
+        body.organizationName.trim(),
+        body.organizationWebsite?.trim() || null,
+        body.organizationCountry?.trim() || null,
+        body.contactEmail.trim().toLowerCase(),
+        body.walletAddress,
+        body.projectName.trim(),
+        body.projectCategory,
+        body.projectLocation.trim(),
+        body.projectDescription?.trim() || null,
+        Number.parseFloat(body.co2PerXLM).toFixed(7),
+        body.expectedAnnualTonnesCO2 != null && body.expectedAnnualTonnesCO2 !== ""
+          ? Number.parseFloat(body.expectedAnnualTonnesCO2).toFixed(7)
           : null,
         JSON.stringify(processedDocs),
         backendName(),
-        notes,
+        body.notes?.trim() || null,
       ],
     );
 
     const created = mapRequestRow(result.rows[0]);
 
+    // Early plausibility check on the claimed offset rate. The verdict is
+    // not persisted here (the projects row may not exist yet) but is
+    // surfaced to the submitter and to admins so an implausible rate is
+    // visible from the moment it is submitted, not only at approval time.
+    const co2Assessment = verifyCO2Rate(projectCategory, co2PerXLM);
+    if (co2Assessment.status === "flagged") {
+      logger.warn(
+        {
+          event: "co2_rate_flagged",
+          requestId: id,
+          projectCategory,
+          co2PerXLM,
+          reason: co2Assessment.reason,
+        },
+        "Verification request submitted with implausible CO₂ offset rate",
+      );
+    }
+
     // Fire-and-forget admin notification; failures here must NOT block the
     // persist + 201 success path. The submitter still gets their receipt.
-    sendAdminVerificationNotification(created).catch((err) => {
-      // eslint-disable-next-line no-console
-      console.error("[verification] admin notification failed:", err.message);
-    });
+    sendAdminVerificationNotification({ ...created, co2Assessment }).catch(
+      (err) => {
+        // eslint-disable-next-line no-console
+        console.error(
+          "[verification] admin notification failed:",
+          err.message,
+        );
+      },
+    );
 
     res.status(201).json({
       success: true,
       data: {
         ...created,
+        co2Assessment,
         reviewTimeline: "5–10 business days",
       },
     });
@@ -396,9 +420,9 @@ router.get("/me", async (req, res, next) => {
     const wallet =
       typeof req.query.wallet === "string" ? req.query.wallet.trim() : "";
     if (!STELLAR_ADDRESS_RE.test(wallet)) {
-      return res
-        .status(400)
-        .json({ error: "wallet query param must be a valid Stellar address" });
+      throw new AppError("INVALID_ADDRESS", {
+        detail: "wallet query param must be a valid Stellar address",
+      });
     }
     const result = await pool.query(
       `SELECT * FROM verification_requests
@@ -426,8 +450,7 @@ router.get("/:id", async (req, res, next) => {
       [req.params.id],
     );
     const row = result.rows[0];
-    if (!row)
-      return res.status(404).json({ error: "Verification request not found" });
+    if (!row) throw new AppError("VERIFICATION_NOT_FOUND");
 
     // Allow admin-readable without wallet guard.
     const auth = req.headers.authorization || "";
@@ -446,8 +469,8 @@ router.get("/:id", async (req, res, next) => {
     const wallet =
       typeof req.query.wallet === "string" ? req.query.wallet.trim() : "";
     if (!wallet || wallet !== row.wallet_address) {
-      return res.status(403).json({
-        error: "Provide a matching ?wallet= query param to view this request",
+      throw new AppError("FORBIDDEN", {
+        detail: "Provide a matching ?wallet= query param to view this request",
       });
     }
     res.json({ success: true, data: mapRequestRow(row) });
@@ -502,8 +525,9 @@ router.patch("/:id/status", adminRequired, async (req, res, next) => {
   try {
     const { status, reviewerNotes, reviewedBy } = req.body || {};
     if (!status || !Object.keys(VALID_TRANSITIONS).includes(status)) {
-      return res.status(400).json({
-        error: `status must be one of: ${Object.keys(VALID_TRANSITIONS).join(", ")}`,
+      throw new AppError("VALIDATION_ERROR", {
+        field: "status",
+        detail: `status must be one of: ${Object.keys(VALID_TRANSITIONS).join(", ")}`,
       });
     }
     const reviewerNotesStr =
@@ -511,9 +535,10 @@ router.patch("/:id/status", adminRequired, async (req, res, next) => {
         ? reviewerNotes.trim()
         : null;
     if (reviewerNotesStr && reviewerNotesStr.length > 2000) {
-      return res
-        .status(400)
-        .json({ error: "reviewerNotes must be at most 2000 characters" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "reviewerNotes",
+        detail: "reviewerNotes must be at most 2000 characters",
+      });
     }
 
     const existing = await pool.query(
@@ -521,18 +546,17 @@ router.patch("/:id/status", adminRequired, async (req, res, next) => {
       [req.params.id],
     );
     const row = existing.rows[0];
-    if (!row)
-      return res.status(404).json({ error: "Verification request not found" });
+    if (!row) throw new AppError("VERIFICATION_NOT_FOUND");
 
     const transitions = VALID_TRANSITIONS[row.status] || [];
     if (row.status === status) {
-      return res
-        .status(400)
-        .json({ error: `Request is already in "${status}" state` });
+      throw new AppError("INVALID_STATE_TRANSITION", {
+        detail: `Request is already in "${status}" state`,
+      });
     }
     if (!transitions.includes(status)) {
-      return res.status(400).json({
-        error: `Cannot transition from "${row.status}" to "${status}"`,
+      throw new AppError("INVALID_STATE_TRANSITION", {
+        detail: `Cannot transition from "${row.status}" to "${status}"`,
       });
     }
 
@@ -548,6 +572,37 @@ router.patch("/:id/status", adminRequired, async (req, res, next) => {
       [status, reviewerNotesStr, actor, req.params.id],
     );
 
+    // Approval is the moment a project's claimed offset rate starts being
+    // trusted, so run the automated CO₂ benchmark check now and stamp the
+    // verdict onto the matching projects row. Failures must never roll back
+    // the approval itself — the flag can be re-derived by an admin.
+    let co2Verification = null;
+    if (status === "approved") {
+      try {
+        co2Verification = await applyCO2VerificationToProject({
+          walletAddress: row.wallet_address,
+          projectName: row.project_name,
+          category: row.project_category,
+          co2PerXLM: row.co2_per_xlm,
+          requestId: req.params.id,
+        });
+      } catch (err) {
+        logger.error(
+          { event: "co2_verification_failed", requestId: req.params.id },
+          `CO₂ verification failed after approval: ${err.message}`,
+        );
+      }
+    }
+
+    let co2AuditMetadata = null;
+    if (co2Verification) {
+      co2AuditMetadata = {
+        status: co2Verification.status,
+        reason: co2Verification.reason,
+        projectIds: co2Verification.projectIds,
+      };
+    }
+
     logAdminAction({
       actor,
       action: `verification.${status}`,
@@ -557,11 +612,16 @@ router.patch("/:id/status", adminRequired, async (req, res, next) => {
         fromStatus: row.status,
         toStatus: status,
         reviewerNotes: reviewerNotesStr,
+        co2Verification: co2AuditMetadata,
       },
       ipAddress: req.ip,
     });
 
-    res.json({ success: true, data: mapRequestRow(updated.rows[0]) });
+    res.json({
+      success: true,
+      data: mapRequestRow(updated.rows[0]),
+      ...(co2Verification ? { co2Verification } : {}),
+    });
   } catch (e) {
     next(e);
   }

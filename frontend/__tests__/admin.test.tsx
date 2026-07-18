@@ -1,11 +1,17 @@
 /**
  * @jest-environment jsdom
  */
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import AdminIndex from "@/pages/admin/index";
 
 jest.mock("next/router", () => ({
   useRouter: () => ({ push: jest.fn(), query: {}, pathname: "/admin" }),
+}));
+
+const mockConnect = jest.fn();
+let mockPublicKey: string | null = null;
+jest.mock("@/lib/WalletProvider", () => ({
+  useWallet: () => ({ publicKey: mockPublicKey, connect: mockConnect }),
 }));
 
 const mockFetchProjects = jest.fn().mockResolvedValue([]);
@@ -25,6 +31,10 @@ const mockFetchQueues = jest.fn().mockResolvedValue([
 const mockPauseQueue = jest.fn().mockResolvedValue(true);
 const mockResumeQueue = jest.fn().mockResolvedValue(true);
 const mockPurgeQueue = jest.fn().mockResolvedValue(true);
+const mockFetchDeadLetterWebhooks = jest
+  .fn()
+  .mockResolvedValue({ data: [], total: 0, page: 1, pageSize: 20 });
+const mockFetchWebhookDeliveries = jest.fn().mockResolvedValue([]);
 
 jest.mock("@/lib/api", () => ({
   fetchProjects: () => mockFetchProjects(),
@@ -35,20 +45,46 @@ jest.mock("@/lib/api", () => ({
   pauseQueue: (name: string, adminKey: string) => mockPauseQueue(name, adminKey),
   resumeQueue: (name: string, adminKey: string) => mockResumeQueue(name, adminKey),
   purgeQueue: (name: string, adminKey: string) => mockPurgeQueue(name, adminKey),
+  fetchDeadLetterWebhooks: (...args: unknown[]) => mockFetchDeadLetterWebhooks(...args),
+  replayWebhookDelivery: jest.fn(),
+  replayAllWebhookDeliveries: jest.fn(),
+  fetchWebhookDeliveries: (...args: unknown[]) => mockFetchWebhookDeliveries(...args),
 }));
 
 describe("AdminIndex - Queue Monitoring", () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // Re-apply resolved values cleared by clearAllMocks
+    mockFetchProjects.mockResolvedValue([]);
+    mockFetchQueues.mockResolvedValue([
+      {
+        queue: "webhook-deliveries",
+        active: 1,
+        waiting: 2,
+        failed: 3,
+        completed: 4,
+        depth: 3,
+        failure_rate: 0.428,
+        latency: 1.5,
+        paused: false,
+      },
+    ]);
+    mockPauseQueue.mockResolvedValue(true);
+    mockResumeQueue.mockResolvedValue(true);
+    mockPurgeQueue.mockResolvedValue(true);
+    mockFetchDeadLetterWebhooks.mockResolvedValue({ data: [], total: 0, page: 1, pageSize: 20 });
+    mockFetchWebhookDeliveries.mockResolvedValue([]);
   });
 
   test("renders wallet connect when not connected", () => {
-    render(<AdminIndex publicKey={null} onConnect={jest.fn()} />);
+    mockPublicKey = null;
+    render(<AdminIndex />);
     expect(screen.getByText("Connect your wallet to manage projects.")).toBeTruthy();
   });
 
   test("renders queue list and controls when connected", async () => {
-    render(<AdminIndex publicKey="GADMINPUBLICKEY" onConnect={jest.fn()} />);
+    mockPublicKey = "GADMINPUBLICKEY";
+    render(<AdminIndex />);
 
     // Wait for queue metrics to render
     await waitFor(() => {
@@ -65,15 +101,28 @@ describe("AdminIndex - Queue Monitoring", () => {
 
     // Test pause action
     const pauseBtn = screen.getByRole("button", { name: "Pause" });
-    fireEvent.click(pauseBtn);
+    await act(async () => {
+      fireEvent.click(pauseBtn);
+    });
     expect(mockPauseQueue).toHaveBeenCalledWith("webhook-deliveries", "GADMINPUBLICKEY");
+
+    // Wait for the pause operation to finish so the Purge button is
+    // re-enabled (handlePauseQueue sets queuesLoading = true then
+    // calls loadQueues which flips it back to false).
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Purge" })).not.toBeDisabled();
+    });
 
     // Test purge action
     const originalConfirm = window.confirm;
     window.confirm = jest.fn().mockReturnValue(true);
     const purgeBtn = screen.getByRole("button", { name: "Purge" });
-    fireEvent.click(purgeBtn);
-    expect(mockPurgeQueue).toHaveBeenCalledWith("webhook-deliveries", "GADMINPUBLICKEY");
+    await act(async () => {
+      fireEvent.click(purgeBtn);
+    });
+    await waitFor(() =>
+      expect(mockPurgeQueue).toHaveBeenCalledWith("webhook-deliveries", "GADMINPUBLICKEY"),
+    );
     window.confirm = originalConfirm;
   });
 });

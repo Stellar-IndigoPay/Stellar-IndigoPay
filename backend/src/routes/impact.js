@@ -14,15 +14,14 @@ const express = require("express");
 const router = express.Router();
 const pool = require("../db/pool");
 const cache = require("../services/cache");
+const { AppError } = require("../errors");
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const KG_CO2_PER_TREE = 21.77; // heuristic, used for treesEquivalent
 
 function validateKey(k) {
   if (!k || !/^G[A-Z0-9]{55}$/.test(k)) {
-    const e = new Error("Invalid Stellar public key");
-    e.status = 400;
-    throw e;
+    throw new AppError("INVALID_ADDRESS");
   }
 }
 
@@ -53,8 +52,7 @@ router.get("/project/:id", async (req, res, next) => {
        WHERE id = $1`,
       [req.params.id],
     );
-    if (!projectResult.rows[0])
-      return res.status(404).json({ error: "Project not found" });
+    if (!projectResult.rows[0]) throw new AppError("PROJECT_NOT_FOUND");
 
     const aggResult = await pool.query(
       `SELECT

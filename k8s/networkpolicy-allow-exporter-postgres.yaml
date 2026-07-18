@@ -1,0 +1,40 @@
+# k8s/networkpolicy-allow-exporter-postgres.yaml
+#
+# Allows the postgres_exporter pods to reach PostgreSQL primary and
+# standby on port 5432 for metrics collection. Also permits DNS
+# resolution (kube-dns UDP 53) so the exporters can resolve the
+# postgres service names.
+#
+# This policy must be layered on top of the default-deny baseline in
+# networkpolicy-default-deny.yaml.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-exporter-to-postgres
+  namespace: stellar-indigopay
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres-exporter
+  policyTypes:
+    - Egress
+  egress:
+    # DNS resolution
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # PostgreSQL primary and standby
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432

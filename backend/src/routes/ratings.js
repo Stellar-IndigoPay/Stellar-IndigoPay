@@ -7,6 +7,7 @@ const router = express.Router();
 const { v4: uuid } = require("uuid");
 const pool = require("../db/pool");
 const { mapProjectRatingRow } = require("../services/store");
+const { AppError } = require("../errors");
 
 /**
  * POST /api/ratings
@@ -16,12 +17,15 @@ router.post("/", async (req, res, next) => {
   try {
     const { projectId, donorAddress, rating, review } = req.body;
     if (!projectId || !donorAddress || !rating) {
-      return res
-        .status(400)
-        .json({ error: "projectId, donorAddress, and rating are required" });
+      throw new AppError("VALIDATION_ERROR", {
+        detail: "projectId, donorAddress, and rating are required",
+      });
     }
     if (rating < 1 || rating > 5) {
-      return res.status(400).json({ error: "rating must be between 1 and 5" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "rating",
+        detail: "rating must be between 1 and 5",
+      });
     }
 
     const result = await pool.query(
@@ -49,7 +53,7 @@ router.get("/pending", async (req, res, next) => {
   try {
     const { donorAddress } = req.query;
     if (!donorAddress) {
-      return res.status(400).json({ error: "donorAddress is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "donorAddress" });
     }
 
     const result = await pool.query(
@@ -94,7 +98,7 @@ async function listProjectRatings(req, res, next) {
   try {
     const projectId = req.params.projectId || req.params.id;
     if (!projectId) {
-      return res.status(400).json({ error: "projectId is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "projectId" });
     }
 
     const limit = Math.min(
@@ -111,7 +115,7 @@ async function listProjectRatings(req, res, next) {
       [projectId],
     );
     if (!projectCheck.rows[0]) {
-      return res.status(404).json({ error: "Project not found" });
+      throw new AppError("PROJECT_NOT_FOUND");
     }
 
     let whereClause = "WHERE project_id = $1";
@@ -122,7 +126,7 @@ async function listProjectRatings(req, res, next) {
       // cursor-based pagination: fetch ratings older than cursor timestamp
       const cursorDate = new Date(cursor);
       if (isNaN(cursorDate.getTime())) {
-        return res.status(400).json({ error: "Invalid cursor" });
+        throw new AppError("INVALID_CURSOR");
       }
       whereClause += ` AND created_at < $${valueIdx}`;
       values.push(cursorDate.toISOString());

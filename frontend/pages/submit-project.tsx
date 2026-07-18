@@ -2,6 +2,10 @@ import { useState } from "react";
 import { useRouter } from "next/router";
 import { notifyAdmin, submitProject } from "@/lib/api";
 import { PROJECT_CATEGORIES } from "@/utils/format";
+import FormField from "@/components/FormField";
+import { useFormValidation } from "@/hooks/useFormValidation";
+import { projectSubmissionSchema, walletAddressSchema, positiveNumberString } from "@/lib/validation/schemas";
+import { z } from "zod";
 
 type Step = "org" | "project" | "wallet" | "methodology" | "done";
 
@@ -36,30 +40,11 @@ const STEP_LABELS: Record<Step, string> = {
   done: "Submitted",
 };
 
-const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
 const IMPACT_METRICS = [
   { label: "CO₂ Reduction", value: "co2-reduction" },
   { label: "Tree Planting", value: "tree-planting" },
   { label: "Community Jobs", value: "community-jobs" },
 ];
-
-function Field({
-  label,
-  error,
-  children,
-}: {
-  label: string;
-  error?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-col gap-1">
-      <label className="label">{label}</label>
-      {children}
-      {error && <p className="text-xs text-red-500">{error}</p>}
-    </div>
-  );
-}
 
 export default function SubmitProjectPage() {
   const router = useRouter();
@@ -67,9 +52,51 @@ export default function SubmitProjectPage() {
   const [submitting, setSubmitting] = useState(false);
   const [serverError, setServerError] = useState("");
   const [reviewTimeline, setReviewTimeline] = useState("");
-  const [fieldErrors, setFieldErrors] = useState<
-    Partial<Record<keyof FormData, string>>
-  >({});
+
+  const orgStepSchema = z.object({
+    orgName: z.string().min(1, "Required"),
+    orgWebsite: z.string().url("Invalid URL").optional().or(z.literal("")),
+    orgCountry: z.string().optional(),
+    contactEmail: z.string().email("Invalid email"),
+  });
+
+  const projectStepSchema = z.object({
+    projectName: z.string().min(3, "name must be between 3 and 120 characters").max(120, "name must be between 3 and 120 characters"),
+    category: z.enum(PROJECT_CATEGORIES as [string, ...string[]]),
+    description: z.string().min(10, "description must be between 10 and 5000 characters").max(5000, "description must be between 10 and 5000 characters"),
+    location: z.string().min(2, "location must be between 2 and 200 characters").max(200, "location must be between 2 and 200 characters"),
+    goalXLM: positiveNumberString,
+  });
+
+  const walletStepSchema = z.object({
+    walletAddress: walletAddressSchema,
+  });
+
+  const methodologyStepSchema = z.object({
+    co2MethodologyName: z.string().min(1, "Required"),
+    co2VerificationBody: z.string().optional(),
+    co2AnnualTonnes: positiveNumberString,
+    co2DocumentUrl: z.string().url("Invalid URL").optional().or(z.literal("")),
+    impactMetrics: z.array(z.string()).optional(),
+  });
+
+  const orgValidation = useFormValidation(orgStepSchema);
+  const projectValidation = useFormValidation(projectStepSchema);
+  const walletValidation = useFormValidation(walletStepSchema);
+  const methodologyValidation = useFormValidation(methodologyStepSchema);
+
+  const currentValidation =
+    step === "org"
+      ? orgValidation
+      : step === "project"
+        ? projectValidation
+        : step === "wallet"
+          ? walletValidation
+          : step === "methodology"
+            ? methodologyValidation
+            : null;
+
+  const fieldErrors = (currentValidation ? currentValidation.errors : {}) as Record<string, string | undefined>;
 
   const [form, setForm] = useState<FormData>({
     orgName: "",
@@ -97,7 +124,10 @@ export default function SubmitProjectPage() {
       >,
     ) => {
       setForm((prev) => ({ ...prev, [field]: e.target.value }));
-      setFieldErrors((prev) => ({ ...prev, [field]: undefined }));
+      orgValidation.clearField(field as any);
+      projectValidation.clearField(field as any);
+      walletValidation.clearField(field as any);
+      methodologyValidation.clearField(field as any);
     };
 
   const toggleImpactMetric = (value: string) => {
@@ -110,37 +140,38 @@ export default function SubmitProjectPage() {
   };
 
   function validateStep(): boolean {
-    const errs: Partial<Record<keyof FormData, string>> = {};
-
     if (step === "org") {
-      if (!form.orgName.trim()) errs.orgName = "Required";
-      if (!form.contactEmail.trim()) errs.contactEmail = "Required";
-      else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.contactEmail))
-        errs.contactEmail = "Invalid email";
+      return orgValidation.validate({
+        orgName: form.orgName,
+        orgWebsite: form.orgWebsite,
+        orgCountry: form.orgCountry,
+        contactEmail: form.contactEmail,
+      });
     }
-
     if (step === "project") {
-      if (!form.projectName.trim()) errs.projectName = "Required";
-      if (!form.description.trim()) errs.description = "Required";
-      if (!form.location.trim()) errs.location = "Required";
-      if (!form.goalXLM || Number(form.goalXLM) <= 0)
-        errs.goalXLM = "Must be greater than 0";
+      return projectValidation.validate({
+        projectName: form.projectName,
+        category: form.category,
+        description: form.description,
+        location: form.location,
+        goalXLM: form.goalXLM,
+      });
     }
-
     if (step === "wallet") {
-      if (!STELLAR_ADDRESS_RE.test(form.walletAddress.trim()))
-        errs.walletAddress =
-          "Must be a valid Stellar address (starts with G, 56 chars)";
+      return walletValidation.validate({
+        walletAddress: form.walletAddress,
+      });
     }
-
     if (step === "methodology") {
-      if (!form.co2MethodologyName.trim()) errs.co2MethodologyName = "Required";
-      if (!form.co2AnnualTonnes || Number(form.co2AnnualTonnes) <= 0)
-        errs.co2AnnualTonnes = "Must be greater than 0";
+      return methodologyValidation.validate({
+        co2MethodologyName: form.co2MethodologyName,
+        co2VerificationBody: form.co2VerificationBody,
+        co2AnnualTonnes: form.co2AnnualTonnes,
+        co2DocumentUrl: form.co2DocumentUrl,
+        impactMetrics: form.impactMetrics,
+      });
     }
-
-    setFieldErrors(errs);
-    return Object.keys(errs).length === 0;
+    return true;
   }
 
   function nextStep() {
@@ -281,31 +312,31 @@ export default function SubmitProjectPage() {
             <h2 className="font-display text-xl font-bold text-forest-900">
               Organization Info
             </h2>
-            <Field label="Organization Name *" error={fieldErrors.orgName}>
+            <FormField name="orgName" label="Organization Name *" error={fieldErrors.orgName}>
               <input
                 className="input-field"
                 value={form.orgName}
                 onChange={set("orgName")}
                 placeholder="Acme Climate Foundation"
               />
-            </Field>
-            <Field label="Website" error={fieldErrors.orgWebsite}>
+            </FormField>
+            <FormField name="orgWebsite" label="Website" error={fieldErrors.orgWebsite}>
               <input
                 className="input-field"
                 value={form.orgWebsite}
                 onChange={set("orgWebsite")}
                 placeholder="https://acme.org"
               />
-            </Field>
-            <Field label="Country" error={fieldErrors.orgCountry}>
+            </FormField>
+            <FormField name="orgCountry" label="Country" error={fieldErrors.orgCountry}>
               <input
                 className="input-field"
                 value={form.orgCountry}
                 onChange={set("orgCountry")}
                 placeholder="Kenya"
               />
-            </Field>
-            <Field label="Contact Email *" error={fieldErrors.contactEmail}>
+            </FormField>
+            <FormField name="contactEmail" label="Contact Email *" error={fieldErrors.contactEmail}>
               <input
                 className="input-field"
                 type="email"
@@ -313,7 +344,7 @@ export default function SubmitProjectPage() {
                 onChange={set("contactEmail")}
                 placeholder="hello@acme.org"
               />
-            </Field>
+            </FormField>
           </>
         )}
 
@@ -323,15 +354,15 @@ export default function SubmitProjectPage() {
             <h2 className="font-display text-xl font-bold text-forest-900">
               Project Details
             </h2>
-            <Field label="Project Name *" error={fieldErrors.projectName}>
+            <FormField name="projectName" label="Project Name *" error={fieldErrors.projectName}>
               <input
                 className="input-field"
                 value={form.projectName}
                 onChange={set("projectName")}
                 placeholder="Acme Solar Farm Phase 1"
               />
-            </Field>
-            <Field label="Category *" error={fieldErrors.category}>
+            </FormField>
+            <FormField name="category" label="Category *" error={fieldErrors.category}>
               <select
                 className="input-field"
                 value={form.category}
@@ -343,24 +374,24 @@ export default function SubmitProjectPage() {
                   </option>
                 ))}
               </select>
-            </Field>
-            <Field label="Description *" error={fieldErrors.description}>
+            </FormField>
+            <FormField name="description" label="Description *" error={fieldErrors.description}>
               <textarea
                 className="input-field min-h-[100px] resize-y"
                 value={form.description}
                 onChange={set("description")}
                 placeholder="Describe the project's goals, impact, and methods…"
               />
-            </Field>
-            <Field label="Location *" error={fieldErrors.location}>
+            </FormField>
+            <FormField name="location" label="Location *" error={fieldErrors.location}>
               <input
                 className="input-field"
                 value={form.location}
                 onChange={set("location")}
                 placeholder="Nairobi, Kenya"
               />
-            </Field>
-            <Field label="Funding Goal (XLM) *" error={fieldErrors.goalXLM}>
+            </FormField>
+            <FormField name="goalXLM" label="Funding Goal (XLM) *" error={fieldErrors.goalXLM}>
               <input
                 className="input-field"
                 type="number"
@@ -370,7 +401,7 @@ export default function SubmitProjectPage() {
                 onChange={set("goalXLM")}
                 placeholder="50000"
               />
-            </Field>
+            </FormField>
           </>
         )}
 
@@ -384,7 +415,8 @@ export default function SubmitProjectPage() {
               Donations will be sent directly to this Stellar address. Make sure
               you control it.
             </p>
-            <Field
+            <FormField
+              name="walletAddress"
               label="Stellar Wallet Address *"
               error={fieldErrors.walletAddress}
             >
@@ -395,7 +427,7 @@ export default function SubmitProjectPage() {
                 placeholder="GABC…"
                 spellCheck={false}
               />
-            </Field>
+            </FormField>
             <p className="text-xs text-[#8aaa8a] dark:text-forest-300 font-body">
               Starts with G and is 56 characters long. Testnet and mainnet
               addresses are both accepted.
@@ -412,7 +444,8 @@ export default function SubmitProjectPage() {
             <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body">
               Tell us how your project measures and verifies carbon reduction.
             </p>
-            <Field
+            <FormField
+              name="co2MethodologyName"
               label="Methodology Name *"
               error={fieldErrors.co2MethodologyName}
             >
@@ -422,8 +455,9 @@ export default function SubmitProjectPage() {
                 onChange={set("co2MethodologyName")}
                 placeholder="Verra VM0007"
               />
-            </Field>
-            <Field
+            </FormField>
+            <FormField
+              name="co2VerificationBody"
               label="Verification Body"
               error={fieldErrors.co2VerificationBody}
             >
@@ -433,8 +467,9 @@ export default function SubmitProjectPage() {
                 onChange={set("co2VerificationBody")}
                 placeholder="Gold Standard, Verra, etc."
               />
-            </Field>
-            <Field
+            </FormField>
+            <FormField
+              name="co2AnnualTonnes"
               label="Annual CO₂ Reduction (tonnes) *"
               error={fieldErrors.co2AnnualTonnes}
             >
@@ -447,8 +482,9 @@ export default function SubmitProjectPage() {
                 onChange={set("co2AnnualTonnes")}
                 placeholder="1200"
               />
-            </Field>
-            <Field
+            </FormField>
+            <FormField
+              name="co2DocumentUrl"
               label="Supporting Document URL"
               error={fieldErrors.co2DocumentUrl}
             >
@@ -458,9 +494,9 @@ export default function SubmitProjectPage() {
                 onChange={set("co2DocumentUrl")}
                 placeholder="https://…"
               />
-            </Field>
+            </FormField>
 
-            <Field label="Impact Metrics">
+            <FormField name="impactMetrics" label="Impact Metrics">
               <div className="flex flex-col gap-2 rounded-xl border border-[rgba(34,114,57,0.12)] bg-[#f8fcf8] p-3">
                 {IMPACT_METRICS.map((metric) => (
                   <label
@@ -478,7 +514,7 @@ export default function SubmitProjectPage() {
                   </label>
                 ))}
               </div>
-            </Field>
+            </FormField>
 
             {serverError && (
               <p className="text-sm text-red-500 font-body">{serverError}</p>

@@ -34,6 +34,13 @@ class MyDocument extends Document<Props> {
     return (
       <Html lang="en">
         <Head nonce={nonce}>
+          <meta name="theme-color" content="#4F46E5" />
+          <meta name="apple-mobile-web-app-capable" content="yes" />
+          <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+          <meta name="apple-mobile-web-app-title" content="Stellar IndigoPay" />
+          <meta name="mobile-web-app-capable" content="yes" />
+          <link rel="manifest" href="/manifest.json" />
+          <link rel="apple-touch-icon" href="/icon-192.png" />
           {/* The inline body script below is statically stringified — it
               reads `localStorage` directly rather than DOM meta tags, so
               no `<meta name="csp-nonce">` echo is needed here. The script

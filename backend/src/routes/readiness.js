@@ -33,6 +33,7 @@ const HORIZON_URL =
 // so a slow DB can never block /api/readyz past its deadline. Tune all
 // three together; default 4000ms.
 const CHECK_TIMEOUT_MS = Number(process.env.READINESS_CHECK_TIMEOUT_MS || 4000);
+const MAX_REPLICA_LAG_MS = Number(process.env.MAX_REPLICA_LAG_MS || 5000);
 
 function withTimeout(promise, ms, label) {
   // The race pattern here does NOT cancel the underlying work — for
@@ -79,6 +80,8 @@ router.get("/", async (_req, res) => {
 
   const checks = {
     db: { status: "unknown" },
+    pool: { status: "unknown" },
+    readReplicaLag: { status: "skipped" },
     redis: { status: "skipped" },
     horizon: { status: "unknown" },
     soroban_rpc: { status: "unknown" },
@@ -86,10 +89,65 @@ router.get("/", async (_req, res) => {
   };
 
   // Postgres
-  const db = await withTimeout(pool.query("SELECT 1"), CHECK_TIMEOUT_MS, "db");
+  const db = await withTimeout(
+    pool.getWriter().query("SELECT 1"),
+    CHECK_TIMEOUT_MS,
+    "db",
+  );
   checks.db = db.ok
     ? { status: "ok" }
     : { status: "unreachable", reason: db.reason };
+
+  // Pool degradation (high queue depth)
+  const writerPool = pool._writerPool;
+  const waitingCount = writerPool.waitingCount || 0;
+  const max = writerPool.max || 1;
+  if (waitingCount > max * 0.5) {
+    checks.pool = {
+      status: "degraded",
+      reason: "db_pool_degraded",
+      waitingCount,
+      max,
+    };
+  } else {
+    checks.pool = { status: "ok", waitingCount, max };
+  }
+
+  // Read replica lag. A missing replica is valid; excessive lag is not.
+  const replicaLag = await withTimeout(
+    pool.checkReplicaLag(),
+    CHECK_TIMEOUT_MS,
+    "readReplicaLag",
+  );
+  if (!replicaLag.ok) {
+    checks.readReplicaLag = {
+      status: "unknown",
+      reason: replicaLag.reason,
+    };
+  } else if (!replicaLag.value.hasReplica) {
+    checks.readReplicaLag = { status: "skipped", hasReplica: false };
+  } else if (replicaLag.value.lagMs === null) {
+    checks.readReplicaLag = {
+      status: "unknown",
+      hasReplica: true,
+      reason: replicaLag.value.error || "Cannot check replica lag",
+    };
+  } else if (replicaLag.value.lagMs > MAX_REPLICA_LAG_MS) {
+    checks.readReplicaLag = {
+      status: "degraded",
+      hasReplica: true,
+      lagMs: replicaLag.value.lagMs,
+      maxLagMs: MAX_REPLICA_LAG_MS,
+      reason: `Replica lag ${replicaLag.value.lagMs}ms exceeds ${MAX_REPLICA_LAG_MS}ms`,
+    };
+  } else {
+    checks.readReplicaLag = {
+      status: "ok",
+      hasReplica: true,
+      lagMs: replicaLag.value.lagMs,
+      maxLagMs: MAX_REPLICA_LAG_MS,
+    };
+  }
 
   // Redis (optional — only checked if REDIS_URL is set)
   if (process.env.REDIS_URL) {
@@ -141,11 +199,22 @@ router.get("/", async (_req, res) => {
     checks.indexer = { status: "unknown", reason: err.message };
   }
 
-  const requiredOk = checks.db.status === "ok";
+  const replicaOk = checks.readReplicaLag.status !== "degraded";
+  const requiredOk =
+    checks.db.status === "ok" &&
+    checks.pool.status === "ok" &&
+    replicaOk;
   const ready = requiredOk && !isShuttingDown();
 
   if (!ready) {
-    const reason = checks.db.status !== "ok" ? "db" : "draining";
+    const reason =
+      checks.db.status !== "ok"
+        ? "db"
+        : checks.pool.status !== "ok"
+          ? "db_pool_degraded"
+          : checks.readReplicaLag.status === "degraded"
+            ? "readReplicaLag"
+            : "draining";
     metrics.metrics.readinessCheckFailedTotal.inc({ reason });
     logger.warn(
       { event: "readiness_failed", checks },

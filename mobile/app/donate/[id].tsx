@@ -35,8 +35,10 @@ import {
   Memo,
 } from "@stellar/stellar-sdk";
 import { useBiometricAuth } from "../../hooks/useBiometricAuth";
-import type { BiometricAuthOutcome } from "../../hooks/useBiometricAuth";
 import { useTheme } from "../theme";
+import { enqueueDonation } from "../../utils/donationQueue";
+import { useConnectivity } from "../../lib/connectivity";
+import SyncStatusIcon from "../../components/SyncStatusIcon";
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
 const HORIZON_URL =
@@ -55,26 +57,12 @@ interface ClimateProject {
 
 type StatusKind = "success" | "error" | "info" | null;
 
-/**
- * Render-time hint shown above the Donate button. Reassures the user
- * that we'll either prompt for biometrics or fall back to their device
- * PIN/passcode — we never sign a transaction silently.
- */
-function buildBioHint(
-  available: boolean,
-  enrolled: boolean,
-  label: string,
-): string {
-  if (!available)
-    return "No biometric sensor — donations will require your device PIN.";
-  if (!enrolled)
-    return "No biometric enrolled — donations will require your device PIN.";
-  return `You will be asked to authenticate with ${label} before signing.`;
-}
+
 
 export default function DonateScreen() {
   const { colors } = useTheme();
   const { id } = useLocalSearchParams();
+  const { isOnline } = useConnectivity();
 
   const bio = useBiometricAuth();
   const isMountedRef = useRef(true);
@@ -102,6 +90,21 @@ export default function DonateScreen() {
     loadProjects();
   }, [id]);
 
+  // Scan-to-donate prefill (issue #84): the scan screen passes the amount
+  // and memo parsed from the QR code as route params so the donor lands
+  // here with everything filled in — scan → confirm → done.
+  useEffect(() => {
+    if (prefillAmount) {
+      const parsed = Number.parseFloat(String(prefillAmount));
+      if (Number.isFinite(parsed) && parsed > 0) {
+        setAmount(String(prefillAmount));
+      }
+    }
+    if (prefillMemo) {
+      setMessage(String(prefillMemo).slice(0, 100));
+    }
+  }, [prefillAmount, prefillMemo]);
+
   const loadProjects = async () => {
     setLoading(true);
     setStatusMessage(null);
@@ -125,32 +128,7 @@ export default function DonateScreen() {
   const selectedProject =
     projects.find((p) => p.id === selectedProjectId) || projects[0] || null;
 
-  /**
-   * Map a biometric auth outcome to a user-facing status message.
-   */
-  const surfaceAuthFailure = (outcome: BiometricAuthOutcome) => {
-    switch (outcome) {
-      case "cancel":
-        setStatusType("info");
-        setStatusMessage("Authentication cancelled — donation not sent.");
-        return;
-      case "fallback":
-        setStatusType("info");
-        setStatusMessage(
-          "Use your device PIN to confirm the donation next time.",
-        );
-        return;
-      case "error":
-        setStatusType("error");
-        setStatusMessage(
-          'Biometric authentication failed. Please try again or tap "Use Passcode" / "Cancel" and retry.',
-        );
-        return;
-      default:
-        setStatusType("error");
-        setStatusMessage("Authentication required to send a donation.");
-    }
-  };
+
 
   const handleDonate = async () => {
     setStatusMessage(null);
@@ -217,12 +195,20 @@ export default function DonateScreen() {
      * mid-prompt the `isMountedRef` guard prevents setState-after-unmount
      * noise.
      */
-    const authResult = await bio.authenticate(DONATE_PROMPT);
+    const confirmed = await bio.confirmDonation(donationAmount);
     if (!isMountedRef.current) return;
 
-    if (!authResult.success) {
-      surfaceAuthFailure(authResult.outcome);
-      return;
+    if (!confirmed.success) {
+      if (confirmed.error === "lockout" || confirmed.error === "permanent_lockout") {
+        Alert.alert(
+          "Biometrics Locked Out",
+          "Biometric authentication is locked. Proceeding with donation without biometrics.",
+          [{ text: "OK" }]
+        );
+      } else {
+        Alert.alert("Cancelled", "Donation was not confirmed.");
+        return;
+      }
     }
 
     setSubmitting(true);
@@ -271,12 +257,45 @@ export default function DonateScreen() {
       setSecretKey("");
     } catch (error: any) {
       console.error("Donation failed:", error);
-      setStatusType("error");
-      setStatusMessage(
-        error?.response?.data?.message ||
-          error?.message ||
-          "Donation failed. Please try again.",
-      );
+
+      // Enqueue donation for offline retry
+      const isNetworkError =
+        !error?.response &&
+        (error?.code === "ERR_NETWORK" ||
+          error?.code === "ECONNABORTED" ||
+          error?.message?.includes("Network Error") ||
+          error?.message?.includes("timeout"));
+
+      if (isNetworkError && selectedProject) {
+        try {
+          await enqueueDonation({
+            projectId: selectedProject.id,
+            projectName: selectedProject.name,
+            amount: donationAmount.toFixed(7),
+            currency: "XLM",
+            message: message.trim() || undefined,
+            donorAddress: publicKey,
+          });
+          setStatusType("info");
+          setStatusMessage(
+            "Donation queued! It will be submitted when connectivity is restored.",
+          );
+        } catch (queueErr) {
+          setStatusType("error");
+          setStatusMessage(
+            error?.response?.data?.message ||
+              error?.message ||
+              "Donation failed. Please try again.",
+          );
+        }
+      } else {
+        setStatusType("error");
+        setStatusMessage(
+          error?.response?.data?.message ||
+            error?.message ||
+            "Donation failed. Please try again.",
+        );
+      }
     } finally {
       setSubmitting(false);
     }
@@ -318,16 +337,19 @@ export default function DonateScreen() {
     );
   }
 
-  const bioHint = buildBioHint(bio.available, bio.enrolled, bio.label);
+
 
   return (
     <ScrollView
       style={[styles.container, { backgroundColor: colors.background }]}
     >
       <View style={styles.header}>
-        <Text style={[styles.title, { color: colors.primaryText }]}>
-          Donate to {selectedProject?.name || "a project"}
-        </Text>
+        <View style={styles.headerRow}>
+          <Text style={[styles.title, { color: colors.primaryText }]}>
+            Donate to {selectedProject?.name || "a project"}
+          </Text>
+          <SyncStatusIcon pendingCount={0} size={16} showLabel />
+        </View>
         <Text style={[styles.subtitle, { color: colors.secondaryText }]}>
           Choose a project and donate XLM on testnet.
         </Text>
@@ -510,14 +532,20 @@ export default function DonateScreen() {
           accessibilityLabel="Optional donation message"
         />
 
-        <View style={styles.bioHintRow}>
-          <Text style={styles.bioHintIcon} accessibilityElementsHidden>
-            🔒
-          </Text>
-          <Text style={[styles.bioHintText, { color: colors.secondaryText }]}>
-            {bioHint}
-          </Text>
-        </View>
+        {bio.isAvailable && bio.isEnabled && parseFloat(amount) >= bio.threshold ? (
+          <View style={styles.biometricBadge}>
+            <Text style={[styles.biometricBadgeText, { color: colors.primary }]}>🔒</Text>
+            <Text style={[styles.biometricBadgeText, { color: colors.primary, marginLeft: 6 }]}>
+              {bio.biometricType || "Biometrics"} will be required to confirm
+            </Text>
+          </View>
+        ) : !bio.isAvailable ? (
+          <View style={styles.infoBanner}>
+            <Text style={[styles.infoBannerText, { color: colors.secondaryText }]}>
+              ⚠️ Biometric authentication is unavailable. Donations will proceed without confirmation.
+            </Text>
+          </View>
+        ) : null}
       </View>
 
       {statusMessage ? (
@@ -535,6 +563,15 @@ export default function DonateScreen() {
         </View>
       ) : null}
 
+      {!isOnline && (
+        <View style={styles.offlineModeBanner}>
+          <Text style={styles.offlineModeBannerText}>
+            ⚡ Offline mode — donation will be queued and submitted when
+            connectivity is restored.
+          </Text>
+        </View>
+      )}
+
       <TouchableOpacity
         style={[
           styles.donateButton,
@@ -548,7 +585,7 @@ export default function DonateScreen() {
         onPress={handleDonate}
         disabled={submitting || !publicKey || bio.isAuthenticating}
         accessibilityRole="button"
-        accessibilityLabel={`Donate ${amount || "1"} XLM`}
+        accessibilityLabel={`${isOnline ? "Donate" : "Queue donation"} ${amount || "1"} XLM`}
       >
         {bio.isAuthenticating ? (
           <ActivityIndicator color={colors.buttonText} />
@@ -556,7 +593,9 @@ export default function DonateScreen() {
           <Text style={[styles.donateButtonText, { color: colors.buttonText }]}>
             {submitting
               ? "Sending donation..."
-              : `🌱 Donate ${amount || "1"} XLM`}
+              : isOnline
+                ? `🌱 Donate ${amount || "1"} XLM`
+                : `📤 Queue ${amount || "1"} XLM`}
           </Text>
         )}
       </TouchableOpacity>
@@ -717,6 +756,25 @@ const styles = StyleSheet.create({
   statusText: {
     color: "#0f172a",
   },
+  headerRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  offlineModeBanner: {
+    marginHorizontal: 16,
+    marginTop: 4,
+    padding: 12,
+    backgroundColor: "rgba(245, 158, 11, 0.12)",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(245, 158, 11, 0.3)",
+  },
+  offlineModeBannerText: {
+    fontSize: 13,
+    color: "#92400e",
+    lineHeight: 18,
+  },
   donateButton: {
     padding: 16,
     margin: 16,
@@ -726,5 +784,33 @@ const styles = StyleSheet.create({
   donateButtonText: {
     fontSize: 18,
     fontWeight: "bold",
+  },
+  biometricBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 12,
+    padding: 10,
+    backgroundColor: "rgba(34, 114, 57, 0.1)",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "rgba(34, 114, 57, 0.2)",
+  },
+  biometricBadgeText: {
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  infoBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 12,
+    padding: 10,
+    backgroundColor: "rgba(239, 68, 68, 0.05)",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.15)",
+  },
+  infoBannerText: {
+    fontSize: 13,
+    lineHeight: 18,
   },
 });

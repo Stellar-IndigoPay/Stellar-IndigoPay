@@ -16,6 +16,7 @@ const express = require("express");
 const router = express.Router();
 const pool = require("../db/pool");
 const { createRateLimiter } = require("../middleware/rateLimiter");
+const { AppError } = require("../errors");
 
 const analyticsLimiter = createRateLimiter(5, 1); // 5 req/min
 
@@ -35,11 +36,13 @@ router.get("/:id/analytics", analyticsLimiter, async (req, res, next) => {
     );
     const project = projectResult.rows[0];
     if (!project) {
-      return res.status(404).json({ error: "Project not found" });
+      throw new AppError("PROJECT_NOT_FOUND");
     }
 
     if (!wallet || wallet !== project.wallet_address) {
-      return res.status(403).json({ error: "Access denied. Only the project owner can view analytics." });
+      throw new AppError("FORBIDDEN", {
+        detail: "Only the project owner can view analytics",
+      });
     }
 
     // ── 2. Donor overview ───────────────────────────────────────────────

@@ -1,21 +1,32 @@
 /**
  * hooks/useDeepLink.ts
- * Handles indigopay:// deep links and navigates to the correct screen.
+ * Handles indigopay:// and web+stellar:// deep links.
  *
  * Supported URLs:
  *   indigopay://project/123       → /projects/123
- *   indigopay://donate/G...ABC    → /donate/G...ABC  (address pre-selects via id param)
+ *   indigopay://donate/G...ABC    → /donate/G...ABC
+ *   web+stellar:pay?destination=G...&amount=10  → SEP-0007 payment
+ *   web+stellar:tx?xdr=AAAA...    → SEP-0007 transaction signing
  */
 import { useEffect } from "react";
 import * as Linking from "expo-linking";
 import { useRouter } from "expo-router";
+import { parseDeepLinkUrl } from "../utils/notifications";
 
 export function useDeepLink() {
   const router = useRouter();
 
   function handleUrl(url: string | null) {
     if (!url) return;
-    const { path } = Linking.parse(url);
+
+    // SEP-0007: web+stellar scheme
+    if (url.startsWith("web+stellar:")) {
+      const encoded = encodeURIComponent(url);
+      router.push(`/wallet/sep0007?uri=${encoded}`);
+      return;
+    }
+
+    const { path, queryParams } = Linking.parse(url);
     if (!path) return;
 
     const [segment, param] = path.replace(/^\//, "").split("/");

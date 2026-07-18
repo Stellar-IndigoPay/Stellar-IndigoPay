@@ -1,6 +1,6 @@
-/**
- * components/EditProfileForm.tsx
- */
+import FormField from "@/components/FormField";
+import { useFormValidation } from "@/hooks/useFormValidation";
+import { profileSchema } from "@/lib/validation/schemas";
 import { useState, useEffect } from "react";
 import { fetchProfile, upsertProfile } from "@/lib/api";
 import type { DonorProfile } from "@/utils/types";
@@ -17,7 +17,8 @@ export default function EditProfileForm({ publicKey }: EditProfileFormProps) {
     type: "success" | "error";
     text: string;
   } | null>(null);
-  const [errors, setErrors] = useState<{ displayName?: string }>({});
+
+  const { errors, validate, clearField } = useFormValidation(profileSchema);
 
   useEffect(() => {
     if (publicKey) {
@@ -32,23 +33,13 @@ export default function EditProfileForm({ publicKey }: EditProfileFormProps) {
     }
   }, [publicKey]);
 
-  const validate = () => {
-    const newErrors: { displayName?: string } = {};
-    if (!displayName.trim()) {
-      newErrors.displayName = "Display name is required";
-    } else if (!/^[a-zA-Z0-9_ ]+$/.test(displayName)) {
-      newErrors.displayName =
-        "Only letters, numbers, underscores, and spaces allowed";
-    } else if (displayName.length > 30) {
-      newErrors.displayName = "Max 30 characters";
-    }
-    setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!validate()) return;
+    const isOk = validate({
+      displayName,
+      bio,
+    });
+    if (!isOk) return;
 
     setIsSaving(true);
     setMessage(null);
@@ -86,53 +77,44 @@ export default function EditProfileForm({ publicKey }: EditProfileFormProps) {
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-6">
-        <div>
-          <label
-            htmlFor="displayName"
-            className="block text-sm font-semibold text-[#4F46E5] dark:text-[#818CF8] mb-1.5 uppercase tracking-wider"
-          >
-            Display Name
-          </label>
+        <FormField
+          name="displayName"
+          label="Display Name"
+          error={errors.displayName}
+        >
           <input
-            id="displayName"
             type="text"
-            className={`w-full px-4 py-2.5 rounded-xl border font-body text-[#0F172A] dark:text-[#E2E8F0] focus:outline-none focus:ring-2 transition-all ${
-              errors.displayName
-                ? "border-red-300 focus:ring-red-100"
-                : "border-[rgba(99,102,241,0.15)] dark:border-[rgba(129,140,248,0.20)] focus:ring-[rgba(99,102,241,0.15)]"
-            }`}
+            className="input-field"
             placeholder="e.g. Alice_Green"
             value={displayName}
-            onChange={(e) => setDisplayName(e.target.value)}
+            onChange={(e) => {
+              setDisplayName(e.target.value);
+              clearField("displayName");
+            }}
             maxLength={30}
           />
-          {errors.displayName && (
-            <p className="mt-1.5 text-xs text-red-500 font-medium">
-              {errors.displayName}
-            </p>
-          )}
-        </div>
+        </FormField>
 
-        <div>
-          <label
-            htmlFor="bio"
-            className="block text-sm font-semibold text-[#4F46E5] dark:text-[#818CF8] mb-1.5 uppercase tracking-wider"
-          >
-            Bio
-          </label>
+        <FormField
+          name="bio"
+          label="Bio"
+          error={errors.bio}
+        >
           <textarea
-            id="bio"
             rows={3}
             className="w-full px-4 py-2.5 rounded-xl border border-[rgba(99,102,241,0.15)] dark:border-[rgba(129,140,248,0.20)] font-body text-[#0F172A] dark:text-[#E2E8F0] focus:outline-none focus:ring-2 focus:ring-[rgba(99,102,241,0.15)] transition-all resize-none"
             placeholder="Tell us why you support climate projects..."
             value={bio}
-            onChange={(e) => setBio(e.target.value)}
+            onChange={(e) => {
+              setBio(e.target.value);
+              clearField("bio");
+            }}
             maxLength={200}
           />
-          <p className="mt-1.5 text-right text-[10px] text-[#64748B] dark:text-[#94A3B8] uppercase font-bold tracking-widest leading-none">
-            {bio.length}/200
-          </p>
-        </div>
+        </FormField>
+        <p className="mt-1.5 text-right text-[10px] text-[#64748B] dark:text-[#94A3B8] uppercase font-bold tracking-widest leading-none">
+          {bio.length}/200
+        </p>
 
         {message && (
           <div

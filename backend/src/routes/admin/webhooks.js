@@ -1,232 +1,209 @@
 "use strict";
 
 /**
- * src/routes/admin/webhooks.js — Admin mTLS configuration for webhooks
+ * src/routes/admin/webhooks.js — Webhook dead-letter queue management
  *
- * Enterprise partners can require mutual-TLS for inbound webhook delivery.
- * This router lets an admin upload (and rotate) per-project mTLS material:
- * the partner's CA certificate, our client certificate, and our client
- * private key (stored AES-256-GCM encrypted). A GET endpoint exposes the
- * current config (excluding the private key) so the admin UI can render
- * certificate status and expiry.
+ * The webhook delivery pipeline (services/webhookQueue.js) retries a
+ * project-milestone webhook 6 times with exponential backoff before
+ * writing it to `webhook_deliveries.status = 'dlq'` (and a snapshot row
+ * in `webhook_dlq`). Without an admin surface, a temporary outage on a
+ * project's webhook endpoint permanently loses those events. This router
+ * lets an admin inspect the dead-letter queue, replay individual or
+ * project-wide failures, and review delivery history.
  *
- * Mounted at /api/admin/webhooks (via admin.js -> router.use("/webhooks")).
- *
- * Public surface:
- *   - GET  /:projectId/mtls      -> current config (no private key)
- *   - POST /:projectId/mtls      -> upsert config + enable mTLS
- *   - POST /:projectId/mtls/disable -> disable mTLS without deleting material
- *   - POST /:projectId/mtls/test -> fire a test delivery over mTLS
+ * Mounted at /api/admin/webhooks (see routes/admin.js). All routes are
+ * admin-only.
  */
 
-"use strict";
-
-const crypto = require("crypto");
 const express = require("express");
 const router = express.Router();
 const pool = require("../../db/pool");
 const { adminRequired } = require("../../middleware/auth");
 const { logAdminAction } = require("../../services/audit");
-const { encryptPrivateKey, decryptPrivateKey } = require("../../services/mtlsEncryption");
+const { replayDelivery } = require("../../services/webhookQueue");
 
-/**
- * Validate that a string looks like a PEM block. We accept CERTIFICATE and
- * (encrypted or unencrypted) PRIVATE KEY / RSA / EC variants. This is a
- * structural sanity check, not full chain validation — Node's tls module
- * does the real verification at connect time.
- */
-function validatePEM(pem, label) {
-  if (typeof pem !== "string" || pem.trim().length === 0) {
-    throw new Error(`${label} is required`);
-  }
-  const re = /-----BEGIN [A-Z0-9 ]+-----[\s\S]+?-----END [A-Z0-9 ]+-----/;
-  if (!re.test(pem.trim())) {
-    throw new Error(`${label} is not a valid PEM block`);
-  }
+router.use(adminRequired);
+
+const VALID_STATUSES = ["pending", "delivered", "failed", "dlq"];
+
+function mapDeliveryRow(row) {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    projectName: row.project_name || null,
+    eventId: row.event_id,
+    eventType: row.event_type,
+    status: row.status,
+    attempts: row.attempts,
+    lastAttemptAt: row.last_attempt_at
+      ? new Date(row.last_attempt_at).toISOString()
+      : null,
+    lastError: row.last_error || null,
+    nextAttemptAt: row.next_attempt_at
+      ? new Date(row.next_attempt_at).toISOString()
+      : null,
+    createdAt: new Date(row.created_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString(),
+  };
 }
 
 /**
- * Extract the expiry timestamp from a client certificate. Throws if the PEM
- * cannot be parsed as an X509Certificate (Node 16+).
+ * GET /api/admin/webhooks/dead-letter?projectId=&limit=&page=
+ * Lists deliveries currently sitting in the dead-letter state.
  */
-function extractCertExpiry(clientCert) {
-  const cert = new crypto.X509Certificate(clientCert);
-  // validTo is a string like "Dec 31 23:59:59 2030 GMT".
-  const expiresAt = new Date(cert.validTo);
-  if (Number.isNaN(expiresAt.getTime())) {
-    throw new Error("Could not parse client certificate validity period");
-  }
-  if (expiresAt.getTime() < Date.now()) {
-    throw new Error("Client certificate has already expired");
-  }
-  return expiresAt;
-}
-
-// GET /:projectId/mtls — return non-sensitive config for the admin UI.
-router.get("/:projectId/mtls", adminRequired, async (req, res, next) => {
+router.get("/dead-letter", async (req, res, next) => {
   try {
-    const { rows } = await pool.query(
-      `SELECT enabled, ca_cert IS NOT NULL AS has_ca,
-              client_cert IS NOT NULL AS has_client_cert,
-              client_key_encrypted IS NOT NULL AS has_client_key,
-              cert_expires_at, created_at, updated_at
-         FROM webhook_mtls_config
-        WHERE project_id = $1`,
-      [req.params.projectId],
-    );
-    if (rows.length === 0) {
-      return res.json({ success: true, data: null });
+    const { projectId } = req.query;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const offset = (page - 1) * limit;
+
+    const where = ["d.status = 'dlq'"];
+    const values = [];
+    if (projectId) {
+      values.push(projectId);
+      where.push(`d.project_id = $${values.length}`);
     }
-    return res.json({ success: true, data: rows[0] });
-  } catch (err) {
-    next(err);
+
+    const countResult = await pool.query(
+      `SELECT COUNT(*)::int AS total
+         FROM webhook_deliveries d
+        WHERE ${where.join(" AND ")}`,
+      values,
+    );
+
+    const listValues = [...values, limit, offset];
+    const result = await pool.query(
+      `SELECT d.*, p.name AS project_name
+         FROM webhook_deliveries d
+         JOIN projects p ON p.id = d.project_id
+        WHERE ${where.join(" AND ")}
+        ORDER BY d.updated_at DESC
+        LIMIT $${listValues.length - 1} OFFSET $${listValues.length}`,
+      listValues,
+    );
+
+    res.json({
+      success: true,
+      data: result.rows.map(mapDeliveryRow),
+      total: countResult.rows[0].total,
+      page,
+      pageSize: limit,
+    });
+  } catch (e) {
+    next(e);
   }
 });
 
-// POST /:projectId/mtls — upsert + enable mTLS config.
-router.post("/:projectId/mtls", adminRequired, async (req, res, next) => {
+/**
+ * POST /api/admin/webhooks/dead-letter/:deliveryId/replay
+ * Replays a single dead-lettered delivery, resetting its attempt budget
+ * and immediately retrying.
+ */
+router.post("/dead-letter/:deliveryId/replay", async (req, res, next) => {
   try {
-    const { caCert, clientCert, clientKey } = req.body || {};
-
-    validatePEM(clientCert, "clientCert");
-    validatePEM(clientKey, "clientKey");
-    if (caCert !== undefined && caCert !== null && caCert !== "") {
-      validatePEM(caCert, "caCert");
+    const { deliveryId } = req.params;
+    const replayed = await replayDelivery(deliveryId);
+    if (!replayed) {
+      return res
+        .status(404)
+        .json({ error: "No dead-lettered delivery found with that id" });
     }
 
-    const expiresAt = extractCertExpiry(clientCert);
-    const { encrypted, iv } = encryptPrivateKey(clientKey);
-
-    await pool.query(
-      `INSERT INTO webhook_mtls_config
-         (project_id, enabled, ca_cert, client_cert, client_key_encrypted, client_key_iv, cert_expires_at)
-       VALUES ($1, true, $2, $3, $4, $5, $6)
-       ON CONFLICT (project_id) DO UPDATE SET
-         enabled = true,
-         ca_cert = $2,
-         client_cert = $3,
-         client_key_encrypted = $4,
-         client_key_iv = $5,
-         cert_expires_at = $6,
-         updated_at = now()`,
-      [
-        req.params.projectId,
-        caCert || null,
-        clientCert,
-        encrypted,
-        iv,
-        expiresAt,
-      ],
+    const result = await pool.query(
+      "SELECT * FROM webhook_deliveries WHERE id = $1",
+      [deliveryId],
     );
 
-    await logAdminAction({
-      actor: req.admin?.sub || "admin",
-      action: "webhook.mtls.update",
-      targetType: "project",
-      targetId: req.params.projectId,
-      metadata: { cert_expires_at: expiresAt.toISOString() },
+    logAdminAction({
+      actor: (req.admin && req.admin.sub) || "admin",
+      action: "webhook.dead_letter.replay",
+      targetType: "webhook_delivery",
+      targetId: deliveryId,
+      metadata: { status: result.rows[0]?.status },
       ipAddress: req.ip,
     });
 
-    return res.json({ success: true, data: { cert_expires_at: expiresAt } });
-  } catch (err) {
-    if (/PEM|certificate|required/i.test(err.message)) {
-      return res.status(400).json({ error: err.message });
-    }
-    next(err);
+    res.json({ success: true, data: mapDeliveryRow(result.rows[0]) });
+  } catch (e) {
+    next(e);
   }
 });
 
-// POST /:projectId/mtls/disable — stop using mTLS without dropping material.
-router.post("/:projectId/mtls/disable", adminRequired, async (req, res, next) => {
+/**
+ * POST /api/admin/webhooks/dead-letter/replay-all
+ * Body: { projectId: string }
+ * Replays every dead-lettered delivery for a project, sequentially (the
+ * dataset is admin-scale, not high-volume, so a simple loop is enough —
+ * no extra queueing infrastructure needed).
+ */
+router.post("/dead-letter/replay-all", async (req, res, next) => {
   try {
-    const { rowCount } = await pool.query(
-      `UPDATE webhook_mtls_config SET enabled = false, updated_at = now()
-        WHERE project_id = $1`,
-      [req.params.projectId],
+    const { projectId } = req.body || {};
+    if (!projectId || typeof projectId !== "string") {
+      return res.status(400).json({ error: "projectId is required" });
+    }
+
+    const result = await pool.query(
+      "SELECT id FROM webhook_deliveries WHERE project_id = $1 AND status = 'dlq'",
+      [projectId],
     );
 
-    await logAdminAction({
-      actor: req.admin?.sub || "admin",
-      action: "webhook.mtls.disable",
+    let count = 0;
+    for (const row of result.rows) {
+      const replayed = await replayDelivery(row.id);
+      if (replayed) count++;
+    }
+
+    logAdminAction({
+      actor: (req.admin && req.admin.sub) || "admin",
+      action: "webhook.dead_letter.replay_all",
       targetType: "project",
-      targetId: req.params.projectId,
-      metadata: {},
+      targetId: projectId,
+      metadata: { count },
       ipAddress: req.ip,
     });
 
-    return res.json({ success: true, updated: rowCount });
-  } catch (err) {
-    next(err);
+    res.json({ success: true, count });
+  } catch (e) {
+    next(e);
   }
 });
 
-// POST /:projectId/mtls/test — perform a real mTLS handshake against the
-// project's configured webhook_url and report success/failure. This imports
-// the queue worker lazily to reuse its agent-building logic without coupling
-// route tests to the full worker.
-router.post("/:projectId/mtls/test", adminRequired, async (req, res, next) => {
+/**
+ * GET /api/admin/webhooks/deliveries?projectId=&status=&limit=
+ * Delivery history for a project (or across all projects), most recent first.
+ */
+router.get("/deliveries", async (req, res, next) => {
   try {
-    const { rows } = await pool.query(
-      `SELECT wm.enabled, wm.ca_cert, wm.client_cert, wm.client_key_encrypted, wm.client_key_iv, p.webhook_url
-         FROM webhook_mtls_config wm
-         JOIN projects p ON p.id = wm.project_id
-        WHERE wm.project_id = $1`,
-      [req.params.projectId],
+    const { projectId, status } = req.query;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+
+    const where = [];
+    const values = [];
+    if (projectId) {
+      values.push(projectId);
+      where.push(`d.project_id = $${values.length}`);
+    }
+    if (status && VALID_STATUSES.includes(status)) {
+      values.push(status);
+      where.push(`d.status = $${values.length}`);
+    }
+
+    values.push(limit);
+    const result = await pool.query(
+      `SELECT d.*, p.name AS project_name
+         FROM webhook_deliveries d
+         JOIN projects p ON p.id = d.project_id
+         ${where.length ? "WHERE " + where.join(" AND ") : ""}
+        ORDER BY d.created_at DESC
+        LIMIT $${values.length}`,
+      values,
     );
-    const cfg = rows[0];
-    if (!cfg || !cfg.enabled) {
-      return res.status(400).json({ error: "mTLS is not enabled for this project" });
-    }
-    if (!cfg.webhook_url) {
-      return res.status(400).json({ error: "Project has no webhook_url configured" });
-    }
 
-    const https = require("https");
-    const { URL } = require("url");
-    const urlObj = new URL(cfg.webhook_url);
-    if (urlObj.protocol !== "https:") {
-      return res.status(400).json({ error: "webhook_url must be https for mTLS test" });
-    }
-
-    const agent = new https.Agent({
-      cert: cfg.client_cert,
-      key: decryptPrivateKey(cfg.client_key_encrypted, cfg.client_key_iv),
-      ca: cfg.ca_cert || undefined,
-      rejectUnauthorized: true,
-    });
-
-    const result = await new Promise((resolve) => {
-      const reqTls = https.request(
-        {
-          hostname: urlObj.hostname,
-          port: urlObj.port || 443,
-          path: urlObj.pathname + urlObj.search || "/",
-          method: "POST",
-          agent,
-          timeout: 10000,
-          headers: { "Content-Type": "application/json" },
-        },
-        (r) => {
-          r.resume();
-          r.on("end", () => resolve({ ok: true, statusCode: r.statusCode }));
-        },
-      );
-      reqTls.on("error", (e) => resolve({ ok: false, error: e.message }));
-      reqTls.on("timeout", () => {
-        reqTls.destroy();
-        resolve({ ok: false, error: "timeout" });
-      });
-      reqTls.end(JSON.stringify({ type: "mtls.test", ok: true }));
-    });
-    agent.destroy();
-
-    if (result.ok) {
-      return res.json({ success: true, data: { statusCode: result.statusCode } });
-    }
-    return res.status(502).json({ success: false, error: result.error });
-  } catch (err) {
-    next(err);
+    res.json({ success: true, data: result.rows.map(mapDeliveryRow) });
+  } catch (e) {
+    next(e);
   }
 });
 

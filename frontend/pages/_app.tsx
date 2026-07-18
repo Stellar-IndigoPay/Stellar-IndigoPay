@@ -1,11 +1,22 @@
+import { useEffect } from "react";
 import type { AppProps } from "next/app";
 import Head from "next/head";
+import { useRouter } from "next/router";
+import { AnimatePresence } from "framer-motion";
+import SkipToContent from "@/components/SkipToContent";
+import PageTransition from "@/components/PageTransition";
 import { ThemeTiedToaster } from "@/components/ThemeTiedToaster";
 import { ThemeProvider } from "@/lib/theme";
 import { I18nProvider } from "@/lib/i18n";
 import { PriceProvider } from "@/lib/priceContext";
 import { WalletProvider } from "@/lib/WalletProvider";
 import { ErrorBoundary } from "@/lib/ErrorBoundary";
+import useOnlineStatus from "@/hooks/useOnlineStatus";
+import ConnectivityBanner from "@/components/ConnectivityBanner";
+import OfflineFallback from "@/components/OfflineFallback";
+import InstallPrompt from "@/components/InstallPrompt";
+import { syncQueuedDonations } from "@/lib/offlineDonationQueue";
+import { recordDonation } from "@/lib/api";
 import "@/styles/globals.css";
 
 // ThemeTiedToaster keeps the sonner toast palette in sync with the
@@ -13,7 +24,44 @@ import "@/styles/globals.css";
 // ErrorBoundary is the OUTERMOST provider so it can catch render-time
 // exceptions in any of the providers below it (Theme, I18n, Price,
 // Wallet) instead of leaving the user with a blank shell.
+// SkipToContent lives at the very top so it is the first focusable
+// element on the page (satisfies WCAG 2.4.1 Bypass Blocks).
 export default function App({ Component, pageProps }: AppProps) {
+  const router = useRouter();
+  const isOnline = useOnlineStatus();
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
+
+    const handleOnlineSync = () => {
+      void syncQueuedDonations(async (payload) => {
+        try {
+          await recordDonation({
+            ...payload,
+            transactionHash: payload.transactionHash || "queued-offline",
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      });
+    };
+
+    navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+    navigator.serviceWorker.addEventListener("message", (event) => {
+      if (event.data?.type === "sync-queued-donations") {
+        handleOnlineSync();
+      }
+    });
+    window.addEventListener("online", handleOnlineSync);
+
+    handleOnlineSync();
+
+    return () => {
+      window.removeEventListener("online", handleOnlineSync);
+    };
+  }, []);
+
   return (
     <ErrorBoundary>
       <ThemeProvider>
@@ -33,7 +81,23 @@ export default function App({ Component, pageProps }: AppProps) {
                   content="width=device-width, initial-scale=1"
                 />
               </Head>
-              <Component {...pageProps} />
+              <ConnectivityBanner isOnline={isOnline} />
+              <SkipToContent />
+              <main id="main-content" tabIndex={-1}>
+                <OfflineFallback isOnline={isOnline} />
+                {/* `initial={false}` prevents the entrance animation on the
+                    first SSR paint; `mode="wait"` lets the outgoing page
+                    finish exiting before the incoming one mounts, which keeps
+                    route changes smooth for both forward and back/forward
+                    navigations. Keying by `router.asPath` (including the
+                    query string) ensures dynamic routes animate too. */}
+                <AnimatePresence mode="wait" initial={false}>
+                  <PageTransition key={router.asPath}>
+                    <Component {...pageProps} />
+                  </PageTransition>
+                </AnimatePresence>
+              </main>
+              <InstallPrompt />
               <ThemeTiedToaster />
             </WalletProvider>
           </PriceProvider>

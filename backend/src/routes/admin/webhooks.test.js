@@ -2,189 +2,197 @@
 
 const express = require("express");
 const request = require("supertest");
-const crypto = require("crypto");
-const fs = require("fs");
-const os = require("os");
-const path = require("path");
-const { execFileSync } = require("child_process");
 
-// Generate a real self-signed certificate + key via openssl so the PEM
-// parses with crypto.X509Certificate (used for expiry extraction). No real
-// secret material is committed.
-function certMaterial() {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mtls-test-"));
-  const keyPath = path.join(tmp, "key.pem");
-  const csrPath = path.join(tmp, "csr.pem");
-  const certPath = path.join(tmp, "cert.pem");
-
-  execFileSync("openssl", ["genrsa", "-traditional", "-out", keyPath, "2048"]);
-  execFileSync("openssl", [
-    "req",
-    "-new",
-    "-key",
-    keyPath,
-    "-subj",
-    "/CN=test.indigopay.local",
-    "-out",
-    csrPath,
-  ]);
-  execFileSync("openssl", [
-    "x509",
-    "-req",
-    "-in",
-    csrPath,
-    "-signkey",
-    keyPath,
-    "-days",
-    "365",
-    "-out",
-    certPath,
-  ]);
-
-  const clientKey = fs.readFileSync(keyPath, "utf8");
-  const clientCert = fs.readFileSync(certPath, "utf8");
-  fs.rmSync(tmp, { recursive: true, force: true });
-
-  return { caCert: clientCert, clientCert, clientKey };
-}
-
-jest.mock("../../db/pool", () => ({ query: jest.fn() }));
-jest.mock("../../middleware/rateLimiter", () => ({
-  createRateLimiter: () => (req, res, next) => next(),
+jest.mock("../../db/pool", () => ({
+  query: jest.fn(),
 }));
+
 jest.mock("../../services/audit", () => ({
   logAdminAction: jest.fn().mockResolvedValue(undefined),
 }));
 
+jest.mock("../../services/webhookQueue", () => ({
+  replayDelivery: jest.fn(),
+}));
+
 const pool = require("../../db/pool");
 const { logAdminAction } = require("../../services/audit");
+const { replayDelivery } = require("../../services/webhookQueue");
 
+process.env.ADMIN_USERNAME = "admin";
+process.env.ADMIN_PASSWORD = "testpass";
 process.env.ADMIN_API_KEY = "test-admin-key";
-process.env.WEBHOOK_MTLS_ENCRYPTION_KEY = crypto.randomBytes(32).toString("hex");
+process.env.JWT_SECRET = "test-secret-for-jest";
 
 function buildApp() {
   const app = express();
   app.use(express.json());
   app.use("/api/admin/webhooks", require("./webhooks"));
+  app.use((err, _req, res, _next) => {
+    res.status(err.status || 500).json({ error: err.message || "Internal server error" });
+  });
   return app;
 }
 
-describe("Admin Webhook mTLS Router", () => {
+const MOCK_DELIVERY_ROW = {
+  id: "delivery-1",
+  project_id: "proj-1",
+  project_name: "Amazon Reforestation",
+  event_id: "evt-abc",
+  event_type: "milestone.reached",
+  status: "dlq",
+  attempts: 6,
+  last_attempt_at: new Date("2026-07-10T00:00:00.000Z").toISOString(),
+  last_error: "timeout",
+  next_attempt_at: null,
+  created_at: new Date("2026-07-01T00:00:00.000Z").toISOString(),
+  updated_at: new Date("2026-07-10T00:00:00.000Z").toISOString(),
+};
+
+describe("Admin Webhooks Router", () => {
   let app;
-  let mat;
 
   beforeEach(() => {
     jest.clearAllMocks();
     app = buildApp();
-    mat = certMaterial();
   });
 
-  test("POST /:projectId/mtls returns 401 without auth", async () => {
-    const res = await request(app)
-      .post("/api/admin/webhooks/proj/mtls")
-      .send({ caCert: mat.caCert, clientCert: mat.clientCert, clientKey: mat.clientKey });
-    expect(res.status).toBe(401);
-  });
-
-  test("POST /:projectId/mtls uploads and upserts config", async () => {
-    pool.query.mockResolvedValue({ rows: [] });
-    const res = await request(app)
-      .post("/api/admin/webhooks/proj/mtls")
-      .set("X-Admin-Key", "test-admin-key")
-      .send({
-        caCert: mat.caCert,
-        clientCert: mat.clientCert,
-        clientKey: mat.clientKey,
-      });
-
-    expect(res.status).toBe(200);
-    expect(res.body.success).toBe(true);
-    expect(res.body.data.cert_expires_at).toBeDefined();
-
-    const insertCall = pool.query.mock.calls.find((c) =>
-      String(c[0]).toUpperCase().includes("INSERT INTO WEBHOOK_MTLS_CONFIG"),
-    );
-    expect(insertCall).toBeDefined();
-    // Encrypted key is stored, not the raw PEM.
-    expect(insertCall[1][3]).not.toBe(mat.clientKey);
-    expect(logAdminAction).toHaveBeenCalledWith(
-      expect.objectContaining({ action: "webhook.mtls.update" }),
-    );
-  });
-
-  test("POST /:projectId/mtls rejects invalid PEM", async () => {
-    const res = await request(app)
-      .post("/api/admin/webhooks/proj/mtls")
-      .set("X-Admin-Key", "test-admin-key")
-      .send({
-        caCert: "not a pem",
-        clientCert: mat.clientCert,
-        clientKey: mat.clientKey,
-      });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/PEM/);
-  });
-
-  test("POST /:projectId/mtls rejects missing client key", async () => {
-    const res = await request(app)
-      .post("/api/admin/webhooks/proj/mtls")
-      .set("X-Admin-Key", "test-admin-key")
-      .send({ caCert: mat.caCert, clientCert: mat.clientCert });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/required/);
-  });
-
-  test("GET /:projectId/mtls returns null when no config", async () => {
-    pool.query.mockResolvedValue({ rows: [] });
-    const res = await request(app)
-      .get("/api/admin/webhooks/proj/mtls")
-      .set("X-Admin-Key", "test-admin-key");
-    expect(res.status).toBe(200);
-    expect(res.body.data).toBeNull();
-  });
-
-  test("GET /:projectId/mtls returns non-sensitive config without private key", async () => {
-    pool.query.mockResolvedValue({
-      rows: [
-        {
-          enabled: true,
-          has_ca: true,
-          has_client_cert: true,
-          has_client_key: true,
-          cert_expires_at: new Date(),
-          created_at: new Date(),
-          updated_at: new Date(),
-        },
-      ],
+  describe("auth", () => {
+    test("rejects requests without admin credentials with 401", async () => {
+      const res = await request(app).get("/api/admin/webhooks/dead-letter");
+      expect(res.status).toBe(401);
     });
-    const res = await request(app)
-      .get("/api/admin/webhooks/proj/mtls")
-      .set("X-Admin-Key", "test-admin-key");
-    expect(res.status).toBe(200);
-    expect(res.body.data.has_client_key).toBe(true);
-    expect(res.body.data.client_key_encrypted).toBeUndefined();
   });
 
-  test("POST /:projectId/mtls/disable sets enabled=false", async () => {
-    pool.query.mockResolvedValue({ rowCount: 1 });
-    const res = await request(app)
-      .post("/api/admin/webhooks/proj/mtls/disable")
-      .set("X-Admin-Key", "test-admin-key");
-    expect(res.status).toBe(200);
-    expect(res.body.success).toBe(true);
-    const updateCall = pool.query.mock.calls.find((c) =>
-      String(c[0]).toUpperCase().includes("UPDATE WEBHOOK_MTLS_CONFIG"),
-    );
-    expect(updateCall).toBeDefined();
-    expect(String(updateCall[0]).toUpperCase()).toContain("ENABLED = FALSE");
+  describe("GET /dead-letter", () => {
+    test("returns dead-lettered deliveries with pagination", async () => {
+      pool.query
+        .mockResolvedValueOnce({ rows: [{ total: 1 }] }) // count
+        .mockResolvedValueOnce({ rows: [MOCK_DELIVERY_ROW] }); // page
+
+      const res = await request(app)
+        .get("/api/admin/webhooks/dead-letter")
+        .set("X-Admin-Key", "test-admin-key")
+        .expect(200);
+
+      expect(res.body.success).toBe(true);
+      expect(res.body.total).toBe(1);
+      expect(res.body.data).toHaveLength(1);
+      expect(res.body.data[0]).toMatchObject({
+        id: "delivery-1",
+        status: "dlq",
+        attempts: 6,
+        projectName: "Amazon Reforestation",
+      });
+    });
+
+    test("filters by projectId", async () => {
+      pool.query
+        .mockResolvedValueOnce({ rows: [{ total: 0 }] })
+        .mockResolvedValueOnce({ rows: [] });
+
+      await request(app)
+        .get("/api/admin/webhooks/dead-letter?projectId=proj-1")
+        .set("X-Admin-Key", "test-admin-key")
+        .expect(200);
+
+      const countQueryParams = pool.query.mock.calls[0][1];
+      expect(countQueryParams).toEqual(["proj-1"]);
+    });
   });
 
-  test("POST /:projectId/mtls/test returns 400 when not enabled", async () => {
-    pool.query.mockResolvedValue({ rows: [] });
-    const res = await request(app)
-      .post("/api/admin/webhooks/proj/mtls/test")
-      .set("X-Admin-Key", "test-admin-key");
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/not enabled/);
+  describe("POST /dead-letter/:deliveryId/replay", () => {
+    test("replays and returns the updated delivery", async () => {
+      replayDelivery.mockResolvedValue(true);
+      pool.query.mockResolvedValueOnce({
+        rows: [{ ...MOCK_DELIVERY_ROW, status: "delivered" }],
+      });
+
+      const res = await request(app)
+        .post("/api/admin/webhooks/dead-letter/delivery-1/replay")
+        .set("X-Admin-Key", "test-admin-key")
+        .expect(200);
+
+      expect(replayDelivery).toHaveBeenCalledWith("delivery-1");
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.status).toBe("delivered");
+      expect(logAdminAction).toHaveBeenCalledWith(
+        expect.objectContaining({ action: "webhook.dead_letter.replay" }),
+      );
+    });
+
+    test("returns 404 when the delivery isn't dead-lettered", async () => {
+      replayDelivery.mockResolvedValue(false);
+
+      const res = await request(app)
+        .post("/api/admin/webhooks/dead-letter/unknown/replay")
+        .set("X-Admin-Key", "test-admin-key")
+        .expect(404);
+
+      expect(res.body.error).toMatch(/no dead-lettered delivery/i);
+    });
+  });
+
+  describe("POST /dead-letter/replay-all", () => {
+    test("replays all dlq deliveries for a project and returns the count", async () => {
+      pool.query.mockResolvedValueOnce({
+        rows: [{ id: "d-1" }, { id: "d-2" }, { id: "d-3" }],
+      });
+      replayDelivery
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false);
+
+      const res = await request(app)
+        .post("/api/admin/webhooks/dead-letter/replay-all")
+        .set("X-Admin-Key", "test-admin-key")
+        .send({ projectId: "proj-1" })
+        .expect(200);
+
+      expect(replayDelivery).toHaveBeenCalledTimes(3);
+      expect(res.body.success).toBe(true);
+      expect(res.body.count).toBe(2);
+    });
+
+    test("requires projectId", async () => {
+      const res = await request(app)
+        .post("/api/admin/webhooks/dead-letter/replay-all")
+        .set("X-Admin-Key", "test-admin-key")
+        .send({})
+        .expect(400);
+
+      expect(res.body.error).toMatch(/projectId/i);
+    });
+  });
+
+  describe("GET /deliveries", () => {
+    test("returns delivery history filtered by projectId and status", async () => {
+      pool.query.mockResolvedValueOnce({ rows: [MOCK_DELIVERY_ROW] });
+
+      const res = await request(app)
+        .get("/api/admin/webhooks/deliveries?projectId=proj-1&status=dlq")
+        .set("X-Admin-Key", "test-admin-key")
+        .expect(200);
+
+      expect(res.body.success).toBe(true);
+      expect(res.body.data).toHaveLength(1);
+
+      const [query, params] = pool.query.mock.calls[0];
+      expect(query).toContain("d.project_id = $1");
+      expect(query).toContain("d.status = $2");
+      expect(params).toEqual(["proj-1", "dlq", 100]);
+    });
+
+    test("ignores an invalid status filter", async () => {
+      pool.query.mockResolvedValueOnce({ rows: [] });
+
+      await request(app)
+        .get("/api/admin/webhooks/deliveries?status=bogus")
+        .set("X-Admin-Key", "test-admin-key")
+        .expect(200);
+
+      const query = pool.query.mock.calls[0][0];
+      expect(query).not.toContain("d.status =");
+    });
   });
 });

@@ -17,13 +17,13 @@ import React, { type ReactNode } from "react";
 import { Text, Pressable, View } from "react-native";
 import { render, fireEvent, screen } from "@testing-library/react-native";
 
-jest.mock("../lib/errorReporter", () => ({
+jest.mock("../../lib/errorReporter", () => ({
   init: jest.fn(),
   captureException: jest.fn().mockResolvedValue(true),
 }));
 
-import { ErrorBoundary } from "../components/ErrorBoundary";
-import { captureException } from "../lib/errorReporter";
+import { ErrorBoundary } from "../ErrorBoundary";
+import { captureException } from "../../lib/errorReporter";
 
 const captureExceptionMock = captureException as jest.MockedFunction<
   typeof captureException

@@ -1,0 +1,329 @@
+# monitoring/tests/alert-rules-test.yml
+#
+# promtool test rules for monitoring/alert-rules-routing.yml (SLO burn-rate alerts).
+#
+# Validates that multi-window burn-rate alerts fire and don't fire under
+# the correct conditions. The alert rules reference recording rules defined
+# in monitoring/recording-rules.yml, so both files must be loaded.
+#
+# Run with:
+#   promtool test rules monitoring/tests/alert-rules-test.yml
+#
+# NOTE: eval_time accounts for both rate() warmup (~1m) and the alert's
+# `for` duration. Input series cover enough time for all windows.
+
+rule_files:
+  - ../recording-rules.yml
+  - ../alert-rules-routing.yml
+
+evaluation_interval: 30s
+
+tests:
+  # ═══════════════════════════════════════════════════════════════════
+  # DonationsHighBurnRate1h — for: 5m, threshold: 28.8%
+  # ═══════════════════════════════════════════════════════════════════
+
+  # FIRES at 30% error rate (above 28.8% threshold)
+  - name: donations-burn-1h-fires
+    interval: 30s
+    input_series:
+      # 300 rps total + 130 rps errors = 430 rps total, 130 rps errors = 30.2% error rate
+      # Counters increment by (rps * 30s) each interval
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="200"}'
+        values: '0+9000x30'
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="500"}'
+        values: '0+3900x30'  # 3900/(9000+3900) = 30.2% > 28.8%
+
+    alert_rule_test:
+      # 7m = 1m rate() warmup + 5m for + 1m buffer
+      - alertname: DonationsHighBurnRate1h
+        eval_time: 7m
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              routing: pagerduty
+              slo: donations-995
+            exp_annotations:
+              summary: "Donation API burning error budget at 2%/1h (>14.4x burn rate)"
+
+  # Does NOT fire below threshold (5% error rate < 28.8%)
+  - name: donations-burn-1h-ok
+    interval: 30s
+    input_series:
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="200"}'
+        values: '0+11400x30'
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="500"}'
+        values: '0+600x30'  # 600/12000 = 5% < 28.8%
+
+    alert_rule_test:
+      - alertname: DonationsHighBurnRate1h
+        eval_time: 7m
+        exp_alerts: []
+
+  # ═══════════════════════════════════════════════════════════════════
+  # DonationsHighBurnRate6h — for: 10m, threshold: 30%
+  # ═══════════════════════════════════════════════════════════════════
+
+  # FIRES at 32% error rate (above 30% threshold)
+  - name: donations-burn-6h-fires
+    interval: 30s
+    input_series:
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="200"}'
+        values: '0+8500x40'
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="500"}'
+        values: '0+4000x40'  # 4000/12500 = 32% > 30%
+
+    alert_rule_test:
+      # 12m = 1m warmup + 10m for + 1m buffer
+      - alertname: DonationsHighBurnRate6h
+        eval_time: 12m
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              routing: pagerduty
+              slo: donations-995
+            exp_annotations:
+              summary: "Donation API burning error budget at 5%/6h (>6x burn rate)"
+
+  # Does NOT fire below threshold
+  - name: donations-burn-6h-ok
+    interval: 30s
+    input_series:
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="200"}'
+        values: '0+9500x40'
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="500"}'
+        values: '0+3000x40'  # 3000/12500 = 24% < 30%
+
+    alert_rule_test:
+      - alertname: DonationsHighBurnRate6h
+        eval_time: 12m
+        exp_alerts: []
+
+  # ═══════════════════════════════════════════════════════════════════
+  # DonationsHighBurnRate3d — for: 30m, threshold: 10%
+  # ═══════════════════════════════════════════════════════════════════
+
+  # FIRES at 20% error rate (above 10% threshold)
+  - name: donations-burn-3d-fires
+    interval: 30s
+    input_series:
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="200"}'
+        values: '0+10000x80'
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="500"}'
+        values: '0+2500x80'  # 2500/12500 = 20% > 10%
+
+    alert_rule_test:
+      # 32m = 1m warmup + 30m for + 1m buffer
+      - alertname: DonationsHighBurnRate3d
+        eval_time: 32m
+        exp_alerts:
+          - exp_labels:
+              severity: warn
+              slo: donations-995
+            exp_annotations:
+              summary: "Donation API burning error budget at 10%/3d (>1x burn rate)"
+
+  # Does NOT fire below threshold (5% < 10%)
+  - name: donations-burn-3d-ok
+    interval: 30s
+    input_series:
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="200"}'
+        values: '0+11900x80'
+      - series: 'http_requests_total{method="POST", route="/api/donations", status_code="500"}'
+        values: '0+600x80'
+
+    alert_rule_test:
+      - alertname: DonationsHighBurnRate3d
+        eval_time: 32m
+        exp_alerts: []
+
+  # ═══════════════════════════════════════════════════════════════════
+  # ProjectsHighBurnRate1h — for: 5m, threshold: 1.44%
+  # ═══════════════════════════════════════════════════════════════════
+
+  # FIRES at 2% error rate (above 1.44% threshold)
+  - name: projects-burn-1h-fires
+    interval: 30s
+    input_series:
+      # 98 rps 200 + 2 rps 500 = 100 rps total, 2% 5xx, no slow errors
+      - series: 'http_requests_total{method="GET", route="/api/projects", status_code="200"}'
+        values: '0+2940x30'
+      - series: 'http_requests_total{method="GET", route="/api/projects", status_code="500"}'
+        values: '0+60x30'
+      # Histogram: all requests under 0.5s → no slow errors (all ≤ 2s)
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="200", le="0.5"}'
+        values: '0+3000x30'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="200", le="2"}'
+        values: '0+3000x30'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="200", le="+Inf"}'
+        values: '0+3000x30'
+      # Histogram for 5xx requests (all fast, just so histogram _count covers all traffic)
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="500", le="0.5"}'
+        values: '0+60x30'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="500", le="2"}'
+        values: '0+60x30'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="500", le="+Inf"}'
+        values: '0+60x30'
+
+    alert_rule_test:
+      - alertname: ProjectsHighBurnRate1h
+        eval_time: 7m
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              routing: pagerduty
+              slo: projects-999
+            exp_annotations:
+              summary: "Project listing API burning error budget at 2%/1h (>14.4x burn rate)"
+
+  # Does NOT fire below threshold (1% < 1.44%)
+  - name: projects-burn-1h-ok
+    interval: 30s
+    input_series:
+      - series: 'http_requests_total{method="GET", route="/api/projects", status_code="200"}'
+        values: '0+2970x30'
+      - series: 'http_requests_total{method="GET", route="/api/projects", status_code="500"}'
+        values: '0+30x30'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="200", le="0.5"}'
+        values: '0+3000x30'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="200", le="2"}'
+        values: '0+3000x30'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="200", le="+Inf"}'
+        values: '0+3000x30'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="500", le="0.5"}'
+        values: '0+30x30'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="500", le="2"}'
+        values: '0+30x30'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="500", le="+Inf"}'
+        values: '0+30x30'
+
+    alert_rule_test:
+      - alertname: ProjectsHighBurnRate1h
+        eval_time: 7m
+        exp_alerts: []
+
+  # ═══════════════════════════════════════════════════════════════════
+  # ProjectsHighBurnRate6h — for: 10m, threshold: 0.6%
+  # ═══════════════════════════════════════════════════════════════════
+
+  # FIRES at 0.8% error rate (above 0.6% threshold)
+  - name: projects-burn-6h-fires
+    interval: 30s
+    input_series:
+      - series: 'http_requests_total{method="GET", route="/api/projects", status_code="200"}'
+        values: '0+2976x40'
+      - series: 'http_requests_total{method="GET", route="/api/projects", status_code="500"}'
+        values: '0+24x40'  # 24/3000 = 0.8% > 0.6%
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="200", le="0.5"}'
+        values: '0+3000x40'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="200", le="2"}'
+        values: '0+3000x40'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="200", le="+Inf"}'
+        values: '0+3000x40'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="500", le="0.5"}'
+        values: '0+24x40'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="500", le="2"}'
+        values: '0+24x40'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="500", le="+Inf"}'
+        values: '0+24x40'
+
+    alert_rule_test:
+      - alertname: ProjectsHighBurnRate6h
+        eval_time: 12m
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              routing: pagerduty
+              slo: projects-999
+            exp_annotations:
+              summary: "Project listing API burning error budget at 5%/6h (>6x burn rate)"
+
+  # Does NOT fire below threshold (0.4% < 0.6%)
+  - name: projects-burn-6h-ok
+    interval: 30s
+    input_series:
+      - series: 'http_requests_total{method="GET", route="/api/projects", status_code="200"}'
+        values: '0+2988x40'
+      - series: 'http_requests_total{method="GET", route="/api/projects", status_code="500"}'
+        values: '0+12x40'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="200", le="0.5"}'
+        values: '0+3000x40'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="200", le="2"}'
+        values: '0+3000x40'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="200", le="+Inf"}'
+        values: '0+3000x40'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="500", le="0.5"}'
+        values: '0+12x40'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="500", le="2"}'
+        values: '0+12x40'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="500", le="+Inf"}'
+        values: '0+12x40'
+
+    alert_rule_test:
+      - alertname: ProjectsHighBurnRate6h
+        eval_time: 12m
+        exp_alerts: []
+
+  # ═══════════════════════════════════════════════════════════════════
+  # ProjectsHighBurnRate3d — for: 30m, threshold: 0.1%
+  # ═══════════════════════════════════════════════════════════════════
+
+  # FIRES at 0.5% error rate (above 0.1% threshold)
+  - name: projects-burn-3d-fires
+    interval: 30s
+    input_series:
+      - series: 'http_requests_total{method="GET", route="/api/projects", status_code="200"}'
+        values: '0+2985x80'
+      - series: 'http_requests_total{method="GET", route="/api/projects", status_code="500"}'
+        values: '0+15x80'  # 15/3000 = 0.5% > 0.1%
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="200", le="0.5"}'
+        values: '0+3000x80'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="200", le="2"}'
+        values: '0+3000x80'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="200", le="+Inf"}'
+        values: '0+3000x80'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="500", le="0.5"}'
+        values: '0+15x80'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="500", le="2"}'
+        values: '0+15x80'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="500", le="+Inf"}'
+        values: '0+15x80'
+
+    alert_rule_test:
+      - alertname: ProjectsHighBurnRate3d
+        eval_time: 32m
+        exp_alerts:
+          - exp_labels:
+              severity: warn
+              slo: projects-999
+            exp_annotations:
+              summary: "Project listing API burning error budget at 10%/3d (>1x burn rate)"
+
+  # Does NOT fire below threshold (0.033% < 0.1%)
+  - name: projects-burn-3d-ok
+    interval: 30s
+    input_series:
+      # 2999 rps 200 + 1 rps 500 = 3000 rps total, 1/3000 ≈ 0.033% < 0.1%
+      - series: 'http_requests_total{method="GET", route="/api/projects", status_code="200"}'
+        values: '0+2999x80'
+      - series: 'http_requests_total{method="GET", route="/api/projects", status_code="500"}'
+        values: '0+1x80'
+      # Histogram for 200s
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="200", le="0.5"}'
+        values: '0+2999x80'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="200", le="2"}'
+        values: '0+2999x80'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="200", le="+Inf"}'
+        values: '0+2999x80'
+      # Histogram for 500s
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="500", le="0.5"}'
+        values: '0+1x80'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="500", le="2"}'
+        values: '0+1x80'
+      - series: 'http_request_duration_seconds_bucket{method="GET", route="/api/projects", status_code="500", le="+Inf"}'
+        values: '0+1x80'
+
+    alert_rule_test:
+      - alertname: ProjectsHighBurnRate3d
+        eval_time: 32m
+        exp_alerts: []

@@ -1,7 +1,6 @@
 /**
  * components/LeaderboardTable.tsx
  */
-import { useState, useEffect } from "react";
 import { fetchLeaderboard } from "@/lib/api";
 import {
   formatXLM,
@@ -12,6 +11,9 @@ import {
 import { accountUrl } from "@/lib/stellar";
 import { useXlmPrice } from "@/lib/priceContext";
 import type { LeaderboardEntry } from "@/utils/types";
+import { SkeletonList } from "./Skeleton";
+import { useAsyncData } from "@/hooks/useAsyncData";
+import { QueryErrorFallback } from "@/components/QueryErrorFallback";
 
 const AVATAR_COLORS = [
   "#4F46E5",
@@ -59,6 +61,10 @@ function Avatar({
   );
 }
 
+export function LeaderboardTableSkeleton({ rows = 5 }: { rows?: number }) {
+  return <SkeletonList rows={rows} withAvatar={true} palette="indigo" />;
+}
+
 export default function LeaderboardTable({
   limit = 20,
   period = "all",
@@ -66,45 +72,36 @@ export default function LeaderboardTable({
   limit?: number;
   period?: "all" | "month" | "year";
 }) {
-  const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const xlmUsd = useXlmPrice();
 
-  useEffect(() => {
-    setLoading(true);
-    setError(null);
-    fetchLeaderboard(limit, period)
-      .then(setEntries)
-      .catch(() => setError("Could not load leaderboard."))
-      .finally(() => setLoading(false));
-  }, [limit, period]);
+  const {
+    data: entries,
+    isLoading,
+    isError,
+    error,
+    refetch,
+    isRetrying,
+    retryCount,
+  } = useAsyncData<LeaderboardEntry[]>(() => fetchLeaderboard(limit, period), {
+    deps: [limit, period],
+  });
 
-  if (loading)
+  if (isLoading) return <LeaderboardTableSkeleton />;
+
+  if (isError || isRetrying)
     return (
-      <div className="space-y-2">
-        {Array.from({ length: 5 }).map((_, i) => (
-          <div
-            key={i}
-            className="animate-pulse flex items-center gap-4 p-4 rounded-xl bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)] border border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)]"
-          >
-            <div className="w-8 h-8 rounded-full bg-[rgba(99,102,241,0.10)] dark:bg-[rgba(129,140,248,0.12)]" />
-            <div className="flex-1 space-y-2">
-              <div className="h-3 bg-[rgba(99,102,241,0.10)] dark:bg-[rgba(129,140,248,0.12)] rounded w-1/3" />
-              <div className="h-2 bg-[rgba(99,102,241,0.06)] dark:bg-[rgba(129,140,248,0.08)] rounded w-1/4" />
-            </div>
-            <div className="h-4 bg-[rgba(99,102,241,0.10)] dark:bg-[rgba(129,140,248,0.12)] rounded w-20" />
-          </div>
-        ))}
-      </div>
+      <QueryErrorFallback
+        error={error}
+        onRetry={refetch}
+        isRetrying={isRetrying}
+        retryCount={retryCount}
+        title="Couldn't load the leaderboard"
+      />
     );
 
-  if (error)
-    return (
-      <p className="text-red-500 text-sm text-center py-6 font-body">{error}</p>
-    );
+  const safeEntries = entries ?? [];
 
-  if (entries.length === 0)
+  if (safeEntries.length === 0)
     return (
       <div className="text-center py-12">
         <p className="text-3xl mb-3">🌱</p>
@@ -118,7 +115,7 @@ export default function LeaderboardTable({
 
   return (
     <div className="space-y-2">
-      {entries.map((entry) => (
+      {safeEntries.map((entry) => (
         <div
           key={entry.publicKey}
           className="flex items-center gap-4 p-4 rounded-xl bg-white dark:bg-[#14142D] border border-[rgba(99,102,241,0.10)] dark:border-[rgba(129,140,248,0.12)] hover:border-[rgba(99,102,241,0.25)] dark:hover:border-[rgba(129,140,248,0.30)] transition-all"

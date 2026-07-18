@@ -23,12 +23,18 @@ jest.mock("../services/summaryQueue", () => ({
   enqueueAISummary: jest.fn(),
 }));
 
+jest.mock("../services/geocoder", () => ({
+  geocode: jest.fn(),
+}));
+
 const pool = require("../db/pool");
+const { geocode } = require("../services/geocoder");
 const redis = require("../services/redis");
 const { server } = require("../services/stellar");
 const express = require("express");
 const request = require("supertest");
 const projectsRouter = require("./projects");
+const { AppError } = require("../errors");
 
 process.env.ADMIN_API_KEY = "test-admin-key";
 
@@ -37,6 +43,9 @@ function buildApp() {
   app.use(express.json());
   app.use("/api/projects", projectsRouter);
   app.use((err, _req, res, _next) => {
+    if (err instanceof AppError) {
+      return res.status(err.status).json(err.toJSON());
+    }
     res
       .status(err.status || 500)
       .json({ error: err.message || "Internal server error" });
@@ -62,6 +71,63 @@ const MOCK_PROJECT_ROW = {
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
 };
+
+describe("GET /api/projects/nearby", () => {
+  let app;
+
+  beforeEach(() => {
+    app = buildApp();
+    jest.resetAllMocks();
+  });
+
+  test("returns projects within radius, nearest first", async () => {
+    pool.query.mockResolvedValueOnce({
+      rows: [
+        { ...MOCK_PROJECT_ROW, id: "close", distance_km: "12.5" },
+        { ...MOCK_PROJECT_ROW, id: "far", distance_km: "40.2" },
+      ],
+    });
+
+    const res = await request(app)
+      .get("/api/projects/nearby?lat=-3.4653&lng=-62.2159&radius=50")
+      .expect(200);
+
+    expect(res.body.success).toBe(true);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.data[0].distanceKm).toBe(12.5);
+    expect(res.body.data[1].distanceKm).toBe(40.2);
+
+    const [query, params] = pool.query.mock.calls[0];
+    expect(query).toContain("distance_km <= $3");
+    expect(params).toEqual([-3.4653, -62.2159, 50]);
+  });
+
+  test("rejects an invalid latitude", async () => {
+    const res = await request(app)
+      .get("/api/projects/nearby?lat=999&lng=0")
+      .expect(400);
+
+    expect(res.body.error).toMatch(/lat/i);
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  test("rejects an invalid longitude", async () => {
+    const res = await request(app)
+      .get("/api/projects/nearby?lat=0&lng=-200")
+      .expect(400);
+
+    expect(res.body.error).toMatch(/lng/i);
+  });
+
+  test("defaults radius to 50km when not provided", async () => {
+    pool.query.mockResolvedValueOnce({ rows: [] });
+
+    await request(app).get("/api/projects/nearby?lat=0&lng=0").expect(200);
+
+    const params = pool.query.mock.calls[0][1];
+    expect(params[2]).toBe(50);
+  });
+});
 
 describe("GET /api/projects", () => {
   let app;
@@ -119,6 +185,97 @@ describe("GET /api/projects", () => {
 
     const query = pool.query.mock.calls[0][0];
     expect(query).toContain("ILIKE");
+  });
+
+  test("ranks by relevance via ts_rank when searching without a cursor", async () => {
+    pool.query.mockResolvedValue({ rows: [MOCK_PROJECT_ROW] });
+
+    await request(app).get("/api/projects?search=amazon").expect(200);
+
+    const [query, params] = pool.query.mock.calls[0];
+    expect(query).toContain("search_vector @@ plainto_tsquery");
+    expect(query).toContain("ORDER BY ts_rank(search_vector, plainto_tsquery('english', $1)) DESC");
+    expect(params[0]).toBe("amazon");
+  });
+
+  test("falls back to created_at ordering when searching with a cursor", async () => {
+    pool.query.mockResolvedValue({ rows: [MOCK_PROJECT_ROW] });
+    const cursor = Buffer.from(
+      JSON.stringify({ created_at: new Date().toISOString(), id: "proj-1" }),
+    ).toString("base64");
+
+    await request(app)
+      .get(`/api/projects?search=amazon&cursor=${cursor}`)
+      .expect(200);
+
+    const query = pool.query.mock.calls[0][0];
+    expect(query).not.toContain("ts_rank");
+    expect(query).toContain("ORDER BY created_at DESC, id DESC");
+  });
+
+  test("filters by location", async () => {
+    pool.query.mockResolvedValue({ rows: [MOCK_PROJECT_ROW] });
+
+    await request(app).get("/api/projects?location=Brazil").expect(200);
+
+    const [query, params] = pool.query.mock.calls[0];
+    expect(query).toContain("location ILIKE");
+    expect(params).toContain("%Brazil%");
+  });
+
+  test("filters by co2Min and co2Max", async () => {
+    pool.query.mockResolvedValue({ rows: [MOCK_PROJECT_ROW] });
+
+    await request(app)
+      .get("/api/projects?co2Min=1000&co2Max=100000")
+      .expect(200);
+
+    const [query, params] = pool.query.mock.calls[0];
+    expect(query).toContain("co2_offset_kg >= $1");
+    expect(query).toContain("co2_offset_kg <= $2");
+    expect(params).toEqual(expect.arrayContaining([1000, 100000]));
+  });
+
+  test("ignores a non-numeric co2Min/co2Max", async () => {
+    pool.query.mockResolvedValue({ rows: [MOCK_PROJECT_ROW] });
+
+    await request(app).get("/api/projects?co2Min=abc").expect(200);
+
+    const query = pool.query.mock.calls[0][0];
+    expect(query).not.toContain("co2_offset_kg");
+  });
+
+  test("returns facet counts scoped to active filters when facets=true", async () => {
+    pool.query
+      .mockResolvedValueOnce({
+        rows: [{ value: "Reforestation", count: 12 }],
+      }) // category facets
+      .mockResolvedValueOnce({ rows: [{ value: "Brazil", count: 5 }] }) // location facets
+      .mockResolvedValueOnce({ rows: [{ value: "active", count: 45 }] }) // status facets
+      .mockResolvedValueOnce({ rows: [MOCK_PROJECT_ROW] }); // main list query
+
+    const res = await request(app)
+      .get("/api/projects?category=Reforestation&facets=true")
+      .expect(200);
+
+    expect(res.body.facets).toEqual({
+      category: [{ value: "Reforestation", count: 12 }],
+      location: [{ value: "Brazil", count: 5 }],
+      status: [{ value: "active", count: 45 }],
+    });
+
+    // Facet queries run before the main query and share the same filters.
+    const categoryFacetQuery = pool.query.mock.calls[0][0];
+    expect(categoryFacetQuery).toContain("GROUP BY category");
+    expect(categoryFacetQuery).toContain("category = $1");
+  });
+
+  test("omits facets from the response when facets is not requested", async () => {
+    pool.query.mockResolvedValue({ rows: [MOCK_PROJECT_ROW] });
+
+    const res = await request(app).get("/api/projects").expect(200);
+
+    expect(res.body.facets).toBeUndefined();
   });
 
   test("rejects invalid cursor", async () => {
@@ -202,7 +359,7 @@ describe("GET /api/projects/featured", () => {
     pool.query.mockResolvedValue({ rows: [] });
 
     const res = await request(app).get("/api/projects/featured").expect(404);
-    expect(res.body).toEqual({ error: "No featured project found" });
+    expect(res.body.error.code).toBe("NO_FEATURED_PROJECT");
 
     nowSpy.mockRestore();
   });
@@ -251,7 +408,7 @@ describe("GET /api/projects/:id/badge-holders", () => {
   });
 
   test("returns the list of badge-holding donors for a project", async () => {
-    const validUuid = "11111111-2222-3333-4444-555555555555";
+    const validUuid = "11111111-2222-3333-8888-555555555555";
     pool.query.mockResolvedValueOnce({ rows: [{ id: validUuid }] });
     pool.query.mockResolvedValueOnce({
       rows: [
@@ -282,22 +439,22 @@ describe("GET /api/projects/:id/badge-holders", () => {
   });
 
   test("returns 404 if project does not exist", async () => {
-    const validUuid = "11111111-2222-3333-4444-555555555555";
+    const validUuid = "11111111-2222-3333-8888-555555555555";
     pool.query.mockResolvedValueOnce({ rows: [] });
 
     const res = await request(app)
       .get(`/api/projects/${validUuid}/badge-holders`)
       .expect(404);
 
-    expect(res.body.error).toBe("Project not found");
+    expect(res.body.error.code).toBe("PROJECT_NOT_FOUND");
   });
 
-  test("returns 404 if project ID is not a valid UUID", async () => {
+  test("returns 400 if project ID is not a valid UUID", async () => {
     const res = await request(app)
       .get("/api/projects/invalid-uuid/badge-holders")
-      .expect(404);
+      .expect(400);
 
-    expect(res.body.error).toBe("Project not found");
+    expect(res.body.error.code).toBe("PROJECT_NOT_FOUND");
   });
 });
 
@@ -360,15 +517,92 @@ describe("POST /api/projects (admin)", () => {
     redis.deletePattern.mockResolvedValue(null);
   });
 
+  test("returns 401 without admin auth", async () => {
+    const res = await request(app)
+      .post("/api/projects/admin/register")
+      .send({ name: "Test", adminAddress: "GADMIN" });
+
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe("UNAUTHORIZED");
+  });
+
   test("returns 400 when adminAddress is missing", async () => {
     const res = await request(app)
       .post("/api/projects/admin/register")
+      .set("X-Admin-Key", "test-admin-key")
       .send({ name: "Test" });
 
-    // Route currently returns 500 when adminAddress is missing.
-    // Ideally this should be 401, but existing implementation returns 500.
-    expect([401, 500]).toContain(res.status);
-    expect(res.body.error).toMatch(/adminAddress|Unauthorized|auth/i);
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(res.body.error.field).toBe("adminAddress");
+  });
+});
+
+describe("POST /api/projects (create)", () => {
+  let app;
+
+  beforeEach(() => {
+    app = buildApp();
+    jest.resetAllMocks();
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue(null);
+    redis.deletePattern.mockResolvedValue(null);
+  });
+
+  const validBody = {
+    name: "Test Project",
+    description: "A test project description that is long enough",
+    location: "Amazonas, Brazil",
+    category: "Reforestation",
+    walletAddress: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    goalXLM: "10000",
+    organization: {
+      name: "Acme",
+      website: "https://acme.org",
+      country: "US",
+      contactEmail: "contact@acme.org",
+    },
+    co2Methodology: {
+      name: "Methodology A",
+      verificationBody: "Body A",
+      annualTonnesCO2: "100",
+      documentUrl: "https://acme.org/doc.pdf",
+    },
+    impactMetrics: ["co2-reduction"],
+  };
+
+  test("geocodes the location and stores lat/lng on success", async () => {
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ ...MOCK_PROJECT_ROW, id: "new-id" }] }) // INSERT
+      .mockResolvedValueOnce({
+        rows: [
+          { ...MOCK_PROJECT_ROW, id: "new-id", latitude: -3.4653, longitude: -62.2159 },
+        ],
+      }); // UPDATE with coords
+    geocode.mockResolvedValue({ latitude: -3.4653, longitude: -62.2159 });
+
+    const res = await request(app)
+      .post("/api/projects")
+      .send(validBody)
+      .expect(201);
+
+    expect(geocode).toHaveBeenCalledWith(MOCK_PROJECT_ROW.location);
+    expect(res.body.data.latitude).toBe(-3.4653);
+    expect(res.body.data.longitude).toBe(-62.2159);
+    expect(pool.query).toHaveBeenCalledTimes(2);
+  });
+
+  test("still creates the project when geocoding fails", async () => {
+    pool.query.mockResolvedValueOnce({ rows: [MOCK_PROJECT_ROW] }); // INSERT only
+    geocode.mockResolvedValue(null);
+
+    const res = await request(app)
+      .post("/api/projects")
+      .send(validBody)
+      .expect(201);
+
+    expect(res.body.success).toBe(true);
+    expect(pool.query).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -657,7 +891,8 @@ describe("GET /api/projects/:id/impact-certificate", () => {
       .get("/api/projects/proj-1/impact-certificate")
       .expect(400);
 
-    expect(res.body.error).toMatch(/donorAddress/i);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(res.body.error.field).toBe("donorAddress");
   });
 
   test("returns 400 when donorAddress is invalid (too short)", async () => {
@@ -665,7 +900,8 @@ describe("GET /api/projects/:id/impact-certificate", () => {
       .get("/api/projects/proj-1/impact-certificate?donorAddress=GBADKEY")
       .expect(400);
 
-    expect(res.body.error).toMatch(/donorAddress/i);
+    expect(res.body.error.code).toBe("INVALID_ADDRESS");
+    expect(res.body.error.field).toBe("donorAddress");
   });
 
   test("returns 400 when donorAddress starts with wrong letter", async () => {
@@ -675,7 +911,8 @@ describe("GET /api/projects/:id/impact-certificate", () => {
       )
       .expect(400);
 
-    expect(res.body.error).toMatch(/donorAddress/i);
+    expect(res.body.error.code).toBe("INVALID_ADDRESS");
+    expect(res.body.error.field).toBe("donorAddress");
   });
 
   test("returns 404 when project does not exist", async () => {
@@ -687,7 +924,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
       )
       .expect(404);
 
-    expect(res.body.error).toMatch(/project not found/i);
+    expect(res.body.error.code).toBe("PROJECT_NOT_FOUND");
   });
 
   test("returns 404 when donor has no donations on this project", async () => {
@@ -699,7 +936,8 @@ describe("GET /api/projects/:id/impact-certificate", () => {
       .get(`/api/projects/proj-1/impact-certificate?donorAddress=${CERT_DONOR}`)
       .expect(404);
 
-    expect(res.body.error).toMatch(/no donations found/i);
+    expect(res.body.error.code).toBe("DONATION_NOT_FOUND");
+    expect(res.body.error.detail).toMatch(/no donations found/i);
   });
 
   test("co2OffsetKg is proportional to donor's share of total raised", async () => {

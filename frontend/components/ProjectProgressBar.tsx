@@ -1,9 +1,20 @@
 import React from "react";
+import { SkeletonProgressBar, type SkeletonPalette } from "./Skeleton";
 
 interface ProjectProgressBarProps {
   raisedXLM: string | number;
   goalXLM: string | number;
   className?: string;
+}
+
+export function ProjectProgressBarSkeleton({
+  className = "",
+  palette = "forest",
+}: {
+  className?: string;
+  palette?: SkeletonPalette;
+}) {
+  return <SkeletonProgressBar className={className} palette={palette} />;
 }
 
 export default function ProjectProgressBar({
@@ -38,6 +49,7 @@ export default function ProjectProgressBar({
       <div
         className="h-2.5 w-full overflow-hidden rounded-full bg-[rgba(99,102,241,0.08)] dark:bg-[rgba(129,140,248,0.10)]"
         role="progressbar"
+        aria-label="Funding progress"
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={hasGoal ? percentage : 0}

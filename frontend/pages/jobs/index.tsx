@@ -6,6 +6,7 @@ import Link from "next/link";
 import { fetchJobs } from "@/lib/api";
 import type { EscrowJob } from "@/utils/types";
 import { formatXLM } from "@/utils/format";
+import { SkeletonBox } from "@/components/Skeleton";
 
 export default function JobsIndexPage() {
   const [jobs, setJobs] = useState<EscrowJob[]>([]);
@@ -29,7 +30,14 @@ export default function JobsIndexPage() {
       </p>
 
       {loading && (
-        <p className="text-[#5a7a5a] dark:text-[#8aaa8a] font-body">Loading…</p>
+        <div className="animate-pulse pointer-events-none space-y-3">
+          {[1, 2, 3, 4].map((i) => (
+            <div key={i} className="card border border-forest-100">
+              <SkeletonBox className="h-5 rounded w-2/3 mb-2" palette="forest" />
+              <SkeletonBox className="h-3 rounded w-1/3" palette="forest" />
+            </div>
+          ))}
+        </div>
       )}
       {error && <p className="text-red-600 font-body">{error}</p>}
 

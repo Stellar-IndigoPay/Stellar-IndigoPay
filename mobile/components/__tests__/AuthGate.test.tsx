@@ -15,12 +15,12 @@ import React, { type ReactNode } from "react";
 import { Text, Pressable, View } from "react-native";
 import { render, screen, fireEvent } from "@testing-library/react-native";
 
-jest.mock("../providers/AuthProvider", () => ({
+jest.mock("../../providers/AuthProvider", () => ({
   useAuth: jest.fn(),
 }));
 
-import { useAuth } from "../providers/AuthProvider";
-import { AuthGate } from "../components/AuthGate";
+import { useAuth } from "../../providers/AuthProvider";
+import { AuthGate } from "../AuthGate";
 
 const useAuthMock = useAuth as jest.MockedFunction<typeof useAuth>;
 

@@ -6,12 +6,22 @@ const EventEmitter = require("events");
 const express = require("express");
 const router = express.Router();
 const { v4: uuid } = require("uuid");
+const { z } = require("zod");
 const logger = require("../logger");
 const pool = require("../db/pool");
 const { createRateLimiter } = require("../middleware/rateLimiter");
+const { validate } = require("../middleware/validate");
+const idempotencyMiddleware = require("../middleware/idempotency");
+const {
+  donationSchema,
+  stellarAddress,
+  uuid: uuidValidator,
+} = require("../validators/schemas");
 const { mapDonationRow } = require("../services/store");
 const { enqueueProfileUpdate } = require("../services/profileQueue");
+const { enqueuePushNotification } = require("../services/pushQueue");
 const { server } = require("../services/stellar");
+const { AppError } = require("../errors");
 const donationLimiter = createRateLimiter(10, 1); // 10 requests per minute
 
 // Local EventEmitter used by both the POST /api/donations handler and the
@@ -19,21 +29,6 @@ const donationLimiter = createRateLimiter(10, 1); // 10 requests per minute
 // real time without going through Socket.IO.
 const donationEvents = new EventEmitter();
 
-function validateKey(k) {
-  if (!k || !/^G[A-Z0-9]{55}$/.test(k)) {
-    const e = new Error("Invalid Stellar public key");
-    e.status = 400;
-    throw e;
-  }
-}
-
-function validateTxHash(h) {
-  if (!h || !/^[a-fA-F0-9]{64}$/.test(h)) {
-    const e = new Error("Invalid transaction hash");
-    e.status = 400;
-    throw e;
-  }
-}
 
 /**
  * Record a donation after an on-chain transaction is observed.
@@ -58,20 +53,26 @@ async function recordDonation(req, res, next) {
       currency = "XLM",
       message,
       transactionHash,
+      sourceAsset,
+      conversionPath,
+      convertedAmountXLM,
     } = req.body;
-    validateKey(donorAddress);
-    validateTxHash(transactionHash);
 
-    client = await pool.connect();
+    if (!donorAddress || !/^G[A-Z0-9]{55}$/.test(donorAddress)) {
+      throw new AppError("INVALID_ADDRESS");
+    }
+    if (!transactionHash || !/^[a-fA-F0-9]{64}$/.test(transactionHash)) {
+      throw new AppError("INVALID_TX_HASH");
+    }
+
+    if (!client) client = await pool.connect();
 
     const projectResult = await client.query(
       "SELECT id FROM projects WHERE id = $1",
       [projectId],
     );
     if (!projectResult.rows[0]) {
-      const e = new Error("Project not found");
-      e.status = 404;
-      throw e;
+      throw new AppError("PROJECT_NOT_FOUND");
     }
 
     // Determine numeric amount depending on currency
@@ -79,9 +80,10 @@ async function recordDonation(req, res, next) {
       currency === "XLM" ? (amountXLM ?? amount) : amount,
     );
     if (isNaN(parsedAmount) || parsedAmount <= 0) {
-      const e = new Error("Invalid amount");
-      e.status = 400;
-      throw e;
+      throw new AppError("VALIDATION_ERROR", {
+        field: "amount",
+        detail: "Invalid amount",
+      });
     }
 
     // Deduplicate by tx hash
@@ -89,11 +91,15 @@ async function recordDonation(req, res, next) {
       "SELECT * FROM donations WHERE transaction_hash = $1",
       [transactionHash],
     );
-    if (existingResult.rows[0])
+    if (existingResult.rows[0]) {
       return res.json({
         success: true,
+        // Flag replayed idempotency keys so the client can treat the
+        // submission as already-completed instead of re-queuing it.
+        duplicate: true,
         data: mapDonationRow(existingResult.rows[0]),
       });
+    }
 
     // Verify the transaction is confirmed on-chain before recording it.
     // Prevents a caller from inflating raised_xlm with a fake or unconfirmed tx hash.
@@ -101,14 +107,12 @@ async function recordDonation(req, res, next) {
     try {
       onChainTx = await server.getTransaction(transactionHash);
     } catch {
-      const e = new Error("Transaction not found on Stellar");
-      e.status = 400;
-      throw e;
+      throw new AppError("TX_NOT_FOUND");
     }
     if (!onChainTx || onChainTx.successful !== true) {
-      const e = new Error("Transaction not confirmed on Stellar");
-      e.status = 400;
-      throw e;
+      throw new AppError("TX_FAILED", {
+        detail: "Transaction not confirmed on Stellar",
+      });
     }
 
     await client.query("BEGIN");
@@ -116,19 +120,23 @@ async function recordDonation(req, res, next) {
 
     const donationResult = await client.query(
       `INSERT INTO donations (
-        id, project_id, donor_address, amount_xlm, amount, currency, message, transaction_hash, created_at
+        id, project_id, donor_address, amount_xlm, amount, currency, message,
+        transaction_hash, source_asset, conversion_path, converted_amount_xlm, created_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
       RETURNING *`,
       [
         uuid(),
         projectId,
         donorAddress,
-        currency === "XLM" ? parsedAmount : null,
+        currency === "XLM" ? parsedAmount : (convertedAmountXLM || null),
         parsedAmount,
         currency,
         message?.trim().slice(0, 100) || null,
         transactionHash,
+        sourceAsset || null,
+        conversionPath != null ? JSON.stringify(conversionPath) : null,
+        convertedAmountXLM ? parseFloat(convertedAmountXLM) : null,
       ],
     );
 
@@ -136,11 +144,14 @@ async function recordDonation(req, res, next) {
       id: uuid(),
       project_id: projectId,
       donor_address: donorAddress,
-      amount_xlm: currency === "XLM" ? parsedAmount : null,
+      amount_xlm: currency === "XLM" ? parsedAmount : (convertedAmountXLM || null),
       amount: parsedAmount,
       currency,
       message: message?.trim().slice(0, 100) || null,
       transaction_hash: transactionHash,
+      source_asset: sourceAsset || null,
+      conversion_path: conversionPath || null,
+      converted_amount_xlm: convertedAmountXLM || null,
       created_at: new Date().toISOString(),
     };
 
@@ -189,7 +200,13 @@ async function recordDonation(req, res, next) {
       }
     }
 
-    // Update project totals
+    // Update project totals — use converted XLM amount for path-payment donations
+    const xlmIncrement =
+      currency === "XLM"
+        ? parsedAmount
+        : convertedAmountXLM
+          ? parseFloat(convertedAmountXLM)
+          : 0;
     await client.query(
       `UPDATE projects
        SET raised_xlm = raised_xlm + $1::numeric,
@@ -200,7 +217,7 @@ async function recordDonation(req, res, next) {
            ),
            updated_at = NOW()
        WHERE id = $2`,
-      [currency === "XLM" ? parsedAmount : 0, projectId],
+      [xlmIncrement, projectId],
     );
 
     await client.query("COMMIT");
@@ -210,6 +227,22 @@ async function recordDonation(req, res, next) {
       logger.error(
         { event: "profile_update_enqueue_failed", err, donorAddress },
         "Failed to enqueue profile update job",
+      );
+    });
+
+    enqueuePushNotification({
+      type: "donation_receipt",
+      payload: {
+        donorAddress,
+        projectId,
+        donationId: recordedDonation.id,
+        amount: parsedAmount,
+        currency,
+      },
+    }).catch((err) => {
+      logger.error(
+        { event: "push_enqueue_failed", err: err.message, donorAddress, projectId },
+        "Failed to enqueue donation receipt push notification",
       );
     });
 
@@ -239,7 +272,8 @@ async function recordDonation(req, res, next) {
     const mappedDonation = mapDonationRow(donationResult.rows[0]);
     donationEvents.emit("new_donation", mappedDonation);
 
-    res.status(201).json({ success: true, data: mappedDonation });
+    const responseBody = { success: true, data: mappedDonation };
+    res.status(201).json(responseBody);
   } catch (e) {
     if (inTransaction && client) await client.query("ROLLBACK");
     next(e);
@@ -258,7 +292,7 @@ async function recordDonation(req, res, next) {
  * @returns {Promise<void>} Sends the created donation payload.
  * @throws {Error} If rate limiting or donation creation fails.
  */
-router.post("/", donationLimiter, recordDonation);
+router.post("/", donationLimiter, idempotencyMiddleware, validate(donationSchema), recordDonation);
 
 // GET /api/donations/stream
 router.get("/stream", (req, res) => {
@@ -355,20 +389,22 @@ router.get("/project/:projectId", async (req, res, next) => {
  * @returns {Promise<void>} Sends the donor donation history.
  * @throws {Error} If validation or the donation query fails.
  */
-router.get("/donor/:publicKey", async (req, res, next) => {
-  try {
-    validateKey(req.params.publicKey);
-    const result = await pool.query(
-      `SELECT * FROM donations
+router.get(
+  "/donor/:publicKey",
+  validate(z.object({ publicKey: stellarAddress }), "params"),
+  async (req, res, next) => {
+    try {
+      const result = await pool.query(
+        `SELECT * FROM donations
        WHERE donor_address = $1
        ORDER BY created_at DESC`,
-      [req.params.publicKey],
-    );
-    res.json({ success: true, data: result.rows.map(mapDonationRow) });
-  } catch (e) {
-    next(e);
-  }
-});
+        [req.params.publicKey],
+      );
+      res.json({ success: true, data: result.rows.map(mapDonationRow) });
+    } catch (e) {
+      next(e);
+    }
+  });
 
 // GET /api/donations/:id - single donation fetch endpoint
 router.get("/:id", async (req, res, next) => {
@@ -380,18 +416,23 @@ router.get("/:id", async (req, res, next) => {
         id,
       )
     ) {
-      const e = new Error("Invalid donation ID");
-      e.status = 400;
-      throw e;
+      throw new AppError("VALIDATION_ERROR", {
+        field: "id",
+        detail: "Invalid donation ID",
+      });
     }
 
+    const USDC_TO_XLM_RATE = parseFloat(process.env.USDC_TO_XLM_RATE || "8.0");
     const query = `
       SELECT 
         d.*,
         p.name AS project_name,
         pr.display_name AS donor_display_name,
         CASE
-          WHEN p.raised_xlm > 0 THEN (d.amount_xlm * (p.co2_offset_kg::numeric / p.raised_xlm))
+          WHEN d.currency = 'USDC' AND p.raised_xlm > 0
+            THEN (d.amount * ${USDC_TO_XLM_RATE} * (p.co2_offset_kg::numeric / p.raised_xlm))
+          WHEN d.currency = 'XLM' AND p.raised_xlm > 0
+            THEN (d.amount_xlm * (p.co2_offset_kg::numeric / p.raised_xlm))
           ELSE 0
         END AS co2_offset_kg
       FROM donations d
@@ -402,11 +443,8 @@ router.get("/:id", async (req, res, next) => {
     const result = await pool.query(query, [id]);
 
     if (!result.rows[0]) {
-      const e = new Error("Donation not found");
-      e.status = 404;
-      throw e;
+      throw new AppError("DONATION_NOT_FOUND");
     }
-
     const row = result.rows[0];
     const donationData = mapDonationRow(row);
     donationData.projectName = row.project_name;

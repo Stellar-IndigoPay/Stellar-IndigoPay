@@ -28,6 +28,10 @@ jest.mock("../utils/notifications", () => ({
   getPushToken: jest.fn(),
   followProject: jest.fn(),
   unfollowProject: jest.fn(),
+  setupNotificationListener: jest.fn(() => ({ remove: jest.fn() })),
+  setupNotificationResponseListener: jest.fn(() => ({ remove: jest.fn() })),
+  markNotificationsSeen: jest.fn().mockResolvedValue("2026-07-16T21:00:00Z"),
+  getUnreadNotificationCount: jest.fn().mockResolvedValue(0),
 }));
 
 import * as notifUtils from "../utils/notifications";

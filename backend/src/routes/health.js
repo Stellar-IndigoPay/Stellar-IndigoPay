@@ -39,11 +39,21 @@ router.get("/", (_req, res) => {
     });
   }
 
+  // Attach indexer status from the service (best-effort — cheap, local).
+  let indexerStatus = null;
+  try {
+    const indexerService = require("../services/indexerService");
+    indexerStatus = indexerService.getStatus();
+  } catch {
+    // Indexer may not be loaded yet; skip.
+  }
+
   return res.status(200).json({
     status: "ok",
     service: "stellar-indigopay-api",
     network: process.env.STELLAR_NETWORK || "testnet",
     uptimeSeconds,
+    indexer: indexerStatus,
     timestamp: new Date().toISOString(),
   });
 });

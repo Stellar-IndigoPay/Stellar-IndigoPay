@@ -1,6 +1,7 @@
 "use strict";
 
 const cors = require("cors");
+const { sendAppError } = require("../errors");
 
 const DEFAULT_ALLOWED_ORIGINS = Object.freeze([
   "https://indigopay.app",
@@ -36,7 +37,7 @@ function rejectDisallowedOrigins(allowedOrigins = getAllowedOrigins()) {
       return next();
     }
 
-    return res.status(403).json({ error: "Origin not allowed" });
+    return sendAppError(res, "ORIGIN_NOT_ALLOWED");
   };
 }
 

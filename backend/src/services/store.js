@@ -156,6 +156,8 @@ function mapProjectRow(row) {
     description: row.description,
     category: row.category,
     location: row.location,
+    latitude: row.latitude !== null && row.latitude !== undefined ? Number(row.latitude) : null,
+    longitude: row.longitude !== null && row.longitude !== undefined ? Number(row.longitude) : null,
     walletAddress: row.wallet_address,
     goalXLM: row.goal_xlm?.toString() || "0",
     raisedXLM: row.raised_xlm?.toString() || "0",
@@ -200,6 +202,24 @@ function mapDonationRow(row) {
 
   if (row.amount_xlm !== null && row.amount_xlm !== undefined) {
     data.amountXLM = Number.parseFloat(row.amount_xlm).toFixed(7);
+  }
+
+  if (row.source_asset != null) {
+    data.sourceAsset = row.source_asset;
+  }
+
+  if (row.conversion_path != null) {
+    data.conversionPath =
+      typeof row.conversion_path === "string"
+        ? JSON.parse(row.conversion_path)
+        : row.conversion_path;
+  }
+
+  if (
+    row.converted_amount_xlm !== null &&
+    row.converted_amount_xlm !== undefined
+  ) {
+    data.convertedAmountXLM = row.converted_amount_xlm.toString();
   }
 
   return data;
