@@ -149,6 +149,28 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 
 ---
 
+## 15. `token_added`
+
+**Description**: Emitted when an admin adds a Stellar asset contract to the donation allowlist.
+
+| Event Name    | Topics                    | Data                 | When Emitted |
+| ------------- | ------------------------- | -------------------- | ------------ |
+| `token_added` | `["token_added", admin]` | `{ "token": Address }` | When an admin calls `add_allowed_token` |
+
+---
+
+## 16. `token_removed`
+
+**Description**: Emitted when an admin removes a Stellar asset contract from the donation allowlist.
+
+| Event Name      | Topics                      | Data                   | When Emitted |
+| --------------- | --------------------------- | ---------------------- | ------------ |
+| `token_removed` | `["token_removed", admin]` | `{ "token": Address }` | When an admin calls `remove_allowed_token` |
+
+Native XLM is always accepted and does not need an allowlist event.
+
+---
+
 ## 15. `ew_cncl`
 
 **Description**: Emitted when an admin cancels a pending emergency withdrawal.

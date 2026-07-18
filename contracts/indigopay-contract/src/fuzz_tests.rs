@@ -98,6 +98,7 @@ mod fuzz {
         let token = env
             .register_stellar_asset_contract_v2(token_admin)
             .address();
+        client.add_allowed_token(&admin, &token);
 
         (env, cid, client, project_id, token)
     }
