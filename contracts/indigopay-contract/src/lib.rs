@@ -3609,4 +3609,25 @@ mod tests {
             .address();
         client.batch_donate(&token, &donor, &Vec::new(&env), &(100 * STROOP), &0u32);
     }
+
+    #[test]
+    fn test_extend_all_ttl() {
+        let env = Env::default();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Before extending, TTL should be some default (usually 100 in tests or determined by init).
+        // The host env starts at ledger 0. We will use testutils to check the exact TTL.
+        use soroban_sdk::testutils::storage::Instance as TestInstance;
+
+        let _before_ttl = env.as_contract(&id, || env.storage().instance().get_ttl());
+
+        // Extend TTL
+        client.extend_all_ttl(&500_000);
+
+        let after_ttl = env.as_contract(&id, || env.storage().instance().get_ttl());
+        assert!(after_ttl >= 500_000);
+    }
 }

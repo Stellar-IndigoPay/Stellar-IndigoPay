@@ -347,3 +347,7 @@ export default function AdminVerificationPage() {
     </>
   );
 }
+
+export const getServerSideProps = async () => {
+  return { props: {} };
+};

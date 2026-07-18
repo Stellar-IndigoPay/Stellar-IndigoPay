@@ -20,6 +20,78 @@ let accessToken: string | null = null;
 // which the backend reads as theft and answers by killing every session.
 let inFlightRefresh: Promise<string | null> | null = null;
 
+// Raw refresh result (includes HTTP status) so initAuth can distinguish
+// between expired (401) and unauthenticated (network error / other).
+let inFlightRefreshRaw: Promise<{ token: string | null; status: number }> | null = null;
+
+// ── Auth state machine ──────────────────────────────────────────────
+
+/**
+ * Tracks the current lifecycle of the admin session so UIs can decide
+ * whether to show a spinner, the protected content, or a redirect.
+ *
+ * - `loading`       — initial hydration is not yet complete (show spinner)
+ * - `authenticated` — a valid access token is in memory
+ * - `unauthenticated` — no session exists (redirect to login)
+ * - `expired`        — the refresh cookie was rejected as expired
+ */
+export type AuthState = "loading" | "authenticated" | "unauthenticated" | "expired";
+
+let authState: AuthState = "loading";
+
+/** Return the current auth state so route guards can branch on it. */
+export function getAuthState(): AuthState {
+  return authState;
+}
+
+/**
+ * Bootstrap the admin session on page load. Call once at app/guard
+ * startup before rendering protected content.
+ *
+ * - If a token is already in memory the state flips to `authenticated`
+ *   synchronously (no network call).
+ * - Otherwise it attempts a refresh; on 401 it sets `expired`.
+ */
+export async function initAuth(): Promise<void> {
+  if (isAdminAuthenticated()) {
+    authState = "authenticated";
+    return;
+  }
+
+  try {
+    // Share the same in-flight raw refresh so we can inspect the HTTP status.
+    if (!inFlightRefreshRaw) {
+      inFlightRefreshRaw = requestRefreshedToken();
+      inFlightRefresh = inFlightRefreshRaw.then(({ token }) => token).finally(() => {
+        inFlightRefresh = null;
+        inFlightRefreshRaw = null;
+      });
+    }
+
+    const { token, status } = await inFlightRefreshRaw;
+
+    if (token) {
+      authState = "authenticated";
+    } else if (status === 401) {
+      authState = "expired";
+    } else {
+      authState = "unauthenticated";
+    }
+  } catch {
+    authState = "unauthenticated";
+  }
+}
+
+/**
+ * Mark the current session as expired so route guards redirect with the
+ * appropriate reason. Called by the global 401 interceptor when a refresh
+ * after a 401 also fails.
+ */
+export function markSessionExpired(): void {
+  accessToken = null;
+  authState = "expired";
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 /**
@@ -59,13 +131,16 @@ function errorMessage(body: unknown): string {
   );
 }
 
-function redirectToLogin(): void {
+function redirectToLogin(reason?: AuthState): void {
   if (typeof window !== "undefined") {
-    window.location.href = "/admin/login";
+    const url = new URL("/admin/login", window.location.origin);
+    if (reason) url.searchParams.set("reason", reason);
+    url.searchParams.set("redirect", window.location.pathname + window.location.search);
+    window.location.href = url.toString();
   }
 }
 
-async function requestRefreshedToken(): Promise<string | null> {
+async function requestRefreshedToken(): Promise<{ token: string | null; status: number }> {
   try {
     const res = await fetch(`${apiBase()}/api/v1/admin/refresh`, {
       method: "POST",
@@ -75,15 +150,15 @@ async function requestRefreshedToken(): Promise<string | null> {
 
     if (!res.ok) {
       accessToken = null;
-      return null;
+      return { token: null, status: res.status };
     }
 
     const body = await res.json();
     accessToken = body.data?.token ?? null;
-    return accessToken;
+    return { token: accessToken, status: res.status };
   } catch {
     accessToken = null;
-    return null;
+    return { token: null, status: 0 };
   }
 }
 
@@ -148,8 +223,10 @@ export function isAdminAuthenticated(): boolean {
  */
 export async function refreshAdminToken(): Promise<string | null> {
   if (!inFlightRefresh) {
-    inFlightRefresh = requestRefreshedToken().finally(() => {
+    inFlightRefreshRaw = requestRefreshedToken();
+    inFlightRefresh = inFlightRefreshRaw.then(({ token }) => token).finally(() => {
       inFlightRefresh = null;
+      inFlightRefreshRaw = null;
     });
   }
   return inFlightRefresh;
@@ -209,10 +286,12 @@ export async function adminFetch(
     if (retryRes.ok) return retryRes;
 
     accessToken = null;
-    redirectToLogin();
+    authState = "expired";
+    redirectToLogin("expired");
     return retryRes;
   }
 
-  redirectToLogin();
+  authState = "expired";
+  redirectToLogin("expired");
   return res;
 }

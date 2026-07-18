@@ -748,6 +748,31 @@ export async function getDonorStats(donorAddress: string) {
 }
 
 /**
+ * Queries the contract for a voter's badge-weighted voting power.
+ *
+ * @param voterAddress - Voter Stellar public key.
+ * @returns Voter weight (u32), or 0 when the contract is not configured or on errors.
+ */
+export async function getVoterWeight(voterAddress: string): Promise<number> {
+  if (!CONTRACT_ID) {
+    return 0;
+  }
+
+  const contract = new Contract(CONTRACT_ID);
+
+  try {
+    const voter = new Address(voterAddress);
+    const weight = await simulateCall(contract, "get_voter_weight", [
+      voter.toScVal(),
+    ]);
+    return Number(weight);
+  } catch (err) {
+    console.error("Failed to fetch voter weight:", err);
+    return 0;
+  }
+}
+
+/**
  * Simple djb2 hash function for donation messages.
  * Returns a 32-bit unsigned integer hash.
  *

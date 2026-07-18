@@ -21,6 +21,10 @@ import {
   uploadSupportingDocument,
   type VerificationDocument,
 } from "@/lib/api";
+import FormField from "@/components/FormField";
+import { useFormValidation } from "@/hooks/useFormValidation";
+import { verificationRequestSchema } from "@/lib/validation/schemas";
+import { z } from "zod";
 
 type Step = "org" | "project" | "impact" | "documents" | "review" | "done";
 
@@ -56,40 +60,8 @@ const STEP_LABELS: Record<Step, string> = {
   done: "Done",
 };
 
-const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ACCEPTED_DOC_TYPES =
   ".pdf,.png,.jpg,.jpeg,.webp,.gif,.doc,.docx,.xls,.xlsx,.txt,.csv,.zip";
-
-function Field({
-  label,
-  error,
-  helper,
-  children,
-}: {
-  label: string;
-  error?: string;
-  helper?: string;
-  children: React.ReactNode;
-}) {
-  // The <label> wraps *only* the input so the accessible name is just the
-  // field label text. Putting helper/error messages inside the <label>
-  // would cause screen readers + RTL's getByLabelText to include them in
-  // the label's accessible text (e.g. "apply.walletAddress *apply.walletHelper"),
-  // which would break both a11y and test label matching.
-  return (
-    <div className="flex flex-col gap-1">
-      <label className="flex flex-col gap-1 cursor-pointer">
-        <span className="label">{label}</span>
-        {children}
-      </label>
-      {helper && !error && (
-        <p className="text-xs text-[#8aaa8a] font-body">{helper}</p>
-      )}
-      {error && <p className="text-xs text-red-500 font-body">{error}</p>}
-    </div>
-  );
-}
 
 export default function ApplyPage() {
   const router = useRouter();
@@ -100,9 +72,57 @@ export default function ApplyPage() {
   const [submitting, setSubmitting] = useState(false);
   const [serverError, setServerError] = useState("");
   const [reviewTimeline, setReviewTimeline] = useState("5–10 business days");
-  const [fieldErrors, setFieldErrors] = useState<
-    Partial<Record<keyof FormData, string>>
-  >({});
+  const orgStepSchema = z.object({
+    organizationName: z.string().min(1, "required"),
+    organizationWebsite: z.string().url("invalidUrl").optional().or(z.literal("")),
+    organizationCountry: z.string().optional(),
+    contactEmail: z.string().email("invalidEmail"),
+    walletAddress: z.string().regex(/^G[A-Z2-7]{55}$/, "invalidWallet"),
+  });
+
+  const projectStepSchema = z.object({
+    projectName: z.string().min(1, "required"),
+    projectCategory: z.enum(PROJECT_CATEGORIES as [string, ...string[]], {
+      message: "invalidCategory",
+    }),
+    projectLocation: z.string().min(1, "required"),
+    projectDescription: z.string().optional(),
+  });
+
+  const impactStepSchema = z.object({
+    co2PerXLM: z.string().refine(
+      (val) => {
+        const n = Number(val);
+        return val !== "" && Number.isFinite(n) && n >= 0;
+      },
+      { message: "invalidCO2" }
+    ),
+    expectedAnnualTonnesCO2: z.string().refine(
+      (val) => {
+        if (val === "") return true;
+        const n = Number(val);
+        return Number.isFinite(n) && n >= 0;
+      },
+      { message: "invalidCO2" }
+    ).optional(),
+    notes: z.string().optional(),
+  });
+
+  const orgValidation = useFormValidation(orgStepSchema);
+  const projectValidation = useFormValidation(projectStepSchema);
+  const impactValidation = useFormValidation(impactStepSchema);
+
+  const currentValidation =
+    step === "org"
+      ? orgValidation
+      : step === "project"
+        ? projectValidation
+        : step === "impact"
+          ? impactValidation
+          : null;
+
+  const fieldErrors = (currentValidation ? currentValidation.errors : {}) as Record<string, string | undefined>;
+
   const [documents, setDocuments] = useState<VerificationDocument[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
@@ -131,45 +151,37 @@ export default function ApplyPage() {
       >,
     ) => {
       setForm((prev) => ({ ...prev, [field]: e.target.value }));
-      setFieldErrors((prev) => ({ ...prev, [field]: undefined }));
+      orgValidation.clearField(field as any);
+      projectValidation.clearField(field as any);
+      impactValidation.clearField(field as any);
     };
 
   function validateStep(): boolean {
-    const errs: Partial<Record<keyof FormData, string>> = {};
-
     if (step === "org") {
-      if (!form.organizationName.trim()) errs.organizationName = T("required");
-      if (!form.contactEmail.trim()) errs.contactEmail = T("required");
-      else if (!EMAIL_RE.test(form.contactEmail))
-        errs.contactEmail = T("invalidEmail");
-      if (!STELLAR_ADDRESS_RE.test(form.walletAddress.trim())) {
-        errs.walletAddress = T("invalidWallet");
-      }
+      return orgValidation.validate({
+        organizationName: form.organizationName,
+        organizationWebsite: form.organizationWebsite,
+        organizationCountry: form.organizationCountry,
+        contactEmail: form.contactEmail,
+        walletAddress: form.walletAddress,
+      });
     }
-
     if (step === "project") {
-      if (!form.projectName.trim()) errs.projectName = T("required");
-      if (!form.projectCategory) errs.projectCategory = T("invalidCategory");
-      if (!form.projectLocation.trim()) errs.projectLocation = T("required");
+      return projectValidation.validate({
+        projectName: form.projectName,
+        projectCategory: form.projectCategory,
+        projectLocation: form.projectLocation,
+        projectDescription: form.projectDescription,
+      });
     }
-
     if (step === "impact") {
-      const co2 = Number(form.co2PerXLM);
-      if (!form.co2PerXLM || !Number.isFinite(co2) || co2 < 0)
-        errs.co2PerXLM = T("invalidCO2");
-      const annual = form.expectedAnnualTonnesCO2
-        ? Number(form.expectedAnnualTonnesCO2)
-        : 0;
-      if (
-        form.expectedAnnualTonnesCO2 &&
-        (!Number.isFinite(annual) || annual < 0)
-      ) {
-        errs.expectedAnnualTonnesCO2 = T("invalidCO2");
-      }
+      return impactValidation.validate({
+        co2PerXLM: form.co2PerXLM,
+        expectedAnnualTonnesCO2: form.expectedAnnualTonnesCO2,
+        notes: form.notes,
+      });
     }
-
-    setFieldErrors(errs);
-    return Object.keys(errs).length === 0;
+    return true;
   }
 
   function nextStep() {
@@ -326,9 +338,10 @@ export default function ApplyPage() {
             <h2 className="font-display text-xl font-bold text-[#0F172A] dark:text-[#E2E8F0]">
               {T("stepOrg")}
             </h2>
-            <Field
+            <FormField
+              name="organizationName"
               label={`${T("orgName")} *`}
-              error={fieldErrors.organizationName}
+              error={fieldErrors.organizationName ? T(fieldErrors.organizationName) : undefined}
             >
               <input
                 className="input-field"
@@ -336,26 +349,35 @@ export default function ApplyPage() {
                 onChange={set("organizationName")}
                 placeholder="Acme Climate Foundation"
               />
-            </Field>
-            <Field label={T("orgWebsite")}>
+            </FormField>
+            <FormField
+              name="organizationWebsite"
+              label={T("orgWebsite")}
+              error={fieldErrors.organizationWebsite ? T(fieldErrors.organizationWebsite) : undefined}
+            >
               <input
                 className="input-field"
                 value={form.organizationWebsite}
                 onChange={set("organizationWebsite")}
                 placeholder="https://acme.org"
               />
-            </Field>
-            <Field label={T("orgCountry")}>
+            </FormField>
+            <FormField
+              name="organizationCountry"
+              label={T("orgCountry")}
+              error={fieldErrors.organizationCountry ? T(fieldErrors.organizationCountry) : undefined}
+            >
               <input
                 className="input-field"
                 value={form.organizationCountry}
                 onChange={set("organizationCountry")}
                 placeholder="Kenya"
               />
-            </Field>
-            <Field
+            </FormField>
+            <FormField
+              name="contactEmail"
               label={`${T("contactEmail")} *`}
-              error={fieldErrors.contactEmail}
+              error={fieldErrors.contactEmail ? T(fieldErrors.contactEmail) : undefined}
             >
               <input
                 className="input-field"
@@ -364,11 +386,12 @@ export default function ApplyPage() {
                 onChange={set("contactEmail")}
                 placeholder="hello@acme.org"
               />
-            </Field>
-            <Field
+            </FormField>
+            <FormField
+              name="walletAddress"
               label={`${T("walletAddress")} *`}
               helper={T("walletHelper")}
-              error={fieldErrors.walletAddress}
+              error={fieldErrors.walletAddress ? T(fieldErrors.walletAddress) : undefined}
             >
               <input
                 className="input-field font-mono text-sm"
@@ -377,7 +400,7 @@ export default function ApplyPage() {
                 onChange={set("walletAddress")}
                 placeholder="GABC…"
               />
-            </Field>
+            </FormField>
           </>
         )}
 
@@ -387,9 +410,10 @@ export default function ApplyPage() {
             <h2 className="font-display text-xl font-bold text-[#0F172A] dark:text-[#E2E8F0]">
               {T("stepProject")}
             </h2>
-            <Field
+            <FormField
+              name="projectName"
               label={`${T("projectName")} *`}
-              error={fieldErrors.projectName}
+              error={fieldErrors.projectName ? T(fieldErrors.projectName) : undefined}
             >
               <input
                 className="input-field"
@@ -397,10 +421,11 @@ export default function ApplyPage() {
                 onChange={set("projectName")}
                 placeholder="Acme Solar Farm Phase 1"
               />
-            </Field>
-            <Field
+            </FormField>
+            <FormField
+              name="projectCategory"
               label={`${T("projectCategory")} *`}
-              error={fieldErrors.projectCategory}
+              error={fieldErrors.projectCategory ? T(fieldErrors.projectCategory) : undefined}
             >
               <select
                 className="input-field"
@@ -413,10 +438,11 @@ export default function ApplyPage() {
                   </option>
                 ))}
               </select>
-            </Field>
-            <Field
+            </FormField>
+            <FormField
+              name="projectLocation"
               label={`${T("projectLocation")} *`}
-              error={fieldErrors.projectLocation}
+              error={fieldErrors.projectLocation ? T(fieldErrors.projectLocation) : undefined}
             >
               <input
                 className="input-field"
@@ -424,15 +450,19 @@ export default function ApplyPage() {
                 onChange={set("projectLocation")}
                 placeholder="Nairobi, Kenya"
               />
-            </Field>
-            <Field label={T("projectDescription")}>
+            </FormField>
+            <FormField
+              name="projectDescription"
+              label={T("projectDescription")}
+              error={fieldErrors.projectDescription ? T(fieldErrors.projectDescription) : undefined}
+            >
               <textarea
                 className="input-field min-h-[100px] resize-y"
                 value={form.projectDescription}
                 onChange={set("projectDescription")}
                 placeholder="Tell us about the project in a few sentences."
               />
-            </Field>
+            </FormField>
           </>
         )}
 
@@ -445,9 +475,10 @@ export default function ApplyPage() {
             <p className="text-[#475569] dark:text-[#94A3B8] text-sm font-body">
               We use these numbers to communicate impact to donors and on-chain.
             </p>
-            <Field
+            <FormField
+              name="co2PerXLM"
               label={`${T("co2PerXLM")} *`}
-              error={fieldErrors.co2PerXLM}
+              error={fieldErrors.co2PerXLM ? T(fieldErrors.co2PerXLM) : undefined}
               helper="e.g. 0.05 kg CO₂ per XLM."
             >
               <input
@@ -460,10 +491,11 @@ export default function ApplyPage() {
                 onChange={set("co2PerXLM")}
                 placeholder="0.05"
               />
-            </Field>
-            <Field
+            </FormField>
+            <FormField
+              name="expectedAnnualTonnesCO2"
               label={T("annualTonnes")}
-              error={fieldErrors.expectedAnnualTonnesCO2}
+              error={fieldErrors.expectedAnnualTonnesCO2 ? T(fieldErrors.expectedAnnualTonnesCO2) : undefined}
             >
               <input
                 className="input-field"
@@ -475,15 +507,19 @@ export default function ApplyPage() {
                 onChange={set("expectedAnnualTonnesCO2")}
                 placeholder="1200"
               />
-            </Field>
-            <Field label={T("notes")}>
+            </FormField>
+            <FormField
+              name="notes"
+              label={T("notes")}
+              error={fieldErrors.notes ? T(fieldErrors.notes) : undefined}
+            >
               <textarea
                 className="input-field min-h-[80px] resize-y"
                 value={form.notes}
                 onChange={set("notes")}
                 placeholder="Methodology, prior funding rounds, anything else the reviewer should see."
               />
-            </Field>
+            </FormField>
           </>
         )}
 
