@@ -554,7 +554,21 @@ describe("POST /api/projects (create)", () => {
     description: "A test project description that is long enough",
     location: "Amazonas, Brazil",
     category: "Reforestation",
-    wallet_address: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    walletAddress: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    goalXLM: "10000",
+    organization: {
+      name: "Acme",
+      website: "https://acme.org",
+      country: "US",
+      contactEmail: "contact@acme.org",
+    },
+    co2Methodology: {
+      name: "Methodology A",
+      verificationBody: "Body A",
+      annualTonnesCO2: "100",
+      documentUrl: "https://acme.org/doc.pdf",
+    },
+    impactMetrics: ["co2-reduction"],
   };
 
   test("geocodes the location and stores lat/lng on success", async () => {

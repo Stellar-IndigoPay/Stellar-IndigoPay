@@ -11,6 +11,14 @@ import userEvent from "@testing-library/user-event";
 import DonateForm from "../DonateForm";
 import type { ClimateProject } from "@/utils/types";
 
+jest.mock("@/lib/offlineDonationQueue", () => ({
+  queueDonation: jest.fn().mockResolvedValue(null),
+  getQueuedDonations: jest.fn().mockResolvedValue([]),
+  removeQueuedDonation: jest.fn().mockResolvedValue(undefined),
+  syncQueuedDonations: jest.fn().mockResolvedValue(undefined),
+  requestBackgroundSync: jest.fn().mockResolvedValue(undefined),
+}));
+
 const project: ClimateProject = {
   id: "proj-1",
   name: "Amazon Reforestation",

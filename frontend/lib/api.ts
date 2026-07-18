@@ -82,6 +82,37 @@ api.interceptors.response.use(
       }
     }
 
+    // Admin JWT 401 interceptor — refresh once and retry before giving up.
+    // Only fires for requests that already carry an Authorization header
+    // (i.e. admin-authenticated calls), so public API calls are unaffected.
+    if (
+      error.response?.status === 401 &&
+      !error.config.__adminRetry &&
+      error.config.headers?.Authorization
+    ) {
+      error.config.__adminRetry = true;
+      try {
+        // Dynamic import to avoid circular dependency at module init time.
+        const { refreshAdminToken, markSessionExpired } = await import("./adminAuth");
+        const newToken = await refreshAdminToken();
+        if (newToken) {
+          error.config.headers.Authorization = `Bearer ${newToken}`;
+          return api.request(error.config);
+        }
+        // Refresh failed — session is gone. Mark expired so the route guard
+        // redirects with reason=expired on the next navigation.
+        markSessionExpired();
+      } catch {
+        // Refresh threw — mark expired and let the original 401 propagate.
+        try {
+          const { markSessionExpired } = await import("./adminAuth");
+          markSessionExpired();
+        } catch {
+          // Best-effort — the route guard will catch it on next navigation.
+        }
+      }
+    }
+
     return Promise.reject(error);
   },
 );
@@ -533,6 +564,70 @@ export async function fetchGlobalStats(): Promise<GlobalStats> {
   }
 
   return normalizeGlobalStats(data);
+}
+
+// ── Cross-Chain Attestations ────────────────────────────────────────────
+/**
+ * Cross-chain donation attestation shape returned by the backend.
+ */
+export interface CrossChainAttestation {
+  id: string;
+  onChainId: number | null;
+  sourceChain: string;
+  sourceTxHash: string;
+  donorAddress: string;
+  projectId: string | null;
+  amountUsd: string | null;
+  amountXlm: string | null;
+  status: "pending" | "verified" | "revoked";
+  messageHash: number | null;
+  createdAt: string;
+  verifiedAt: string | null;
+}
+
+/**
+ * Attestation roll-up stats returned by GET /api/attestations.
+ */
+export interface AttestationStats {
+  total: number;
+  pending: number;
+  verified: number;
+  revoked: number;
+  byChain: Array<{ sourceChain: string; count: number }>;
+}
+
+/**
+ * Look up an attestation by its source-chain (chain, tx hash) pair.
+ */
+export async function fetchAttestationBySource(
+  sourceChain: string,
+  sourceTxHash: string,
+): Promise<CrossChainAttestation | null> {
+  try {
+    const { data } = await api.get<{
+      success: boolean;
+      data: CrossChainAttestation;
+    }>("/api/attestations/by-source", {
+      params: { source_chain: sourceChain, source_tx_hash: sourceTxHash },
+    });
+    return data.data;
+  } catch (err: unknown) {
+    if (axios.isAxiosError(err) && err.response?.status === 404) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Fetch platform-wide attestation roll-up stats.
+ */
+export async function fetchAttestationStats(): Promise<AttestationStats> {
+  const { data } = await api.get<{
+    success: boolean;
+    data: AttestationStats;
+  }>("/api/attestations");
+  return data.data;
 }
 
 // ── Tag Suggestions ────────────────────────────────────────────────

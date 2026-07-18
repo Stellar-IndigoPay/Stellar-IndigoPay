@@ -13,6 +13,9 @@ const { v4: uuidv4 } = require("uuid");
 const pool = require("../db/pool");
 const { AppError } = require("../errors");
 const { verifyUnsubscribeToken } = require("../services/digestBuilder");
+const {
+  metrics: { pushSentTotal },
+} = require("../services/metrics");
 
 function parseLastSeen(value) {
   if (!value || typeof value !== "string") return null;
@@ -544,6 +547,76 @@ router.post("/inbox/:id/read", async (req, res, next) => {
     }
 
     res.json({ success: true, data: { id, read: true } });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// POST /api/notifications/delivery-callback
+// Receives confirmed delivery status from APNs / FCM webhooks.
+//
+// Authentication: Bearer token checked against DELIVERY_CALLBACK_SECRET env var.
+// This endpoint is called by APNs/FCM delivery receipt pipelines, not by
+// end-user clients. APNs Unregistered (410) responses are handled
+// synchronously in ApnsProvider.send(); this endpoint handles asynchronous
+// FCM downstream message receipts and any future webhook-based confirmations.
+router.post("/delivery-callback", async (req, res, next) => {
+  try {
+    const secret = process.env.DELIVERY_CALLBACK_SECRET;
+    if (secret) {
+      const auth = req.headers.authorization || "";
+      const provided = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+      if (provided !== secret) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+    }
+
+    const { provider, deviceToken, status, providerMessageId } = req.body;
+
+    const validProviders = ["apns", "fcm", "expo"];
+    const validStatuses = ["delivered", "unregistered", "failed"];
+
+    if (!provider || !validProviders.includes(provider)) {
+      throw new AppError("VALIDATION_ERROR", {
+        field: "provider",
+        detail: `provider must be one of: ${validProviders.join(", ")}`,
+      });
+    }
+    if (!status || !validStatuses.includes(status)) {
+      throw new AppError("VALIDATION_ERROR", {
+        field: "status",
+        detail: `status must be one of: ${validStatuses.join(", ")}`,
+      });
+    }
+    if (!deviceToken && !providerMessageId) {
+      throw new AppError("VALIDATION_ERROR", {
+        field: "deviceToken",
+        detail: "deviceToken or providerMessageId is required",
+      });
+    }
+
+    // Update the push_notifications row if we have a provider message ID.
+    if (providerMessageId) {
+      await pool.query(
+        `UPDATE push_notifications
+           SET status = $1, updated_at = NOW()
+         WHERE ticket_id = $2`,
+        [status === "delivered" ? "delivered" : "failed", providerMessageId],
+      );
+    }
+
+    // Deactivate the device token when the provider confirms it is stale.
+    if (status === "unregistered" && deviceToken) {
+      await pool.query(
+        "UPDATE device_tokens SET is_active = false, updated_at = NOW() WHERE token = $1",
+        [deviceToken],
+      );
+    }
+
+    // Increment the Prometheus counter for confirmed delivery outcome.
+    pushSentTotal.inc({ provider, outcome: status });
+
+    res.json({ success: true });
   } catch (e) {
     next(e);
   }

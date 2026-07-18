@@ -48,7 +48,7 @@ for everything in this directory. Pick the section that matches what you need.
 | **[Database Schema](database.md)**               | Postgres tables, indexes, FK relationships, and the migration workflow.                                                                                |
 | **[Indexer](indexer.md)**                        | The Stellar Horizon stream → Postgres indexer, including shutdown wiring.                                                                              |
 | **[Performance & Load Testing](performance.md)** | p50 / p95 / p99 targets, k6 invocation, threshold semantics, and the baseline table.                                                                   |
-| **[CI / CD pipeline](../.github/workflows/)**    | Per-app workflows (`backend.yml`, `frontend.yml`, `extension.yml`, `mobile.yml`, `contracts.yml`), release, SBOM, image scanning, and secret-scanning. |
+| **[CI / CD pipeline](../.github/workflows/)**    | Per-app workflows (`frontend.yml`, `extension.yml`, `mobile.yml`, `contracts.yml`), main CI (backend, helm, gitleaks, OpenAPI lint, ZAP), release, SBOM, and image scanning. |
 
 ### Smart contracts
 

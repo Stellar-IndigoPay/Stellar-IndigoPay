@@ -236,6 +236,23 @@ const queueLatency = new client.Gauge({
   registers: [registry],
 });
 
+// ── Push notification provider metrics ──────────────────────────────────────
+
+const pushSentTotal = new client.Counter({
+  name: "indigopay_push_sent_total",
+  help: "Total push notifications sent, labelled by provider and outcome.",
+  labelNames: ["provider", "outcome"], // provider: apns|fcm|expo  outcome: delivered|failed|fallback|unregistered
+  registers: [registry],
+});
+
+const pushLatencySeconds = new client.Histogram({
+  name: "indigopay_push_latency_seconds",
+  help: "Push notification send latency in seconds, labelled by provider.",
+  labelNames: ["provider"],
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  registers: [registry],
+});
+
 /**
  * Normalise an Express req.route.path / req.path to a low-cardinality
  * route label. We fall back to the literal path when no route is
@@ -386,5 +403,7 @@ module.exports = {
     queueFailed,
     queueCompleted,
     queueLatency,
+    pushSentTotal,
+    pushLatencySeconds,
   },
 };

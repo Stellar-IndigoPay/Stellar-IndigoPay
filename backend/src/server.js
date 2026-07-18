@@ -69,7 +69,10 @@ const { start: startBlacklistCleanup } = require("./services/blacklistCleanup");
 const { startIndexer } = require("./services/indexerService");
 const { startReconciler, stopReconciler } = require("./services/indexerReconciler");
 const { startDLQWorker, stopDLQWorker } = require("./services/indexerDLQWorker");
+const { stop: stopSorobanEvents } = require("./services/sorobanEventService");
 const lifecycle = require("./services/lifecycle");
+const guardianService = require("./services/guardian");
+
 
 Sentry.init({
   dsn: process.env.SENTRY_DSN || "",
@@ -295,6 +298,21 @@ try {
   );
 }
 
+// Cross-chain donation attestation bridge (issue #125). The route file
+// exports an Express router that handles reads, writes, proof minting,
+// verification, and admin revoke. It is mounted under both the legacy
+// unversioned and the /v1 paths so existing callers keep working.
+try {
+  const attestationsRouter = require("./routes/attestations");
+  app.use("/api/attestations", attestationsRouter);
+  app.use("/api/v1/attestations", attestationsRouter);
+} catch (err) {
+  logger.error(
+    { event: "route_load_failed", route: "attestations", err: err.message },
+    "Failed to load attestations route module",
+  );
+}
+
 // ── 404 + error handling ────────────────────────────────────────────────────
 
 // Best-effort code for 4xx errors raised outside AppError (library/middleware
@@ -450,6 +468,16 @@ async function startServer() {
     );
   }
 
+  try {
+    guardianService.start();
+    logger.info({ event: "guardian_scheduler_started" }, "Guardian service scheduler started");
+  } catch (err) {
+    logger.error(
+      { event: "guardian_startup_error", err: err.message },
+      "Guardian service failed to start",
+    );
+  }
+
   // The Stellar Horizon stream in the indexer holds the event loop open.
   // Register a shutdown hook so the stream is closed cleanly on SIGTERM.
   lifecycle.onShutdown(async () => {
@@ -465,6 +493,11 @@ async function startServer() {
     } catch {
       // ignore
     }
+    try {
+      if (typeof guardianService.stop === "function") guardianService.stop();
+    } catch {
+      // ignore
+    }
   });
 
   lifecycle.onShutdown(async () => {
@@ -475,10 +508,22 @@ async function startServer() {
     await stopDLQWorker();
   });
 
-  // Soroban event service: stop the polling loop and persist the cursor.
+  // Soroban event service: start the polling loop.
+  try {
+    const sorobanEvents = require("./services/sorobanEventService");
+    sorobanEvents.start(io);
+  } catch (err) {
+    logger.error(
+      { event: "soroban_events_startup_error", err: err.message },
+      "Soroban event service failed to start",
+    );
+  }
+
+  // Soroban event service: stop the polling loop and persist the cursor on shutdown.
   lifecycle.onShutdown(async () => {
     try {
-      await stopSorobanEvents();
+      const sorobanEvents = require("./services/sorobanEventService");
+      if (typeof sorobanEvents.stop === "function") await sorobanEvents.stop();
     } catch {
       // Service may already be stopped; swallow.
     }

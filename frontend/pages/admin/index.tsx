@@ -2,6 +2,7 @@
  * pages/admin/index.tsx — Admin dashboard listing all projects with status.
  */
 import { useState, useEffect } from "react";
+import { useWallet } from "@/lib/WalletProvider";
 import Link from "next/link";
 import WalletConnect from "@/components/WalletConnect";
 import WebhookManager from "@/components/admin/WebhookManager";
@@ -20,12 +21,8 @@ import { formatXLM, shortenAddress } from "@/utils/format";
 import type { ClimateProject } from "@/utils/types";
 import { SkeletonBox } from "@/components/Skeleton";
 
-interface AdminIndexProps {
-  publicKey: string | null;
-  onConnect: (pk: string) => void;
-}
-
-export default function AdminIndex({ publicKey, onConnect }: AdminIndexProps) {
+export default function AdminIndex() {
+  const { publicKey, connect: onConnect } = useWallet();
   const [projects, setProjects] = useState<ClimateProject[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

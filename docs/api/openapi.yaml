@@ -27,6 +27,8 @@ tags:
   - name: Jobs
   - name: Stats
   - name: Admin
+  - name: Attestations
+    description: Cross-chain donation attestation endpoints for verifying bridge transactions across chains.
   - name: RateLimit
     description: All endpoints are subject to rate limiting. See the components/responses/RateLimitExceeded response for headers and 429 response body details.
 security:
@@ -747,6 +749,140 @@ components:
         reason:
           type: string
         adminAddress:
+          type: string
+    Attestation:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        onChainId:
+          type: integer
+          nullable: true
+        sourceChain:
+          type: string
+          description: Source chain slug (e.g. "ethereum", "polygon", "arbitrum", "base").
+          example: ethereum
+        sourceTxHash:
+          type: string
+          description: Transaction hash on the source chain.
+          example: "0xabc123…"
+        donorAddress:
+          type: string
+          pattern: "^G[A-Z0-9]{55}$"
+        projectId:
+          type: string
+          format: uuid
+          nullable: true
+        amountUsd:
+          type: string
+          description: USD-equivalent value, 6 decimals (USDC convention).
+          example: "10.000000"
+        amountXlm:
+          type: string
+          description: XLM-equivalent value, 7 decimals (stroops stored as decimal).
+          example: "80.0000000"
+        status:
+          type: string
+          enum: [pending, verified, revoked]
+        messageHash:
+          type: integer
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        verifiedAt:
+          type: string
+          format: date-time
+          nullable: true
+    AttestationStats:
+      type: object
+      properties:
+        total:
+          type: integer
+        pending:
+          type: integer
+        verified:
+          type: integer
+        revoked:
+          type: integer
+        byChain:
+          type: array
+          items:
+            type: object
+            properties:
+              sourceChain:
+                type: string
+              count:
+                type: integer
+    BuildAttestationProofRequest:
+      type: object
+      required: [source_chain, source_tx_hash, donor_address, project_id]
+      properties:
+        source_chain:
+          type: string
+        source_tx_hash:
+          type: string
+        donor_address:
+          type: string
+          pattern: "^G[A-Z0-9]{55}$"
+        project_id:
+          type: string
+    BuildAttestationProofResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            payload:
+              type: string
+              description: Hex-encoded SHA-256 of the canonical input.
+            signature:
+              type: string
+              description: GitHub-style t=…,v1=… HMAC-SHA256 signature.
+            timestamp:
+              type: integer
+            canonical:
+              type: object
+    RecordAttestationRequest:
+      type: object
+      required:
+        - source_chain
+        - source_tx_hash
+        - donor_address
+        - project_id
+        - amount_usd
+        - amount_xlm
+        - on_chain_id
+      properties:
+        source_chain:
+          type: string
+        source_tx_hash:
+          type: string
+        donor_address:
+          type: string
+          pattern: "^G[A-Z0-9]{55}$"
+        project_id:
+          type: string
+          format: uuid
+        amount_usd:
+          type: number
+          description: USD-equivalent value, 6 decimals.
+        amount_xlm:
+          type: number
+          description: XLM-equivalent value, 7 decimals.
+        message_hash:
+          type: integer
+        on_chain_id:
+          type: integer
+          description: Soroban-assigned monotonic id returned by the relayer.
+        status:
+          type: string
+          enum: [pending, verified, revoked]
+          default: pending
+        recorded_by:
           type: string
     AdminRegisterProjectRequest:
       type: object
@@ -2136,3 +2272,287 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /api/attestations:
+    get:
+      tags: [Attestations]
+      operationId: getAttestations
+      summary: Get attestation roll-up stats
+      description: Returns platform-wide counts (total / pending / verified / revoked) plus per-source-chain breakdown (issue #125).
+      security: []
+      responses:
+        "200":
+          description: Roll-up stats.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/AttestationStats"
+    post:
+      tags: [Attestations]
+      operationId: recordAttestation
+      summary: Record a new cross-chain attestation
+      description: Called by the relayer after source-chain finality. Requires a signed proof in either the `x-attestation-signature` / `x-attestation-timestamp` headers or the legacy `x_proof_signature` / `x_proof_timestamp` aliases.
+      security: []
+      parameters:
+        - name: x-attestation-signature
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: x-attestation-timestamp
+          in: header
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecordAttestationRequest"
+      responses:
+        "201":
+          description: Attestation created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  created:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/Attestation"
+        "200":
+          description: Attestation already existed; idempotent response.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  created:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/Attestation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+  /api/attestations/build-proof:
+    post:
+      tags: [Attestations]
+      operationId: buildAttestationProof
+      summary: Mint a signed proof for a cross-chain observation
+      description: Returns `{payload, signature, timestamp, canonical}` so a partner can submit `/api/attestations` with a verifiable header pair.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BuildAttestationProofRequest"
+      responses:
+        "200":
+          description: A signed proof.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BuildAttestationProofResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+  /api/attestations/by-source:
+    get:
+      tags: [Attestations]
+      operationId: getAttestationBySource
+      summary: Look up an attestation by source-chain keys
+      description: Look up an attestation using its source-chain identifier and transaction hash.
+      security: []
+      parameters:
+        - name: source_chain
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: source_tx_hash
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The matching attestation.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/Attestation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/attestations/by-donor/{publicKey}:
+    get:
+      tags: [Attestations]
+      operationId: listAttestationsByDonor
+      summary: List every attestation for a Stellar donor
+      description: Retrieve all cross-chain attestations associated with a specific Stellar donor address.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/PublicKeyParam"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        "200":
+          description: Attestation history for the donor.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Attestation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  /api/attestations/by-id/{onChainId}:
+    get:
+      tags: [Attestations]
+      operationId: getAttestationByOnChainId
+      summary: Look up an attestation by its Soroban on-chain id
+      description: Look up an attestation by its monotonic Soroban on-chain counter.
+      security: []
+      parameters:
+        - name: onChainId
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        "200":
+          description: The matching attestation.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/Attestation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/attestations/{id}:
+    get:
+      tags: [Attestations]
+      operationId: getAttestationById
+      summary: Get an attestation by backend UUID
+      description: Retrieve a single attestation by its backend UUID identifier.
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The matching attestation.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/Attestation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/attestations/{id}/verify:
+    post:
+      tags: [Attestations]
+      operationId: verifyAttestation
+      summary: Flip a pending attestation to verified
+      description: Mark a pending attestation as verified. Only callable by the relayer after on-chain confirmation.
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Attestation updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/Attestation"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+  /api/attestations/{id}/revoke:
+    post:
+      tags: [Attestations]
+      operationId: revokeAttestation
+      summary: Revoke an attestation (admin / incident response)
+      description: Revoke an existing attestation. Restricted to admin users only.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Attestation revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/Attestation"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"

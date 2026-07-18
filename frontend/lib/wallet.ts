@@ -11,6 +11,9 @@ import {
 import { NETWORK_PASSPHRASE } from "./stellar";
 
 export async function isFreighterInstalled(): Promise<boolean> {
+  if (typeof window !== "undefined" && (window as any).__test_publicKey__) {
+    return true;
+  }
   try {
     const result: any = await isConnected();
     // Handle both boolean and object return types
@@ -24,6 +27,9 @@ export async function connectWallet(): Promise<{
   publicKey: string | null;
   error: string | null;
 }> {
+  if (typeof window !== "undefined" && (window as any).__test_publicKey__) {
+    return { publicKey: (window as any).__test_publicKey__, error: null };
+  }
   const installed = await isFreighterInstalled();
   if (!installed)
     return {
@@ -48,6 +54,9 @@ export async function connectWallet(): Promise<{
 }
 
 export async function getConnectedPublicKey(): Promise<string | null> {
+  if (typeof window !== "undefined" && (window as any).__test_publicKey__) {
+    return (window as any).__test_publicKey__;
+  }
   try {
     const allowedResult: any = await isAllowed();
     // Handle both boolean and object return types
@@ -72,6 +81,9 @@ export async function getConnectedPublicKey(): Promise<string | null> {
 export async function signTransactionWithWallet(
   xdr: string,
 ): Promise<{ signedXDR: string | null; error: string | null }> {
+  if (typeof window !== "undefined" && (window as any).__test_publicKey__) {
+    return { signedXDR: xdr, error: null };
+  }
   try {
     const network =
       process.env.NEXT_PUBLIC_STELLAR_NETWORK === "mainnet"
