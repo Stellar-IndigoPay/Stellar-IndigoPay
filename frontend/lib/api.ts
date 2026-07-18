@@ -985,3 +985,74 @@ export async function purgeQueue(name: string, adminKey: string): Promise<boolea
   );
   return data.success;
 }
+
+// ── Webhook mTLS configuration ────────────────────────────────────────────────
+
+export interface WebhookMTLSConfig {
+  enabled: boolean;
+  has_ca: boolean;
+  has_client_cert: boolean;
+  has_client_key: boolean;
+  cert_expires_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Fetch the current mTLS configuration for a project's webhooks (the private
+ * key is never returned by the API).
+ */
+export async function fetchWebhookMTLS(
+  projectId: string,
+  adminKey: string,
+): Promise<WebhookMTLSConfig | null> {
+  const { data } = await api.get<{ success: boolean; data: WebhookMTLSConfig | null }>(
+    `/api/admin/webhooks/${projectId}/mtls`,
+    { headers: { "X-Admin-Key": adminKey } },
+  );
+  return data.data;
+}
+
+/**
+ * Upload (or rotate) the mTLS certificate material for a project. Certificates
+ * are read from the selected `.pem` files and sent as plain text.
+ */
+export async function uploadWebhookMTLS(
+  projectId: string,
+  adminKey: string,
+  payload: { caCert: string; clientCert: string; clientKey: string },
+): Promise<{ cert_expires_at: string }> {
+  const { data } = await api.post<{
+    success: boolean;
+    data: { cert_expires_at: string };
+  }>(`/api/admin/webhooks/${projectId}/mtls`, payload, {
+    headers: { "X-Admin-Key": adminKey },
+  });
+  return data.data;
+}
+
+export async function disableWebhookMTLS(
+  projectId: string,
+  adminKey: string,
+): Promise<boolean> {
+  const { data } = await api.post<{ success: boolean }>(
+    `/api/admin/webhooks/${projectId}/mtls/disable`,
+    {},
+    { headers: { "X-Admin-Key": adminKey } },
+  );
+  return data.success;
+}
+
+export async function testWebhookMTLS(
+  projectId: string,
+  adminKey: string,
+): Promise<{ success: boolean; statusCode?: number; error?: string }> {
+  const { data } = await api.post<{
+    success: boolean;
+    data?: { statusCode: number };
+    error?: string;
+  }>(`/api/admin/webhooks/${projectId}/mtls/test`, {}, {
+    headers: { "X-Admin-Key": adminKey },
+  });
+  return { success: data.success, statusCode: data.data?.statusCode, error: data.error };
+}

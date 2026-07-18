@@ -2,6 +2,17 @@
 
 ### Features
 
+* **backend:** Webhook mutual-TLS (mTLS) authentication for enterprise partners (closes #246)
+  - Add `backend/src/db/migrations/025_webhook_mtls.js` — `webhook_mtls_config` table storing per-project CA cert, client cert, and AES-256-GCM-encrypted client key
+  - Add `backend/src/services/mtlsEncryption.js` — encrypt/decrypt client private keys with AES-256-GCM derived from `WEBHOOK_MTLS_ENCRYPTION_KEY`
+  - Update `backend/src/services/webhookQueue.js` — `processDelivery` builds an `https.Agent` presenting the client cert and verifying the server against the partner CA; exposes expiry gauge
+  - Add `indigopay_webhook_mtls_cert_expiry_seconds` Prometheus `Gauge` in `backend/src/services/metrics.js`
+  - Add `backend/src/routes/admin/webhooks.js` — `GET`/`POST /:projectId/mtls`, `POST /:projectId/mtls/disable`, `POST /:projectId/mtls/test` (admin only, PEM-validated, expiry extracted from client cert)
+  - Add mTLS alert rules (`WebhookMTLSCertExpiring`, `WebhookMTLSCertExpired`) to `monitoring/alert-rules.yml`
+  - Add `WEBHOOK_MTLS_ENCRYPTION_KEY` to `backend/.env.example` and `k8s/external-secret.yaml`
+  - Update `frontend/pages/admin/[projectId].tsx` + `frontend/lib/api.ts` — mTLS config UI: enable/disable toggle, CA/client cert/key `.pem` uploads, expiry colour-coding, test connection, and certificate rotation
+  - Add 29-test suite: `mtlsEncryption.test.js` (12), `webhookQueue.test.js` (7), `webhookQueue.integration.test.js` (3, real local HTTPS mTLS handshake), `routes/admin/webhooks.test.js` (8)
+
 * **backend:** implement Soroban RPC retry with exponential backoff and circuit breaker (GF-043, closes #100)
   - Add `backend/src/services/circuitBreaker.js` — reusable `CircuitBreaker` class (CLOSED / HALF_OPEN / OPEN state machine, configurable `failureThreshold` and `resetTimeout`)
   - Export `indigopay_soroban_circuit_breaker_state` Prometheus Gauge (0=closed, 1=half_open, 2=open)

@@ -92,3 +92,28 @@ groups:
           description: |
             There are more than 100 failed jobs in queue '{{ $labels.queue }}' for the last 10 minutes.
             Check the worker logs.
+
+  - name: stellar-indigopay-backend-webhook-mtls
+    interval: 1h
+    rules:
+      - alert: WebhookMTLSCertExpiring
+        expr: indigopay_webhook_mtls_cert_expiry_seconds < 2592000  # 30 days
+        for: 1h
+        labels:
+          severity: warn
+        annotations:
+          summary: "mTLS certificate for webhook {{ $labels.project_id }} expires in <30 days"
+          description: |
+            The mTLS client certificate for project {{ $labels.project_id }} expires within 30 days.
+            Rotate the certificate via POST /api/admin/webhooks/:projectId/mtls to avoid delivery failures.
+
+      - alert: WebhookMTLSCertExpired
+        expr: indigopay_webhook_mtls_cert_expiry_seconds < 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "mTLS certificate for webhook {{ $labels.project_id }} has expired"
+          description: |
+            The mTLS client certificate for project {{ $labels.project_id }} is expired. Webhook
+            deliveries using mTLS will fail until the certificate is rotated.

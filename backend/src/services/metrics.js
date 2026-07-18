@@ -128,6 +128,13 @@ const webhookAttemptsTotal = new client.Counter({
   registers: [registry],
 });
 
+const mtlsCertExpirySeconds = new client.Gauge({
+  name: "indigopay_webhook_mtls_cert_expiry_seconds",
+  help: "Seconds until the mTLS client certificate expires, per project. Negative once expired.",
+  labelNames: ["project_id"],
+  registers: [registry],
+});
+
 const webhookAttemptDurationSeconds = new client.Histogram({
   name: "webhook_attempt_duration_seconds",
   help: "Duration of webhook HTTP attempts in seconds, labelled by outcome (success|failure).",
@@ -280,6 +287,7 @@ module.exports = {
     readinessCheckFailedTotal,
     webhookDeliveriesTotal,
     webhookAttemptsTotal,
+    mtlsCertExpirySeconds,
     webhookAttemptDurationSeconds,
     aiSummaryTokensTotal,
     aiSummaryCostUsdTotal,

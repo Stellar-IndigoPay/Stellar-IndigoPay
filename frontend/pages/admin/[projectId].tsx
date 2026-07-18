@@ -12,10 +12,15 @@ import {
   confirmProjectRegistration,
   fetchProjectMatches,
   csrfFetch,
+  fetchWebhookMTLS,
+  uploadWebhookMTLS,
+  disableWebhookMTLS,
+  testWebhookMTLS,
 } from "@/lib/api";
 import { buildMilestoneTransaction, submitTransaction } from "@/lib/stellar";
 import { formatCO2, formatXLM, shortenAddress, timeAgo } from "@/utils/format";
 import type { ClimateProject, Donation } from "@/utils/types";
+import type { WebhookMTLSConfig } from "@/lib/api";
 
 const DonationGrowthChartNoSSR = dynamic(
   () => import("@/components/DonationGrowthChart"),
@@ -80,6 +85,20 @@ export default function ProjectAdmin({ publicKey, onConnect }: AdminProps) {
 
   const [matches, setMatches] = useState<any[]>([]);
 
+  // mTLS webhook configuration state.
+  const [mtlsAdminKey, setMtlsAdminKey] = useState("");
+  const [mtlsConfig, setMtlsConfig] = useState<WebhookMTLSConfig | null>(null);
+  const [caCert, setCaCert] = useState("");
+  const [clientCert, setClientCert] = useState("");
+  const [clientKey, setClientKey] = useState("");
+  const [mtlsState, setMtlsState] = useState<
+    "idle" | "loading" | "success" | "error"
+  >("idle");
+  const [mtlsMessage, setMtlsMessage] = useState<string | null>(null);
+  const [mtlsMessageType, setMtlsMessageType] = useState<
+    "success" | "error"
+  >("success");
+
   const [widgetAccent, setWidgetAccent] = useState("#059669");
   const [widgetButtonText, setWidgetButtonText] = useState(
     "Donate on IndigoPay",
@@ -114,6 +133,122 @@ export default function ProjectAdmin({ publicKey, onConnect }: AdminProps) {
     "#65a30d",
     "#0891b2",
   ];
+
+  // Read a selected .pem file as text into the given state setter.
+  const readPemFile = (file: File | null, setter: (v: string) => void) => {
+    if (!file) {
+      setter("");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => setter(String(reader.result || ""));
+    reader.readAsText(file);
+  };
+
+  // Colour-code the cert expiry: green >60d, amber 30-60d, red <30d.
+  const mtlsStatusColor = (() => {
+    if (!mtlsConfig || !mtlsConfig.enabled || !mtlsConfig.cert_expires_at) {
+      return "red";
+    }
+    const days =
+      (new Date(mtlsConfig.cert_expires_at).getTime() - Date.now()) /
+      86400000;
+    if (days < 30) return "red";
+    if (days < 60) return "amber";
+    return "green";
+  })();
+
+  const saveMTLS = async () => {
+    if (!projectId || typeof projectId !== "string") return;
+    if (!mtlsAdminKey) {
+      setMtlsMessage("Admin API key is required.");
+      setMtlsMessageType("error");
+      return;
+    }
+    setMtlsState("loading");
+    setMtlsMessage(null);
+    try {
+      const data = await uploadWebhookMTLS(projectId, mtlsAdminKey, {
+        caCert,
+        clientCert,
+        clientKey,
+      });
+      setMtlsConfig((prev) =>
+        prev
+          ? { ...prev, enabled: true, cert_expires_at: data.cert_expires_at }
+          : {
+              enabled: true,
+              has_ca: !!caCert,
+              has_client_cert: !!clientCert,
+              has_client_key: !!clientKey,
+              cert_expires_at: data.cert_expires_at,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            },
+      );
+      setMtlsMessage("mTLS configuration saved.");
+      setMtlsMessageType("success");
+      setMtlsState("success");
+      setTimeout(() => setMtlsState("idle"), 2000);
+    } catch (e: any) {
+      setMtlsMessage(e.message || "Failed to save mTLS config");
+      setMtlsMessageType("error");
+      setMtlsState("error");
+    }
+  };
+
+  const testMTLS = async () => {
+    if (!projectId || typeof projectId !== "string") return;
+    if (!mtlsAdminKey) {
+      setMtlsMessage("Admin API key is required.");
+      setMtlsMessageType("error");
+      return;
+    }
+    setMtlsState("loading");
+    setMtlsMessage(null);
+    try {
+      const res = await testWebhookMTLS(projectId, mtlsAdminKey);
+      if (res.success) {
+        setMtlsMessage(
+          `Test connection succeeded (HTTP ${res.statusCode ?? 200}).`,
+        );
+        setMtlsMessageType("success");
+        setMtlsState("success");
+      } else {
+        setMtlsMessage(`Test connection failed: ${res.error || "unknown error"}`);
+        setMtlsMessageType("error");
+        setMtlsState("error");
+      }
+      setTimeout(() => setMtlsState("idle"), 3000);
+    } catch (e: any) {
+      setMtlsMessage(e.message || "Test connection failed");
+      setMtlsMessageType("error");
+      setMtlsState("error");
+    }
+  };
+
+  const disableMTLS = async () => {
+    if (!projectId || typeof projectId !== "string") return;
+    if (!mtlsAdminKey) {
+      setMtlsMessage("Admin API key is required.");
+      setMtlsMessageType("error");
+      return;
+    }
+    setMtlsState("loading");
+    setMtlsMessage(null);
+    try {
+      await disableWebhookMTLS(projectId, mtlsAdminKey);
+      setMtlsConfig((prev) => (prev ? { ...prev, enabled: false } : prev));
+      setMtlsMessage("mTLS disabled.");
+      setMtlsMessageType("success");
+      setMtlsState("success");
+      setTimeout(() => setMtlsState("idle"), 2000);
+    } catch (e: any) {
+      setMtlsMessage(e.message || "Failed to disable mTLS");
+      setMtlsMessageType("error");
+      setMtlsState("error");
+    }
+  };
 
   const copyEmbed = async () => {
     try {
@@ -156,6 +291,23 @@ export default function ProjectAdmin({ publicKey, onConnect }: AdminProps) {
       )
       .finally(() => setLoading(false));
   }, [projectId]);
+
+  // Load the mTLS config whenever the admin key is provided/changed. The
+  // fetch helper is intentionally dropped from the deps to avoid re-running on
+  // every render (it is stable module-level code).
+  useEffect(() => {
+    if (!mtlsAdminKey || typeof projectId !== "string") return;
+    let cancelled = false;
+    fetchWebhookMTLS(projectId, mtlsAdminKey)
+      .then((cfg) => {
+        if (!cancelled) setMtlsConfig(cfg);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [mtlsAdminKey, projectId]);
+
 
   const isOwner =
     !!publicKey && !!project && publicKey === project.walletAddress;
@@ -900,6 +1052,136 @@ export default function ProjectAdmin({ publicKey, onConnect }: AdminProps) {
             ))}
           </div>
         )}
+      </div>
+
+      {/* Webhook mTLS Configuration */}
+      <div className="card mt-6">
+        <h2 className="font-display text-xl font-bold text-forest-900 mb-2">
+          Webhook mTLS Configuration
+        </h2>
+        <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body mb-4">
+          Enterprise partners may require mutual-TLS for inbound webhook
+          delivery. Upload the partner CA, our client certificate, and our
+          client private key to deliver webhooks over an authenticated mTLS
+          connection. The private key is encrypted at rest.
+        </p>
+
+        {mtlsConfig && (
+          <div
+            className={`p-3 rounded-xl mb-4 text-sm font-body ${
+              mtlsStatusColor === "green"
+                ? "bg-green-50 border border-green-200 text-green-700"
+                : mtlsStatusColor === "amber"
+                  ? "bg-amber-50 border border-amber-200 text-amber-700"
+                  : "bg-red-50 border border-red-200 text-red-700"
+            }`}
+          >
+            {mtlsConfig.enabled
+              ? `mTLS enabled · certificate expires ${new Date(
+                  mtlsConfig.cert_expires_at || "",
+                ).toLocaleDateString()}`
+              : "mTLS disabled"}
+          </div>
+        )}
+
+        {mtlsMessage && (
+          <div
+            className={`p-3 rounded-xl text-sm font-body mb-4 ${
+              mtlsMessageType === "success"
+                ? "bg-green-50 border border-green-200 text-green-700"
+                : "bg-red-50 border border-red-200 text-red-700"
+            }`}
+          >
+            {mtlsMessage}
+          </div>
+        )}
+
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs font-bold text-forest-800 uppercase tracking-widest mb-1 ml-1 opacity-50">
+              Admin API Key (X-Admin-Key)
+            </label>
+            <input
+              type="password"
+              value={mtlsAdminKey}
+              onChange={(e) => setMtlsAdminKey(e.target.value)}
+              className="input-field"
+              placeholder="Required to manage mTLS configuration"
+            />
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+            <div>
+              <label className="block text-xs font-bold text-forest-800 uppercase tracking-widest mb-1 ml-1 opacity-50">
+                CA Certificate (.pem)
+              </label>
+              <input
+                type="file"
+                accept=".pem"
+                onChange={(e) =>
+                  readPemFile(e.target.files?.[0] || null, setCaCert)
+                }
+                className="input-field"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-forest-800 uppercase tracking-widest mb-1 ml-1 opacity-50">
+                Client Certificate (.pem)
+              </label>
+              <input
+                type="file"
+                accept=".pem"
+                onChange={(e) =>
+                  readPemFile(e.target.files?.[0] || null, setClientCert)
+                }
+                className="input-field"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-forest-800 uppercase tracking-widest mb-1 ml-1 opacity-50">
+                Client Key (.pem)
+              </label>
+              <input
+                type="file"
+                accept=".pem"
+                onChange={(e) =>
+                  readPemFile(e.target.files?.[0] || null, setClientKey)
+                }
+                className="input-field"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-3">
+            <button
+              onClick={saveMTLS}
+              disabled={
+                mtlsState === "loading" || !mtlsAdminKey || !clientCert || !clientKey
+              }
+              className="btn-primary flex-1 min-w-[160px] disabled:opacity-50"
+            >
+              {mtlsState === "loading" ? "Saving…" : "Save mTLS Config"}
+            </button>
+            <button
+              onClick={testMTLS}
+              disabled={mtlsState === "loading" || !mtlsAdminKey}
+              className="flex-1 min-w-[160px] bg-forest-100 hover:bg-forest-200 text-forest-900 font-semibold px-6 py-3 rounded-xl transition-all disabled:opacity-40"
+            >
+              {mtlsState === "loading" ? "Testing…" : "Test Connection"}
+            </button>
+            <button
+              onClick={disableMTLS}
+              disabled={mtlsState === "loading" || !mtlsAdminKey}
+              className="px-6 py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-semibold transition-all disabled:opacity-40"
+            >
+              Disable
+            </button>
+          </div>
+          <p className="text-xs text-[#8aaa8a] dark:text-forest-300 font-body">
+            Uploading a new certificate before the old one expires performs a
+            zero-downtime rotation — the new material replaces the old on save.
+          </p>
+        </div>
       </div>
 
       {/* Widget Builder */}
