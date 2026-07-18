@@ -17,4 +17,9 @@ proptest = "1.4"
 
 [features]
 testutils = ["soroban-sdk/testutils"]
+v1 = []
+
+[[test]]
+name = "upgrade_test"
+path = "../tests/upgrade_test.rs"
 

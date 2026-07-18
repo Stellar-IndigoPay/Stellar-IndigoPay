@@ -91,3 +91,31 @@ Run the full contract suite:
 ```bash
 cargo test
 ```
+
+## Upgrade Integration Testing
+
+We have built a dedicated integration test suite validating same-storage upgrade compatibility (such as Project layout transition where `paused` field is added) under `contracts/tests/upgrade_test.rs`.
+
+To run the upgrade integration test suite locally, you must first build the V1 and V2 WASM fixtures:
+
+```bash
+# From contracts/ directory
+mkdir -p tests/fixtures
+cargo build --package indigopay-contract --features v1 --target wasm32v1-none --release
+cp target/wasm32v1-none/release/indigopay_contract.wasm tests/fixtures/v1.wasm
+cargo build --package indigopay-contract-v2 --target wasm32v1-none --release
+cp target/wasm32v1-none/release/indigopay_contract_v2.wasm tests/fixtures/v2.wasm
+
+# Run the upgrade integration test
+cargo test --package indigopay-contract --test upgrade_test --features testutils
+```
+
+## Indexer Compatibility Testing
+
+To ensure that the backend events indexer can handle upgrades and v2 events without data loss or cursor progression issues, run the Jest tests:
+
+```bash
+# From backend/ directory
+npm test backend/__tests__/contractUpgrade.test.js
+```
+

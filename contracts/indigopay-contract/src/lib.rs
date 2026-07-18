@@ -79,6 +79,7 @@ pub struct Project {
     /// backward-compatible with any Project value that was already on
     /// chain before this field existed. Per UPGRADE.md, new fields must
     /// be appended or live behind a new storage version.
+    #[cfg(not(feature = "v1"))]
     pub paused: bool,
 }
 
@@ -243,6 +244,8 @@ pub enum DataKey {
     // returns. Used by indexers to confirm which WASM is currently
     // running at the contract address.
     LastExecutedUpgrade,
+    // New feature key for V2 compatibility checks
+    NewFeature,
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -396,6 +399,7 @@ impl IndigoPayContract {
             total_raised: 0,
             donor_count: 0,
             active: true,
+            #[cfg(not(feature = "v1"))]
             paused: false,
             registered_at: env.ledger().sequence(),
         };
@@ -456,6 +460,7 @@ impl IndigoPayContract {
                 total_raised: 0,
                 donor_count: 0,
                 active: true,
+                #[cfg(not(feature = "v1"))]
                 paused: false,
                 registered_at: env.ledger().sequence(),
             };
@@ -564,28 +569,38 @@ impl IndigoPayContract {
     }
 
     pub fn pause_project(env: Env, admin: Address, project_id: String) {
-        admin.require_auth();
-        require_admin(&env, &admin);
-        // pause_project is intentionally NOT paused-gated so the admin can
-        // still manage individual projects during a contract-wide pause.
-        let mut project: Project = env
-            .storage()
-            .instance()
-            .get(&DataKey::Project(project_id.clone()))
-            .expect("Project not found");
-        if !project.active {
-            panic!("Cannot pause a deactivated project");
+        #[cfg(feature = "v1")]
+        {
+            let _ = env;
+            let _ = admin;
+            let _ = project_id;
+            panic!("Project pausing not supported in v1");
         }
-        if project.paused {
-            panic!("Project is already paused");
+        #[cfg(not(feature = "v1"))]
+        {
+            admin.require_auth();
+            require_admin(&env, &admin);
+            // pause_project is intentionally NOT paused-gated so the admin can
+            // still manage individual projects during a contract-wide pause.
+            let mut project: Project = env
+                .storage()
+                .instance()
+                .get(&DataKey::Project(project_id.clone()))
+                .expect("Project not found");
+            if !project.active {
+                panic!("Cannot pause a deactivated project");
+            }
+            if project.paused {
+                panic!("Project is already paused");
+            }
+            project.paused = true;
+            env.storage()
+                .instance()
+                .set(&DataKey::Project(project_id.clone()), &project);
+            env.events()
+                .publish((symbol_short!("prj_pause"), admin), project_id);
+            ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
         }
-        project.paused = true;
-        env.storage()
-            .instance()
-            .set(&DataKey::Project(project_id.clone()), &project);
-        env.events()
-            .publish((symbol_short!("prj_pause"), admin), project_id);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Admin-only: lift a temporary pause on a project. Mirrors
@@ -593,27 +608,37 @@ impl IndigoPayContract {
     /// for indexers, idempotency-aware (panics on resume when the
     /// project is not paused, to prevent accidental double-resumes).
     pub fn resume_project(env: Env, admin: Address, project_id: String) {
-        admin.require_auth();
-        require_admin(&env, &admin);
-        // resume_project is intentionally NOT paused-gated.
-        let mut project: Project = env
-            .storage()
-            .instance()
-            .get(&DataKey::Project(project_id.clone()))
-            .expect("Project not found");
-        if !project.active {
-            panic!("Cannot resume a deactivated project");
+        #[cfg(feature = "v1")]
+        {
+            let _ = env;
+            let _ = admin;
+            let _ = project_id;
+            panic!("Project resuming not supported in v1");
         }
-        if !project.paused {
-            panic!("Project is not paused");
+        #[cfg(not(feature = "v1"))]
+        {
+            admin.require_auth();
+            require_admin(&env, &admin);
+            // resume_project is intentionally NOT paused-gated.
+            let mut project: Project = env
+                .storage()
+                .instance()
+                .get(&DataKey::Project(project_id.clone()))
+                .expect("Project not found");
+            if !project.active {
+                panic!("Cannot resume a deactivated project");
+            }
+            if !project.paused {
+                panic!("Project is not paused");
+            }
+            project.paused = false;
+            env.storage()
+                .instance()
+                .set(&DataKey::Project(project_id.clone()), &project);
+            env.events()
+                .publish((symbol_short!("prj_resm"), admin), project_id);
+            ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
         }
-        project.paused = false;
-        env.storage()
-            .instance()
-            .set(&DataKey::Project(project_id.clone()), &project);
-        env.events()
-            .publish((symbol_short!("prj_resm"), admin), project_id);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     // ─── Donations ────────────────────────────────────────────────────────────
@@ -674,6 +699,7 @@ impl IndigoPayContract {
         if !project.active {
             panic!("Project is not accepting donations");
         }
+        #[cfg(not(feature = "v1"))]
         if project.paused {
             panic!("Project is temporarily paused");
         }
@@ -852,6 +878,7 @@ impl IndigoPayContract {
         if !project.active {
             panic!("Project is not accepting donations");
         }
+        #[cfg(not(feature = "v1"))]
         if project.paused {
             panic!("Project is temporarily paused");
         }
@@ -1478,6 +1505,7 @@ impl IndigoPayContract {
         if !project.active {
             panic!("Project is not accepting donations");
         }
+        #[cfg(not(feature = "v1"))]
         if project.paused {
             panic!("Project is temporarily paused");
         }

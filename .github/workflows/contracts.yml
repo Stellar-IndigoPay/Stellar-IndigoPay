@@ -101,3 +101,26 @@ jobs:
         with:
           name: coverage-report
           path: contracts/indigopay-contract/coverage/
+
+  upgrade-integration:
+    name: Contract Upgrade Integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+          targets: wasm32v1-none
+      - name: Build v1 and v2 WASM fixtures
+        run: |
+          cd contracts
+          mkdir -p tests/fixtures
+          cargo build --package indigopay-contract --features v1 --target wasm32v1-none --release
+          cp target/wasm32v1-none/release/indigopay_contract.wasm tests/fixtures/v1.wasm
+          cargo build --package indigopay-contract-v2 --target wasm32v1-none --release
+          cp target/wasm32v1-none/release/indigopay_contract_v2.wasm tests/fixtures/v2.wasm
+      - name: Run upgrade integration tests
+        run: |
+          cd contracts
+          cargo test --package indigopay-contract --test upgrade_test --features testutils -- --nocapture

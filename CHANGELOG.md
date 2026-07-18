@@ -2,6 +2,15 @@
 
 ### Features
 
+* **contracts,backend:** build integration test suite for contract upgrade lifecycle and indexer compatibility
+  - Implement full upgrade integration test suite in `contracts/tests/upgrade_test.rs` covering deploy, seed, propose, cancel, timelock, execute, state continuity, and V2 additions
+  - Implement V2 fixture contract in `contracts/indigopay-contract/tests/v2_fixture.rs` and its Cargo configuration
+  - Support `v1` feature flag in `contracts/indigopay-contract` to conditionally compile `Project` without the `paused` field to model backward compatibility
+  - Implement backend indexer compatibility tests in `backend/__tests__/contractUpgrade.test.js` to verify events processing and DLQ handling during upgrade window
+  - Integrate upgrade testing job in `.github/workflows/contracts.yml` CI workflow
+  - Update `UPGRADE.md` with instructions on upgrade and indexer compatibility testing
+
+
 * **frontend:** implement Playwright end-to-end test suite covering critical user journeys (GF-052, closes #110)
   - Set up Playwright configuration in `playwright.config.ts` with Next.js dev server and Chrome browser projects
   - Implement mock fixtures for Freighter wallet injection (`freighter.ts`), Horizon API/Soroban RPC responses (`horizon.ts`), and backend REST endpoints (`api.ts`)
