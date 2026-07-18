@@ -181,6 +181,36 @@ Native XLM is always accepted and does not need an allowlist event.
 
 ---
 
+## 16. `rfnd_rq`
+
+**Description**: Emitted when a donor requests a refund within the 24-hour cooldown window.
+
+| Event Name  | Topics                              | Data                                                            | When Emitted                          |
+| ----------- | ----------------------------------- | --------------------------------------------------------------- | ------------------------------------- |
+| `rfnd_rq`   | `["rfnd_rq", refund_id, donor]`    | `(project_id: String, amount: i128, donation_record_index: u32)` | When donor calls `request_refund` |
+
+---
+
+## 17. `rfnd_ap`
+
+**Description**: Emitted when an admin + project wallet approve a refund. The token transfer happens atomically.
+
+| Event Name  | Topics                              | Data                                                    | When Emitted                          |
+| ----------- | ----------------------------------- | ------------------------------------------------------- | ------------------------------------- |
+| `rfnd_ap`   | `["rfnd_ap", refund_id, admin]`    | `(project_id: String, amount: i128, donor: Address)`    | When admin calls `approve_refund`     |
+
+---
+
+## 18. `rfnd_rj`
+
+**Description**: Emitted when an admin rejects a refund request. The donation stands; no counters are adjusted.
+
+| Event Name  | Topics                              | Data                                        | When Emitted                          |
+| ----------- | ----------------------------------- | ------------------------------------------- | ------------------------------------- |
+| `rfnd_rj`   | `["rfnd_rj", refund_id, admin]`    | `(project_id: String, donor: Address)`       | When admin calls `reject_refund`      |
+
+---
+
 ## Usage Notes
 
 - All events follow Soroban’s standard event format: `topics: Vec<Val>`, `data: Val`.

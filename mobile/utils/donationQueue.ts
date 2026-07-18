@@ -53,6 +53,19 @@ export interface QueuedDonation {
   maxAttempts: number;
   nextRetryAt: number;
   lastError?: string;
+  /**
+   * Machine-readable backend error code captured on the last failure
+   * (e.g. "PROJECT_NOT_FOUND", "TX_FAILED"). Used to classify a failure as
+   * retryable vs. permanent without re-parsing the human message.
+   */
+  errorCode?: string;
+  /**
+   * Whether the last failure is expected to succeed on a later attempt.
+   * Permanent (non-retryable) failures stop being picked up by
+   * getRetryEligibleDonations() even if attempts < maxAttempts, so a
+   * permanently-failed donation never blocks the rest of the queue.
+   */
+  retryable?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -72,12 +85,39 @@ async function readQueue(): Promise<QueuedDonation[]> {
   }
 }
 
+// In-process subscribers notified after the queue is mutated. Used by the UI
+// (and the worker) to react to per-item status changes without polling.
+type QueueUpdateListener = (queue: QueuedDonation[]) => void;
+const updateListeners = new Set<QueueUpdateListener>();
+
 async function writeQueue(queue: QueuedDonation[]): Promise<void> {
   // Cap queue size so a runaway failure mode can't fill storage
   if (queue.length > MAX_QUEUE_SIZE) {
     queue = queue.slice(queue.length - MAX_QUEUE_SIZE);
   }
   await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(queue));
+  // Notify listeners with the (possibly trimmed) queue snapshot.
+  for (const listener of updateListeners) {
+    try {
+      listener(queue);
+    } catch {
+      // a misbehaving listener must not break persistence
+    }
+  }
+}
+
+/**
+ * Subscribe to queue mutations. The callback fires with the full queue
+ * snapshot after every write. Returns an unsubscribe function.
+ *
+ * @param listener - called with the latest queue after each change
+ * @returns unsubscribe function
+ */
+export function onQueueItemUpdate(listener: QueueUpdateListener): () => void {
+  updateListeners.add(listener);
+  return () => {
+    updateListeners.delete(listener);
+  };
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -109,6 +149,7 @@ export async function enqueueDonation(params: {
     attempts: 0,
     maxAttempts: MAX_RETRY_ATTEMPTS,
     nextRetryAt: now, // eligible for immediate retry
+    retryable: true, // optimistic; downgraded on a permanent failure
     createdAt: now,
     updatedAt: now,
   };
@@ -140,7 +181,9 @@ export async function getPendingCount(): Promise<number> {
 
 /**
  * Get the subset of donations whose nextRetryAt ≤ Date.now() and that are
- * still eligible for retry (attempts < maxAttempts).
+ * still eligible for retry (attempts < maxAttempts). Permanently-failed
+ * donations (retryable === false) are excluded so a single dead donation
+ * never blocks the rest of the queue.
  */
 export async function getRetryEligibleDonations(): Promise<QueuedDonation[]> {
   const queue = await readQueue();
@@ -149,8 +192,29 @@ export async function getRetryEligibleDonations(): Promise<QueuedDonation[]> {
     (d) =>
       (d.status === "pending" || d.status === "retrying") &&
       d.attempts < d.maxAttempts &&
+      d.retryable !== false &&
       d.nextRetryAt <= now,
   );
+}
+
+/**
+ * Alias for getRetryEligibleDonations exposed under the shorter name the
+ * issue/spec references. Both return the same retry-eligible set.
+ */
+export const getRetryEligible = getRetryEligibleDonations;
+
+/**
+ * Return the current status of a single queued donation, or null if it is
+ * not present in the queue.
+ *
+ * @param donationId - id of the queued donation
+ */
+export async function getItemStatus(
+  donationId: string,
+): Promise<DonationStatus | null> {
+  const queue = await readQueue();
+  const found = queue.find((d) => d.id === donationId);
+  return found ? found.status : null;
 }
 
 /**
@@ -183,10 +247,19 @@ export async function markSubmitted(
 
 /**
  * Record a failed attempt and schedule the next retry.
+ *
+ * @param donationId - id of the queued donation
+ * @param errorMessage - human-readable error (preserved in lastError)
+ * @param options.permanent - when true, the donation is marked failed and
+ *        non-retryable immediately (e.g. insufficient balance, deleted
+ *        project). Overrides the backoff/exhaust schedule.
+ * @param options.errorCode - machine-readable backend error code, stored for
+ *        retry classification and UI display.
  */
 export async function markFailed(
   donationId: string,
   errorMessage: string,
+  options: { permanent?: boolean; errorCode?: string } = {},
 ): Promise<void> {
   const queue = await readQueue();
   const idx = queue.findIndex((d) => d.id === donationId);
@@ -195,17 +268,49 @@ export async function markFailed(
   const d = queue[idx];
   d.attempts += 1;
   d.lastError = errorMessage;
+  d.errorCode = options.errorCode ?? d.errorCode;
   d.updatedAt = Date.now();
 
-  if (d.attempts >= d.maxAttempts) {
+  const permanent = options.permanent === true || d.attempts >= d.maxAttempts;
+
+  if (permanent) {
     d.status = "failed";
-    d.nextRetryAt = 0; // never retry
+    d.retryable = false; // never picked up by getRetryEligibleDonations
+    d.nextRetryAt = 0;
   } else {
     d.status = "pending";
+    d.retryable = true;
     // next retry at now + backoff for current attempt count
     const backoffIndex = Math.min(d.attempts - 1, RETRY_BACKOFF_MS.length - 1);
     d.nextRetryAt = Date.now() + RETRY_BACKOFF_MS[backoffIndex];
   }
+
+  await writeQueue(queue);
+}
+
+/**
+ * Mark a previously failed donation as retryable again so it re-enters the
+ * normal backoff schedule. Used by the "Retry" button in the UI.
+ *
+ * @param donationId - id of the donation to re-queue
+ * @param immediate - when true, make it eligible for an immediate retry
+ */
+export async function retryDonation(
+  donationId: string,
+  immediate = true,
+): Promise<void> {
+  const queue = await readQueue();
+  const idx = queue.findIndex((d) => d.id === donationId);
+  if (idx === -1) return;
+
+  const d = queue[idx];
+  d.status = "pending";
+  d.retryable = true;
+  d.attempts = 0; // fresh attempt budget
+  d.lastError = undefined;
+  d.errorCode = undefined;
+  d.nextRetryAt = immediate ? Date.now() : d.nextRetryAt;
+  d.updatedAt = Date.now();
 
   await writeQueue(queue);
 }
