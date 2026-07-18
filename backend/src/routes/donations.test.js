@@ -16,10 +16,15 @@ jest.mock("../services/profileQueue", () => ({
   enqueueProfileUpdate: jest.fn().mockResolvedValue(undefined),
 }));
 
+jest.mock("../services/matchQueue", () => ({
+  enqueueDonationMatching: jest.fn().mockResolvedValue("job-id"),
+}));
+
 const { server } = require("../services/stellar");
 const pool = require("../db/pool");
 const { computeBadges } = require("../services/store");
 const { enqueueProfileUpdate } = require("../services/profileQueue");
+const { enqueueDonationMatching } = require("../services/matchQueue");
 const { AppError } = require("../errors");
 const { recordDonation } = require("./donations");
 

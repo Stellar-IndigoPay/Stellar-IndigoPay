@@ -21,6 +21,7 @@ const {
 const { mapDonationRow } = require("../services/store");
 const { enqueueProfileUpdate } = require("../services/profileQueue");
 const { enqueuePushNotification } = require("../services/pushQueue");
+const { enqueueDonationMatching } = require("../services/matchQueue");
 const { server } = require("../services/stellar");
 const donationLimiter = createRateLimiter(10, 1); // 10 requests per minute
 
