@@ -7,7 +7,8 @@ import Head from "next/head";
 import Link from "next/link";
 import { getPublicKey } from "@stellar/freighter-api";
 import { shortenAddress } from "@/utils/format";
-import { fetchProjects, recordDonation } from "@/lib/api";
+import { safeRandomUUID } from "@/utils/uuid";
+import { fetchProjects, recordDonation, csrfFetch } from "@/lib/api";
 import type { ClimateProject } from "@/utils/types";
 
 const CIRCLE_BRIDGE_URL = "https://bridge.circle.com";
@@ -28,6 +29,7 @@ export default function BridgePage() {
   const [bridgeAmount, setBridgeAmount] = useState<string>("");
   const [recording, setRecording] = useState(false);
   const [recordError, setRecordError] = useState<string | null>(null);
+  const [lastBridgeTxHash, setLastBridgeTxHash] = useState<string | null>(null);
 
   useEffect(() => {
     loadStellarAddress();
@@ -123,7 +125,7 @@ export default function BridgePage() {
         currency: "USDC",
         message: "Donated via Circle CCTP bridge",
         transactionHash: `bridge-${Date.now()}`,
-        idempotencyKey: crypto.randomUUID(),
+        idempotencyKey: safeRandomUUID(),
       });
 
       // Update bridge history
@@ -137,6 +139,7 @@ export default function BridgePage() {
         timestamp: new Date().toISOString(),
         status: "completed",
         type: "donation",
+        attestationId: null,
       };
 
       const updatedHistory = [newEntry, ...bridgeHistory];
@@ -149,6 +152,130 @@ export default function BridgePage() {
     } catch (err) {
       setRecordError(
         err instanceof Error ? err.message : "Failed to record donation",
+      );
+    } finally {
+      setRecording(false);
+    }
+  };
+
+  /**
+   * Record a cross-chain donation attestation. Called after the user has
+   * completed the CCTP bridge and wants the backend to mint an
+   * attestation id (linking the source-chain tx to their Stellar wallet
+   * and the chosen IndigoPay project). Uses the new /api/attestations
+   * endpoint family — see issue #125.
+   *
+   * Two-step flow:
+   *   1. POST /api/attestations/build-proof — get a signed proof from the
+   *      relayer (no relayer secret in the browser, so we use the proof
+   *      endpoint to mint one with the relayer's HMAC secret).
+   *   2. POST /api/attestations — submit the observation with the proof
+   *      headers. The backend replays the same canonical hash and verifies
+   *      the signature, then writes the attestation row.
+   *   3. INSERT may race against another parallel submit; we treat the
+   *      resulting 200 (created=false) as success rather than an error.
+   */
+  const recordCrossChainAttestation = async () => {
+    if (!selectedProject || !bridgeAmount || !stellarAddress) return;
+    if (!lastBridgeTxHash) {
+      setRecordError(
+        "Initiate a bridge first so we have a source-chain tx hash to attest.",
+      );
+      return;
+    }
+
+    setRecording(true);
+    setRecordError(null);
+
+    try {
+      const amount = parseFloat(bridgeAmount);
+      if (isNaN(amount) || amount <= 0) {
+        throw new Error("Invalid amount");
+      }
+
+      // Step 1: build a signed proof. We deliberately go through the
+      // shared `csrfFetch` helper instead of raw `fetch()` — the latter
+      // would skip the axios X-CSRF-Token interceptor and the backend's
+      // csurf middleware would reject the POST with a 403 in production.
+      const proofRes = await csrfFetch("/api/attestations/build-proof", {
+        method: "POST",
+        body: JSON.stringify({
+          source_chain: sourceChain,
+          source_tx_hash: lastBridgeTxHash,
+          donor_address: stellarAddress,
+          project_id: selectedProject,
+        }),
+      });
+      if (!proofRes.ok) {
+        const text = await proofRes.text();
+        throw new Error(`Attestation proof failed: ${proofRes.status} ${text}`);
+      }
+      const proofPayload = await proofRes.json();
+      const proof = proofPayload?.data ?? proofPayload;
+
+      // Step 2: submit the attestation with the proof headers. We omit
+      // `amount_xlm` entirely so the relayer can quote it during the
+      // next step; storing a "guess XLM" on the backend before the
+      // relayer runs would leak incorrect numbers to indexers on
+      // mainnet.
+      // on_chain_id is `0` here — the relayer awards the real Soroban
+      // id when it replays this observation on-chain; the backend stores
+      // 0 as a placeholder until the relayer's adapter upserts the
+      // final monotonic id. This is intentional: the off-chain record
+      // is provisional, the on-chain record is canonical.
+      const recordRes = await csrfFetch("/api/attestations", {
+        method: "POST",
+        body: JSON.stringify({
+          source_chain: sourceChain,
+          source_tx_hash: lastBridgeTxHash,
+          donor_address: stellarAddress,
+          project_id: selectedProject,
+          amount_usd: amount,
+          message_hash: 0,
+          on_chain_id: 0,
+          status: "pending",
+        }),
+        headers: {
+          "x-attestation-signature": proof.signature,
+          "x-attestation-timestamp": String(proof.timestamp),
+          "x-relayer-address": "frontend-bridge-user",
+        },
+      });
+      if (!recordRes.ok && recordRes.status !== 200) {
+        const text = await recordRes.text();
+        throw new Error(`Attestation submit failed: ${recordRes.status} ${text}`);
+      }
+      const recordPayload = await recordRes.json();
+      const attestationId =
+        recordPayload?.data?.id ??
+        (proof.timestamp
+          ? `${lastBridgeTxHash.slice(0, 10)}@${proof.timestamp}`
+          : lastBridgeTxHash);
+
+      const newEntry = {
+        id: Date.now(),
+        sourceChain,
+        destinationChain,
+        stellarAddress,
+        amount: bridgeAmount,
+        projectId: selectedProject,
+        sourceTxHash: lastBridgeTxHash,
+        attestationId,
+        timestamp: new Date().toISOString(),
+        status: "attested",
+        type: "attestation",
+      };
+
+      const updatedHistory = [newEntry, ...bridgeHistory];
+      setBridgeHistory(updatedHistory);
+      localStorage.setItem("bridge_history", JSON.stringify(updatedHistory));
+
+      setBridgeAmount("");
+      setSelectedProject("");
+      setLastBridgeTxHash(null);
+    } catch (err) {
+      setRecordError(
+        err instanceof Error ? err.message : "Failed to record attestation",
       );
     } finally {
       setRecording(false);
@@ -179,6 +306,21 @@ export default function BridgePage() {
     const updatedHistory = [newEntry, ...bridgeHistory];
     setBridgeHistory(updatedHistory);
     localStorage.setItem("bridge_history", JSON.stringify(updatedHistory));
+  };
+
+  /**
+   * Capture the source-chain tx hash from the user after the CCTP bridge
+   * completes. The user pastes it manually because Circle CCTP fires
+   * the burn tx off-platform and our extension can't observe it from the
+   * browser — this preserves the trust-minimised model where the
+   * donor is responsible for quoting the source transaction.
+   */
+  const captureSourceTxHash = () => {
+    const value = window.prompt(
+      "Paste the source-chain transaction hash (the burn tx on Ethereum / Polygon):",
+    );
+    if (!value) return;
+    setLastBridgeTxHash(value.trim());
   };
 
   const steps = [
@@ -432,19 +574,57 @@ export default function BridgePage() {
                   />
                 </div>
 
+                <div>
+                  <label className="label">Source-Chain Tx Hash</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={lastBridgeTxHash ?? ""}
+                      onChange={(e) => setLastBridgeTxHash(e.target.value)}
+                      placeholder="0x… (paste the burn tx from Circle)"
+                      className="input-field flex-1"
+                    />
+                    <button
+                      type="button"
+                      onClick={captureSourceTxHash}
+                      className="btn-ghost py-2 px-3 text-sm whitespace-nowrap"
+                    >
+                      Paste
+                    </button>
+                  </div>
+                  <p className="text-xs text-[#475569] dark:text-[#94A3B8] mt-1">
+                    Required for the on-chain attestation. Circle&apos;s burn tx
+                    hash goes here.
+                  </p>
+                </div>
+
                 {recordError && (
                   <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-red-600 text-sm">
                     {recordError}
                   </div>
                 )}
 
-                <button
-                  onClick={recordBridgeDonation}
-                  disabled={!selectedProject || !bridgeAmount || recording}
-                  className="btn-primary w-full py-3 px-4"
-                >
-                  {recording ? "Recording..." : "🎯 Record Donation"}
-                </button>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <button
+                    onClick={recordBridgeDonation}
+                    disabled={!selectedProject || !bridgeAmount || recording}
+                    className="btn-primary py-3 px-4"
+                  >
+                    {recording ? "Recording..." : "🎯 Record Donation"}
+                  </button>
+                  <button
+                    onClick={recordCrossChainAttestation}
+                    disabled={
+                      !selectedProject ||
+                      !bridgeAmount ||
+                      !lastBridgeTxHash ||
+                      recording
+                    }
+                    className="bg-gradient-to-r from-blue-500 to-emerald-500 text-white py-3 px-4 rounded-xl font-semibold hover:from-blue-600 hover:to-emerald-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {recording ? "Attesting..." : "🔗 Mint Cross-Chain Attestation"}
+                  </button>
+                </div>
               </div>
             </div>
           )}

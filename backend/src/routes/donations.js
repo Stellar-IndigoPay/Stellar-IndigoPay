@@ -9,6 +9,7 @@ const { v4: uuid } = require("uuid");
 const { z } = require("zod");
 const logger = require("../logger");
 const pool = require("../db/pool");
+const { AppError } = require("../errors");
 const { createRateLimiter } = require("../middleware/rateLimiter");
 const { validate } = require("../middleware/validate");
 const idempotencyMiddleware = require("../middleware/idempotency");
@@ -21,7 +22,6 @@ const { mapDonationRow } = require("../services/store");
 const { enqueueProfileUpdate } = require("../services/profileQueue");
 const { enqueuePushNotification } = require("../services/pushQueue");
 const { server } = require("../services/stellar");
-const { AppError } = require("../errors");
 const donationLimiter = createRateLimiter(10, 1); // 10 requests per minute
 
 // Local EventEmitter used by both the POST /api/donations handler and the
@@ -29,9 +29,25 @@ const donationLimiter = createRateLimiter(10, 1); // 10 requests per minute
 // real time without going through Socket.IO.
 const donationEvents = new EventEmitter();
 
+function validateKey(k) {
+  if (!k || !/^G[A-Z0-9]{55}$/.test(k)) {
+    throw new AppError("INVALID_ADDRESS");
+  }
+}
+
+function validateTxHash(h) {
+  if (!h || !/^[a-fA-F0-9]{64}$/.test(h)) {
+    throw new AppError("INVALID_TX_HASH");
+  }
+}
 
 /**
  * Record a donation after an on-chain transaction is observed.
+ *
+ * Supports an optional `Idempotency-Key` request header (UUID v4).  When
+ * supplied, the server stores the response and replays it on duplicate
+ * requests within a 24-hour window, preventing double-recording of the same
+ * donation.
  *
  * @route POST /api/donations
  * @param {import('express').Request} req - Express request containing the donation payload.
@@ -65,7 +81,7 @@ async function recordDonation(req, res, next) {
       throw new AppError("INVALID_TX_HASH");
     }
 
-    if (!client) client = await pool.connect();
+    client = await pool.connect();
 
     const projectResult = await client.query(
       "SELECT id FROM projects WHERE id = $1",
@@ -80,10 +96,7 @@ async function recordDonation(req, res, next) {
       currency === "XLM" ? (amountXLM ?? amount) : amount,
     );
     if (isNaN(parsedAmount) || parsedAmount <= 0) {
-      throw new AppError("VALIDATION_ERROR", {
-        field: "amount",
-        detail: "Invalid amount",
-      });
+      throw new AppError("VALIDATION_ERROR", { field: "amount" });
     }
 
     // Deduplicate by tx hash
@@ -94,6 +107,9 @@ async function recordDonation(req, res, next) {
     if (existingResult.rows[0]) {
       return res.json({
         success: true,
+        // Flag replayed idempotency keys so the client can treat the
+        // submission as already-completed instead of re-queuing it.
+        duplicate: true,
         data: mapDonationRow(existingResult.rows[0]),
       });
     }
@@ -107,9 +123,7 @@ async function recordDonation(req, res, next) {
       throw new AppError("TX_NOT_FOUND");
     }
     if (!onChainTx || onChainTx.successful !== true) {
-      throw new AppError("TX_FAILED", {
-        detail: "Transaction not confirmed on Stellar",
-      });
+      throw new AppError("TX_FAILED");
     }
 
     await client.query("BEGIN");
@@ -126,7 +140,7 @@ async function recordDonation(req, res, next) {
         uuid(),
         projectId,
         donorAddress,
-        currency === "XLM" ? parsedAmount : (convertedAmountXLM || null),
+        currency === "XLM" ? parsedAmount : (convertedAmountXLM ? parseFloat(convertedAmountXLM) : null),
         parsedAmount,
         currency,
         message?.trim().slice(0, 100) || null,
@@ -141,14 +155,14 @@ async function recordDonation(req, res, next) {
       id: uuid(),
       project_id: projectId,
       donor_address: donorAddress,
-      amount_xlm: currency === "XLM" ? parsedAmount : (convertedAmountXLM || null),
+      amount_xlm: currency === "XLM" ? parsedAmount : (convertedAmountXLM ? parseFloat(convertedAmountXLM) : null),
       amount: parsedAmount,
       currency,
       message: message?.trim().slice(0, 100) || null,
       transaction_hash: transactionHash,
       source_asset: sourceAsset || null,
       conversion_path: conversionPath || null,
-      converted_amount_xlm: convertedAmountXLM || null,
+      converted_amount_xlm: convertedAmountXLM ? parseFloat(convertedAmountXLM) : null,
       created_at: new Date().toISOString(),
     };
 
@@ -413,10 +427,7 @@ router.get("/:id", async (req, res, next) => {
         id,
       )
     ) {
-      throw new AppError("VALIDATION_ERROR", {
-        field: "id",
-        detail: "Invalid donation ID",
-      });
+      throw new AppError("VALIDATION_ERROR", { field: "id", message: "Invalid donation ID" });
     }
 
     const USDC_TO_XLM_RATE = parseFloat(process.env.USDC_TO_XLM_RATE || "8.0");

@@ -279,3 +279,17 @@ CREATE INDEX IF NOT EXISTS verification_requests_status_idx
   ON verification_requests (status, submitted_at DESC);
 CREATE INDEX IF NOT EXISTS verification_requests_wallet_idx
   ON verification_requests (wallet_address);
+
+-- idempotency_keys: stores the cached HTTP response for each Idempotency-Key
+-- header value sent by clients to POST /api/donations.  Rows older than 24 h
+-- are pruned by the idempotencyCleanup cron service so that retried requests
+-- within the same window always receive the same response body and status code.
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+  key              TEXT        PRIMARY KEY,
+  response_status  INTEGER     NOT NULL,
+  response_body    JSONB       NOT NULL,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idempotency_keys_created_at_idx
+  ON idempotency_keys (created_at);

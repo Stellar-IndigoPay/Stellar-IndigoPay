@@ -80,6 +80,27 @@ const rateLimitHitsTotal = new client.Counter({
   registers: [registry],
 });
 
+// ── Shard-aware rate-limit metrics ──────────────────────────────────────────
+
+const ratelimitShardRequests = new client.Counter({
+  name: "indigopay_ratelimit_shard_requests_total",
+  help: "Total rate limit decisions per shard.",
+  labelNames: ["shard", "decision"],
+  registers: [registry],
+});
+
+const ratelimitShardKeys = new client.Gauge({
+  name: "indigopay_ratelimit_shard_keys",
+  help: "Approximate number of rate limit keys per shard.",
+  labelNames: ["shard"],
+  registers: [registry],
+});
+
+// Track approximate key counts per shard for the gauge above.
+// Not perfectly accurate (keys expire independently of this counter)
+// but gives operators a rough sense of shard balance.
+const _shardKeyEstimates = new Map();
+
 /**
  * Sliding-window rate-limit check using a Redis sorted set.
  *
@@ -98,7 +119,7 @@ async function slidingWindowRateLimit(key, limit, windowMs) {
   const now = Date.now();
   const windowStart = now - windowMs;
   const member = `${now}-${Math.random()}`;
-  const client = redisService.getClient();
+  const client = redisService.getClient(key);
 
   // ── Pipeline: batch all Redis commands into one round-trip ────────────
   const pipeline = client.pipeline();
@@ -218,7 +239,7 @@ async function _ensureScriptLoaded(redisClient) {
 async function tokenBucketRateLimit(key, capacity, refillRate) {
   const now = Date.now();
   const cost = 1;
-  const client = redisService.getClient();
+  const client = redisService.getClient(key);
 
   // Ensure the Lua script is cached on the Redis server
   await _ensureScriptLoaded(client);
@@ -329,6 +350,11 @@ async function _handleSlidingWindow(req, res, config) {
     result.remaining,
   );
 
+  // ── Update shard-aware Prometheus metrics ───────────────────────────
+  const shardLabel = _shardLabel(key);
+  ratelimitShardRequests.inc({ shard: shardLabel, decision: result.allowed ? "allowed" : "denied" });
+  _trackShardKey(shardLabel);
+
   if (!result.allowed) {
     res.setHeader("Retry-After", String(result.reset));
     rateLimitHitsTotal.inc({ method: req.method, endpoint: req.path, strategy: "sliding-window" });
@@ -379,6 +405,11 @@ async function _handleTokenBucket(req, res, config) {
     result.remaining,
   );
 
+  // ── Update shard-aware Prometheus metrics ───────────────────────────
+  const shardLabel = _shardLabel(key);
+  ratelimitShardRequests.inc({ shard: shardLabel, decision: result.allowed ? "allowed" : "denied" });
+  _trackShardKey(shardLabel);
+
   if (!result.allowed) {
     res.setHeader("Retry-After", String(result.nextRefill));
     rateLimitHitsTotal.inc({ method: req.method, endpoint: req.path, strategy: "token-bucket" });
@@ -403,6 +434,53 @@ async function _handleTokenBucket(req, res, config) {
   }
 
   return true;
+}
+
+/**
+ * Derive a stable shard label from a rate-limit key for Prometheus metrics.
+ * Extracts the shard index from the consistent hash ring so dashboards can
+ * show per-shard request distribution.
+ *
+ * @param {string} key - Rate-limit Redis key
+ * @returns {string} Shard label (e.g. "shard-0")
+ */
+function _shardLabel(key) {
+  try {
+    // initRedis / first getClient call has already set up the ring.
+    // We can re-derive the shard by asking the ring directly.
+    const { ring: hashRing } = redisService.initRedis();
+    if (hashRing && hashRing.nodes.length > 0) {
+      return hashRing.getNode(key) || hashRing.nodes[0];
+    }
+  } catch (err) {
+    // If the ring isn't available (e.g. test mock without initRedis),
+    // default to shard-0. Log once so operators can detect misconfiguration.
+    if (!_shardLabel._warned) {
+      _shardLabel._warned = true;
+      logger.warn(
+        { event: "ratelimit_shard_label_fallback", err: err.message },
+        "Unable to determine shard label — defaulting to shard-0",
+      );
+    }
+  }
+  return "shard-0";
+}
+
+/**
+ * Track an approximate key count per shard for the `ratelimitShardKeys` gauge.
+ * This is a rough estimate (keys expire independently of this counter) but
+ * gives operators a sense of shard balance.
+ *
+ * @param {string} shardLabel - Shard identifier (e.g. "shard-0")
+ */
+function _trackShardKey(shardLabel) {
+  const current = _shardKeyEstimates.get(shardLabel) || 0;
+  _shardKeyEstimates.set(shardLabel, current + 1);
+  // Decay the estimate every ~1000 increments to keep it from growing unbounded
+  if (current % 1000 === 0 && current > 0) {
+    _shardKeyEstimates.set(shardLabel, Math.floor(current * 0.7));
+  }
+  ratelimitShardKeys.set({ shard: shardLabel }, _shardKeyEstimates.get(shardLabel));
 }
 
 // Testing hook: reset the cached Lua script SHA so that tests can verify

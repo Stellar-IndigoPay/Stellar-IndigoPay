@@ -1,15 +1,23 @@
 ## [Unreleased]
 
+### Performance
+
+* **frontend:** isolate LiveDonationTicker component to eliminate 3.5s page-wide re-render cycle
+  - Extract `LiveDonationTicker` into `frontend/components/LiveDonationTicker.tsx` as a `React.memo`-wrapped component
+  - Move state rotation (`tickerIndex`) and `setInterval` loop internally inside `LiveDonationTicker`
+  - Remove parent `Home` page component re-renders on ticker ticks
+  - Add unit test suite in `frontend/components/__tests__/LiveDonationTicker.test.tsx`
+
 ### Features
 
-* **frontend:** implement optimistic project follow/unfollow and update likes using React Query (closes #256)
-  - Add `useProjectQuery`, `useFollowProject`, `useUnfollowProject`, and `useToggleUpdateLike` hooks in `frontend/hooks/queries.ts` utilizing React Query
-  - Integrate follow/unfollow project mutations with optimistic query cache updates and automatic error rollbacks
-  - Integrate update like mutations with optimistic updates and render individual like status dynamically in the feed using `useQueries`
-  - Guard follow and like actions to ignore/disable click triggers while mutations are actively pending
-  - Display error toast alerts on API mutation failure
-  - Wrap hooks and components in `QueryClientProvider` within Next.js `_app.tsx` root
-  - Add 6 hooks unit tests (`queries.test.tsx`) and 2 page integration tests (`projects-detail.test.tsx`)
+<EmptyState
+  title="No Active Rounds"
+  description="There are currently no active rounds. Learn how the game works or refresh to check for new rounds."
+  action={{
+    label: "Refresh",
+    onClick: onRefresh,
+  }}
+/>
 
 * **backend,frontend:** JWT refresh token rotation and session management for admin auth (GF-032, closes #87)
   - Access tokens cut to 15 minutes and carry a `jti`; refresh tokens are opaque, DB-backed, and live 7 days
@@ -167,6 +175,17 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [Unreleased]
+
+### Added
+- Comprehensive Soroban contract fuzzing harness with 7 property-based tests (#239)
+- ContractAction-based action-sequence fuzzing for holistic invariant checking
+- Fuzz corpus infrastructure with replayable regression tests
+- Property tests: donation totals consistency, badge monotonicity, donor count accuracy,
+  global stats consistency, vote integrity, CO₂ offset monotonicity, pause/resume idempotency
+- CI fuzz job with 60-second timeout and corpus regression step
+- FUZZ_FINDINGS.md documenting all discoveries from fuzz testing
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).

@@ -11,6 +11,8 @@
     "type-check": "tsc --noEmit",
     "test": "jest",
     "test:watch": "jest --watch",
+    "test:e2e": "playwright test",
+    "test:e2e:update-snapshots": "playwright test --update-snapshots",
     "test:smoke": "jest --ci --colors=false --testPathPattern='(Tabs|MonthlyGivingSetup)\\.test'",
     "test:smoke:install": "node -e \"require.resolve('jest-axe'); require.resolve('axe-core'); console.log('jest-axe + axe-core resolved cleanly')\"",
     "a11y:scan": "node scripts/axe-scan.mjs"
@@ -24,16 +26,19 @@
     "axios": "^1.18.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.4.0",
+    "framer-motion": "^11.3.0",
     "next": "14.2.3",
     "qrcode.react": "^4.2.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-leaflet": "4.2.1",
     "recharts": "^2.15.4",
-    "sonner": "^2.0.7"
+    "sonner": "^2.0.7",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@axe-core/playwright": "4.9.0",
+    "@axe-core/playwright": "^4.12.1",
+    "@playwright/test": "^1.61.1",
     "@testing-library/jest-dom": "^6.4.5",
     "@testing-library/react": "^16.0.0",
     "@testing-library/user-event": "^14.6.1",
@@ -56,8 +61,6 @@
     "typescript": "5.4.5"
   },
   "overrides": {
-    "@axe-core/playwright": "4.9.0",
-    "axe-core": "4.10.0",
-    "playwright": "1.44.0"
+    "axe-core": "4.10.0"
   }
 }
