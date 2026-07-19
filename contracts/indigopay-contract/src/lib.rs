@@ -4,9 +4,9 @@
 // TODO(indigopay-272): migrate to #[contractevent] pattern.
 #![allow(deprecated)]
 #[cfg(all(test, feature = "testutils"))]
-mod fuzz_tests;
-#[cfg(all(test, feature = "testutils"))]
 mod fuzz_template;
+#[cfg(all(test, feature = "testutils"))]
+mod fuzz_tests;
 
 /**
  * contracts/indigopay-contract/src/lib.rs
@@ -80,6 +80,29 @@ pub struct Project {
     /// chain before this field existed. Per UPGRADE.md, new fields must
     /// be appended or live behind a new storage version.
     pub paused: bool,
+    /// Fundraising goal in stroops for the active time-bound campaign.
+    /// `0` when `campaign_status` is `None`.
+    pub goal: i128,
+    /// Ledger sequence after which Active-campaign donations are rejected.
+    pub deadline_ledger: u32,
+    /// Lifecycle of the project's optional time-bound campaign.
+    pub campaign_status: CampaignStatus,
+}
+
+/// Lifecycle of a project's optional time-bound fundraising campaign.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CampaignStatus {
+    /// No campaign configured — donations behave as before.
+    None,
+    /// Accepting donations until deadline or goal.
+    Active,
+    /// `total_raised` met or exceeded `goal`.
+    GoalReached,
+    /// Deadline passed without meeting the goal (set on admin close).
+    Expired,
+    /// Manually closed by admin before or after the goal.
+    Closed,
 }
 
 /// Input for registering a project via `batch_register_projects`.
@@ -110,6 +133,14 @@ pub struct DonorStats {
     pub donation_count: u32,
     pub badge: BadgeTier,
     pub co2_offset_grams: i128,
+}
+
+/// Sliding-window donation counter for a (donor, project_id) pair.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RateLimitWindow {
+    pub window_start: u32,
+    pub count: u32,
 }
 
 #[contracttype]
@@ -144,35 +175,6 @@ pub struct VoteProposal {
     pub resolved: bool,
 }
 
-/// An on-chain recurring donation subscription for a (donor, project_id)
-/// pair. Durable replacement for the browser-`localStorage`-only
-/// subscriptions previously managed by `frontend/lib/monthlyGiving.ts`.
-/// The donor still signs every `execute_subscription` call — Soroban has
-/// no native scheduler — but the interval and due date live on-chain
-/// instead of in a browser that could be closed, cleared, or never opened
-/// on the due date. See #81.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct Subscription {
-    pub donor: Address,
-    pub project_id: String,
-    pub amount: i128,
-    pub interval_ledgers: u32,
-    pub next_execution: u32,
-    pub active: bool,
-    pub created_at: u32,
-}
-
-/// One entry in the `AllSubscriptionKeys` registry — lets off-chain
-/// services (the cron worker, indexers) enumerate every subscription
-/// without external indexing. Mirrors the `ProjectIdsAll` pattern.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct SubscriptionKey {
-    pub donor: Address,
-    pub project_id: String,
-}
-
 /// Aggregated platform-wide counters returned by `get_global_stats`.
 ///
 /// Bundles the four values that the landing page hero section needs in a
@@ -192,9 +194,77 @@ pub struct GlobalStats {
     pub project_count: u32,
 }
 
+/// Record of a pending emergency withdrawal. One per project at a time
+/// (keyed by project_id only — a project holding multiple tokens must
+/// execute withdrawals sequentially, not in parallel).
+/// The `amount` field must not exceed `ProjectContractBalance(project_id, token)`
+/// at execution time — enforced by `execute_emergency_withdrawal`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmergencyWithdrawal {
+    pub new_wallet: Address,
+    pub amount: i128,
+    pub token: Address,
+    pub initiated_at: u32,
+    pub executable_at: u32,
+}
+
+// ─── Donation refund (#290) ─────────────────────────────────────────────────
+
+/// Status of a refund request.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum RefundRequestStatus {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+/// A donor-initiated refund request. Created by `request_refund`, resolved by
+/// `approve_refund` (which atomically transfers tokens back) or `reject_refund`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RefundRequest {
+    pub donor: Address,
+    pub project_id: String,
+    pub amount: i128,
+    pub donation_record_index: u32,
+    pub requested_at: u32,
+    pub status: RefundRequestStatus,
+    pub token: Address,
+    /// Exact CO₂ offset credited at donation time, sourced from
+    /// `DonationCO2Offset(donation_record_index)`. Zero for pre-upgrade
+    /// donations that lack this key (documented known limitation).
+    pub co2_offset_grams: i128,
+}
+
+// ─── Recurring donation subscriptions (#81) ─────────────────────────────────
+
+/// An on-chain record of a donor's intent to give `amount` to `project_id`
+/// every `interval_ledgers`. Automation stops at "reminder + pre-built tx" —
+/// the donor still signs each individual `donate()` call; this struct exists
+/// so that intent survives a cleared browser and a backend worker can find
+/// due subscriptions instead of relying on client-side localStorage.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Subscription {
+    pub donor: Address,
+    pub project_id: String,
+    pub amount: i128,
+    pub interval_ledgers: u32,
+    pub next_execution: u32,
+    pub active: bool,
+    pub created_at: u32,
+}
+
 #[contracttype]
 pub enum DataKey {
-    Admin,
+    // Multi-sig admin set: Vec<Address> of authorized admin addresses.
+    // Replaces the former single-admin `Admin` variant.
+    AdminSet,
+    // M-of-N threshold for critical operations. Must satisfy
+    // 1 <= threshold <= admin_set.len().
+    AdminThreshold,
     Project(String),
     ProjectIds,
     ProjectCount,
@@ -212,6 +282,11 @@ pub enum DataKey {
     HasVoted(String, Address),
     // Per-donor per-project cumulative donation total for milestone NFT gating
     DonorProjectTotal(String, Address),
+    // Per-donor per-project sliding-window donation rate limit
+    DonorRateLimit(Address, String),
+    // Admin-configurable donation rate limit overrides (instance storage)
+    DonationRateLimitMax,
+    DonationRateLimitWindow,
     // Per-project milestone NFT: one per (project_id, donor) pair
     ProjectMilestoneNFT(String, Address),
     // Contract upgrade and multi-currency support
@@ -235,20 +310,16 @@ pub enum DataKey {
     // bulk operations (e.g. `deactivate_all_projects`) so they can
     // enumerate projects without external indexing.
     ProjectIdsAll,
-    // Pending admin for the two-step `transfer_admin` / `accept_admin`
-    // flow. Stored when the current admin calls `transfer_admin` and
-    // cleared either on `accept_admin` (promotion) or
-    // `cancel_admin_transfer`. Never holds an Address that's already
-    // the current admin.
+    // Pending admin transfer for the two-step `transfer_admin` /
+    // `accept_admin` flow. Stores `(old_admin, new_admin)` tuple.
+    // Set when M-of-N admins call `transfer_admin` and cleared on
+    // `accept_admin` (swap) or `cancel_admin_transfer`.
     PendingAdmin,
     // Contract-level pause flag. When true, every state-mutating
     // function (donate, donate_usdc, mint_*, governance create/vote,
-    // project register/deactivate, create_subscription,
-    // execute_subscription) rejects with "Contract is paused".
+    // project register/deactivate) rejects with "Contract is paused".
     // `pause_contract` / `unpause_contract` are themselves exempt so
-    // the admin can always recover from a pause, and so is
-    // `cancel_subscription` — a donor must always be able to stop a
-    // recurring commitment even while the contract is paused.
+    // the admin can always recover from a pause.
     ContractPaused,
     // Pending contract upgrade — hash of the WASM that the admin has
     // proposed via `propose_upgrade` but not yet executed. Cleared on
@@ -262,13 +333,37 @@ pub enum DataKey {
     // returns. Used by indexers to confirm which WASM is currently
     // running at the contract address.
     LastExecutedUpgrade,
-    // Recurring donation subscription for a (donor, project_id) pair.
-    // See `create_subscription` / `cancel_subscription` / `execute_subscription`.
+    // Pending emergency withdrawal request. One per project at a time —
+    // key is project_id only; a project with multiple token balances
+    // must execute withdrawals sequentially (initiate → wait → execute
+    // → repeat for next token). Cleared by `execute_emergency_withdrawal`
+    // or `cancel_emergency_withdrawal`.
+    EmergencyWithdrawal(String),
+    // Donation refund (#290)
+    RefundRequest(u32),
+    RefundCount,
+    RefundForDonation(u32),
+    DonationCO2Offset(u32),
+    // Per-project per-token contract-held balance — the canonical ledger
+    // for how much of each asset each project has deposited into the
+    // contract. Key: (project_id, token_address) → i128.
+    //
+    // MUST be reused by any future contract-held-funds feature (matching
+    // pool, escrow extensions, etc.) rather than introducing a parallel
+    // balance concept. #277's deposit logic must increment this key on
+    // deposit. See SECURITY.md and #277 for coordination notes.
+    ProjectContractBalance(String, Address),
+    // Recurring donation subscriptions (#81). Keyed by (donor, project_id).
     Subscription(Address, String),
-    // Registry of every (donor, project_id) pair that has ever had a
-    // subscription created — lets off-chain services enumerate
-    // subscriptions without external indexing. Mirrors `ProjectIdsAll`.
-    AllSubscriptionKeys,
+    // Append-only count of unique (donor, project_id) subscription keys
+    // ever created — used only to size the enumeration below, not as a
+    // count of currently-active subscriptions.
+    SubscriptionCount,
+    // Ordered index over every unique (donor, project_id) pair that has
+    // ever had a subscription, so the backend worker (and anyone else)
+    // can enumerate all subscriptions to find due ones without needing
+    // to already know every donor/project pair up front.
+    SubscriptionIndex(u32),
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -278,6 +373,9 @@ const STROOP: i128 = 10_000_000;
 // 7 days × 24 h × 3600 s ÷ 5 s per ledger ≈ 120_960 ledgers — used as the
 // default when `create_proposal` is called without an explicit duration.
 const VOTING_WINDOW_LEDGERS: u32 = 120_960;
+
+const DEFAULT_DONATION_RATE_LIMIT_MAX: u32 = 10;
+const DEFAULT_DONATION_RATE_LIMIT_WINDOW: u32 = 720;
 
 // Bounds on caller-supplied voting durations. Floor (~1 hour) keeps the
 // window long enough to be observed; ceiling (~30 days) bounds storage TTL
@@ -297,25 +395,77 @@ const MAX_CO2_PER_XLM: u32 = 100_000;
 // off-chain channels) before the WASM is swapped.
 const UPGRADE_TIMELOCK_LEDGERS: u32 = 34_560;
 
-// 24 h × 3600 s ÷ 5 s per ledger = 17_280 ledgers — the minimum interval
-// `create_subscription` accepts between recurring donations. Per #81, this
-// stops a subscription from being configured to fire faster than the
-// backend cron worker's own 5-minute poll could reasonably notify a donor.
+// 7 days × 24 h × 3600 s ÷ 5 s per ledger = 120_960 ledgers. The minimum
+// delay between `initiate_emergency_withdrawal` and the earliest ledger at
+// which `execute_emergency_withdrawal` can fire. Gives donors and observers
+// a 7-day window to object off-chain before contract-held funds are sent to
+// the new wallet.
+const EMERGENCY_WITHDRAWAL_TIMELOCK: u32 = 120_960;
+
+// 24 hours × 3600 s / 5 s per ledger = 17 280 ledgers. The window after a
+// donation during which the donor may request a refund (subject to admin +
+// project wallet approval).
+const REFUND_COOLDOWN_LEDGERS: u32 = 17_280;
+
+// 24 hours × 3600 s / 5 s per ledger = 17 280 ledgers. Minimum interval
+// between recurring donation executions, per issue #81's requirement.
 const MIN_SUBSCRIPTION_INTERVAL_LEDGERS: u32 = 17_280;
 
-/// Read the stored admin. Caller must compare and panic on mismatch.
-/// Centralised so every admin check uses the same pattern.
-fn read_admin(env: &Env) -> Address {
+/// Read the stored admin set. Panics if not initialized.
+fn read_admin_set(env: &Env) -> Vec<Address> {
     env.storage()
         .instance()
-        .get(&DataKey::Admin)
+        .get(&DataKey::AdminSet)
         .expect("Not initialized")
 }
 
-/// Verify that `caller` is the stored admin. Used after `require_auth`
-/// so the auth signature has already been verified by the host.
-fn require_admin(env: &Env, caller: &Address) {
-    if read_admin(env) != *caller {
+/// Read the stored admin threshold. Panics if not initialized.
+fn read_admin_threshold(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::AdminThreshold)
+        .expect("Admin threshold not set")
+}
+
+/// Verify M-of-N threshold signatures for critical admin actions.
+///
+/// Iterates the supplied `signers` vec, calling `require_auth()` on each
+/// address (Soroban host-level cryptographic verification) and checking
+/// membership in the admin set. Duplicate signers are counted only once
+/// to prevent a single compromised key from satisfying the threshold by
+/// passing itself multiple times.
+fn verify_m_of_n(env: &Env, signers: &Vec<Address>, required_threshold: u32) {
+    let admin_set: Vec<Address> = read_admin_set(env);
+
+    let mut counted: Vec<Address> = Vec::new(env);
+    let mut valid_count: u32 = 0;
+    for signer in signers.iter() {
+        signer.require_auth();
+        if admin_set.contains(&signer) && !counted.contains(&signer) {
+            counted.push_back(signer.clone());
+            valid_count = valid_count.checked_add(1).expect("valid_count overflow");
+        }
+    }
+
+    if valid_count < required_threshold {
+        panic!(
+            "Insufficient admin signatures: {}/{} required",
+            valid_count, required_threshold
+        );
+    }
+}
+
+/// Require M-of-N admin signatures for critical operations.
+fn require_admin_for_critical(env: &Env, signers: &Vec<Address>) {
+    let threshold: u32 = read_admin_threshold(env);
+    verify_m_of_n(env, signers, threshold);
+}
+
+/// Require a single admin signature for routine operations.
+fn require_admin_for_routine(env: &Env, signer: &Address) {
+    signer.require_auth();
+    let admin_set: Vec<Address> = read_admin_set(env);
+    if !admin_set.contains(signer) {
         panic!("Only admin can perform this action");
     }
 }
@@ -335,6 +485,12 @@ fn require_not_paused(env: &Env) {
     }
 }
 
+fn ensure_min_ttl(env: &Env, min_ledgers: u32) {
+    env.storage()
+        .instance()
+        .extend_ttl(min_ledgers, min_ledgers);
+}
+
 fn calculate_badge(total_stroops: i128) -> BadgeTier {
     let xlm = total_stroops / STROOP;
     if xlm >= 2000 {
@@ -350,6 +506,45 @@ fn calculate_badge(total_stroops: i128) -> BadgeTier {
     }
 }
 
+/// Reject donations when the project's campaign is not accepting them.
+fn require_campaign_accepts_donation(project: &Project, current_ledger: u32) {
+    match project.campaign_status {
+        CampaignStatus::None => {}
+        CampaignStatus::Active => {
+            if current_ledger > project.deadline_ledger {
+                panic!("Campaign deadline has passed");
+            }
+        }
+        CampaignStatus::GoalReached => panic!("Campaign goal already reached"),
+        CampaignStatus::Expired => panic!("Campaign has expired"),
+        CampaignStatus::Closed => panic!("Campaign is closed"),
+    }
+}
+
+/// After `total_raised` is updated, flip `Active` → `GoalReached` when the
+/// campaign goal is met. Returns `true` when the transition happened.
+fn apply_campaign_goal_progress(project: &mut Project) -> bool {
+    if project.campaign_status == CampaignStatus::Active
+        && project.goal > 0
+        && project.total_raised >= project.goal
+    {
+        project.campaign_status = CampaignStatus::GoalReached;
+        true
+    } else {
+        false
+    }
+}
+
+fn voting_weight_from_badge(badge: &BadgeTier) -> u32 {
+    match badge {
+        BadgeTier::None => 0,
+        BadgeTier::Seedling => 1,
+        BadgeTier::Tree => 3,
+        BadgeTier::Forest => 10,
+        BadgeTier::EarthGuardian => 25,
+    }
+}
+
 // ─── Contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -357,13 +552,25 @@ pub struct IndigoPayContract;
 
 #[contractimpl]
 impl IndigoPayContract {
+    pub fn extend_all_ttl(env: Env, threshold_ledgers: u32) {
+        ensure_min_ttl(&env, threshold_ledgers);
+    }
     // ─── Initialization ──────────────────────────────────────────────────────
 
-    pub fn initialize(env: Env, admin: Address) {
-        if env.storage().instance().has(&DataKey::Admin) {
+    pub fn initialize(env: Env, admins: Vec<Address>, threshold: u32) {
+        if env.storage().instance().has(&DataKey::AdminSet) {
             panic!("Contract already initialized");
         }
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        if admins.is_empty() {
+            panic!("Admin set must not be empty");
+        }
+        if threshold == 0 || threshold > admins.len() {
+            panic!("Threshold must be between 1 and the number of admins");
+        }
+        env.storage().instance().set(&DataKey::AdminSet, &admins);
+        env.storage()
+            .instance()
+            .set(&DataKey::AdminThreshold, &threshold);
         env.storage().instance().set(&DataKey::ProjectCount, &0u32);
         env.storage().instance().set(&DataKey::DonationCount, &0u32);
         env.storage()
@@ -372,6 +579,7 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::GlobalCO2OffsetGrams, &0i128);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     // ─── Project management ───────────────────────────────────────────────────
@@ -384,8 +592,7 @@ impl IndigoPayContract {
         wallet: Address,
         co2_per_xlm: u32,
     ) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
         if env
             .storage()
@@ -407,6 +614,9 @@ impl IndigoPayContract {
             active: true,
             paused: false,
             registered_at: env.ledger().sequence(),
+            goal: 0,
+            deadline_ledger: 0,
+            campaign_status: CampaignStatus::None,
         };
         env.storage()
             .instance()
@@ -434,11 +644,11 @@ impl IndigoPayContract {
 
         env.events()
             .publish((symbol_short!("proj_reg"), admin), project_id);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     pub fn batch_register_projects(env: Env, admin: Address, projects: Vec<ProjectInit>) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
 
         let mut ids: Vec<String> = env
@@ -466,6 +676,9 @@ impl IndigoPayContract {
                 active: true,
                 paused: false,
                 registered_at: env.ledger().sequence(),
+                goal: 0,
+                deadline_ledger: 0,
+                campaign_status: CampaignStatus::None,
             };
             env.storage()
                 .instance()
@@ -484,15 +697,15 @@ impl IndigoPayContract {
                 .publish((symbol_short!("proj_reg"), admin.clone()), project_id);
         }
         env.storage().instance().set(&DataKey::ProjectIdsAll, &ids);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Admin-only: deactivate every registered project in one call.
     /// Iterates `DataKey::ProjectIdsAll` and flips `active=false`. Useful
     /// for incident response when the platform needs to halt all
     /// donations immediately.
-    pub fn deactivate_all_projects(env: Env, admin: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn deactivate_all_projects(env: Env, signers: Vec<Address>) {
+        require_admin_for_critical(&env, &signers);
         require_not_paused(&env);
 
         let ids: Vec<String> = env
@@ -516,12 +729,12 @@ impl IndigoPayContract {
         }
 
         env.events()
-            .publish((symbol_short!("deact_all"), admin), ids);
+            .publish((symbol_short!("deact_all"), signers.get(0).unwrap()), ids);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     pub fn deactivate_project(env: Env, admin: Address, project_id: String) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
         let mut project: Project = env
             .storage()
@@ -532,11 +745,11 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::Project(project_id), &project);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     pub fn update_project_co2_rate(env: Env, admin: Address, project_id: String, co2_per_xlm: u32) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
 
         // Bounds must match `register_project` so the on-chain limits stay
@@ -565,11 +778,11 @@ impl IndigoPayContract {
             (symbol_short!("co2_rate"), admin),
             (project_id, co2_per_xlm),
         );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     pub fn pause_project(env: Env, admin: Address, project_id: String) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        require_admin_for_routine(&env, &admin);
         // pause_project is intentionally NOT paused-gated so the admin can
         // still manage individual projects during a contract-wide pause.
         let mut project: Project = env
@@ -589,6 +802,7 @@ impl IndigoPayContract {
             .set(&DataKey::Project(project_id.clone()), &project);
         env.events()
             .publish((symbol_short!("prj_pause"), admin), project_id);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Admin-only: lift a temporary pause on a project. Mirrors
@@ -596,8 +810,7 @@ impl IndigoPayContract {
     /// for indexers, idempotency-aware (panics on resume when the
     /// project is not paused, to prevent accidental double-resumes).
     pub fn resume_project(env: Env, admin: Address, project_id: String) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        require_admin_for_routine(&env, &admin);
         // resume_project is intentionally NOT paused-gated.
         let mut project: Project = env
             .storage()
@@ -616,6 +829,126 @@ impl IndigoPayContract {
             .set(&DataKey::Project(project_id.clone()), &project);
         env.events()
             .publish((symbol_short!("prj_resm"), admin), project_id);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    // ─── Time-bound campaigns ─────────────────────────────────────────────────
+
+    /// Admin-only: start a time-bound fundraising campaign on a project.
+    /// Goal is denominated in stroops (XLM-equivalent). Only one campaign
+    /// may be Active at a time; a prior campaign must be Closed or Expired.
+    pub fn create_campaign(
+        env: Env,
+        admin: Address,
+        project_id: String,
+        goal: i128,
+        deadline_ledger: u32,
+    ) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        if goal <= 0 {
+            panic!("Campaign goal must be positive");
+        }
+        let current = env.ledger().sequence();
+        if deadline_ledger <= current {
+            panic!("Campaign deadline must be in the future");
+        }
+
+        let mut project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        if !project.active {
+            panic!("Project is not active");
+        }
+        match project.campaign_status {
+            CampaignStatus::None | CampaignStatus::Closed | CampaignStatus::Expired => {}
+            CampaignStatus::Active | CampaignStatus::GoalReached => {
+                panic!("Project already has an open campaign");
+            }
+        }
+        if goal <= project.total_raised {
+            panic!("Campaign goal must exceed amount already raised");
+        }
+
+        project.goal = goal;
+        project.deadline_ledger = deadline_ledger;
+        project.campaign_status = CampaignStatus::Active;
+        env.storage()
+            .instance()
+            .set(&DataKey::Project(project_id.clone()), &project);
+        env.events().publish(
+            (symbol_short!("camp_crt"), admin, project_id),
+            (goal, deadline_ledger),
+        );
+    }
+
+    /// Admin-only: push an Active campaign's deadline further into the future.
+    pub fn extend_campaign(env: Env, admin: Address, project_id: String, new_deadline: u32) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+
+        let mut project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        if project.campaign_status != CampaignStatus::Active {
+            panic!("Campaign is not active");
+        }
+        let current = env.ledger().sequence();
+        if current > project.deadline_ledger {
+            panic!("Campaign deadline has passed");
+        }
+        if new_deadline <= project.deadline_ledger {
+            panic!("New deadline must be after current deadline");
+        }
+        if new_deadline <= current {
+            panic!("Campaign deadline must be in the future");
+        }
+
+        project.deadline_ledger = new_deadline;
+        env.storage()
+            .instance()
+            .set(&DataKey::Project(project_id.clone()), &project);
+        env.events()
+            .publish((symbol_short!("camp_ext"), admin, project_id), new_deadline);
+    }
+
+    /// Admin-only: end a campaign. Early close → `Closed`; past deadline
+    /// without meeting the goal → `Expired`; closing after `GoalReached` → `Closed`.
+    pub fn close_campaign(env: Env, admin: Address, project_id: String) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+
+        let mut project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        match project.campaign_status {
+            CampaignStatus::Active => {
+                if env.ledger().sequence() > project.deadline_ledger
+                    && project.total_raised < project.goal
+                {
+                    project.campaign_status = CampaignStatus::Expired;
+                } else {
+                    project.campaign_status = CampaignStatus::Closed;
+                }
+            }
+            CampaignStatus::GoalReached => {
+                project.campaign_status = CampaignStatus::Closed;
+            }
+            _ => panic!("Campaign cannot be closed"),
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::Project(project_id.clone()), &project);
+        env.events().publish(
+            (symbol_short!("camp_cls"), admin, project_id),
+            project.campaign_status.clone(),
+        );
     }
 
     // ─── Donations ────────────────────────────────────────────────────────────
@@ -634,6 +967,40 @@ impl IndigoPayContract {
             panic!("Donation amount must be positive");
         }
 
+        let current_ledger = env.ledger().sequence();
+        let max_donations: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationRateLimitMax)
+            .unwrap_or(DEFAULT_DONATION_RATE_LIMIT_MAX);
+        let window_ledgers: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationRateLimitWindow)
+            .unwrap_or(DEFAULT_DONATION_RATE_LIMIT_WINDOW);
+
+        let rate_key = DataKey::DonorRateLimit(donor.clone(), project_id.clone());
+        let mut window: RateLimitWindow =
+            env.storage()
+                .instance()
+                .get(&rate_key)
+                .unwrap_or(RateLimitWindow {
+                    window_start: current_ledger,
+                    count: 0,
+                });
+        if current_ledger - window.window_start >= window_ledgers {
+            window.window_start = current_ledger;
+            window.count = 0;
+        }
+        if window.count >= max_donations {
+            panic!("Donation rate limit exceeded");
+        }
+        window.count = window
+            .count
+            .checked_add(1)
+            .expect("RateLimitWindow count overflow");
+        env.storage().instance().set(&rate_key, &window);
+
         let mut project: Project = env
             .storage()
             .instance()
@@ -645,6 +1012,7 @@ impl IndigoPayContract {
         if project.paused {
             panic!("Project is temporarily paused");
         }
+        require_campaign_accepts_donation(&project, env.ledger().sequence());
 
         // Pre-compute CO2 increment with checked multiplication so an attacker
         // can't trigger a silent wrap via a project with a huge co2_per_xlm.
@@ -672,6 +1040,7 @@ impl IndigoPayContract {
             .total_raised
             .checked_add(amount)
             .expect("Project total_raised overflow");
+        let goal_reached = apply_campaign_goal_progress(&mut project);
         let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
         if !env.storage().instance().has(&donated_key) {
             env.storage().instance().set(&donated_key, &true);
@@ -683,6 +1052,12 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::Project(project_id.clone()), &project);
+        if goal_reached {
+            env.events().publish(
+                (symbol_short!("camp_goal"), project_id.clone()),
+                project.total_raised,
+            );
+        }
 
         donor_stats.total_donated = donor_stats
             .total_donated
@@ -750,6 +1125,10 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::DonationRecord(dc), &donation_record);
+        // Snapshot CO₂ offset for exact reversal on refund (#290).
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
 
         let gr: i128 = env
             .storage()
@@ -779,9 +1158,350 @@ impl IndigoPayContract {
             (symbol_short!("donated"), donor.clone(), project_id.clone()),
             (amount, donor_stats.badge.clone(), msg_hash),
         );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    // ─── Recurring donation subscriptions (#81) ────────────────────────────────
+
+    /// Records a donor's intent to give `amount` to `project_id` every
+    /// `interval_ledgers`. This does NOT move any funds or schedule an
+    /// automatic transfer — the donor still signs each `donate()` call
+    /// individually; this just makes that intent durable on-chain instead of
+    /// living only in browser localStorage.
+    ///
+    /// Panics if `amount` is not positive, `interval_ledgers` is below the
+    /// 1-day minimum, the project doesn't exist or isn't active, or an
+    /// active subscription already exists for this (donor, project_id) pair.
+    /// Re-subscribing after `cancel_subscription` is allowed and reuses the
+    /// same storage slot rather than growing the enumeration index again.
+    pub fn create_subscription(
+        env: Env,
+        donor: Address,
+        project_id: String,
+        amount: i128,
+        interval_ledgers: u32,
+    ) {
+        donor.require_auth();
+        require_not_paused(&env);
+
+        if amount <= 0 {
+            panic!("Subscription amount must be positive");
+        }
+        if interval_ledgers < MIN_SUBSCRIPTION_INTERVAL_LEDGERS {
+            panic!("Interval too short (min 1 day)");
+        }
+
+        let project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        if !project.active {
+            panic!("Project is not accepting donations");
+        }
+
+        let sub_key = DataKey::Subscription(donor.clone(), project_id.clone());
+        let existing: Option<Subscription> = env.storage().instance().get(&sub_key);
+        if let Some(ref current) = existing {
+            if current.active {
+                panic!("Subscription already exists");
+            }
+        }
+
+        let current_ledger = env.ledger().sequence();
+        let subscription = Subscription {
+            donor: donor.clone(),
+            project_id: project_id.clone(),
+            amount,
+            interval_ledgers,
+            next_execution: current_ledger
+                .checked_add(interval_ledgers)
+                .expect("next_execution overflow"),
+            active: true,
+            created_at: current_ledger,
+        };
+        env.storage().instance().set(&sub_key, &subscription);
+
+        // Only grow the enumeration index the first time this (donor,
+        // project_id) pair is ever subscribed — re-subscribing after a
+        // cancellation reuses the existing index entry.
+        if existing.is_none() {
+            let count: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::SubscriptionCount)
+                .unwrap_or(0);
+            env.storage().instance().set(
+                &DataKey::SubscriptionIndex(count),
+                &(donor.clone(), project_id.clone()),
+            );
+            let new_count = count.checked_add(1).expect("SubscriptionCount overflow");
+            env.storage()
+                .instance()
+                .set(&DataKey::SubscriptionCount, &new_count);
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "sub_created"), donor, project_id),
+            (amount, interval_ledgers, subscription.next_execution),
+        );
+    }
+
+    /// Cancels a donor's recurring subscription, setting `active = false`.
+    /// Deliberately NOT gated by `require_not_paused` — a donor should always
+    /// be able to stop a recurring intent even if the contract is paused for
+    /// an unrelated reason, the same way pause/unpause stay exempt for admins.
+    ///
+    /// Panics if no subscription exists for this (donor, project_id) pair, or
+    /// if it's already inactive.
+    pub fn cancel_subscription(env: Env, donor: Address, project_id: String) {
+        donor.require_auth();
+
+        let sub_key = DataKey::Subscription(donor.clone(), project_id.clone());
+        let mut subscription: Subscription = env
+            .storage()
+            .instance()
+            .get(&sub_key)
+            .expect("Subscription not found");
+        if !subscription.active {
+            panic!("Subscription already cancelled");
+        }
+        subscription.active = false;
+        env.storage().instance().set(&sub_key, &subscription);
+
+        env.events()
+            .publish((Symbol::new(&env, "sub_cancelled"), donor, project_id), ());
+    }
+
+    /// Returns the subscription for a (donor, project_id) pair.
+    /// Panics if none exists — callers that need existence-checking
+    /// semantics instead of a panic should enumerate via
+    /// `get_subscription_count` / `get_subscription_by_index`.
+    pub fn get_subscription(env: Env, donor: Address, project_id: String) -> Subscription {
         env.storage()
             .instance()
-            .extend_ttl(VOTING_WINDOW_LEDGERS * 4, VOTING_WINDOW_LEDGERS * 4);
+            .get(&DataKey::Subscription(donor, project_id))
+            .expect("Subscription not found")
+    }
+
+    /// Returns how many unique (donor, project_id) pairs have ever had a
+    /// subscription created — the upper bound for `get_subscription_by_index`.
+    /// Not a count of currently-active subscriptions; the backend worker
+    /// filters those out itself via `active` and `next_execution`.
+    pub fn get_subscription_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::SubscriptionCount)
+            .unwrap_or(0)
+    }
+
+    /// Enumeration helper for the backend cron worker: returns the
+    /// subscription at append-only index `index` (0-based), so the worker
+    /// can iterate `0..get_subscription_count()` to find every subscription
+    /// with `active == true && next_execution <= current_ledger` without
+    /// needing to already know every donor/project pair.
+    ///
+    /// Panics if `index` is out of range.
+    pub fn get_subscription_by_index(env: Env, index: u32) -> Subscription {
+        let (donor, project_id): (Address, String) = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubscriptionIndex(index))
+            .expect("Subscription index out of range");
+        env.storage()
+            .instance()
+            .get(&DataKey::Subscription(donor, project_id))
+            .expect("Subscription not found")
+    }
+
+    // ─── DEX Path-Payment Donation (any Stellar asset → XLM) ──────────────────
+
+    /// Donate any Stellar asset via DEX path payment.
+    ///
+    /// The caller submits an atomic Stellar transaction that:
+    /// 1. Executes a `PathPaymentStrictSend` converting `source_asset` to XLM
+    ///    and delivering the XLM to the project wallet.
+    /// 2. Calls `donate_asset()` to record the donation on-chain.
+    ///
+    /// Because the XLM transfer already happened in the path payment operation,
+    /// this function only records the donation effects — it does NOT perform
+    /// a second token transfer. This keeps the contract simple while
+    /// leveraging Stellar's native DEX for path payments.
+    ///
+    /// `source_asset_code` is a short symbol identifying the source asset
+    /// (e.g. "yXLM", "USDT", "BTC") for the on-chain donation record.
+    pub fn donate_asset(
+        env: Env,
+        donor: Address,
+        project_id: String,
+        xlm_amount: i128,
+        source_asset_code: Symbol,
+        msg_hash: u32,
+    ) {
+        donor.require_auth();
+        require_not_paused(&env);
+        if xlm_amount <= 0 {
+            panic!("Donation amount must be positive");
+        }
+
+        let mut project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        if !project.active {
+            panic!("Project is not accepting donations");
+        }
+        if project.paused {
+            panic!("Project is temporarily paused");
+        }
+        require_campaign_accepts_donation(&project, env.ledger().sequence());
+
+        // Pre-compute CO2 increment using the XLM-equivalent received
+        let xlm_units = xlm_amount / STROOP;
+        let co2_increment = xlm_units
+            .checked_mul(project.co2_per_xlm as i128)
+            .expect("CO2 calculation overflow");
+
+        let mut donor_stats: DonorStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonorStats(donor.clone()))
+            .unwrap_or(DonorStats {
+                total_donated: 0,
+                donation_count: 0,
+                badge: BadgeTier::None,
+                co2_offset_grams: 0,
+            });
+        let prev_badge = donor_stats.badge.clone();
+
+        // ── Effects: all state writes happen here (no external interaction
+        //    needed because the path payment already transferred XLM).
+        project.total_raised = project
+            .total_raised
+            .checked_add(xlm_amount)
+            .expect("Project total_raised overflow");
+        let goal_reached = apply_campaign_goal_progress(&mut project);
+        let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
+        if !env.storage().instance().has(&donated_key) {
+            env.storage().instance().set(&donated_key, &true);
+            project.donor_count = project
+                .donor_count
+                .checked_add(1)
+                .expect("Project donor_count overflow");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::Project(project_id.clone()), &project);
+        if goal_reached {
+            env.events().publish(
+                (symbol_short!("camp_goal"), project_id.clone()),
+                project.total_raised,
+            );
+        }
+
+        donor_stats.total_donated = donor_stats
+            .total_donated
+            .checked_add(xlm_amount)
+            .expect("Donor total_donated overflow");
+        donor_stats.donation_count = donor_stats
+            .donation_count
+            .checked_add(1)
+            .expect("Donor donation_count overflow");
+        donor_stats.co2_offset_grams = donor_stats
+            .co2_offset_grams
+            .checked_add(co2_increment)
+            .expect("Donor co2_offset overflow");
+        donor_stats.badge = calculate_badge(donor_stats.total_donated);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonorStats(donor.clone()), &donor_stats);
+
+        // Track per-project cumulative donations for milestone NFT eligibility.
+        let proj_total_key = DataKey::DonorProjectTotal(project_id.clone(), donor.clone());
+        let prev_proj_total: i128 = env.storage().instance().get(&proj_total_key).unwrap_or(0);
+        env.storage().instance().set(
+            &proj_total_key,
+            &prev_proj_total
+                .checked_add(xlm_amount)
+                .expect("DonorProjectTotal overflow"),
+        );
+
+        // Auto-mint an Impact NFT when a donor reaches a new badge tier.
+        if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
+            let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
+            if !env.storage().instance().has(&nft_key) {
+                let nft = ImpactNFT {
+                    owner: donor.clone(),
+                    tier: donor_stats.badge.clone(),
+                    total_donated: donor_stats.total_donated,
+                    minted_at_ledger: env.ledger().sequence(),
+                };
+                env.storage().instance().set(&nft_key, &nft);
+                env.events().publish(
+                    (symbol_short!("nft_mint"), donor.clone()),
+                    donor_stats.badge.clone(),
+                );
+            }
+        }
+
+        let dc: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationCount)
+            .unwrap_or(0);
+        let new_dc = dc.checked_add(1).expect("DonationCount overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationCount, &new_dc);
+        // Store donation record with the source asset code as currency
+        let donation_record = DonationRecord {
+            donor: donor.clone(),
+            project: project_id.clone(),
+            amount: xlm_amount,
+            ledger: env.ledger().sequence(),
+            message_hash: msg_hash,
+            currency: source_asset_code,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationRecord(dc), &donation_record);
+        // Snapshot CO₂ offset for exact reversal on refund (#290).
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+
+        let gr: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalTotalRaised)
+            .unwrap_or(0);
+        let new_gr = gr
+            .checked_add(xlm_amount)
+            .expect("GlobalTotalRaised overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::GlobalTotalRaised, &new_gr);
+
+        let gc: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalCO2OffsetGrams)
+            .unwrap_or(0);
+        let new_gc = gc.checked_add(co2_increment).expect("GlobalCO2 overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::GlobalCO2OffsetGrams, &new_gc);
+
+        // No token transfer — the path payment already delivered XLM to the
+        // project wallet in the same Stellar transaction.
+
+        env.events().publish(
+            (symbol_short!("donated"), donor.clone(), project_id.clone()),
+            (xlm_amount, donor_stats.badge.clone(), msg_hash),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     // ─── Getters ─────────────────────────────────────────────────────────────
@@ -894,11 +1614,21 @@ impl IndigoPayContract {
             .expect("Donation record not found")
     }
 
+    /// Backward-compatible getter: returns the first admin in the set.
+    /// Prefer `get_admin_set()` for multi-sig contexts.
     pub fn get_admin(env: Env) -> Address {
-        env.storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Not initialized")
+        let admin_set: Vec<Address> = read_admin_set(&env);
+        admin_set.get(0).expect("Admin set is empty")
+    }
+
+    /// Returns the full admin set.
+    pub fn get_admin_set(env: Env) -> Vec<Address> {
+        read_admin_set(&env)
+    }
+
+    /// Returns the current M-of-N threshold for critical actions.
+    pub fn get_admin_threshold(env: Env) -> u32 {
+        read_admin_threshold(&env)
     }
 
     // ─── Placeholders ─────────────────────────────────────────────────────────
@@ -941,6 +1671,7 @@ impl IndigoPayContract {
         env.storage().instance().set(&key, &nft);
         env.events()
             .publish((symbol_short!("nft_mint"), donor), tier);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     pub fn has_nft(env: Env, donor: Address, tier: BadgeTier) -> bool {
@@ -995,6 +1726,7 @@ impl IndigoPayContract {
             (symbol_short!("pnft_mnt"), donor.clone()),
             (project_id, proj_total),
         );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     pub fn has_project_nft(env: Env, donor: Address, project_id: String) -> bool {
@@ -1018,9 +1750,13 @@ impl IndigoPayContract {
     /// ledgers (≈5 s each). Pass `0` to use the default 7-day window;
     /// any other value must be within
     /// [`MIN_VOTING_WINDOW_LEDGERS`, `MAX_VOTING_WINDOW_LEDGERS`].
-    pub fn create_proposal(env: Env, admin: Address, project_id: String, duration_ledgers: u32) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn create_proposal(
+        env: Env,
+        signers: Vec<Address>,
+        project_id: String,
+        duration_ledgers: u32,
+    ) {
+        require_admin_for_critical(&env, &signers);
         require_not_paused(&env);
         if !env
             .storage()
@@ -1064,8 +1800,25 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::Proposal(project_id.clone()), &proposal);
-        env.events()
-            .publish((symbol_short!("prop_new"), admin), (project_id, window));
+        env.events().publish(
+            (symbol_short!("prop_new"), signers.get(0).unwrap()),
+            (project_id, window),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    pub fn get_voter_weight(env: Env, voter: Address) -> u32 {
+        let stats: DonorStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonorStats(voter))
+            .unwrap_or(DonorStats {
+                total_donated: 0,
+                donation_count: 0,
+                badge: BadgeTier::None,
+                co2_offset_grams: 0,
+            });
+        voting_weight_from_badge(&stats.badge)
     }
 
     /// Badge holders (≥ Seedling) cast a vote. One vote per address per proposal.
@@ -1086,6 +1839,8 @@ impl IndigoPayContract {
         if stats.badge == BadgeTier::None {
             panic!("Only badge holders (Seedling or above) can vote");
         }
+
+        let weight = voting_weight_from_badge(&stats.badge);
 
         let mut proposal: VoteProposal = env
             .storage()
@@ -1123,12 +1878,12 @@ impl IndigoPayContract {
         if approve {
             proposal.votes_for = proposal
                 .votes_for
-                .checked_add(1)
+                .checked_add(weight)
                 .expect("votes_for overflow");
         } else {
             proposal.votes_against = proposal
                 .votes_against
-                .checked_add(1)
+                .checked_add(weight)
                 .expect("votes_against overflow");
         }
         env.storage()
@@ -1136,6 +1891,7 @@ impl IndigoPayContract {
             .set(&DataKey::Proposal(project_id.clone()), &proposal);
         env.events()
             .publish((symbol_short!("voted"), voter, project_id), approve);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Callable by anyone after the deadline. Resolves based on majority.
@@ -1163,14 +1919,14 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::Proposal(project_id), &proposal);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Admin-only immediate veto. Marks the proposal resolved & rejected.
     /// Required for incident response when a proposal is based on fraudulent data.
     /// Emits prop_veto with the admin address for auditability.
-    pub fn veto_proposal(env: Env, admin: Address, project_id: String) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn veto_proposal(env: Env, signers: Vec<Address>, project_id: String) {
+        require_admin_for_critical(&env, &signers);
         let mut proposal: VoteProposal = env
             .storage()
             .instance()
@@ -1180,11 +1936,14 @@ impl IndigoPayContract {
             panic!("Proposal already resolved");
         }
         proposal.resolved = true;
-        env.events()
-            .publish((symbol_short!("prop_veto"), admin), project_id.clone());
+        env.events().publish(
+            (symbol_short!("prop_veto"), signers.get(0).unwrap()),
+            project_id.clone(),
+        );
         env.storage()
             .instance()
             .set(&DataKey::Proposal(project_id), &proposal);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Returns current vote counts and status for a proposal.
@@ -1202,198 +1961,6 @@ impl IndigoPayContract {
             .instance()
             .get(&DataKey::VoterList(project_id))
             .unwrap_or(Vec::new(&env))
-    }
-
-    // ─── Recurring donations (#81) ───────────────────────────────────────────
-
-    /// Creates (or re-creates, after a prior cancellation) an on-chain
-    /// recurring donation subscription for `donor` → `project_id`.
-    ///
-    /// `interval_ledgers` must be at least `MIN_SUBSCRIPTION_INTERVAL_LEDGERS`
-    /// (~1 day). `next_execution` is set to `current_ledger + interval_ledgers`,
-    /// i.e. the first donation is due one full interval from now, not
-    /// immediately — call `donate` directly for an immediate first gift.
-    pub fn create_subscription(
-        env: Env,
-        donor: Address,
-        project_id: String,
-        amount: i128,
-        interval_ledgers: u32,
-    ) {
-        donor.require_auth();
-        require_not_paused(&env);
-
-        if amount <= 0 {
-            panic!("Subscription amount must be positive");
-        }
-        if interval_ledgers < MIN_SUBSCRIPTION_INTERVAL_LEDGERS {
-            panic!("Interval too short (min 1 day)");
-        }
-
-        let project: Project = env
-            .storage()
-            .instance()
-            .get(&DataKey::Project(project_id.clone()))
-            .expect("Project not found");
-        if !project.active {
-            panic!("Project is not accepting donations");
-        }
-
-        let key = DataKey::Subscription(donor.clone(), project_id.clone());
-        let existing: Option<Subscription> = env.storage().instance().get(&key);
-        if let Some(existing_sub) = existing {
-            if existing_sub.active {
-                panic!("Subscription already active for this project");
-            }
-        }
-
-        let now = env.ledger().sequence();
-        let next_execution = now
-            .checked_add(interval_ledgers)
-            .expect("next_execution overflow");
-
-        let subscription = Subscription {
-            donor: donor.clone(),
-            project_id: project_id.clone(),
-            amount,
-            interval_ledgers,
-            next_execution,
-            active: true,
-            created_at: now,
-        };
-        env.storage().instance().set(&key, &subscription);
-
-        // Track the key so off-chain services can enumerate every
-        // subscription without external indexing — same pattern as
-        // `ProjectIdsAll` / `VoterList`. Only append on a genuinely new
-        // (donor, project_id) pair; re-subscribing after a cancellation
-        // reuses the existing entry.
-        let mut keys: Vec<SubscriptionKey> = env
-            .storage()
-            .instance()
-            .get(&DataKey::AllSubscriptionKeys)
-            .unwrap_or(Vec::new(&env));
-        let already_tracked = keys
-            .iter()
-            .any(|k| k.donor == donor && k.project_id == project_id);
-        if !already_tracked {
-            keys.push_back(SubscriptionKey {
-                donor: donor.clone(),
-                project_id: project_id.clone(),
-            });
-            env.storage()
-                .instance()
-                .set(&DataKey::AllSubscriptionKeys, &keys);
-        }
-
-        env.events().publish(
-            (symbol_short!("sub_new"), donor),
-            (project_id, amount, interval_ledgers, next_execution),
-        );
-        env.storage()
-            .instance()
-            .extend_ttl(VOTING_WINDOW_LEDGERS * 4, VOTING_WINDOW_LEDGERS * 4);
-    }
-
-    /// Cancels an active subscription — sets `active = false` but keeps
-    /// the record, so `create_subscription` can detect and allow a clean
-    /// re-subscribe later and so the history stays queryable.
-    ///
-    /// Deliberately NOT gated by `require_not_paused`: a donor must
-    /// always be able to stop a recurring commitment, the same way
-    /// `pause_contract` / `unpause_contract` are themselves exempt so the
-    /// admin can always recover from a pause.
-    pub fn cancel_subscription(env: Env, donor: Address, project_id: String) {
-        donor.require_auth();
-
-        let key = DataKey::Subscription(donor.clone(), project_id.clone());
-        let mut subscription: Subscription = env
-            .storage()
-            .instance()
-            .get(&key)
-            .expect("Subscription not found");
-        if !subscription.active {
-            panic!("Subscription already cancelled");
-        }
-        subscription.active = false;
-        env.storage().instance().set(&key, &subscription);
-
-        env.events()
-            .publish((symbol_short!("sub_canc"), donor), project_id);
-    }
-
-    /// Returns the subscription for `(donor, project_id)`, active or not.
-    pub fn get_subscription(env: Env, donor: Address, project_id: String) -> Subscription {
-        env.storage()
-            .instance()
-            .get(&DataKey::Subscription(donor, project_id))
-            .expect("Subscription not found")
-    }
-
-    /// Enumerates every (donor, project_id) pair that has ever had a
-    /// subscription — including cancelled ones. Used by
-    /// `recurringDonationWorker.js` to know what to poll via
-    /// `get_subscription`; callers should check `.active` and
-    /// `.next_execution` themselves.
-    pub fn get_all_subscription_keys(env: Env) -> Vec<SubscriptionKey> {
-        env.storage()
-            .instance()
-            .get(&DataKey::AllSubscriptionKeys)
-            .unwrap_or(Vec::new(&env))
-    }
-
-    /// Executes a due subscription. The donor still signs this call —
-    /// Soroban has no native scheduler — but the backend worker
-    /// (`recurringDonationWorker.js`) watches `next_execution` across all
-    /// subscriptions via `get_all_subscription_keys` and notifies the
-    /// donor over WebSocket when one becomes due, so the donor doesn't
-    /// have to remember the date themselves.
-    ///
-    /// Delegates the actual transfer plus badge/NFT/CO2/global-stat
-    /// effects to `donate`, so a subscribed donation is indistinguishable
-    /// on-chain from a manual one — then advances `next_execution` by one
-    /// `interval_ledgers`.
-    pub fn execute_subscription(env: Env, token: Address, donor: Address, project_id: String, msg_hash: u32) {
-        donor.require_auth();
-        require_not_paused(&env);
-
-        let key = DataKey::Subscription(donor.clone(), project_id.clone());
-        let mut subscription: Subscription = env
-            .storage()
-            .instance()
-            .get(&key)
-            .expect("Subscription not found");
-
-        if !subscription.active {
-            panic!("Subscription is cancelled");
-        }
-        let now = env.ledger().sequence();
-        if now < subscription.next_execution {
-            panic!("Subscription is not yet due");
-        }
-
-        Self::donate(
-            env.clone(),
-            token,
-            donor.clone(),
-            project_id.clone(),
-            subscription.amount,
-            msg_hash,
-        );
-
-        subscription.next_execution = subscription
-            .next_execution
-            .checked_add(subscription.interval_ledgers)
-            .expect("next_execution overflow");
-        env.storage().instance().set(&key, &subscription);
-
-        env.events().publish(
-            (symbol_short!("sub_exec"), donor),
-            (project_id, subscription.amount, subscription.next_execution),
-        );
-        env.storage()
-            .instance()
-            .extend_ttl(VOTING_WINDOW_LEDGERS * 4, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Donate USDC. Converts to XLM-equivalent for global stats using a price oracle stub.
@@ -1443,6 +2010,7 @@ impl IndigoPayContract {
         if project.paused {
             panic!("Project is temporarily paused");
         }
+        require_campaign_accepts_donation(&project, env.ledger().sequence());
 
         // Pre-compute CO2 increment using XLM-equivalent
         let xlm_units = xlm_equivalent / STROOP;
@@ -1467,6 +2035,7 @@ impl IndigoPayContract {
             .total_raised
             .checked_add(xlm_equivalent)
             .expect("Project total_raised overflow");
+        let goal_reached = apply_campaign_goal_progress(&mut project);
         let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
         if !env.storage().instance().has(&donated_key) {
             env.storage().instance().set(&donated_key, &true);
@@ -1478,6 +2047,12 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::Project(project_id.clone()), &project);
+        if goal_reached {
+            env.events().publish(
+                (symbol_short!("camp_goal"), project_id.clone()),
+                project.total_raised,
+            );
+        }
 
         donor_stats.total_donated = donor_stats
             .total_donated
@@ -1534,6 +2109,10 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::DonationRecord(dc), &donation_record);
+        // Snapshot CO₂ offset for exact reversal on refund (#290).
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
 
         let gr: i128 = env
             .storage()
@@ -1575,18 +2154,19 @@ impl IndigoPayContract {
             (symbol_short!("donated"), donor.clone(), project_id),
             (usdc_amount, symbol_short!("USDC"), msg_hash),
         );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Admin-only: Set the USDC token address for multi-currency donations.
     pub fn set_usdc_token(env: Env, admin: Address, usdc_token: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
         env.storage()
             .instance()
             .set(&DataKey::USDCTokenAddress, &usdc_token);
         env.events()
             .publish((symbol_short!("usdc_set"),), usdc_token);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Get the configured USDC token address.
@@ -1594,16 +2174,58 @@ impl IndigoPayContract {
         env.storage().instance().get(&DataKey::USDCTokenAddress)
     }
 
+    /// Admin-only: Configure the per-donor per-project donation rate limit.
+    pub fn set_donation_rate_limit(
+        env: Env,
+        admin: Address,
+        max_donations: u32,
+        window_ledgers: u32,
+    ) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        if max_donations == 0 {
+            panic!("max_donations must be positive");
+        }
+        if window_ledgers == 0 {
+            panic!("window_ledgers must be positive");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationRateLimitMax, &max_donations);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationRateLimitWindow, &window_ledgers);
+        env.events().publish(
+            (symbol_short!("rate_lim"),),
+            (max_donations, window_ledgers),
+        );
+    }
+
+    /// Get the configured donation rate limit (max donations, window in ledgers).
+    pub fn get_donation_rate_limit(env: Env) -> (u32, u32) {
+        let max: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationRateLimitMax)
+            .unwrap_or(DEFAULT_DONATION_RATE_LIMIT_MAX);
+        let window: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationRateLimitWindow)
+            .unwrap_or(DEFAULT_DONATION_RATE_LIMIT_WINDOW);
+        (max, window)
+    }
+
     /// Admin-only: Set the price oracle contract address used by `donate_usdc`.
     /// The oracle must implement `OracleInterface::get_price()`.
     pub fn set_oracle(env: Env, admin: Address, oracle: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
         env.storage()
             .instance()
             .set(&DataKey::OracleAddress, &oracle);
         env.events().publish((symbol_short!("oracle"),), oracle);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Get the configured price oracle address.
@@ -1618,54 +2240,149 @@ impl IndigoPayContract {
 
     // ─── Two-step admin transfer ─────────────────────────────────────────────
 
-    /// Admin-only: step 1 of a two-step admin transfer. Stores the proposed
-    /// new admin; the proposal becomes final when they call `accept_admin`.
+    /// Admin-only: step 1 of a two-step admin transfer. M-of-N admins
+    /// sign to propose swapping `old_admin` for `new_admin` in the admin
+    /// set. The swap is finalized when `new_admin` calls `accept_admin`.
+    /// The admin set size and threshold are preserved — this is an
+    /// in-place swap, not a dissolution of the multi-sig.
     /// Refuses to overwrite an existing pending transfer — the caller must
     /// `cancel_admin_transfer` first.
-    pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn transfer_admin(env: Env, signers: Vec<Address>, old_admin: Address, new_admin: Address) {
+        require_admin_for_critical(&env, &signers);
         if env.storage().instance().has(&DataKey::PendingAdmin) {
             panic!("Admin transfer already pending; cancel first");
         }
-        env.storage()
-            .instance()
-            .set(&DataKey::PendingAdmin, &new_admin);
+        let admin_set: Vec<Address> = read_admin_set(&env);
+        if !admin_set.contains(&old_admin) {
+            panic!("old_admin is not in the admin set");
+        }
+        if admin_set.contains(&new_admin) {
+            panic!("new_admin is already an admin");
+        }
+        env.storage().instance().set(
+            &DataKey::PendingAdmin,
+            &(old_admin.clone(), new_admin.clone()),
+        );
         env.events()
-            .publish((symbol_short!("ad_xfer"), admin), new_admin);
+            .publish((symbol_short!("ad_xfer"), old_admin), new_admin);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
-    /// Step 2 of the two-step transfer. The caller must be the pending
-    /// admin recorded by a prior `transfer_admin`. On success the stored
-    /// admin is updated and the pending entry is cleared.
+    /// Step 2 of the two-step transfer. The caller must be the `new_admin`
+    /// recorded by a prior `transfer_admin`. On success `old_admin` is
+    /// replaced by `new_admin` in the admin set (in-place swap). Threshold
+    /// and set size are preserved.
     pub fn accept_admin(env: Env) {
-        let pending: Address = env
+        let (old_admin, new_admin): (Address, Address) = env
             .storage()
             .instance()
             .get(&DataKey::PendingAdmin)
             .expect("No pending admin transfer");
-        pending.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &pending);
+        new_admin.require_auth();
+
+        let admin_set: Vec<Address> = read_admin_set(&env);
+
+        if !admin_set.contains(&old_admin) {
+            panic!("old_admin no longer in admin set; transfer stale");
+        }
+        if admin_set.contains(&new_admin) {
+            panic!("new_admin already an admin; transfer stale");
+        }
+
+        let mut new_set: Vec<Address> = Vec::new(&env);
+        for addr in admin_set.iter() {
+            if addr == old_admin {
+                new_set.push_back(new_admin.clone());
+            } else {
+                new_set.push_back(addr);
+            }
+        }
+        env.storage().instance().set(&DataKey::AdminSet, &new_set);
         env.storage().instance().remove(&DataKey::PendingAdmin);
-        env.events().publish((symbol_short!("ad_acc"),), pending);
+        env.events().publish((symbol_short!("ad_acc"),), new_admin);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
-    /// Admin-only: cancel a pending admin transfer without promoting anyone.
+    /// Admin-only: cancel a pending admin transfer without performing the swap.
     /// Useful when the proposed recipient lost their key or the transfer
     /// was a mistake.
-    pub fn cancel_admin_transfer(env: Env, admin: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn cancel_admin_transfer(env: Env, signers: Vec<Address>) {
+        require_admin_for_critical(&env, &signers);
         if !env.storage().instance().has(&DataKey::PendingAdmin) {
             panic!("No pending admin transfer");
         }
         env.storage().instance().remove(&DataKey::PendingAdmin);
-        env.events().publish((symbol_short!("ad_xfc"), admin), ());
+        env.events().publish((symbol_short!("ad_xfc"),), ());
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
-    /// Returns the proposed new admin if a transfer is pending, or `None`.
-    pub fn get_pending_admin(env: Env) -> Option<Address> {
+    /// Returns `(old_admin, new_admin)` if a transfer is pending, or `None`.
+    pub fn get_pending_admin(env: Env) -> Option<(Address, Address)> {
         env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    // ─── Admin set management ────────────────────────────────────────────────
+
+    /// M-of-N: add a new address to the admin set.
+    pub fn add_admin(env: Env, signers: Vec<Address>, new_admin: Address) {
+        require_admin_for_critical(&env, &signers);
+        let mut admin_set: Vec<Address> = read_admin_set(&env);
+        if admin_set.contains(&new_admin) {
+            panic!("Address is already an admin");
+        }
+        admin_set.push_back(new_admin.clone());
+        env.storage().instance().set(&DataKey::AdminSet, &admin_set);
+        env.events()
+            .publish((symbol_short!("admin_add"),), new_admin);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// M-of-N: remove an address from the admin set. Panics if this would
+    /// leave the set empty, or if the resulting set is smaller than the
+    /// current threshold (call `update_threshold` first).
+    pub fn remove_admin(env: Env, signers: Vec<Address>, admin_to_remove: Address) {
+        require_admin_for_critical(&env, &signers);
+        let admin_set: Vec<Address> = read_admin_set(&env);
+        if !admin_set.contains(&admin_to_remove) {
+            panic!("Address is not an admin");
+        }
+        if admin_set.len() <= 1 {
+            panic!("Cannot remove last admin");
+        }
+        let mut new_set: Vec<Address> = Vec::new(&env);
+        for addr in admin_set.iter() {
+            if addr != admin_to_remove {
+                new_set.push_back(addr);
+            }
+        }
+        let threshold: u32 = read_admin_threshold(&env);
+        if threshold > new_set.len() {
+            panic!(
+                "Threshold {} exceeds admin count {}; call update_threshold first",
+                threshold,
+                new_set.len()
+            );
+        }
+        env.storage().instance().set(&DataKey::AdminSet, &new_set);
+        env.events()
+            .publish((symbol_short!("admin_rmv"),), admin_to_remove);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// M-of-N: update the threshold for critical actions. Must satisfy
+    /// 1 <= new_threshold <= admin_set.len().
+    pub fn update_threshold(env: Env, signers: Vec<Address>, new_threshold: u32) {
+        require_admin_for_critical(&env, &signers);
+        let admin_set: Vec<Address> = read_admin_set(&env);
+        if new_threshold == 0 || new_threshold > admin_set.len() {
+            panic!("Threshold must be between 1 and the number of admins");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::AdminThreshold, &new_threshold);
+        env.events()
+            .publish((symbol_short!("thresh_up"),), new_threshold);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     // ─── Contract-level pause ─────────────────────────────────────────────────
@@ -1674,23 +2391,25 @@ impl IndigoPayContract {
     /// mutating function rejects with "Contract is paused". Read-only
     /// getters continue to work, and the admin can always call
     /// `unpause_contract` to recover.
-    pub fn pause_contract(env: Env, admin: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn pause_contract(env: Env, signers: Vec<Address>) {
+        require_admin_for_critical(&env, &signers);
         env.storage()
             .instance()
             .set(&DataKey::ContractPaused, &true);
-        env.events().publish((symbol_short!("paused"), admin), ());
+        env.events()
+            .publish((symbol_short!("paused"), signers.get(0).unwrap()), ());
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Admin-only: lift the contract-level pause.
-    pub fn unpause_contract(env: Env, admin: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn unpause_contract(env: Env, signers: Vec<Address>) {
+        require_admin_for_critical(&env, &signers);
         env.storage()
             .instance()
             .set(&DataKey::ContractPaused, &false);
-        env.events().publish((symbol_short!("unpause"), admin), ());
+        env.events()
+            .publish((symbol_short!("unpause"), signers.get(0).unwrap()), ());
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Read-only: returns the contract-level pause state.
@@ -1707,9 +2426,8 @@ impl IndigoPayContract {
     /// proposed WASM hash and the ledger sequence at which it becomes
     /// executable. Replaces any existing pending upgrade is not allowed;
     /// the caller must `cancel_upgrade` first.
-    pub fn propose_upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn propose_upgrade(env: Env, signers: Vec<Address>, new_wasm_hash: BytesN<32>) {
+        require_admin_for_critical(&env, &signers);
         if env.storage().instance().has(&DataKey::PendingUpgrade) {
             panic!("Upgrade already pending; cancel first");
         }
@@ -1725,9 +2443,10 @@ impl IndigoPayContract {
             .instance()
             .set(&DataKey::UpgradeEffectiveAt, &effective_at);
         env.events().publish(
-            (symbol_short!("upg_prop"), admin),
+            (symbol_short!("upg_prop"), signers.get(0).unwrap()),
             (new_wasm_hash, effective_at),
         );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Permissionless: step 2 of the upgrade timelock. Callable by anyone
@@ -1764,14 +2483,14 @@ impl IndigoPayContract {
             .instance()
             .remove(&DataKey::UpgradeEffectiveAt);
         env.events().publish((symbol_short!("upg_exec"),), pending);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Admin-only: cancel a pending upgrade without executing it. Use
     /// during incident response if the proposed WASM turns out to be
     /// malicious or buggy before the timelock elapses.
-    pub fn cancel_upgrade(env: Env, admin: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn cancel_upgrade(env: Env, signers: Vec<Address>) {
+        require_admin_for_critical(&env, &signers);
         if !env.storage().instance().has(&DataKey::PendingUpgrade) {
             panic!("No pending upgrade");
         }
@@ -1779,7 +2498,9 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .remove(&DataKey::UpgradeEffectiveAt);
-        env.events().publish((symbol_short!("upg_cncl"), admin), ());
+        env.events()
+            .publish((symbol_short!("upg_cncl"), signers.get(0).unwrap()), ());
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Read-only: returns `(hash, effective_at_ledger)` for the pending
@@ -1798,6 +2519,382 @@ impl IndigoPayContract {
     /// `execute_upgrade`.
     pub fn get_last_executed_upgrade(env: Env) -> Option<BytesN<32>> {
         env.storage().instance().get(&DataKey::LastExecutedUpgrade)
+    }
+
+    // ─── Emergency withdrawal (7-day timelock) ─────────────────────────────────
+
+    /// Admin-only: step 1 of the emergency withdrawal flow. Records a
+    /// request to send `amount` of `token` from the contract's
+    /// per-project balance to `new_wallet` after a 7-day timelock.
+    /// One pending withdrawal per project at a time; the caller must
+    /// cancel or execute the existing one before initiating another.
+    ///
+    /// The actual balance check happens at execution time, not here,
+    /// because the 7-day gap means the balance could shift before then
+    /// (TOCTOU avoidance).
+    pub fn initiate_emergency_withdrawal(
+        env: Env,
+        admin: Address,
+        project_id: String,
+        new_wallet: Address,
+        token: Address,
+        amount: i128,
+    ) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        if amount <= 0 {
+            panic!("Emergency withdrawal amount must be positive");
+        }
+
+        let project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        if !project.active {
+            panic!("Project is not accepting donations");
+        }
+
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::EmergencyWithdrawal(project_id.clone()))
+        {
+            panic!("Emergency withdrawal already pending for this project");
+        }
+
+        let current_ledger = env.ledger().sequence();
+        let executable_at = current_ledger
+            .checked_add(EMERGENCY_WITHDRAWAL_TIMELOCK)
+            .expect("Emergency withdrawal timelock overflow");
+
+        let withdrawal = EmergencyWithdrawal {
+            new_wallet: new_wallet.clone(),
+            amount,
+            token: token.clone(),
+            initiated_at: current_ledger,
+            executable_at,
+        };
+        env.storage().instance().set(
+            &DataKey::EmergencyWithdrawal(project_id.clone()),
+            &withdrawal,
+        );
+
+        env.events().publish(
+            (symbol_short!("ew_init"), admin, project_id),
+            (new_wallet, amount, token, executable_at),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Admin-only: cancel a pending emergency withdrawal before it has
+    /// been executed. Clears the pending entry and emits an event for
+    /// off-chain notification.
+    pub fn cancel_emergency_withdrawal(env: Env, admin: Address, project_id: String) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::EmergencyWithdrawal(project_id.clone()))
+        {
+            panic!("No pending emergency withdrawal");
+        }
+
+        env.storage()
+            .instance()
+            .remove(&DataKey::EmergencyWithdrawal(project_id.clone()));
+
+        env.events()
+            .publish((symbol_short!("ew_cncl"), admin, project_id), ());
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Permissionless: step 2 of the emergency withdrawal flow. Callable
+    /// by anyone after the 7-day timelock has elapsed. Validates that
+    /// the project's per-project-per-token balance is sufficient, then
+    /// clears the pending entry, decrements the balance, and transfers
+    /// tokens to the new wallet (CEI ordering).
+    pub fn execute_emergency_withdrawal(env: Env, project_id: String) {
+        let withdrawal: EmergencyWithdrawal = env
+            .storage()
+            .instance()
+            .get(&DataKey::EmergencyWithdrawal(project_id.clone()))
+            .expect("No pending emergency withdrawal");
+
+        let current_ledger = env.ledger().sequence();
+        if current_ledger < withdrawal.executable_at {
+            panic!("Emergency withdrawal timelock not yet elapsed");
+        }
+
+        // ── Checks: validate per-project-per-token balance
+        let balance_key =
+            DataKey::ProjectContractBalance(project_id.clone(), withdrawal.token.clone());
+        let balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
+        if withdrawal.amount > balance {
+            panic!("Insufficient contract balance for project");
+        }
+
+        // ── Effects: clear withdrawal AND decrement balance before transfer
+        env.storage()
+            .instance()
+            .remove(&DataKey::EmergencyWithdrawal(project_id.clone()));
+        let new_balance = balance - withdrawal.amount;
+        env.storage().instance().set(&balance_key, &new_balance);
+
+        // ── Interaction: external token transfer
+        let token_client = token::Client::new(&env, &withdrawal.token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &withdrawal.new_wallet,
+            &withdrawal.amount,
+        );
+
+        env.events().publish(
+            (symbol_short!("ew_exec"), project_id),
+            (withdrawal.new_wallet, withdrawal.amount, withdrawal.token),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Read-only: returns the pending emergency withdrawal for a project,
+    /// or `None` if no withdrawal is currently pending.
+    pub fn get_emergency_withdrawal(env: Env, project_id: String) -> Option<EmergencyWithdrawal> {
+        env.storage()
+            .instance()
+            .get(&DataKey::EmergencyWithdrawal(project_id))
+    }
+
+    // ─── Donation refund (#290) ───────────────────────────────────────────────
+
+    /// Donor-initiated refund request. Must be called within the cooldown
+    /// window (`REFUND_COOLDOWN_LEDGERS`) after the original donation.
+    /// Creates a `RefundRequest` with status `Pending` for admin + project
+    /// wallet approval.
+    pub fn request_refund(env: Env, donor: Address, donation_record_index: u32, token: Address) {
+        donor.require_auth();
+        require_not_paused(&env);
+
+        let record: DonationRecord = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationRecord(donation_record_index))
+            .expect("Donation record not found");
+
+        if record.donor != donor {
+            panic!("Only the donor can request a refund");
+        }
+
+        let current_ledger = env.ledger().sequence();
+        let deadline = record
+            .ledger
+            .checked_add(REFUND_COOLDOWN_LEDGERS)
+            .expect("Refund deadline overflow");
+        if current_ledger > deadline {
+            panic!("Refund cooldown expired");
+        }
+
+        // One refund request per donation — prevent duplicate requests.
+        let refund_for_donation_key = DataKey::RefundForDonation(donation_record_index);
+        if env.storage().instance().has(&refund_for_donation_key) {
+            panic!("Refund already requested for this donation");
+        }
+
+        // Snapshot CO₂ offset from the separate key written at donation time.
+        // Pre-upgrade donations lack this key; CO₂ reversal defaults to 0
+        // (documented known limitation — see SECURITY.md).
+        let co2_offset_grams: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationCO2Offset(donation_record_index))
+            .unwrap_or(0);
+
+        let refund_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RefundCount)
+            .unwrap_or(0);
+        let refund_id = refund_count;
+
+        let request = RefundRequest {
+            donor: donor.clone(),
+            project_id: record.project.clone(),
+            amount: record.amount,
+            donation_record_index,
+            requested_at: current_ledger,
+            status: RefundRequestStatus::Pending,
+            token,
+            co2_offset_grams,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::RefundRequest(refund_id), &request);
+        env.storage()
+            .instance()
+            .set(&refund_for_donation_key, &refund_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::RefundCount, &(refund_id + 1));
+
+        env.events().publish(
+            (symbol_short!("rfnd_rq"), refund_id, donor),
+            (record.project, record.amount, donation_record_index),
+        );
+    }
+
+    /// Admin + project wallet co-sign to approve a pending refund.
+    /// Atomically transfers tokens from the project wallet back to the donor
+    /// and decrements all counters (CEI ordering — effects before interaction).
+    ///
+    /// Badges are permanent and NOT recalculated. `DonationCount` is historical
+    /// and NOT decremented.
+    pub fn approve_refund(env: Env, admin: Address, refund_id: u32) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+
+        let mut request: RefundRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey::RefundRequest(refund_id))
+            .expect("Refund request not found");
+
+        if request.status != RefundRequestStatus::Pending {
+            panic!("Refund request is not pending");
+        }
+
+        let mut project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(request.project_id.clone()))
+            .expect("Project not found");
+
+        // Project wallet must co-sign — ensures the token transfer actually
+        // happens atomically, so "Approved" reliably means "Paid" for
+        // non-adversarial cases (wrong project, wrong amount, tech error).
+        // The fraud case is unresolvable on-chain without escrow.
+        project.wallet.require_auth();
+
+        // ── Effects: all counter adjustments BEFORE the token transfer (CEI).
+
+        project.total_raised = project
+            .total_raised
+            .checked_sub(request.amount)
+            .expect("Project total_raised underflow on refund");
+        env.storage()
+            .instance()
+            .set(&DataKey::Project(request.project_id.clone()), &project);
+
+        // Donor stats: decrement totals but do NOT recalculate badge (permanent).
+        let mut donor_stats: DonorStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonorStats(request.donor.clone()))
+            .unwrap_or(DonorStats {
+                total_donated: 0,
+                donation_count: 0,
+                badge: BadgeTier::None,
+                co2_offset_grams: 0,
+            });
+        donor_stats.total_donated = donor_stats
+            .total_donated
+            .checked_sub(request.amount)
+            .expect("Donor total_donated underflow on refund");
+        donor_stats.co2_offset_grams = donor_stats
+            .co2_offset_grams
+            .checked_sub(request.co2_offset_grams)
+            .expect("Donor co2_offset underflow on refund");
+        // Badge is NOT recalculated — badges are permanent.
+        env.storage()
+            .instance()
+            .set(&DataKey::DonorStats(request.donor.clone()), &donor_stats);
+
+        // Per-project cumulative donation total (milestone NFT tracker).
+        let proj_total_key =
+            DataKey::DonorProjectTotal(request.project_id.clone(), request.donor.clone());
+        let prev_proj_total: i128 = env.storage().instance().get(&proj_total_key).unwrap_or(0);
+        env.storage().instance().set(
+            &proj_total_key,
+            &prev_proj_total
+                .checked_sub(request.amount)
+                .expect("DonorProjectTotal underflow on refund"),
+        );
+
+        // Global counters.
+        let gr: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalTotalRaised)
+            .unwrap_or(0);
+        env.storage().instance().set(
+            &DataKey::GlobalTotalRaised,
+            &gr.checked_sub(request.amount)
+                .expect("GlobalTotalRaised underflow on refund"),
+        );
+
+        let gc: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalCO2OffsetGrams)
+            .unwrap_or(0);
+        env.storage().instance().set(
+            &DataKey::GlobalCO2OffsetGrams,
+            &gc.checked_sub(request.co2_offset_grams)
+                .expect("GlobalCO2OffsetGrams underflow on refund"),
+        );
+
+        // Mark approved before the external transfer.
+        request.status = RefundRequestStatus::Approved;
+        env.storage()
+            .instance()
+            .set(&DataKey::RefundRequest(refund_id), &request);
+
+        // ── Interaction: token transfer from project wallet back to donor.
+        let token_client = token::Client::new(&env, &request.token);
+        token_client.transfer(&project.wallet, &request.donor, &request.amount);
+
+        env.events().publish(
+            (symbol_short!("rfnd_ap"), refund_id, admin),
+            (request.project_id, request.amount, request.donor),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Admin-only: reject a pending refund request. The donation stands;
+    /// no counters are adjusted and no tokens move.
+    pub fn reject_refund(env: Env, admin: Address, refund_id: u32) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+
+        let mut request: RefundRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey::RefundRequest(refund_id))
+            .expect("Refund request not found");
+
+        if request.status != RefundRequestStatus::Pending {
+            panic!("Refund request is not pending");
+        }
+
+        request.status = RefundRequestStatus::Rejected;
+        env.storage()
+            .instance()
+            .set(&DataKey::RefundRequest(refund_id), &request);
+
+        env.events().publish(
+            (symbol_short!("rfnd_rj"), refund_id, admin),
+            (request.project_id, request.donor),
+        );
+    }
+
+    /// Read-only: returns the refund request for the given ID, or panics if
+    /// not found.
+    pub fn get_refund_request(env: Env, refund_id: u32) -> RefundRequest {
+        env.storage()
+            .instance()
+            .get(&DataKey::RefundRequest(refund_id))
+            .expect("Refund request not found")
     }
 }
 
@@ -1828,9 +2925,16 @@ impl OracleInterface for MockOracle {
 mod tests {
     extern crate std;
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
     use soroban_sdk::token::StellarAssetClient;
-    use soroban_sdk::{Address, BytesN, Env, String, Symbol, TryFromVal, Vec};
+    use soroban_sdk::{Address, BytesN, Env, String, Vec};
+
+    /// Helper: create a single-element signer Vec for admin calls.
+    fn signers1(env: &Env, a: &Address) -> Vec<Address> {
+        let mut v = Vec::new(env);
+        v.push_back(a.clone());
+        v
+    }
 
     // ─── Existing tests ───────────────────────────────────────────────────────
 
@@ -1840,8 +2944,10 @@ mod tests {
         let id = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
         assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.get_admin_set().len(), 1);
+        assert_eq!(client.get_admin_threshold(), 1);
         assert_eq!(client.get_project_count(), 0);
         assert_eq!(client.get_donation_count(), 0);
         assert_eq!(client.get_global_total(), 0);
@@ -1876,7 +2982,7 @@ mod tests {
         let id = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
 
         let stats = client.get_global_stats();
         assert_eq!(stats.total_raised, 0);
@@ -1895,7 +3001,7 @@ mod tests {
         let id = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
 
         // Register a project (co2_per_xlm = 200 grams per XLM)
         let pid = String::from_str(&env, "proj-stats");
@@ -1939,8 +3045,8 @@ mod tests {
         let id = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        client.initialize(&signers1(&env, &admin), &1u32);
     }
 
     #[test]
@@ -1949,7 +3055,7 @@ mod tests {
         let id = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
         let donor = Address::generate(&env);
         assert_eq!(client.get_badge(&donor), BadgeTier::None);
     }
@@ -1975,7 +3081,7 @@ mod tests {
         let id = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
 
         let wallet1 = Address::generate(&env);
         let wallet2 = Address::generate(&env);
@@ -2022,7 +3128,7 @@ mod tests {
         let id = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
 
         let wallet = Address::generate(&env);
         let pid = String::from_str(&env, "proj-dup");
@@ -2036,7 +3142,7 @@ mod tests {
         projects.push_back(ProjectInit {
             id: pid,
             name: String::from_str(&env, "Duplicate"),
-            wallet: wallet,
+            wallet,
             co2_per_xlm: 50,
         });
 
@@ -2058,7 +3164,7 @@ mod tests {
         let cid = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &cid);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
         let pid = String::from_str(&env, "proj-001");
         let wallet = Address::generate(&env);
         client.register_project(
@@ -2197,7 +3303,7 @@ mod tests {
     #[test]
     fn test_create_proposal() {
         let (env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let p = client.get_proposal(&pid);
         assert_eq!(p.votes_for, 0);
         assert_eq!(p.votes_against, 0);
@@ -2208,15 +3314,15 @@ mod tests {
     #[test]
     #[should_panic(expected = "Proposal already exists for this project")]
     fn test_create_duplicate_proposal_fails() {
-        let (_env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
-        client.create_proposal(&admin, &pid, &0u32);
+        let (env, _cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
     }
 
     #[test]
     fn test_cast_vote() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
         client.vote_verify_project(&voter, &pid, &true);
@@ -2229,7 +3335,7 @@ mod tests {
     #[should_panic(expected = "Only badge holders (Seedling or above) can vote")]
     fn test_non_badge_holder_cannot_vote() {
         let (env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let non_donor = Address::generate(&env);
         client.vote_verify_project(&non_donor, &pid, &true);
     }
@@ -2238,7 +3344,7 @@ mod tests {
     #[should_panic(expected = "Already voted on this proposal")]
     fn test_double_vote_prevented() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
         client.vote_verify_project(&voter, &pid, &true);
@@ -2248,7 +3354,7 @@ mod tests {
     #[test]
     fn test_resolve_proposal_approved() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         // 2 approve, 1 rejects
         for i in 0..3u32 {
             let voter = Address::generate(&env);
@@ -2267,7 +3373,7 @@ mod tests {
     #[test]
     fn test_resolve_proposal_rejected() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         // 1 approves, 2 reject
         for i in 0..3u32 {
             let voter = Address::generate(&env);
@@ -2286,7 +3392,7 @@ mod tests {
     #[test]
     fn test_resolve_proposal_tie_rejected_with_rejection_event() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
 
         for i in 0..2u32 {
             let voter = Address::generate(&env);
@@ -2313,8 +3419,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "Voting window not yet closed")]
     fn test_resolve_before_deadline_fails() {
-        let (_env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        let (env, _cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         client.resolve_proposal(&pid);
     }
 
@@ -2322,7 +3428,7 @@ mod tests {
     #[should_panic(expected = "Proposal already resolved")]
     fn test_double_resolve_fails() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         extend_ttl(&env, &cid);
         env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
         client.resolve_proposal(&pid);
@@ -2334,20 +3440,20 @@ mod tests {
     #[test]
     fn test_veto_proposal() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         extend_ttl(&env, &cid);
-        client.veto_proposal(&admin, &pid);
+        client.veto_proposal(&signers1(&env, &admin), &pid);
         let p = client.get_proposal(&pid);
         assert!(p.resolved);
     }
 
     #[test]
-    #[should_panic(expected = "Only admin can perform this action")]
+    #[should_panic(expected = "Insufficient admin signatures")]
     fn test_veto_proposal_non_admin_fails() {
         let (env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let imposter = Address::generate(&env);
-        client.veto_proposal(&imposter, &pid);
+        client.veto_proposal(&signers1(&env, &imposter), &pid);
     }
 
     #[test]
@@ -2358,18 +3464,21 @@ mod tests {
         let cid = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &cid);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
-        client.veto_proposal(&admin, &String::from_str(&env, "nonexistent"));
+        client.initialize(&signers1(&env, &admin), &1u32);
+        client.veto_proposal(
+            &signers1(&env, &admin),
+            &String::from_str(&env, "nonexistent"),
+        );
     }
 
     #[test]
     #[should_panic(expected = "Proposal already resolved")]
     fn test_veto_proposal_double_veto_fails() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         extend_ttl(&env, &cid);
-        client.veto_proposal(&admin, &pid);
-        client.veto_proposal(&admin, &pid);
+        client.veto_proposal(&signers1(&env, &admin), &pid);
+        client.veto_proposal(&signers1(&env, &admin), &pid);
     }
 
     // ─── Configurable voting-duration tests ───────────────────────────────────
@@ -2380,7 +3489,7 @@ mod tests {
         let (env, _cid, client, admin, pid) = setup();
         let custom: u32 = 5_000;
         let start = env.ledger().sequence();
-        client.create_proposal(&admin, &pid, &custom);
+        client.create_proposal(&signers1(&env, &admin), &pid, &custom);
         let p = client.get_proposal(&pid);
         assert_eq!(p.deadline_ledger, start + custom);
     }
@@ -2390,7 +3499,7 @@ mod tests {
     fn test_create_proposal_zero_duration_uses_default() {
         let (env, _cid, client, admin, pid) = setup();
         let start = env.ledger().sequence();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let p = client.get_proposal(&pid);
         assert_eq!(p.deadline_ledger, start + VOTING_WINDOW_LEDGERS);
     }
@@ -2398,15 +3507,23 @@ mod tests {
     #[test]
     #[should_panic(expected = "Voting duration too short")]
     fn test_create_proposal_rejects_too_short_duration() {
-        let (_env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &(MIN_VOTING_WINDOW_LEDGERS - 1));
+        let (env, _cid, client, admin, pid) = setup();
+        client.create_proposal(
+            &signers1(&env, &admin),
+            &pid,
+            &(MIN_VOTING_WINDOW_LEDGERS - 1),
+        );
     }
 
     #[test]
     #[should_panic(expected = "Voting duration too long")]
     fn test_create_proposal_rejects_too_long_duration() {
-        let (_env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &(MAX_VOTING_WINDOW_LEDGERS + 1));
+        let (env, _cid, client, admin, pid) = setup();
+        client.create_proposal(
+            &signers1(&env, &admin),
+            &pid,
+            &(MAX_VOTING_WINDOW_LEDGERS + 1),
+        );
     }
 
     #[test]
@@ -2440,7 +3557,7 @@ mod tests {
         assert!(client.get_project(&pid1).active);
         assert!(client.get_project(&pid2).active);
 
-        client.deactivate_all_projects(&admin);
+        client.deactivate_all_projects(&signers1(&env, &admin));
 
         assert!(!client.get_project(&pid1).active);
         assert!(!client.get_project(&pid2).active);
@@ -2451,7 +3568,7 @@ mod tests {
     #[should_panic(expected = "Voting window has closed")]
     fn test_vote_rejected_after_deadline() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
 
         // Create a voter with badge
         let voter = Address::generate(&env);
@@ -2470,7 +3587,7 @@ mod tests {
     fn test_vote_allowed_before_deadline() {
         let (env, cid, client, admin, pid) = setup();
         let start = env.ledger().sequence();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
 
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
@@ -2494,7 +3611,7 @@ mod tests {
         let custom_duration = MIN_VOTING_WINDOW_LEDGERS;
         let start = env.ledger().sequence();
 
-        client.create_proposal(&admin, &pid, &custom_duration);
+        client.create_proposal(&signers1(&env, &admin), &pid, &custom_duration);
 
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
@@ -2628,7 +3745,7 @@ mod tests {
 
     #[test]
     fn test_pause_project_sets_paused_flag() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (_env, _cid, client, admin, pid) = setup();
         client.pause_project(&admin, &pid);
         let p = client.get_project(&pid);
         assert!(p.paused);
@@ -2646,7 +3763,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Cannot pause a deactivated project")]
     fn test_pause_deactivated_project_fails() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (_env, _cid, client, admin, pid) = setup();
         client.deactivate_project(&admin, &pid);
         client.pause_project(&admin, &pid);
     }
@@ -2661,7 +3778,7 @@ mod tests {
 
     #[test]
     fn test_resume_project_clears_paused_flag() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (_env, _cid, client, admin, pid) = setup();
         client.pause_project(&admin, &pid);
         client.resume_project(&admin, &pid);
         let p = client.get_project(&pid);
@@ -2769,7 +3886,6 @@ mod tests {
     /// from any valid `amount <= i128::MAX` (since
     /// `xlm_units * MAX_CO2_PER_XLM <= 9.22e16 < i128::MAX`), so no
     /// redundant overflow tests are kept here.
-
     /// Replaying the same donor must NOT inflate `project.donor_count` —
     /// it counts unique donors.
     #[test]
@@ -2821,7 +3937,7 @@ mod tests {
     #[test]
     fn test_get_voter_list() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
 
         let mut voters = std::vec::Vec::new();
         for _ in 0..3 {
@@ -2848,7 +3964,7 @@ mod tests {
         let cid = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &cid);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
 
         // Initialize admin path + then ask for an unknown project.
         let pid = String::from_str(&env, "never-created");
@@ -2856,211 +3972,14 @@ mod tests {
         assert_eq!(list.len(), 0);
     }
 
-    // ─── Recurring donation subscription tests (#81) ─────────────────────────
-
-    #[test]
-    fn test_create_subscription_stores_on_chain() {
-        let (env, _cid, client, _admin, pid) = setup();
-        let donor = Address::generate(&env);
-
-        client.create_subscription(&donor, &pid, &(10 * STROOP), &MIN_SUBSCRIPTION_INTERVAL_LEDGERS);
-
-        let sub = client.get_subscription(&donor, &pid);
-        assert_eq!(sub.donor, donor);
-        assert_eq!(sub.project_id, pid);
-        assert_eq!(sub.amount, 10 * STROOP);
-        assert_eq!(sub.interval_ledgers, MIN_SUBSCRIPTION_INTERVAL_LEDGERS);
-        assert!(sub.active);
-        assert_eq!(sub.next_execution, sub.created_at + MIN_SUBSCRIPTION_INTERVAL_LEDGERS);
-
-        let keys = client.get_all_subscription_keys();
-        assert_eq!(keys.len(), 1);
-        assert_eq!(keys.get(0).unwrap().donor, donor);
-        assert_eq!(keys.get(0).unwrap().project_id, pid);
-    }
-
-    #[test]
-    #[should_panic(expected = "Interval too short")]
-    fn test_create_subscription_rejects_short_interval() {
-        let (env, _cid, client, _admin, pid) = setup();
-        let donor = Address::generate(&env);
-
-        client.create_subscription(&donor, &pid, &(10 * STROOP), &(MIN_SUBSCRIPTION_INTERVAL_LEDGERS - 1));
-    }
-
-    #[test]
-    #[should_panic(expected = "Subscription amount must be positive")]
-    fn test_create_subscription_rejects_zero_amount() {
-        let (env, _cid, client, _admin, pid) = setup();
-        let donor = Address::generate(&env);
-
-        client.create_subscription(&donor, &pid, &0, &MIN_SUBSCRIPTION_INTERVAL_LEDGERS);
-    }
-
-    #[test]
-    #[should_panic(expected = "Project not found")]
-    fn test_create_subscription_rejects_unknown_project() {
-        let (env, _cid, client, _admin, _pid) = setup();
-        let donor = Address::generate(&env);
-        let unknown = String::from_str(&env, "no-such-project");
-
-        client.create_subscription(&donor, &unknown, &(10 * STROOP), &MIN_SUBSCRIPTION_INTERVAL_LEDGERS);
-    }
-
-    #[test]
-    #[should_panic(expected = "Subscription already active")]
-    fn test_create_subscription_rejects_duplicate_while_active() {
-        let (env, _cid, client, _admin, pid) = setup();
-        let donor = Address::generate(&env);
-
-        client.create_subscription(&donor, &pid, &(10 * STROOP), &MIN_SUBSCRIPTION_INTERVAL_LEDGERS);
-        client.create_subscription(&donor, &pid, &(20 * STROOP), &MIN_SUBSCRIPTION_INTERVAL_LEDGERS);
-    }
-
-    #[test]
-    fn test_cancel_subscription_sets_inactive_and_allows_resubscribe() {
-        let (env, _cid, client, _admin, pid) = setup();
-        let donor = Address::generate(&env);
-
-        client.create_subscription(&donor, &pid, &(10 * STROOP), &MIN_SUBSCRIPTION_INTERVAL_LEDGERS);
-        client.cancel_subscription(&donor, &pid);
-
-        let sub = client.get_subscription(&donor, &pid);
-        assert!(!sub.active);
-
-        // Re-subscribing after cancellation must succeed and must not add a
-        // second entry to the enumeration registry.
-        client.create_subscription(&donor, &pid, &(15 * STROOP), &MIN_SUBSCRIPTION_INTERVAL_LEDGERS);
-        let sub2 = client.get_subscription(&donor, &pid);
-        assert!(sub2.active);
-        assert_eq!(sub2.amount, 15 * STROOP);
-        assert_eq!(client.get_all_subscription_keys().len(), 1);
-    }
-
-    #[test]
-    #[should_panic(expected = "Subscription already cancelled")]
-    fn test_cancel_subscription_twice_panics() {
-        let (env, _cid, client, _admin, pid) = setup();
-        let donor = Address::generate(&env);
-
-        client.create_subscription(&donor, &pid, &(10 * STROOP), &MIN_SUBSCRIPTION_INTERVAL_LEDGERS);
-        client.cancel_subscription(&donor, &pid);
-        client.cancel_subscription(&donor, &pid);
-    }
-
-    #[test]
-    #[should_panic(expected = "Subscription not found")]
-    fn test_get_subscription_unknown_panics() {
-        let (env, _cid, client, _admin, pid) = setup();
-        let donor = Address::generate(&env);
-
-        client.get_subscription(&donor, &pid);
-    }
-
-    #[test]
-    fn test_execute_subscription_transfers_and_advances_next_execution() {
-        let (env, _cid, client, _admin, pid) = setup();
-        let donor = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        StellarAssetClient::new(&env, &token).mint(&donor, &(100 * STROOP));
-
-        client.create_subscription(&donor, &pid, &(10 * STROOP), &MIN_SUBSCRIPTION_INTERVAL_LEDGERS);
-        let sub_before = client.get_subscription(&donor, &pid);
-
-        env.ledger().set_sequence_number(sub_before.next_execution);
-        client.execute_subscription(&token, &donor, &pid, &0u32);
-
-        // Effects match a normal `donate` call.
-        let p = client.get_project(&pid);
-        assert_eq!(p.total_raised, 10 * STROOP);
-        let stats = client.get_donor_stats(&donor);
-        assert_eq!(stats.total_donated, 10 * STROOP);
-
-        // Subscription rolled forward by exactly one interval.
-        let sub_after = client.get_subscription(&donor, &pid);
-        assert_eq!(
-            sub_after.next_execution,
-            sub_before.next_execution + MIN_SUBSCRIPTION_INTERVAL_LEDGERS
-        );
-        assert!(sub_after.active);
-    }
-
-    #[test]
-    #[should_panic(expected = "Subscription is not yet due")]
-    fn test_execute_subscription_rejects_before_due() {
-        let (env, _cid, client, _admin, pid) = setup();
-        let donor = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        StellarAssetClient::new(&env, &token).mint(&donor, &(100 * STROOP));
-
-        client.create_subscription(&donor, &pid, &(10 * STROOP), &MIN_SUBSCRIPTION_INTERVAL_LEDGERS);
-        // Still on the ledger the subscription was created at — not due yet.
-        client.execute_subscription(&token, &donor, &pid, &0u32);
-    }
-
-    #[test]
-    #[should_panic(expected = "Subscription is cancelled")]
-    fn test_execute_subscription_rejects_after_cancel() {
-        let (env, _cid, client, _admin, pid) = setup();
-        let donor = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        StellarAssetClient::new(&env, &token).mint(&donor, &(100 * STROOP));
-
-        client.create_subscription(&donor, &pid, &(10 * STROOP), &MIN_SUBSCRIPTION_INTERVAL_LEDGERS);
-        let sub = client.get_subscription(&donor, &pid);
-        client.cancel_subscription(&donor, &pid);
-
-        env.ledger().set_sequence_number(sub.next_execution);
-        client.execute_subscription(&token, &donor, &pid, &0u32);
-    }
-
-    #[test]
-    fn test_cancel_subscription_works_while_contract_paused() {
-        let (env, _cid, client, admin, pid) = setup();
-        let donor = Address::generate(&env);
-
-        client.create_subscription(&donor, &pid, &(10 * STROOP), &MIN_SUBSCRIPTION_INTERVAL_LEDGERS);
-        client.pause_contract(&admin);
-
-        // Must NOT panic — cancellation is exempt from the pause gate.
-        client.cancel_subscription(&donor, &pid);
-        let sub = client.get_subscription(&donor, &pid);
-        assert!(!sub.active);
-    }
-
-    #[test]
-    fn test_create_subscription_blocked_while_contract_paused() {
-        let (env, _cid, client, admin, pid) = setup();
-        let donor = Address::generate(&env);
-
-        client.pause_contract(&admin);
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.create_subscription(&donor, &pid, &(10 * STROOP), &MIN_SUBSCRIPTION_INTERVAL_LEDGERS);
-        }));
-        assert!(
-            result.is_err(),
-            "create_subscription should be rejected while paused"
-        );
-    }
-
     // ─── Bulk admin tests ──────────────────────────────────────────────────────
 
     #[test]
-    #[should_panic(expected = "Only admin can perform this action")]
+    #[should_panic(expected = "Insufficient admin signatures")]
     fn test_deactivate_all_projects_non_admin_fails() {
         let (env, _cid, client, _admin, _pid) = setup();
         let imposter = Address::generate(&env);
-        client.deactivate_all_projects(&imposter);
+        client.deactivate_all_projects(&signers1(&env, &imposter));
     }
 
     // ─── Two-step admin transfer tests ─────────────────────────────────────
@@ -3078,7 +3997,7 @@ mod tests {
         let cid = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &cid);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
         (env, cid, client, admin)
     }
 
@@ -3087,30 +4006,35 @@ mod tests {
         let (env, _cid, client, admin) = setup_admin_only();
         let new_admin = Address::generate(&env);
 
-        client.transfer_admin(&admin, &new_admin);
-        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+        client.transfer_admin(&signers1(&env, &admin), &admin, &new_admin);
+        assert_eq!(
+            client.get_pending_admin(),
+            Some((admin.clone(), new_admin.clone()))
+        );
         // Stored admin does not change until accept_admin.
         assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.get_admin_set().len(), 1);
 
         client.accept_admin();
         assert_eq!(client.get_admin(), new_admin);
+        assert_eq!(client.get_admin_set().len(), 1);
+        assert_eq!(client.get_admin_threshold(), 1);
         assert_eq!(client.get_pending_admin(), None);
     }
 
     #[test]
-    #[should_panic(expected = "Only admin can perform this action")]
+    #[should_panic(expected = "Insufficient admin signatures")]
     fn test_two_step_admin_transfer_non_admin_cant_initiate() {
         let (env, _cid, client, _admin) = setup_admin_only();
         let imposter = Address::generate(&env);
         let new_admin = Address::generate(&env);
-        client.transfer_admin(&imposter, &new_admin);
+        client.transfer_admin(&signers1(&env, &imposter), &imposter, &new_admin);
     }
 
     #[test]
     #[should_panic(expected = "No pending admin transfer")]
     fn test_two_step_admin_transfer_accept_without_proposal_fails() {
         let (_env, _cid, client, _admin) = setup_admin_only();
-        // mock_all_auths is enabled, but no proposal exists.
         client.accept_admin();
     }
 
@@ -3120,8 +4044,8 @@ mod tests {
         let (env, _cid, client, admin) = setup_admin_only();
         let a = Address::generate(&env);
         let b = Address::generate(&env);
-        client.transfer_admin(&admin, &a);
-        client.transfer_admin(&admin, &b);
+        client.transfer_admin(&signers1(&env, &admin), &admin, &a);
+        client.transfer_admin(&signers1(&env, &admin), &admin, &b);
     }
 
     #[test]
@@ -3129,19 +4053,471 @@ mod tests {
         let (env, _cid, client, admin) = setup_admin_only();
         let new_admin = Address::generate(&env);
 
-        client.transfer_admin(&admin, &new_admin);
-        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
-        client.cancel_admin_transfer(&admin);
+        client.transfer_admin(&signers1(&env, &admin), &admin, &new_admin);
+        assert_eq!(
+            client.get_pending_admin(),
+            Some((admin.clone(), new_admin.clone()))
+        );
+        client.cancel_admin_transfer(&signers1(&env, &admin));
         assert_eq!(client.get_pending_admin(), None);
-        // Original admin is still the admin.
         assert_eq!(client.get_admin(), admin);
     }
 
     #[test]
     #[should_panic(expected = "No pending admin transfer")]
     fn test_two_step_admin_transfer_cancel_without_pending_fails() {
-        let (_env, _cid, client, admin) = setup_admin_only();
-        client.cancel_admin_transfer(&admin);
+        let (env, _cid, client, admin) = setup_admin_only();
+        client.cancel_admin_transfer(&signers1(&env, &admin));
+    }
+
+    // ─── Time-bound campaign tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_create_campaign_sets_active_goal_and_deadline() {
+        let (env, _cid, client, admin, pid) = setup();
+        let deadline = env.ledger().sequence() + 1_000;
+        let goal = 5_000 * STROOP;
+        client.create_campaign(&admin, &pid, &goal, &deadline);
+        let p = client.get_project(&pid);
+        assert_eq!(p.campaign_status, CampaignStatus::Active);
+        assert_eq!(p.goal, goal);
+        assert_eq!(p.deadline_ledger, deadline);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_create_campaign_non_admin_fails() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let imposter = Address::generate(&env);
+        client.create_campaign(
+            &imposter,
+            &pid,
+            &(100 * STROOP),
+            &(env.ledger().sequence() + 10),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Campaign goal must be positive")]
+    fn test_create_campaign_zero_goal_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.create_campaign(&admin, &pid, &0i128, &(env.ledger().sequence() + 10));
+    }
+
+    #[test]
+    #[should_panic(expected = "Campaign deadline must be in the future")]
+    fn test_create_campaign_past_deadline_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.create_campaign(&admin, &pid, &(100 * STROOP), &env.ledger().sequence());
+    }
+
+    #[test]
+    #[should_panic(expected = "Project already has an open campaign")]
+    fn test_create_campaign_while_active_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        let deadline = env.ledger().sequence() + 100;
+        client.create_campaign(&admin, &pid, &(100 * STROOP), &deadline);
+        client.create_campaign(&admin, &pid, &(200 * STROOP), &(deadline + 100));
+    }
+
+    #[test]
+    fn test_donate_under_goal_keeps_campaign_active() {
+        let (env, _cid, client, admin, pid) = setup();
+        let goal = 100 * STROOP;
+        client.create_campaign(&admin, &pid, &goal, &(env.ledger().sequence() + 1_000));
+
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&donor, &(50 * STROOP));
+        client.donate(&token, &donor, &pid, &(50 * STROOP), &0u32);
+
+        let p = client.get_project(&pid);
+        assert_eq!(p.total_raised, 50 * STROOP);
+        assert_eq!(p.campaign_status, CampaignStatus::Active);
+    }
+
+    #[test]
+    fn test_donate_reaching_goal_sets_goal_reached() {
+        let (env, _cid, client, admin, pid) = setup();
+        let goal = 100 * STROOP;
+        client.create_campaign(&admin, &pid, &goal, &(env.ledger().sequence() + 1_000));
+
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&donor, &(100 * STROOP));
+        client.donate(&token, &donor, &pid, &(100 * STROOP), &0u32);
+
+        let p = client.get_project(&pid);
+        assert_eq!(p.total_raised, 100 * STROOP);
+        assert_eq!(p.campaign_status, CampaignStatus::GoalReached);
+    }
+
+    #[test]
+    #[should_panic(expected = "Campaign goal already reached")]
+    fn test_donate_after_goal_reached_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        let goal = 50 * STROOP;
+        client.create_campaign(&admin, &pid, &goal, &(env.ledger().sequence() + 1_000));
+
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&donor, &(100 * STROOP));
+        client.donate(&token, &donor, &pid, &(50 * STROOP), &0u32);
+        client.donate(&token, &donor, &pid, &(50 * STROOP), &1u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "Campaign deadline has passed")]
+    fn test_donate_after_deadline_fails() {
+        let (env, cid, client, admin, pid) = setup();
+        let start = env.ledger().sequence();
+        let deadline = start + 50;
+        client.create_campaign(&admin, &pid, &(1_000 * STROOP), &deadline);
+
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(deadline + 1);
+
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&donor, &STROOP);
+        client.donate(&token, &donor, &pid, &STROOP, &0u32);
+    }
+
+    #[test]
+    fn test_extend_campaign_updates_deadline() {
+        let (env, _cid, client, admin, pid) = setup();
+        let start = env.ledger().sequence();
+        client.create_campaign(&admin, &pid, &(100 * STROOP), &(start + 100));
+        client.extend_campaign(&admin, &pid, &(start + 500));
+        assert_eq!(client.get_project(&pid).deadline_ledger, start + 500);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_extend_campaign_non_admin_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        let start = env.ledger().sequence();
+        client.create_campaign(&admin, &pid, &(100 * STROOP), &(start + 100));
+        let imposter = Address::generate(&env);
+        client.extend_campaign(&imposter, &pid, &(start + 200));
+    }
+
+    #[test]
+    fn test_close_campaign_early_sets_closed() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.create_campaign(
+            &admin,
+            &pid,
+            &(100 * STROOP),
+            &(env.ledger().sequence() + 1_000),
+        );
+        client.close_campaign(&admin, &pid);
+        assert_eq!(
+            client.get_project(&pid).campaign_status,
+            CampaignStatus::Closed
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Campaign is closed")]
+    fn test_donate_after_close_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.create_campaign(
+            &admin,
+            &pid,
+            &(100 * STROOP),
+            &(env.ledger().sequence() + 1_000),
+        );
+        client.close_campaign(&admin, &pid);
+
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&donor, &STROOP);
+        client.donate(&token, &donor, &pid, &STROOP, &0u32);
+    }
+
+    #[test]
+    fn test_close_campaign_after_deadline_sets_expired() {
+        let (env, cid, client, admin, pid) = setup();
+        let start = env.ledger().sequence();
+        let deadline = start + 40;
+        client.create_campaign(&admin, &pid, &(1_000 * STROOP), &deadline);
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(deadline + 1);
+        client.close_campaign(&admin, &pid);
+        assert_eq!(
+            client.get_project(&pid).campaign_status,
+            CampaignStatus::Expired
+        );
+    }
+
+    #[test]
+    fn test_donate_asset_respects_campaign_goal() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.create_campaign(
+            &admin,
+            &pid,
+            &(30 * STROOP),
+            &(env.ledger().sequence() + 1_000),
+        );
+        let donor = Address::generate(&env);
+        client.donate_asset(&donor, &pid, &(30 * STROOP), &symbol_short!("yXLM"), &0u32);
+        assert_eq!(
+            client.get_project(&pid).campaign_status,
+            CampaignStatus::GoalReached
+        );
+    }
+
+    #[test]
+    fn test_donate_usdc_respects_campaign_deadline() {
+        let (env, cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.set_usdc_token(&admin, &token);
+        let oracle_id = env.register_contract(None, MockOracle);
+        client.set_oracle(&admin, &oracle_id);
+
+        let start = env.ledger().sequence();
+        let deadline = start + 30;
+        // MockOracle rate = 8 XLM per USDC stroop; 1 USDC stroop → 8 XLM stroops.
+        client.create_campaign(&admin, &pid, &(1_000 * STROOP), &deadline);
+
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(deadline + 1);
+
+        let donor = Address::generate(&env);
+        let usdc_amount: i128 = 1_000_000;
+        StellarAssetClient::new(&env, &token).mint(&donor, &usdc_amount);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.donate_usdc(&token, &donor, &pid, &usdc_amount, &0u32);
+        }));
+        assert!(
+            result.is_err(),
+            "donate_usdc must reject after campaign deadline"
+        );
+    }
+
+    #[test]
+    fn test_donate_without_campaign_unchanged() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&donor, &(10 * STROOP));
+        client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32);
+        let p = client.get_project(&pid);
+        assert_eq!(p.campaign_status, CampaignStatus::None);
+        assert_eq!(p.total_raised, 10 * STROOP);
+    }
+
+    // ─── Contract-level pause tests ─────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "old_admin is not in the admin set")]
+    fn test_transfer_admin_old_admin_not_in_set_panics() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        let outsider = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.transfer_admin(&signers1(&env, &admin), &outsider, &new_admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "new_admin is already an admin")]
+    fn test_transfer_admin_new_admin_already_in_set_panics() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        client.transfer_admin(&signers1(&env, &admin), &admin, &admin);
+    }
+
+    // ─── Donation rate limit tests ────────────────────────────────────────────
+
+    /// Mint XLM tokens for a donor and return the token contract address.
+    fn mint_xlm(env: &Env, donor: &Address, amount: i128) -> Address {
+        let token_admin = Address::generate(env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(env, &token).mint(donor, &amount);
+        token
+    }
+
+    #[test]
+    fn test_donation_rate_limit_allows_up_to_max_within_window() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.set_donation_rate_limit(&admin, &3, &100);
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 3 * STROOP);
+        for i in 0..3u32 {
+            client.donate(&token, &donor, &pid, &STROOP, &i);
+        }
+        assert_eq!(client.get_project(&pid).total_raised, 3 * STROOP);
+    }
+
+    #[test]
+    #[should_panic(expected = "Donation rate limit exceeded")]
+    fn test_donation_rate_limit_blocks_max_plus_one() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.set_donation_rate_limit(&admin, &3, &100);
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 4 * STROOP);
+        for i in 0..3u32 {
+            client.donate(&token, &donor, &pid, &STROOP, &i);
+        }
+        client.donate(&token, &donor, &pid, &STROOP, &3u32);
+    }
+
+    #[test]
+    fn test_donation_rate_limit_resets_after_window_elapses() {
+        let (env, cid, client, admin, pid) = setup();
+        client.set_donation_rate_limit(&admin, &2, &50);
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 3 * STROOP);
+        let window_start = env.ledger().sequence();
+        client.donate(&token, &donor, &pid, &STROOP, &0u32);
+        client.donate(&token, &donor, &pid, &STROOP, &1u32);
+
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(window_start + 50);
+        client.donate(&token, &donor, &pid, &STROOP, &2u32);
+        assert_eq!(client.get_project(&pid).total_raised, 3 * STROOP);
+    }
+
+    #[test]
+    fn test_donation_rate_limit_off_by_one_window_boundary() {
+        let (env, cid, client, admin, pid) = setup();
+        client.set_donation_rate_limit(&admin, &2, &50);
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 3 * STROOP);
+        let window_start = env.ledger().sequence();
+        client.donate(&token, &donor, &pid, &STROOP, &0u32);
+        client.donate(&token, &donor, &pid, &STROOP, &1u32);
+
+        // Still inside the window — third donation must be blocked.
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(window_start + 50 - 1);
+        let blocked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.donate(&token, &donor, &pid, &STROOP, &2u32);
+        }));
+        assert!(
+            blocked.is_err(),
+            "donation at window boundary - 1 should be blocked"
+        );
+
+        // Exactly at window expiry — window resets and donation succeeds.
+        env.ledger().set_sequence_number(window_start + 50);
+        client.donate(&token, &donor, &pid, &STROOP, &2u32);
+        assert_eq!(client.get_project(&pid).total_raised, 3 * STROOP);
+    }
+
+    #[test]
+    fn test_donation_rate_limit_independent_per_project() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.set_donation_rate_limit(&admin, &2, &100);
+        let pid2 = String::from_str(&env, "proj-002");
+        let wallet2 = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &pid2,
+            &String::from_str(&env, "Second Project"),
+            &wallet2,
+            &100u32,
+        );
+
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 5 * STROOP);
+        client.donate(&token, &donor, &pid, &STROOP, &0u32);
+        client.donate(&token, &donor, &pid, &STROOP, &1u32);
+        // pid is at limit; pid2 still has its own counter.
+        client.donate(&token, &donor, &pid2, &STROOP, &2u32);
+        assert_eq!(client.get_project(&pid2).total_raised, STROOP);
+    }
+
+    #[test]
+    fn test_donation_rate_limit_independent_per_donor() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.set_donation_rate_limit(&admin, &2, &100);
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+        let token_a = mint_xlm(&env, &donor_a, 3 * STROOP);
+        let token_b = mint_xlm(&env, &donor_b, 3 * STROOP);
+
+        client.donate(&token_a, &donor_a, &pid, &STROOP, &0u32);
+        client.donate(&token_a, &donor_a, &pid, &STROOP, &1u32);
+        // donor_a is at limit; donor_b still has its own counter.
+        client.donate(&token_b, &donor_b, &pid, &STROOP, &2u32);
+        assert_eq!(client.get_project(&pid).total_raised, 3 * STROOP);
+    }
+
+    #[test]
+    fn test_set_donation_rate_limit_takes_effect_immediately() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 5 * STROOP);
+
+        client.set_donation_rate_limit(&admin, &1, &100);
+        client.donate(&token, &donor, &pid, &STROOP, &0u32);
+
+        let blocked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.donate(&token, &donor, &pid, &STROOP, &1u32);
+        }));
+        assert!(
+            blocked.is_err(),
+            "new limit of 1 should block second donation"
+        );
+
+        client.set_donation_rate_limit(&admin, &3, &100);
+        assert_eq!(client.get_donation_rate_limit(), (3, 100));
+        client.donate(&token, &donor, &pid, &STROOP, &1u32);
+        client.donate(&token, &donor, &pid, &STROOP, &2u32);
+        assert_eq!(client.get_project(&pid).total_raised, 3 * STROOP);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_set_donation_rate_limit_non_admin_fails() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let imposter = Address::generate(&env);
+        client.set_donation_rate_limit(&imposter, &5, &100);
+    }
+
+    #[test]
+    fn test_donation_rate_limit_first_donation_succeeds() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, STROOP);
+        client.donate(&token, &donor, &pid, &STROOP, &0u32);
+        assert_eq!(client.get_donation_rate_limit(), (10, 720));
+        assert_eq!(client.get_project(&pid).total_raised, STROOP);
+    }
+
+    #[test]
+    fn test_get_donation_rate_limit_defaults() {
+        let (_env, _cid, client, _admin, _pid) = setup();
+        assert_eq!(
+            client.get_donation_rate_limit(),
+            (
+                DEFAULT_DONATION_RATE_LIMIT_MAX,
+                DEFAULT_DONATION_RATE_LIMIT_WINDOW
+            )
+        );
     }
 
     // ─── Contract-level pause tests ─────────────────────────────────────────
@@ -3166,7 +4542,7 @@ mod tests {
             .address();
         soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&donor, &(10 * STROOP));
 
-        client.pause_contract(&client.get_admin());
+        client.pause_contract(&signers1(&env, &client.get_admin()));
         assert!(client.is_contract_paused());
 
         // A donate attempt must panic with the contract-level pause message.
@@ -3189,8 +4565,8 @@ mod tests {
             &100u32,
         );
 
-        client.pause_contract(&admin);
-        client.unpause_contract(&admin);
+        client.pause_contract(&signers1(&env, &admin));
+        client.unpause_contract(&signers1(&env, &admin));
         assert!(!client.is_contract_paused());
 
         let donor = Address::generate(&env);
@@ -3206,11 +4582,11 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Only admin can perform this action")]
+    #[should_panic(expected = "Insufficient admin signatures")]
     fn test_pause_contract_non_admin_fails() {
         let (env, _cid, client, _admin) = setup_admin_only();
         let imposter = Address::generate(&env);
-        client.pause_contract(&imposter);
+        client.pause_contract(&signers1(&env, &imposter));
     }
 
     // ─── 48h upgrade timelock tests ─────────────────────────────────────────
@@ -3220,19 +4596,19 @@ mod tests {
         let (env, _cid, client, admin) = setup_admin_only();
         let fake_hash = BytesN::from_array(&env, &[7u8; 32]);
 
-        client.propose_upgrade(&admin, &fake_hash);
+        client.propose_upgrade(&signers1(&env, &admin), &fake_hash);
         let (h, eff) = client.get_pending_upgrade().expect("pending upgrade");
         assert_eq!(h, fake_hash);
         assert_eq!(eff, env.ledger().sequence() + UPGRADE_TIMELOCK_LEDGERS);
     }
 
     #[test]
-    #[should_panic(expected = "Only admin can perform this action")]
+    #[should_panic(expected = "Insufficient admin signatures")]
     fn test_propose_upgrade_non_admin_fails() {
         let (env, _cid, client, _admin) = setup_admin_only();
         let imposter = Address::generate(&env);
         let fake_hash = BytesN::from_array(&env, &[1u8; 32]);
-        client.propose_upgrade(&imposter, &fake_hash);
+        client.propose_upgrade(&signers1(&env, &imposter), &fake_hash);
     }
 
     #[test]
@@ -3241,8 +4617,8 @@ mod tests {
         let (env, _cid, client, admin) = setup_admin_only();
         let h1 = BytesN::from_array(&env, &[1u8; 32]);
         let h2 = BytesN::from_array(&env, &[2u8; 32]);
-        client.propose_upgrade(&admin, &h1);
-        client.propose_upgrade(&admin, &h2);
+        client.propose_upgrade(&signers1(&env, &admin), &h1);
+        client.propose_upgrade(&signers1(&env, &admin), &h2);
     }
 
     #[test]
@@ -3250,7 +4626,7 @@ mod tests {
     fn test_execute_upgrade_before_timelock_fails() {
         let (env, _cid, client, admin) = setup_admin_only();
         let fake_hash = BytesN::from_array(&env, &[3u8; 32]);
-        client.propose_upgrade(&admin, &fake_hash);
+        client.propose_upgrade(&signers1(&env, &admin), &fake_hash);
         // Still well before the effective ledger.
         client.execute_upgrade();
     }
@@ -3260,7 +4636,7 @@ mod tests {
         let (env, _cid, client, admin) = setup_admin_only();
         let fake_hash = BytesN::from_array(&env, &[4u8; 32]);
         let start = env.ledger().sequence();
-        client.propose_upgrade(&admin, &fake_hash);
+        client.propose_upgrade(&signers1(&env, &admin), &fake_hash);
 
         // Verify timelock state is recorded correctly (effective_at).
         let (hash, effective_at) = client.get_pending_upgrade().unwrap();
@@ -3271,7 +4647,7 @@ mod tests {
         // contract WASM to be uploaded first, which isn't available in the
         // unit-test host environment.  The timelock state machine is
         // covered by the assertions above and the cancel tests below.
-        client.cancel_upgrade(&admin);
+        client.cancel_upgrade(&signers1(&env, &admin));
         assert_eq!(client.get_pending_upgrade(), None);
     }
 
@@ -3279,9 +4655,9 @@ mod tests {
     fn test_cancel_upgrade_clears_pending() {
         let (env, _cid, client, admin) = setup_admin_only();
         let fake_hash = BytesN::from_array(&env, &[5u8; 32]);
-        client.propose_upgrade(&admin, &fake_hash);
+        client.propose_upgrade(&signers1(&env, &admin), &fake_hash);
         assert!(client.get_pending_upgrade().is_some());
-        client.cancel_upgrade(&admin);
+        client.cancel_upgrade(&signers1(&env, &admin));
         assert_eq!(client.get_pending_upgrade(), None);
         // last-executed is untouched because no upgrade was ever executed.
         assert_eq!(client.get_last_executed_upgrade(), None);
@@ -3297,7 +4673,621 @@ mod tests {
     #[test]
     #[should_panic(expected = "No pending upgrade")]
     fn test_cancel_upgrade_without_pending_fails() {
-        let (_env, _cid, client, admin) = setup_admin_only();
-        client.cancel_upgrade(&admin);
+        let (env, _cid, client, admin) = setup_admin_only();
+        client.cancel_upgrade(&signers1(&env, &admin));
+    }
+
+    #[test]
+    fn test_extend_all_ttl() {
+        let env = Env::default();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        // Before extending, TTL should be some default (usually 100 in tests or determined by init).
+        // The host env starts at ledger 0. We will use testutils to check the exact TTL.
+        use soroban_sdk::testutils::storage::Instance as TestInstance;
+
+        let _before_ttl = env.as_contract(&id, || env.storage().instance().get_ttl());
+
+        // Extend TTL
+        client.extend_all_ttl(&500_000);
+
+        let after_ttl = env.as_contract(&id, || env.storage().instance().get_ttl());
+        assert!(after_ttl >= 500_000);
+    }
+
+    // ─── Emergency withdrawal tests ────────────────────────────────────────────
+
+    /// Seed the per-project-per-token contract balance for testing.
+    /// Mirrors what #277's deposit function will do in production.
+    fn seed_project_balance(
+        env: &Env,
+        cid: &soroban_sdk::Address,
+        project_id: &str,
+        token: &Address,
+        amount: i128,
+    ) {
+        env.as_contract(cid, || {
+            env.storage().instance().set(
+                &DataKey::ProjectContractBalance(String::from_str(env, project_id), token.clone()),
+                &amount,
+            );
+        });
+    }
+
+    #[test]
+    fn test_emergency_withdrawal_initiate_happy() {
+        let (env, _cid, client, admin, pid) = setup();
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let amount = 500 * STROOP;
+
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &amount);
+
+        let w = client.get_emergency_withdrawal(&pid).unwrap();
+        assert_eq!(w.new_wallet, new_wallet);
+        assert_eq!(w.amount, amount);
+        assert_eq!(w.token, token);
+        assert_eq!(w.initiated_at, env.ledger().sequence());
+        assert_eq!(
+            w.executable_at,
+            env.ledger().sequence() + EMERGENCY_WITHDRAWAL_TIMELOCK
+        );
+    }
+
+    #[test]
+    fn test_emergency_withdrawal_execute_after_timelock() {
+        let (env, cid, client, admin, pid) = setup();
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let deposit_amount: i128 = 1000 * STROOP;
+        let withdrawal_amount: i128 = 500 * STROOP;
+
+        // Fund the contract's Stellar token balance
+        StellarAssetClient::new(&env, &token).mint(&cid, &deposit_amount);
+        // Seed the per-project-per-token balance
+        seed_project_balance(&env, &cid, "proj-001", &token, deposit_amount);
+
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &withdrawal_amount);
+
+        let start = env.ledger().sequence();
+        extend_ttl(&env, &cid);
+        env.ledger()
+            .set_sequence_number(start + EMERGENCY_WITHDRAWAL_TIMELOCK);
+
+        client.execute_emergency_withdrawal(&pid);
+
+        // Verify token arrived at new_wallet
+        let balance = StellarAssetClient::new(&env, &token).balance(&new_wallet);
+        assert_eq!(balance, withdrawal_amount);
+
+        // Verify per-project balance decremented
+        let remaining = env.as_contract(&cid, || {
+            env.storage()
+                .instance()
+                .get::<DataKey, i128>(&DataKey::ProjectContractBalance(pid.clone(), token.clone()))
+        });
+        assert_eq!(remaining.unwrap(), deposit_amount - withdrawal_amount);
+
+        // Verify pending withdrawal cleared
+        assert_eq!(client.get_emergency_withdrawal(&pid), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "Emergency withdrawal timelock not yet elapsed")]
+    fn test_emergency_withdrawal_execute_before_timelock_fails() {
+        let (env, cid, client, admin, pid) = setup();
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let amount = 500 * STROOP;
+
+        StellarAssetClient::new(&env, &token).mint(&cid, &(1000 * STROOP));
+        seed_project_balance(&env, &cid, "proj-001", &token, 1000 * STROOP);
+
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &amount);
+
+        // Still well before the effective ledger
+        client.execute_emergency_withdrawal(&pid);
+    }
+
+    #[test]
+    fn test_emergency_withdrawal_cancel_happy() {
+        let (env, _cid, client, admin, pid) = setup();
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &(500 * STROOP));
+        assert!(client.get_emergency_withdrawal(&pid).is_some());
+
+        client.cancel_emergency_withdrawal(&admin, &pid);
+        assert_eq!(client.get_emergency_withdrawal(&pid), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "No pending emergency withdrawal")]
+    fn test_emergency_withdrawal_execute_after_cancel_fails() {
+        let (env, cid, client, admin, pid) = setup();
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+
+        StellarAssetClient::new(&env, &token).mint(&cid, &(1000 * STROOP));
+        seed_project_balance(&env, &cid, "proj-001", &token, 1000 * STROOP);
+
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &(500 * STROOP));
+        client.cancel_emergency_withdrawal(&admin, &pid);
+
+        extend_ttl(&env, &cid);
+        let start = env.ledger().sequence();
+        env.ledger()
+            .set_sequence_number(start + EMERGENCY_WITHDRAWAL_TIMELOCK);
+
+        client.execute_emergency_withdrawal(&pid);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_emergency_withdrawal_initiate_non_admin_fails() {
+        let (env, cid, client, _admin, pid) = setup();
+        let non_admin = Address::generate(&env);
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+
+        extend_ttl(&env, &cid);
+        client.initiate_emergency_withdrawal(
+            &non_admin,
+            &pid,
+            &new_wallet,
+            &token,
+            &(500 * STROOP),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Project not found")]
+    fn test_emergency_withdrawal_initiate_nonexistent_project_fails() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let fake_pid = String::from_str(&env, "nonexistent");
+
+        client.initiate_emergency_withdrawal(
+            &admin,
+            &fake_pid,
+            &new_wallet,
+            &token,
+            &(500 * STROOP),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Emergency withdrawal already pending for this project")]
+    fn test_emergency_withdrawal_double_initiate_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &(500 * STROOP));
+        // Second initiate should fail
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &(300 * STROOP));
+    }
+
+    #[test]
+    #[should_panic(expected = "No pending emergency withdrawal")]
+    fn test_emergency_withdrawal_cancel_without_pending_fails() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        let fake_pid = String::from_str(&env, "no-withdrawal");
+
+        client.cancel_emergency_withdrawal(&admin, &fake_pid);
+    }
+
+    #[test]
+    #[should_panic(expected = "No pending emergency withdrawal")]
+    fn test_emergency_withdrawal_execute_without_pending_fails() {
+        let (env, _cid, client) = {
+            let env = Env::default();
+            env.mock_all_auths();
+            let cid = env.register_contract(None, IndigoPayContract);
+            let client = IndigoPayContractClient::new(&env, &cid);
+            (env, cid, client)
+        };
+        let fake_pid = String::from_str(&env, "no-withdrawal");
+
+        client.execute_emergency_withdrawal(&fake_pid);
+    }
+
+    #[test]
+    fn test_emergency_withdrawal_getter() {
+        let (env, _cid, client, admin, pid) = setup();
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+
+        // No withdrawal initially
+        assert_eq!(client.get_emergency_withdrawal(&pid), None);
+
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &(500 * STROOP));
+
+        let w = client.get_emergency_withdrawal(&pid).unwrap();
+        assert_eq!(w.amount, 500 * STROOP);
+        assert_eq!(w.token, token);
+        assert_eq!(w.new_wallet, new_wallet);
+
+        // Different project returns None
+        let pid2 = String::from_str(&env, "proj-other");
+        assert_eq!(client.get_emergency_withdrawal(&pid2), None);
+    }
+
+    #[test]
+    fn test_emergency_withdrawal_per_project_isolation() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+
+        // Register two projects
+        let pid_a = String::from_str(&env, "proj-A");
+        let wallet_a = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &pid_a,
+            &String::from_str(&env, "Project A"),
+            &wallet_a,
+            &100u32,
+        );
+        let pid_b = String::from_str(&env, "proj-B");
+        let wallet_b = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &pid_b,
+            &String::from_str(&env, "Project B"),
+            &wallet_b,
+            &100u32,
+        );
+
+        let new_wallet_a = Address::generate(&env);
+        let new_wallet_b = Address::generate(&env);
+
+        // Initiate withdrawal for project A
+        client.initiate_emergency_withdrawal(
+            &admin,
+            &pid_a,
+            &new_wallet_a,
+            &token,
+            &(200 * STROOP),
+        );
+
+        // Project A has a pending withdrawal, B does not
+        assert!(client.get_emergency_withdrawal(&pid_a).is_some());
+        assert_eq!(client.get_emergency_withdrawal(&pid_b), None);
+
+        // Cancel A — B is unaffected
+        client.cancel_emergency_withdrawal(&admin, &pid_a);
+        assert_eq!(client.get_emergency_withdrawal(&pid_a), None);
+
+        // Can now initiate for B
+        client.initiate_emergency_withdrawal(
+            &admin,
+            &pid_b,
+            &new_wallet_b,
+            &token,
+            &(300 * STROOP),
+        );
+        assert!(client.get_emergency_withdrawal(&pid_b).is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "Insufficient contract balance for project")]
+    fn test_emergency_withdrawal_execute_fails_when_balance_zero_but_contract_funded() {
+        let (env, cid, client, admin, pid) = setup();
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+
+        // Contract has real token balance, but ProjectContractBalance is NOT set
+        StellarAssetClient::new(&env, &token).mint(&cid, &(1000 * STROOP));
+
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &(500 * STROOP));
+
+        extend_ttl(&env, &cid);
+        let start = env.ledger().sequence();
+        env.ledger()
+            .set_sequence_number(start + EMERGENCY_WITHDRAWAL_TIMELOCK);
+
+        client.execute_emergency_withdrawal(&pid);
+    }
+
+    #[test]
+    #[should_panic(expected = "Insufficient contract balance for project")]
+    fn test_emergency_withdrawal_execute_fails_with_wrong_token() {
+        let (env, cid, client, admin, pid) = setup();
+        let new_wallet = Address::generate(&env);
+
+        // Create two tokens
+        let xlm_admin = Address::generate(&env);
+        let xlm_token = env.register_stellar_asset_contract_v2(xlm_admin).address();
+        let usdc_admin = Address::generate(&env);
+        let usdc_token = env.register_stellar_asset_contract_v2(usdc_admin).address();
+
+        // Seed balance only for XLM
+        seed_project_balance(&env, &cid, "proj-001", &xlm_token, 1000 * STROOP);
+
+        // Initiate withdrawal in USDC (which has no balance)
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &usdc_token, &100);
+
+        extend_ttl(&env, &cid);
+        let start = env.ledger().sequence();
+        env.ledger()
+            .set_sequence_number(start + EMERGENCY_WITHDRAWAL_TIMELOCK);
+
+        client.execute_emergency_withdrawal(&pid);
+    }
+
+    // ─── Donation refund tests (#290) ──────────────────────────────────────
+
+    /// Helper: mint tokens, donate, return (donor, token, donation_index).
+    fn setup_donation(
+        env: &Env,
+        client: &IndigoPayContractClient,
+        pid: &String,
+    ) -> (Address, Address, u32) {
+        let donor = Address::generate(env);
+        let token_admin = Address::generate(env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(env, &token).mint(&donor, &(50 * STROOP));
+        let donation_index: u32 = client.get_donation_count();
+        client.donate(&token, &donor, pid, &(25 * STROOP), &0u32);
+        (donor, token, donation_index)
+    }
+
+    #[test]
+    fn test_request_refund_success() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+
+        client.request_refund(&donor, &donation_index, &token);
+
+        let req = client.get_refund_request(&0);
+        assert_eq!(req.donor, donor);
+        assert_eq!(req.project_id, pid);
+        assert_eq!(req.amount, 25 * STROOP);
+        assert_eq!(req.donation_record_index, donation_index);
+        assert_eq!(req.requested_at, env.ledger().sequence());
+        assert_eq!(req.status, RefundRequestStatus::Pending);
+        assert_eq!(req.token, token);
+        // co2_per_xlm is 100 in setup(); 25 XLM = 25 stroop-units * 100 = 2500
+        assert_eq!(req.co2_offset_grams, 25 * 100);
+        assert_eq!(client.get_refund_request(&0), req);
+    }
+
+    #[test]
+    #[should_panic(expected = "Refund cooldown expired")]
+    fn test_request_refund_after_cooldown_panics() {
+        let (env, cid, client, _admin, pid) = setup();
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+
+        extend_ttl(&env, &cid);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + REFUND_COOLDOWN_LEDGERS + 1);
+
+        client.request_refund(&donor, &donation_index, &token);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only the donor can request a refund")]
+    fn test_request_refund_wrong_donor_panics() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let (_donor, token, donation_index) = setup_donation(&env, &client, &pid);
+        let imposter = Address::generate(&env);
+
+        client.request_refund(&imposter, &donation_index, &token);
+    }
+
+    #[test]
+    #[should_panic(expected = "Refund already requested for this donation")]
+    fn test_request_refund_double_request_panics() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+
+        client.request_refund(&donor, &donation_index, &token);
+        client.request_refund(&donor, &donation_index, &token);
+    }
+
+    #[test]
+    #[should_panic(expected = "Donation record not found")]
+    fn test_request_refund_nonexistent_donation_panics() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+
+        client.request_refund(&donor, &999u32, &token);
+    }
+
+    #[test]
+    fn test_approve_refund_counters_decremented() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+
+        // Snapshot pre-refund counters.
+        let project_before = client.get_project(&pid);
+        let stats_before = client.get_donor_stats(&donor);
+        let global_before = client.get_global_stats();
+
+        client.request_refund(&donor, &donation_index, &token);
+        client.approve_refund(&admin, &0);
+
+        // All counters must be decremented by the donation amount.
+        let project_after = client.get_project(&pid);
+        assert_eq!(
+            project_after.total_raised,
+            project_before.total_raised - 25 * STROOP
+        );
+
+        let stats_after = client.get_donor_stats(&donor);
+        assert_eq!(
+            stats_after.total_donated,
+            stats_before.total_donated - 25 * STROOP
+        );
+        assert_eq!(
+            stats_after.co2_offset_grams,
+            stats_before.co2_offset_grams - 25 * 100
+        );
+
+        let global_after = client.get_global_stats();
+        assert_eq!(
+            global_after.total_raised,
+            global_before.total_raised - 25 * STROOP
+        );
+        assert_eq!(
+            global_after.co2_offset_grams,
+            global_before.co2_offset_grams - 25 * 100
+        );
+        // DonationCount is NOT decremented (historical).
+        assert_eq!(global_after.donation_count, global_before.donation_count);
+    }
+
+    #[test]
+    fn test_approve_refund_badge_preserved() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+
+        // Verify donor reached Seedling badge (25 XLM > 10 XLM threshold).
+        let stats_before = client.get_donor_stats(&donor);
+        assert_eq!(stats_before.badge, BadgeTier::Seedling);
+
+        client.request_refund(&donor, &donation_index, &token);
+        client.approve_refund(&admin, &0);
+
+        // Badge is NOT recalculated — stays Seedling even though total_donated
+        // dropped below the 10 XLM threshold.
+        let stats_after = client.get_donor_stats(&donor);
+        assert_eq!(stats_after.badge, BadgeTier::Seedling);
+    }
+
+    #[test]
+    fn test_approve_refund_token_transferred() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+
+        // Fund the project wallet so it can return funds.
+        let project = client.get_project(&pid);
+        StellarAssetClient::new(&env, &token).mint(&project.wallet, &(50 * STROOP));
+
+        let balance_before = StellarAssetClient::new(&env, &token).balance(&donor);
+
+        client.request_refund(&donor, &donation_index, &token);
+        client.approve_refund(&admin, &0);
+
+        let balance_after = StellarAssetClient::new(&env, &token).balance(&donor);
+        assert_eq!(balance_after, balance_before + 25 * STROOP);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_approve_refund_non_admin_panics() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+        let imposter = Address::generate(&env);
+
+        client.request_refund(&donor, &donation_index, &token);
+        client.approve_refund(&imposter, &0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Refund request is not pending")]
+    fn test_approve_refund_not_pending_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+
+        client.request_refund(&donor, &donation_index, &token);
+        client.reject_refund(&admin, &0);
+        // Now try to approve a rejected request.
+        client.approve_refund(&admin, &0);
+    }
+
+    #[test]
+    fn test_reject_refund_success() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let project_before = client.get_project(&pid);
+        let stats_before = client.get_donor_stats(&donor);
+
+        client.request_refund(&donor, &donation_index, &token);
+        client.reject_refund(&admin, &0);
+
+        let req = client.get_refund_request(&0);
+        assert_eq!(req.status, RefundRequestStatus::Rejected);
+
+        // Counters are untouched — donation stands.
+        let project_after = client.get_project(&pid);
+        assert_eq!(project_after.total_raised, project_before.total_raised);
+        let stats_after = client.get_donor_stats(&donor);
+        assert_eq!(stats_after.total_donated, stats_before.total_donated);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_reject_refund_non_admin_panics() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+        let imposter = Address::generate(&env);
+
+        client.request_refund(&donor, &donation_index, &token);
+        client.reject_refund(&imposter, &0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Refund request is not pending")]
+    fn test_reject_refund_not_pending_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+
+        client.request_refund(&donor, &donation_index, &token);
+        client.approve_refund(&admin, &0);
+        // Now try to reject an approved request.
+        client.reject_refund(&admin, &0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Refund request not found")]
+    fn test_get_refund_request_not_found_panics() {
+        let (_env, _cid, client, _admin, _pid) = setup();
+        client.get_refund_request(&0);
     }
 }
