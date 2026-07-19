@@ -1,26 +1,40 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import InstallPrompt from "../InstallPrompt";
 
 describe("InstallPrompt", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    window.matchMedia = jest.fn().mockReturnValue({ matches: false });
+  });
+
+  const createInstallEvent = () => {
+    const prompt = jest.fn().mockResolvedValue(undefined);
+    const event = new Event("beforeinstallprompt") as Event & {
+      prompt: () => Promise<void>;
+      userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
+    };
+    event.prompt = prompt;
+    event.userChoice = Promise.resolve({ outcome: "accepted" });
+
+    return { event, prompt };
+  };
+
   it("shows the install prompt after beforeinstallprompt", () => {
     render(<InstallPrompt />);
 
-    const event = new Event("beforeinstallprompt");
-    window.dispatchEvent(event);
+    fireEvent(window, createInstallEvent().event);
 
-    expect(screen.getByText(/Add IndigoPay to your home screen/i)).toBeInTheDocument();
+    expect(screen.getByText(/Install Stellar IndigoPay/i)).toBeInTheDocument();
   });
 
-  it("calls the deferred prompt when the install button is pressed", () => {
-    const prompt = jest.fn().mockResolvedValue(undefined);
-    const event = new Event("beforeinstallprompt") as Event & { preventDefault: () => void; prompt: () => Promise<void> };
-    event.preventDefault = jest.fn();
-    event.prompt = prompt;
-
+  it("calls the deferred prompt when the install button is pressed", async () => {
+    const { event, prompt } = createInstallEvent();
     render(<InstallPrompt />);
-    window.dispatchEvent(event);
+    fireEvent(window, event);
 
-    fireEvent.click(screen.getByRole("button", { name: /install/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /install/i }));
+    });
 
     expect(prompt).toHaveBeenCalled();
   });
@@ -28,9 +42,12 @@ describe("InstallPrompt", () => {
   it("dismisses the prompt when the dismiss button is pressed", () => {
     render(<InstallPrompt />);
 
-    window.dispatchEvent(new Event("beforeinstallprompt"));
+    fireEvent(window, createInstallEvent().event);
     fireEvent.click(screen.getByRole("button", { name: /dismiss/i }));
 
-    expect(screen.queryByText(/Add IndigoPay to your home screen/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Install Stellar IndigoPay/i)).not.toBeInTheDocument();
+    expect(window.localStorage.getItem("indigopay-install-dismissed")).toBe(
+      "true",
+    );
   });
 });

@@ -106,6 +106,43 @@ If Redis is unreachable the rate limiter enters **degraded mode**:
   with the configured limit.
 - A warning is logged for observability.
 
+### Distributed Rate Limiting (Multi-Node)
+
+When deploying across multiple backend pods, the API supports **sharded Redis
+rate limiting** with consistent hashing to prevent a single Redis instance
+from becoming a throughput bottleneck.
+
+**How it works:**
+
+1. Set `REDIS_URLS` to a comma-separated list of Redis instance URLs.
+2. Rate limit keys (e.g. `ratelimit:sw:10.0.0.1:POST:/api/donations`) are
+   hashed and routed to a specific Redis shard using a consistent hash ring.
+3. The same key always maps to the same shard — even when pods scale up or
+   down — so rate limit state is never split.
+4. Adding or removing a Redis instance redistributes approximately `1/N`
+   of keys (the consistent hashing property).
+
+**Configuration:**
+
+```bash
+# Single Redis (current setup, backward compatible):
+REDIS_URL=redis://localhost:6379
+
+# Sharded Redis (for multi-node scaling):
+REDIS_URLS=redis://redis-0:6379,redis://redis-1:6379,redis://redis-2:6379
+```
+
+**Prometheus metrics:**
+
+| Metric | Type | Description |
+| ------ | ---- | ----------- |
+| `indigopay_ratelimit_shard_requests_total` | Counter | Rate limit decisions per shard, labelled by `shard` and `decision` (allowed, denied) |
+| `indigopay_ratelimit_shard_keys` | Gauge | Approximate number of rate limit keys per shard |
+
+**Graceful degradation:** If one Redis shard becomes unavailable, only rate
+limiting for keys mapped to that shard is affected. Requests for other shards
+continue to be rate-limited normally.
+
 ---
 
 ## Health
@@ -285,3 +322,53 @@ wallet owner via the `wallet` query parameter.
 | `tree`     | ≥ 100 XLM   | 🌳    |
 | `forest`   | ≥ 500 XLM   | 🌲    |
 | `earth`    | ≥ 2,000 XLM | 🌍    |
+
+---
+
+## Push Notification Delivery Callbacks
+
+### `POST /api/notifications/delivery-callback`
+
+Receives confirmed delivery status from APNs or FCM. Called by provider-side
+delivery pipelines, **not** end-user clients.
+
+**Authentication:** Bearer token in `Authorization` header, validated against
+the `DELIVERY_CALLBACK_SECRET` environment variable. If the env var is unset,
+authentication is skipped (useful for local development).
+
+> **Note on APNs:** Apple Push Notification service returns the `410 Unregistered`
+> status synchronously in the HTTP/2 response from `api.push.apple.com`. The
+> backend handles this inline in `ApnsProvider.send()` — no inbound webhook from
+> Apple is required. This endpoint is primarily used for FCM downstream delivery
+> receipts and any future webhook-based confirmation pipelines.
+
+**Request body:**
+
+| Field               | Type   | Required | Description |
+|---------------------|--------|----------|-------------|
+| `provider`          | string | ✓        | `apns`, `fcm`, or `expo` |
+| `status`            | string | ✓        | `delivered`, `unregistered`, or `failed` |
+| `deviceToken`       | string | –        | Device token (required if `providerMessageId` is absent) |
+| `providerMessageId` | string | –        | Provider-assigned message ID (required if `deviceToken` is absent) |
+
+**Behaviour:**
+
+- If `providerMessageId` is supplied, the matching `push_notifications.status`
+  row is updated to `delivered` or `failed`.
+- If `status = "unregistered"` and `deviceToken` is supplied, the token is
+  deactivated (`device_tokens.is_active = false`).
+- `indigopay_push_sent_total{provider, outcome}` Prometheus counter is
+  incremented for every confirmed delivery.
+
+**Response:**
+
+```json
+{ "success": true }
+```
+
+**Error responses:**
+
+| Status | Condition |
+|--------|-----------|
+| `400`  | Missing or invalid `provider`, `status`, or neither `deviceToken` nor `providerMessageId` |
+| `401`  | `DELIVERY_CALLBACK_SECRET` is set and the supplied Bearer token does not match |

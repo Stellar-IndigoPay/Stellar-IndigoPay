@@ -1,0 +1,110 @@
+# k8s/postgres-failover-rbac.yaml
+#
+# ServiceAccounts and RBAC for the automated Postgres failover system.
+#
+# Two ServiceAccounts:
+#   postgres-failover-sa   — used by the failover Job to exec into pods,
+#                            patch Services, update ConfigMaps, and restart
+#                            the backend Deployment.
+#   postgres-healthcheck-sa — used by the health-check sidecar in the primary
+#                            pod. Only needs permission to create Jobs (so
+#                            it can spawn the failover Job when the primary
+#                            becomes unhealthy).
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: postgres-failover-sa
+  namespace: stellar-indigopay
+  labels:
+    app: postgres-failover
+    component: database-failover
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: postgres-healthcheck-sa
+  namespace: stellar-indigopay
+  labels:
+    app: postgres
+    component: healthcheck
+---
+# ── Failover SA role ──────────────────────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: postgres-failover-role
+  namespace: stellar-indigopay
+  labels:
+    app: postgres-failover
+rules:
+  # Access to postgres pods for pg_ctl promote and verification
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec", "pods/log"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  # Patch Services to redirect traffic to the new primary
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "patch"]
+  # Update ConfigMap with new primary host
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "patch", "update"]
+  # Rolling restart backend Deployment
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["backend"]
+    verbs: ["update"]  # required for rollout restart
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: postgres-failover-binding
+  namespace: stellar-indigopay
+  labels:
+    app: postgres-failover
+subjects:
+  - kind: ServiceAccount
+    name: postgres-failover-sa
+    namespace: stellar-indigopay
+roleRef:
+  kind: Role
+  name: postgres-failover-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# ── Healthcheck SA role (minimal — only create Jobs) ─────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: postgres-healthcheck-role
+  namespace: stellar-indigopay
+  labels:
+    app: postgres
+    component: healthcheck
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: postgres-healthcheck-binding
+  namespace: stellar-indigopay
+  labels:
+    app: postgres
+    component: healthcheck
+subjects:
+  - kind: ServiceAccount
+    name: postgres-healthcheck-sa
+    namespace: stellar-indigopay
+roleRef:
+  kind: Role
+  name: postgres-healthcheck-role
+  apiGroup: rbac.authorization.k8s.io

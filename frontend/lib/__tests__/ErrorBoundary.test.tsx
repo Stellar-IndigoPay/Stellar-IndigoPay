@@ -9,6 +9,8 @@
  *   4. onError listener fires with `(error, info)` for listener-side effects
  *      (e.g. integration tests asserting on the captured tuple).
  *   5. Stack trace is hidden in production NODE_ENV.
+ *   6. The reset button invokes the optional onReset callback.
+ *   7. Changing resetKeys clears the error automatically (remounts children).
  */
 import React, { type ReactNode } from "react";
 import { render, screen, fireEvent } from "@testing-library/react";
@@ -26,13 +28,15 @@ function Harness({
   shouldThrow,
   fallback,
   onError,
+  onReset,
 }: {
   shouldThrow: boolean;
   fallback?: (error: Error, reset: () => void) => ReactNode;
   onError?: (error: Error, info: React.ErrorInfo) => void;
+  onReset?: () => void;
 }) {
   return (
-    <ErrorBoundary fallback={fallback} onError={onError}>
+    <ErrorBoundary fallback={fallback} onError={onError} onReset={onReset}>
       <Bomb shouldThrow={shouldThrow} />
     </ErrorBoundary>
   );
@@ -60,9 +64,7 @@ describe("ErrorBoundary", () => {
     const region = screen.getByRole("alert");
     expect(region).toBeInTheDocument();
     expect(region.textContent).toMatch(/intentional render error/i);
-    expect(
-      screen.getByRole("button", { name: /reload this section/i }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /try again/i }));
     consoleErrorSpy.mockRestore();
   });
 
@@ -105,9 +107,7 @@ describe("ErrorBoundary", () => {
     render(<ToggleHarness />);
     expect(screen.queryByTestId("ok")).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId("stop-booming"));
-    fireEvent.click(
-      screen.getByRole("button", { name: /reload this section/i }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
     expect(screen.getByTestId("ok")).toBeInTheDocument();
     consoleErrorSpy.mockRestore();
   });
@@ -146,6 +146,46 @@ describe("ErrorBoundary", () => {
     expect(
       screen.queryByTestId("error-boundary-stack"),
     ).not.toBeInTheDocument();
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("invokes the onReset callback when the retry button is clicked", () => {
+    const consoleErrorSpy = jest
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const onReset = jest.fn();
+    render(<Harness shouldThrow={true} onReset={onReset} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+    expect(onReset).toHaveBeenCalledTimes(1);
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("clears the error automatically when resetKeys change", () => {
+    const consoleErrorSpy = jest
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    function KeyedHarness() {
+      const [route, setRoute] = React.useState("/a");
+      return (
+        <>
+          <button data-testid="go-b" onClick={() => setRoute("/b")}>
+            navigate
+          </button>
+          <ErrorBoundary resetKeys={[route]}>
+            <Bomb shouldThrow={route === "/a"} />
+          </ErrorBoundary>
+        </>
+      );
+    }
+    render(<KeyedHarness />);
+    // On "/a" the child throws and the fallback shows.
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    // Navigating changes resetKeys, which should clear the error and
+    // remount children (no longer throwing).
+    fireEvent.click(screen.getByTestId("go-b"));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByTestId("ok")).toBeInTheDocument();
     consoleErrorSpy.mockRestore();
   });
 });

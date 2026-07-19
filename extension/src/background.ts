@@ -10,7 +10,7 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
-chrome.runtime.onMessage.addListener((message, sender) => {
+chrome.runtime.onMessage.addListener((message: any, sender: chrome.runtime.MessageSender) => {
   if (message.action === "setProjectContext" && sender.tab?.id) {
     if (message.projectId) {
       tabProjects.set(sender.tab.id, message.projectId);
@@ -36,14 +36,14 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
   updateContextMenu(tabId);
 });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+chrome.tabs.onUpdated.addListener((tabId: number, changeInfo) => {
   if (changeInfo.status === "complete" || changeInfo.url) {
     // The content script will re-evaluate and send 'setProjectContext',
     // but we can ensure it's hidden during navigation if desired.
   }
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => {
+chrome.tabs.onRemoved.addListener((tabId: number) => {
   tabProjects.delete(tabId);
 });
 
@@ -56,7 +56,7 @@ function updateContextMenu(tabId: number) {
   });
 }
 
-chrome.contextMenus.onClicked.addListener((info, tab) => {
+chrome.contextMenus.onClicked.addListener((info: chrome.contextMenus.OnClickData, tab?: chrome.tabs.Tab) => {
   if (info.menuItemId === "donate-project" && tab?.id) {
     const projectId = tabProjects.get(tab.id);
     if (projectId) {

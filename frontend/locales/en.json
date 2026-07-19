@@ -11,7 +11,27 @@
     "disconnect": "Disconnect",
     "mainnet": "Mainnet",
     "testnet": "Testnet",
-    "apply": "Get Verified"
+    "apply": "Get Verified",
+    "transparency": "Transparency"
+  },
+  "transparency": {
+    "title": "Transparency Dashboard",
+    "subtitle": "Real-time platform health, impact metrics, and live donation activity — all verifiable on the Stellar blockchain.",
+    "impact": "Impact Overview",
+    "totalDonated": "Total Donated",
+    "co2Offset": "CO₂ Offset",
+    "activeProjects": "Active Projects",
+    "uniqueDonors": "Unique Donors",
+    "liveMap": "Live Donation Activity",
+    "slo": "Service Level Objectives",
+    "sloAdmin": "Admin",
+    "recentDonations": "Recent Donations",
+    "waitingForDonations": "Waiting for donations to appear…",
+    "healthOperational": "All Systems Operational",
+    "healthDegraded": "Degraded Performance",
+    "healthOutage": "Service Disruption",
+    "lastChecked": "Last checked",
+    "errorLoading": "Unable to load impact stats. Please try again later."
   },
   "project": {
     "about": "About this Project",

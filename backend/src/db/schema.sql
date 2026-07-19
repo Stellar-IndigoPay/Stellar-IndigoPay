@@ -214,12 +214,13 @@ CREATE TABLE IF NOT EXISTS donation_matches (
 -- after 24 hours and are cleaned up by a background job.
 CREATE TABLE IF NOT EXISTS idempotency_keys (
   key TEXT PRIMARY KEY,
+  request_body_hash TEXT NOT NULL,
   response_status INTEGER NOT NULL,
-  response_body JSONB NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  response_body JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '24 hours')
 );
-CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at
-  ON idempotency_keys (created_at);
+CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_keys (expires_at);
 
 -- device_tokens: push notification device registrations. token is the FCM /
 -- APNs device token; platform is 'ios' or 'android'. wallet_address links
@@ -278,3 +279,17 @@ CREATE INDEX IF NOT EXISTS verification_requests_status_idx
   ON verification_requests (status, submitted_at DESC);
 CREATE INDEX IF NOT EXISTS verification_requests_wallet_idx
   ON verification_requests (wallet_address);
+
+-- idempotency_keys: stores the cached HTTP response for each Idempotency-Key
+-- header value sent by clients to POST /api/donations.  Rows older than 24 h
+-- are pruned by the idempotencyCleanup cron service so that retried requests
+-- within the same window always receive the same response body and status code.
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+  key              TEXT        PRIMARY KEY,
+  response_status  INTEGER     NOT NULL,
+  response_body    JSONB       NOT NULL,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idempotency_keys_created_at_idx
+  ON idempotency_keys (created_at);

@@ -2,8 +2,9 @@
  * pages/index.tsx — IndigoPay landing page
  */
 import Link from "next/link";
-import Head from "next/head";
+import type { GetServerSideProps } from "next";
 import { useState, useRef, useEffect } from "react";
+import PageMeta from "@/components/PageMeta";
 import WalletConnect from "@/components/WalletConnect";
 import { useCountUp } from "@/hooks/useCountUp";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
@@ -17,11 +18,6 @@ import { streamGlobalProjectDonations } from "@/lib/stellar";
 import { formatCO2, formatXLM, progressPercent } from "@/utils/format";
 import type { GlobalStats, CategoryStats } from "@/lib/api";
 import type { ClimateProject } from "@/utils/types";
-
-interface HomeProps {
-  publicKey: string | null;
-  onConnect: (pk: string) => void;
-}
 
 interface LiveDonationTickerItem {
   id: string;
@@ -110,7 +106,8 @@ function getCategoryIcon(category: string): string {
   return match ? match.icon : "📁";
 }
 
-export default function Home({ publicKey, onConnect }: HomeProps) {
+export default function Home() {
+  const [publicKey, setPublicKey] = useState<string | null>(null);
   const [showConnect, setShowConnect] = useState(false);
   const [globalStats, setGlobalStats] = useState<GlobalStats | null>(null);
   const [featuredProject, setFeaturedProject] = useState<ClimateProject | null>(
@@ -183,15 +180,25 @@ export default function Home({ publicKey, onConnect }: HomeProps) {
     }
   }, [liveDonations.length, tickerIndex]);
 
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || "https://stellar-indigopay.app";
+  const canonicalUrl = `${appUrl}/`;
+  const homeJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    name: "Stellar IndigoPay",
+    url: canonicalUrl,
+    description:
+      "Stellar IndigoPay connects donors with verified climate projects worldwide. Donations go directly on-chain — no banks, no delays, no fees swallowed by middlemen.",
+  };
+
   return (
     <div className="relative overflow-hidden">
-      <Head>
-        <title>Stellar IndigoPay — Fund the planet. One XLM at a time.</title>
-        <meta
-          name="description"
-          content="Stellar IndigoPay connects donors with verified climate projects worldwide. Donations go directly on-chain — no banks, no delays, no fees swallowed by middlemen."
-        />
-      </Head>
+      <PageMeta
+        title="Stellar IndigoPay — Fund the planet. One XLM at a time."
+        description="Stellar IndigoPay connects donors with verified climate projects worldwide. Donations go directly on-chain — no banks, no delays, no fees swallowed by middlemen."
+        canonicalUrl={canonicalUrl}
+        jsonLd={homeJsonLd}
+      />
       {/* Background gradient */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
         <div className="absolute top-0 inset-x-0 h-[600px] bg-gradient-to-b from-[rgba(79,70,229,0.03)] via-[rgba(124,58,237,0.02)] to-transparent dark:from-[rgba(129,140,248,0.05)] dark:via-[rgba(139,92,246,0.03)]" />
@@ -223,8 +230,10 @@ export default function Home({ publicKey, onConnect }: HomeProps) {
             {publicKey ? (
               <>
                 <Link
+                  key="browse-projects-connected"
                   href="/projects"
                   className="btn-primary text-base px-8 py-3.5 gap-2"
+                  data-testid="browse-projects-link"
                 >
                   <svg
                     className="w-5 h-5"
@@ -242,8 +251,10 @@ export default function Home({ publicKey, onConnect }: HomeProps) {
                   Browse Projects
                 </Link>
                 <Link
+                  key="my-impact"
                   href="/dashboard"
                   className="btn-secondary text-base px-8 py-3.5"
+                  data-testid="my-impact-link"
                 >
                   My Impact
                 </Link>
@@ -251,8 +262,10 @@ export default function Home({ publicKey, onConnect }: HomeProps) {
             ) : (
               <>
                 <button
+                  key="start-donating"
                   onClick={() => setShowConnect(true)}
                   className="btn-primary text-base px-8 py-3.5 gap-2"
+                  data-testid="start-donating-button"
                 >
                   <svg
                     className="w-5 h-5"
@@ -270,8 +283,10 @@ export default function Home({ publicKey, onConnect }: HomeProps) {
                   Start Donating
                 </button>
                 <Link
+                  key="browse-projects-disconnected"
                   href="/projects"
                   className="btn-secondary text-base px-8 py-3.5"
+                  data-testid="browse-projects-link"
                 >
                   Browse Projects
                 </Link>
@@ -423,7 +438,7 @@ export default function Home({ publicKey, onConnect }: HomeProps) {
       {showConnect && !publicKey && (
         <ConnectWalletDialog
           onConnect={(pk) => {
-            onConnect(pk);
+            setPublicKey(pk);
             setShowConnect(false);
           }}
           onClose={() => setShowConnect(false)}
@@ -692,3 +707,12 @@ function ConnectWalletDialog({
     </div>
   );
 }
+
+// Forces per-request SSR. Without a data-fetching method, Next.js applies
+// Automatic Static Optimization and pre-renders this page with no request
+// context, so `_document.tsx` never sees the CSP nonce set by middleware.ts
+// and every <script> tag gets rendered without one — the browser then
+// blocks all of them under the nonce-based CSP and the page never hydrates.
+export const getServerSideProps: GetServerSideProps = async () => {
+  return { props: {} };
+};

@@ -1,45 +1,82 @@
 import { useEffect, useState } from "react";
 
+interface BeforeInstallPromptEvent extends Event {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
+}
+
 export default function InstallPrompt() {
-  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
-  const [showPrompt, setShowPrompt] = useState(false);
+  const [isVisible, setIsVisible] = useState(false);
+  const [deferredPrompt, setDeferredPrompt] =
+    useState<BeforeInstallPromptEvent | null>(null);
 
   useEffect(() => {
-    const handler = (event: Event) => {
-      const installEvent = event as BeforeInstallPromptEvent;
+    if (typeof window === "undefined") return;
+
+    const dismissed =
+      window.localStorage.getItem("indigopay-install-dismissed") === "true";
+    const isStandalone =
+      window.matchMedia("(display-mode: standalone)").matches ||
+      Boolean(
+        (window.navigator as Navigator & { standalone?: boolean }).standalone,
+      );
+
+    if (dismissed || isStandalone) return;
+
+    const handleBeforeInstallPrompt = (event: Event) => {
       event.preventDefault();
-      setDeferredPrompt(installEvent);
-      setShowPrompt(true);
+      setDeferredPrompt(event as BeforeInstallPromptEvent);
+      setIsVisible(true);
     };
 
-    window.addEventListener("beforeinstallprompt", handler);
-    return () => window.removeEventListener("beforeinstallprompt", handler);
+    const handleAppInstalled = () => {
+      setDeferredPrompt(null);
+      setIsVisible(false);
+    };
+
+    window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+    window.addEventListener("appinstalled", handleAppInstalled);
+
+    return () => {
+      window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+      window.removeEventListener("appinstalled", handleAppInstalled);
+    };
   }, []);
 
-  if (!showPrompt) return null;
+  if (!isVisible) return null;
+
+  const dismiss = () => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("indigopay-install-dismissed", "true");
+    setIsVisible(false);
+  };
+
+  const install = async () => {
+    if (!deferredPrompt) return;
+    await deferredPrompt.prompt();
+    setIsVisible(false);
+  };
 
   return (
-    <div className="fixed bottom-20 right-4 z-50 max-w-xs rounded-lg border border-slate-200 bg-white p-4 shadow-lg dark:border-slate-700 dark:bg-slate-900">
-      <p className="mb-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
-        Add IndigoPay to your home screen
+    <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-2xl border border-[rgba(99,102,241,0.16)] bg-white/95 p-4 shadow-2xl backdrop-blur dark:bg-[#0F172A]/95">
+      <p className="text-sm font-semibold text-[#0F172A] dark:text-[#E2E8F0]">
+        Install Stellar IndigoPay
       </p>
-      <div className="flex gap-2">
+      <p className="mt-1 text-sm text-[#475569] dark:text-[#94A3B8]">
+        Use the app offline and keep your donation flow handy on the home screen.
+      </p>
+      <div className="mt-4 flex gap-2">
         <button
           type="button"
-          onClick={async () => {
-            if (deferredPrompt) {
-              await deferredPrompt.prompt();
-            }
-            setShowPrompt(false);
-          }}
-          className="rounded-md bg-indigo-600 px-3 py-1 text-sm font-medium text-white"
+          onClick={install}
+          className="btn-primary rounded-full px-3 py-2 text-sm"
         >
           Install
         </button>
         <button
           type="button"
-          onClick={() => setShowPrompt(false)}
-          className="rounded-md border border-slate-300 px-3 py-1 text-sm font-medium text-slate-700 dark:border-slate-700 dark:text-slate-200"
+          onClick={dismiss}
+          className="rounded-full border border-[rgba(99,102,241,0.16)] px-3 py-2 text-sm text-[#475569] dark:text-[#94A3B8]"
         >
           Dismiss
         </button>
@@ -47,9 +84,3 @@ export default function InstallPrompt() {
     </div>
   );
 }
-
-type BeforeInstallPromptEvent = Event & {
-  readonly platforms: string[];
-  readonly userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
-  prompt(): Promise<void>;
-};

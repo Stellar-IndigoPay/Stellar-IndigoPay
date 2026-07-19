@@ -12,6 +12,7 @@ const { validate } = require("../middleware/validate");
 const {
   stellarAddress,
   uuid: uuidValidator,
+  projectSubmissionSchema,
 } = require("../validators/schemas");
 const { logAdminAction } = require("../services/audit");
 const {
@@ -437,60 +438,17 @@ router.get("/", async (req, res, next) => {
  * @returns {Promise<void>} Sends the created project payload.
  * @throws {Error} If validation or database insertion fails.
  */
-router.post("/", async (req, res, next) => {
+router.post("/", validate(projectSubmissionSchema), async (req, res, next) => {
   try {
     const {
       name,
       description,
       location,
       category,
-      wallet_address,
-      goal_xlm = 0,
+      walletAddress,
+      goalXLM = 0,
       tags = [],
     } = req.body || {};
-
-    if (
-      !name ||
-      typeof name !== "string" ||
-      name.trim().length < 3 ||
-      name.trim().length > 120
-    ) {
-      throw new AppError("VALIDATION_ERROR", {
-        field: "name",
-        detail: "name must be between 3 and 120 characters",
-      });
-    }
-    if (
-      !description ||
-      typeof description !== "string" ||
-      description.trim().length < 10 ||
-      description.trim().length > 5000
-    ) {
-      throw new AppError("VALIDATION_ERROR", {
-        field: "description",
-        detail: "description must be between 10 and 5000 characters",
-      });
-    }
-    if (
-      !location ||
-      typeof location !== "string" ||
-      location.trim().length < 2 ||
-      location.trim().length > 200
-    ) {
-      throw new AppError("VALIDATION_ERROR", {
-        field: "location",
-        detail: "location must be between 2 and 200 characters",
-      });
-    }
-    if (!category || !VALID_CATEGORIES.includes(category)) {
-      throw new AppError("VALIDATION_ERROR", {
-        field: "category",
-        detail: `category must be one of: ${VALID_CATEGORIES.join(", ")}`,
-      });
-    }
-    if (!wallet_address || typeof wallet_address !== "string") {
-      throw new AppError("VALIDATION_ERROR", { field: "wallet_address" });
-    }
 
     const id = uuid();
     const result = await pool.query(
@@ -503,8 +461,8 @@ router.post("/", async (req, res, next) => {
         description.trim(),
         category,
         location.trim(),
-        wallet_address,
-        goal_xlm,
+        walletAddress,
+        goalXLM,
         tags,
       ],
     );

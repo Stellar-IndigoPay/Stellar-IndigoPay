@@ -1,5 +1,4 @@
 import { withSentryConfig } from "@sentry/nextjs";
-import withPWA from "next-pwa";
 
 /** @type {import('next').NextConfig} */
 
@@ -65,6 +64,9 @@ function buildStaticCsp(allowFraming = false) {
 
 const nextConfig = {
   reactStrictMode: true,
+  experimental: {
+    optimizePackageImports: ["@sentry/nextjs"],
+  },
   webpack: (config) => {
     config.resolve.fallback = {
       ...config.resolve.fallback,
@@ -106,39 +108,6 @@ const nextConfig = {
   },
 };
 
-const pwaConfig = {
-  dest: "public",
-  register: true,
-  skipWaiting: true,
-  disable: process.env.NODE_ENV === "development",
-  runtimeCaching: [
-    {
-      urlPattern: /^https:\/\/.*\.stellar\.org\/.*/,
-      handler: "NetworkFirst",
-      options: {
-        cacheName: "horizon-cache",
-        expiration: { maxEntries: 50, maxAgeSeconds: 60 * 60 },
-      },
-    },
-    {
-      urlPattern: /\/api\/(projects|stats|leaderboard)/,
-      handler: "NetworkFirst",
-      options: {
-        cacheName: "api-cache",
-        expiration: { maxEntries: 100, maxAgeSeconds: 60 * 5 },
-      },
-    },
-    {
-      urlPattern: /\.(?:js|css|woff2|png|svg|ico)$/,
-      handler: "CacheFirst",
-      options: {
-        cacheName: "static-assets",
-        expiration: { maxEntries: 200, maxAgeSeconds: 60 * 60 * 24 * 30 },
-      },
-    },
-  ],
-};
-
 // Wrap with Sentry so source maps upload, instrumentation, and the
 // /monitoring tunnel route are auto-configured.
 //
@@ -163,7 +132,7 @@ const pwaConfig = {
 const hasSentryAuth = Boolean(process.env.SENTRY_AUTH_TOKEN);
 
 export default withSentryConfig(
-  withPWA(pwaConfig)(nextConfig),
+  nextConfig,
   // Second arg: Sentry webpack plugin options (source-map upload config)
   {
     org: process.env.SENTRY_ORG,

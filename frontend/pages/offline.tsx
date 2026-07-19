@@ -4,7 +4,9 @@ export default function OfflinePage() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-[#FAFAFE] px-6 py-16 dark:bg-[#0A0A1A]">
       <div className="max-w-md text-center">
-        <div className="mb-4 text-6xl">📡</div>
+        <div className="mb-4 text-2xl font-semibold" aria-hidden="true">
+          Offline
+        </div>
         <h1 className="mb-3 font-semibold text-3xl text-slate-900 dark:text-slate-100">
           You&apos;re offline
         </h1>

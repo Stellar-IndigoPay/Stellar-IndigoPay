@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useWallet } from "@/lib/WalletProvider";
 import { useRouter } from "next/router";
 import dynamic from "next/dynamic";
 import Link from "next/link";
@@ -23,11 +24,6 @@ const DonationGrowthChartNoSSR = dynamic(
   { ssr: false },
 );
 
-interface AdminProps {
-  publicKey: string | null;
-  onConnect: (pk: string) => void;
-}
-
 function weekKey(dateStr: string): string {
   const d = new Date(dateStr);
   if (Number.isNaN(d.getTime())) return dateStr;
@@ -44,7 +40,8 @@ function weekKey(dateStr: string): string {
   return `${utc.getUTCFullYear()}-W${String(weekNo).padStart(2, "0")}`;
 }
 
-export default function ProjectAdmin({ publicKey, onConnect }: AdminProps) {
+export default function ProjectAdmin() {
+  const { publicKey, connect: onConnect } = useWallet();
   const router = useRouter();
   const { projectId } = router.query;
 

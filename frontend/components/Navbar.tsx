@@ -71,6 +71,7 @@ export default function Navbar({
     { href: "/dashboard", label: t("nav.myImpact") },
     { href: "/apply", label: t("nav.apply") },
     { href: "/bridge", label: t("nav.bridge") },
+    { href: "/transparency", label: "Transparency" },
     { href: "/governance", label: "Governance" },
   ];
 
