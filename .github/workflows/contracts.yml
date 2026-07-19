@@ -92,29 +92,6 @@ jobs:
         with:
           workspaces: contracts
 
-  deep-fuzz:
-    name: Deep Fuzz (2k cases each -- nightly)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    defaults:
-      run:
-        working-directory: contracts
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.91.0
-          targets: wasm32v1-none
-          components: rustfmt, clippy
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: contracts
-
       - name: Run deep fuzz tests
         run: cargo test --features testutils -- fuzz
         env:
