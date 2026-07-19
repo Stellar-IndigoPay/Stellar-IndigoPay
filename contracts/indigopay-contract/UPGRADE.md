@@ -95,3 +95,23 @@ Run the full contract suite:
 ```bash
 cargo test
 ```
+
+## Storage Migration Flow (Redeployment)
+
+When upgrading via WASM swap is not possible or desirable (e.g. migrating to a different network or applying structural changes that cannot be handled via WASM replacement), use the migration helpers to export and import state.
+
+### 1. Export State & Get Hash
+1. Call `export_state(admin)` on the active deployed contract. This returns a `Vec<StateEntry>` representing the contract's instance data.
+2. Call `get_state_hash(admin)` on the active contract to get a deterministic 32-byte SHA-256 digest of the exported state.
+
+### 2. Deploy & Import
+1. Deploy the new contract WASM to the target network. Do **not** initialize it.
+2. Call `import_state(admin, state)` on the new contract, passing the `Vec<StateEntry>` exported in Step 1.
+   - *Note:* The contract must not have been initialized (must not contain an `Admin` key in instance storage) for this to succeed.
+3. Once completed, the imported state is active on the new contract.
+
+### 3. Verify
+1. Call `get_state_hash(admin)` on the new contract.
+2. Verify that the returned 32-byte digest matches the hash retrieved from the source contract in Step 1.
+3. The new deployment is now ready to use, and all historical projects, settings, and donation records are preserved.
+
