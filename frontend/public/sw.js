@@ -1,9 +1,9 @@
-const CACHE_VERSION = "indigopay-v1";
+const CACHE_VERSION = "indigopay-v2";
 const APP_SHELL_CACHE = `${CACHE_VERSION}-app-shell`;
 const STATIC_ASSETS_CACHE = `${CACHE_VERSION}-static-assets`;
 const DATA_CACHE = `${CACHE_VERSION}-data`;
 
-const APP_SHELL_URLS = ["/", "/offline", "/manifest.json", "/favicon.ico"];
+const APP_SHELL_URLS = ["/", "/offline", "/manifest.json"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -87,7 +87,9 @@ self.addEventListener("fetch", (event) => {
           }
           return response;
         })
-        .catch(() => cached);
+        .catch(() =>
+          request.mode === "navigate" ? caches.match("/offline") : cached,
+        );
       return cached || networkFetch;
     }),
   );

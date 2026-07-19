@@ -13,10 +13,13 @@ export default function InstallPrompt() {
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    const dismissed = window.localStorage.getItem("indigopay-install-dismissed") === "true";
+    const dismissed =
+      window.localStorage.getItem("indigopay-install-dismissed") === "true";
     const isStandalone =
       window.matchMedia("(display-mode: standalone)").matches ||
-      Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone);
+      Boolean(
+        (window.navigator as Navigator & { standalone?: boolean }).standalone,
+      );
 
     if (dismissed || isStandalone) return;
 
@@ -64,12 +67,14 @@ export default function InstallPrompt() {
       </p>
       <div className="mt-4 flex gap-2">
         <button
+          type="button"
           onClick={install}
           className="btn-primary rounded-full px-3 py-2 text-sm"
         >
           Install
         </button>
         <button
+          type="button"
           onClick={dismiss}
           className="rounded-full border border-[rgba(99,102,241,0.16)] px-3 py-2 text-sm text-[#475569] dark:text-[#94A3B8]"
         >
