@@ -101,7 +101,8 @@ async function onboardProject(verificationRequest) {
   const dashboardUrl = `${appUrl.replace(/\/$/, "")}/dashboard`;
   const setupGuideUrl = `${appUrl.replace(/\/$/, "")}/docs/getting-started`;
 
-  await sendOnboardingEmail(contactEmail, {
+  await sendOnboardingEmail({
+    to: contactEmail,
     projectName,
     projectId: createdProjectId,
     webhookSecret: finalWebhookSecret,
