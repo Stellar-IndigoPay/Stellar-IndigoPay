@@ -1,7 +1,10 @@
 import { useEffect } from "react";
 import type { AppProps } from "next/app";
 import Head from "next/head";
+import { useState } from "react";
 import { useRouter } from "next/router";
+
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AnimatePresence } from "framer-motion";
 import SkipToContent from "@/components/SkipToContent";
 import PageTransition from "@/components/PageTransition";
@@ -27,43 +30,58 @@ import "@/styles/globals.css";
 // SkipToContent lives at the very top so it is the first focusable
 // element on the page (satisfies WCAG 2.4.1 Bypass Blocks).
 export default function App({ Component, pageProps }: AppProps) {
-  const router = useRouter();
-  const isOnline = useOnlineStatus();
+const [queryClient] = useState(
+  () =>
+    new QueryClient({
+      defaultOptions: {
+        queries: {
+          refetchOnWindowFocus: false,
+          retry: false,
+        },
+      },
+    }),
+);
 
-  useEffect(() => {
-    if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
+const router = useRouter();
+const isOnline = useOnlineStatus();
 
-    const handleOnlineSync = () => {
-      void syncQueuedDonations(async (payload) => {
-        try {
-          await recordDonation({
-            ...payload,
-            transactionHash: payload.transactionHash || "queued-offline",
-          });
-          return true;
-        } catch {
-          return false;
-        }
-      });
-    };
+useEffect(() => {
+  if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
 
-    navigator.serviceWorker.register("/sw.js").catch(() => undefined);
-    navigator.serviceWorker.addEventListener("message", (event) => {
-      if (event.data?.type === "sync-queued-donations") {
-        handleOnlineSync();
+  const handleOnlineSync = () => {
+    void syncQueuedDonations(async (payload) => {
+      try {
+        await recordDonation({
+          ...payload,
+          transactionHash: payload.transactionHash || "queued-offline",
+        });
+        return true;
+      } catch {
+        return false;
       }
     });
-    window.addEventListener("online", handleOnlineSync);
+  };
 
-    handleOnlineSync();
+  navigator.serviceWorker.register("/sw.js").catch(() => undefined);
 
-    return () => {
-      window.removeEventListener("online", handleOnlineSync);
-    };
-  }, []);
+  navigator.serviceWorker.addEventListener("message", (event) => {
+    if (event.data?.type === "sync-queued-donations") {
+      handleOnlineSync();
+    }
+  });
 
-  return (
-    <ErrorBoundary>
+  window.addEventListener("online", handleOnlineSync);
+
+  handleOnlineSync();
+
+  return () => {
+    window.removeEventListener("online", handleOnlineSync);
+  };
+}, []);
+
+return (
+  <ErrorBoundary>
+    <QueryClientProvider client={queryClient}>
       <ThemeProvider>
         <I18nProvider>
           <PriceProvider>
@@ -81,28 +99,31 @@ export default function App({ Component, pageProps }: AppProps) {
                   content="width=device-width, initial-scale=1"
                 />
               </Head>
+
               <ConnectivityBanner isOnline={isOnline} />
+
               <SkipToContent />
+
               <main id="main-content" tabIndex={-1}>
                 <OfflineFallback isOnline={isOnline} />
-                {/* `initial={false}` prevents the entrance animation on the
-                    first SSR paint; `mode="wait"` lets the outgoing page
-                    finish exiting before the incoming one mounts, which keeps
-                    route changes smooth for both forward and back/forward
-                    navigations. Keying by `router.asPath` (including the
-                    query string) ensures dynamic routes animate too. */}
+
                 <AnimatePresence mode="wait" initial={false}>
                   <PageTransition key={router.asPath}>
                     <Component {...pageProps} />
                   </PageTransition>
                 </AnimatePresence>
               </main>
+
               <InstallPrompt />
               <ThemeTiedToaster />
             </WalletProvider>
           </PriceProvider>
         </I18nProvider>
       </ThemeProvider>
+    </QueryClientProvider>
+  </ErrorBoundary>
+);
     </ErrorBoundary>
   );
 }
+

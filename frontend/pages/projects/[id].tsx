@@ -2,6 +2,13 @@
  * pages/projects/[id].tsx — Single project detail + donate
  */
 import { useState, useEffect } from "react";
+import { useQueries, useQueryClient } from "@tanstack/react-query";
+import {
+  useProjectQuery,
+  useFollowProject,
+  useUnfollowProject,
+  useToggleUpdateLike,
+} from "@/hooks/queries";
 import { useRouter } from "next/router";
 import type { GetServerSideProps } from "next";
 import PageMeta from "@/components/PageMeta";
@@ -26,9 +33,7 @@ import {
   createProjectCampaign,
   fetchProjectMatches,
   generateProjectSummary,
-  toggleUpdateLike,
-  followProject,
-  unfollowProject,
+  fetchUpdateLikes,
 } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 import {
@@ -72,16 +77,48 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
   const { id } = router.query;
   const { t } = useI18n();
 
-  const [publicKey, setPublicKey] = useState<string | null>(null);
-  const [project, setProject] = useState<ClimateProject | null>(null);
-  const [updates, setUpdates] = useState<ProjectUpdate[]>([]);
-  const [loadError, setLoadError] = useState<unknown>(null);
-  const [isRetrying, setIsRetrying] = useState(false);
-  const [retryCount, setRetryCount] = useState(0);
-  const [updateLikes, setUpdateLikes] = useState<
-    Record<string, { liked: boolean; likeCount: number }>
-  >({});
-  const [loading, setLoading] = useState(true);
+const [publicKey, setPublicKey] = useState<string | null>(null);
+
+const [updates, setUpdates] = useState<ProjectUpdate[]>([]);
+const [loadError, setLoadError] = useState<unknown>(null);
+const [isRetrying, setIsRetrying] = useState(false);
+const [retryCount, setRetryCount] = useState(0);
+const [updateLikes, setUpdateLikes] = useState<
+  Record<string, { liked: boolean; likeCount: number }>
+>({});
+
+const [apiLoading, setApiLoading] = useState(true);
+
+const queryClient = useQueryClient();
+const [project, setProjectState] = useState<ClimateProject | null>(null);
+
+const setProject = (p: ClimateProject | null) => {
+  setProjectState(p);
+
+  if (p) {
+    queryClient.setQueryData(["project", p.id], p);
+  }
+};
+
+const {
+  data: projectQueryData,
+  isLoading: projectQueryLoading,
+} = useProjectQuery(
+  id as string,
+  undefined,
+  publicKey ?? undefined,
+);
+
+useEffect(() => {
+  if (projectQueryData) {
+    setProjectState(projectQueryData);
+  }
+}, [projectQueryData]);
+
+const loading = projectQueryLoading || apiLoading;
+
+const isFollowing = project?.isFollowing ?? false;
+const followCount = project?.followCount ?? 0;
   const [refreshKey, setRefreshKey] = useState(0);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">(
     "idle",
@@ -115,9 +152,61 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
     "idle" | "loading" | "error"
   >("idle");
   const [aiSummaryError, setAiSummaryError] = useState<string | null>(null);
-  const [isFollowing, setIsFollowing] = useState(false);
-  const [followCount, setFollowCount] = useState(0);
-  const [followLoading, setFollowLoading] = useState(false);
+
+  const followMutation = useFollowProject(publicKey || "", {
+    onError: () => {
+      setToasts((prev) => [
+        ...prev,
+        {
+          id: `follow-fail-${Date.now()}`,
+          title: "Failed to follow project. Please try again.",
+          createdAt: Date.now(),
+        },
+      ]);
+    },
+  });
+
+  const unfollowMutation = useUnfollowProject(publicKey || "", {
+    onError: () => {
+      setToasts((prev) => [
+        ...prev,
+        {
+          id: `unfollow-fail-${Date.now()}`,
+          title: "Failed to unfollow project. Please try again.",
+          createdAt: Date.now(),
+        },
+      ]);
+    },
+  });
+
+  const likeMutation = useToggleUpdateLike(publicKey || "", {
+    onError: () => {
+      setToasts((prev) => [
+        ...prev,
+        {
+          id: `like-fail-${Date.now()}`,
+          title: "Failed to update like. Please try again.",
+          createdAt: Date.now(),
+        },
+      ]);
+    },
+  });
+
+  const followLoading = followMutation.isPending || unfollowMutation.isPending;
+
+  const updateLikesQueries = useQueries({
+    queries: updates.map((u) => ({
+      queryKey: ["updateLikes", u.id],
+      queryFn: () => fetchUpdateLikes(u.id, publicKey ?? undefined),
+      enabled: !!u.id,
+    })),
+  });
+
+  const updateLikes = updates.reduce((acc, u, index) => {
+    const query = updateLikesQueries[index];
+    acc[u.id] = query?.data || { liked: false, likeCount: 0 };
+    return acc;
+  }, {} as Record<string, { liked: boolean; likeCount: number }>);
 
   const { toggleWishlist, isInWishlist } = useWishlist();
   const prefillAmount =
@@ -133,49 +222,43 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
 
   useEffect(() => {
     if (!id) return;
-    setLoadError(null);
+setApiLoading(true);
+setLoadError(null);
     Promise.all([
-      fetchProject(id as string, publicKey ?? undefined),
       fetchProjectUpdates(id as string),
       fetchProjectMatches(id as string),
     ])
-      .then(([p, u, m]) => {
-        setProject(p);
+      .then(([u, m]) => {
         setUpdates(u);
         setMatches(m);
-        // Seed follow state from the server response so the button is correct
-        // on initial load without a separate round-trip.
-        setIsFollowing(p.isFollowing ?? false);
-        setFollowCount(p.followCount ?? 0);
       })
-      .catch((err) => setLoadError(err))
-      .finally(() => setLoading(false));
-  }, [id, publicKey]);
+const handleRetryLoad = async () => {
+  if (isRetrying || !id) return;
 
-  const handleRetryLoad = () => {
-    if (isRetrying || !id) return;
-    setRetryCount((c) => c + 1);
-    setIsRetrying(true);
-    setLoadError(null);
-    setLoading(true);
-    Promise.all([
-      fetchProject(id as string, publicKey ?? undefined),
+  setRetryCount((c) => c + 1);
+  setIsRetrying(true);
+  setLoadError(null);
+  setApiLoading(true);
+
+  try {
+    await queryClient.invalidateQueries({
+      queryKey: ["project", id],
+    });
+
+    const [updates, matches] = await Promise.all([
       fetchProjectUpdates(id as string),
       fetchProjectMatches(id as string),
-    ])
-      .then(([p, u, m]) => {
-        setProject(p);
-        setUpdates(u);
-        setMatches(m);
-        setIsFollowing(p.isFollowing ?? false);
-        setFollowCount(p.followCount ?? 0);
-      })
-      .catch((err) => setLoadError(err))
-      .finally(() => {
-        setLoading(false);
-        setIsRetrying(false);
-      });
-  };
+    ]);
+
+    setUpdates(updates);
+    setMatches(matches);
+  } catch (err) {
+    setLoadError(err);
+  } finally {
+    setApiLoading(false);
+    setIsRetrying(false);
+  }
+};
 
   useEffect(() => {
     if (!project) return;
@@ -184,9 +267,9 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
       .then(setDiscussion)
       .catch(() => setDiscussion([]))
       .finally(() => setDiscussionLoading(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- project object
     // identity changes at the same frequency as walletAddress; including
     // project in the deps array would cause spurious refetches.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project?.walletAddress]);
 
   useEffect(() => {
@@ -213,29 +296,20 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
     }
   };
 
-  const handleToggleLike = async (updateId: string) => {
+  const handleToggleLike = (updateId: string) => {
     if (!publicKey) return;
-    try {
-      const result = await toggleUpdateLike(updateId, publicKey);
-      setUpdateLikes((prev) => ({ ...prev, [updateId]: result }));
-    } catch {
-      // silently fail
-    }
+    const isPending =
+      likeMutation.isPending && likeMutation.variables === updateId;
+    if (isPending) return;
+    likeMutation.mutate(updateId);
   };
 
-  const handleToggleFollow = async () => {
+  const handleToggleFollow = () => {
     if (!publicKey || !project || followLoading) return;
-    setFollowLoading(true);
-    try {
-      const result = isFollowing
-        ? await unfollowProject(project.id, publicKey)
-        : await followProject(project.id, publicKey);
-      setIsFollowing(result.isFollowing);
-      setFollowCount(result.followCount);
-    } catch {
-      // silently fail — button will revert on next load
-    } finally {
-      setFollowLoading(false);
+    if (isFollowing) {
+      unfollowMutation.mutate(project.id);
+    } else {
+      followMutation.mutate(project.id);
     }
   };
 
@@ -247,7 +321,7 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
 
     const shareData = {
       title: `${project.name} - Stellar IndigoPay`,
-      text: `Support ${project.name} on Stellar IndigoPay - ${project.description.slice(0, 100)}...`,
+      text: `Support ${project.name} on Stellar IndigoPay - ${(project.description || "").slice(0, 100)}...`,
       url: window.location.href,
     };
 
@@ -802,6 +876,18 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
   else if (treesEquivalent < 50) analogy = "A growing mini-forest! 🌲";
   else analogy = "A massive impact for our planet! 🌍";
 
+const appUrl =
+  process.env.NEXT_PUBLIC_APP_URL || "https://stellar-indigopay.app";
+
+const ogTitle = ogProject
+  ? `${ogProject.name} — Stellar IndigoPay`
+  : "Stellar IndigoPay";
+
+const ogDescription = ogProject
+  ? `${(ogProject.description || "").slice(0, 160).trimEnd()}… Support this ${ogProject.category} project on Stellar.`
+  : "Donate XLM directly to verified climate projects on Stellar.";
+
+const ogImage = ogProject?.imageUrl || `${appUrl}/og-default.png`;
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10 pb-24 sm:pb-10 animate-fade-in">
       <PageMeta
@@ -993,11 +1079,9 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
                         isFollowing ? "Unfollow project" : "Follow project"
                       }
                     >
-                      {followLoading
-                        ? "…"
-                        : isFollowing
-                          ? `✓ Following${followCount > 0 ? ` (${followCount})` : ""}`
-                          : `Follow${followCount > 0 ? ` (${followCount})` : ""}`}
+                      {isFollowing
+                        ? `✓ Following${followCount > 0 ? ` (${followCount})` : ""}`
+                        : `Follow${followCount > 0 ? ` (${followCount})` : ""}`}
                     </button>
                   )}
                   <button
@@ -1133,15 +1217,21 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
             {/* Wallet link */}
             <div className="mt-4 pt-4 border-t border-forest-100 flex items-center gap-2 text-xs text-[#8aaa8a] dark:text-forest-300 font-body">
               <span>Project wallet:</span>
-              <a
-                href={accountUrl(project.walletAddress)}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="address-tag hover:border-forest-300 transition-colors"
-              >
-                {project.walletAddress.slice(0, 8)}...
-                {project.walletAddress.slice(-6)} ↗
-              </a>
+              {project.walletAddress ? (
+                <a
+                  href={accountUrl(project.walletAddress)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="address-tag hover:border-forest-300 transition-colors"
+                >
+                  {project.walletAddress.slice(0, 8)}...
+                  {project.walletAddress.slice(-6)} ↗
+                </a>
+              ) : (
+                <span className="text-xs text-forest-500 italic">
+                  No wallet address
+                </span>
+              )}
               <button
                 onClick={handleCopyWallet}
                 className="ml-1 p-1.5 rounded hover:bg-forest-100 transition-colors focus:outline-none focus:ring-2 focus:ring-forest-300"
@@ -1580,7 +1670,11 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
                       <div className="flex items-center gap-3 mt-2">
                         <button
                           onClick={() => handleToggleLike(u.id)}
-                          disabled={!publicKey}
+                          disabled={
+                            !publicKey ||
+                            (likeMutation.isPending &&
+                              likeMutation.variables === u.id)
+                          }
                           className={`flex items-center gap-1.5 text-xs font-body transition-colors ${
                             like?.liked
                               ? "text-red-500 font-semibold"
@@ -1613,7 +1707,7 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
                   {
                     id: `${d.id}`,
                     title: "New donation received",
-                    description: `${shortenAddress(d.donorAddress)} just donated ${formatXLM(d.amountXLM || d.amount || "0")}`,
+                    description: `${shortenAddress(d.donorAddress || "")} just donated ${formatXLM(d.amountXLM || d.amount || "0")}`,
                     createdAt: Date.now(),
                   },
                 ]);
@@ -1648,7 +1742,10 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
             ) : (
               <div className="space-y-3">
                 {discussion.slice(-50).map((m) => {
-                  const suggested = `Reply to ${m.from.slice(0, 6)}…: `;
+                  const fromVal = m.from || "";
+                  const suggested = fromVal
+                    ? `Reply to ${fromVal.slice(0, 6)}…: `
+                    : "";
                   const replyMemo =
                     suggested.length <= 100
                       ? suggested
@@ -1660,14 +1757,20 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
                     >
                       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                         <div className="text-xs text-[#8aaa8a] dark:text-forest-300 font-body">
-                          <a
-                            href={accountUrl(m.from)}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="font-semibold text-forest-700 hover:underline"
-                          >
-                            {m.from.slice(0, 6)}…{m.from.slice(-6)}
-                          </a>
+                          {fromVal ? (
+                            <a
+                              href={accountUrl(fromVal)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-semibold text-forest-700 hover:underline"
+                            >
+                              {fromVal.slice(0, 6)}…{fromVal.slice(-6)}
+                            </a>
+                          ) : (
+                            <span className="font-semibold text-forest-700">
+                              Unknown
+                            </span>
+                          )}
                           <span className="mx-2">•</span>
                           <span className="font-semibold text-forest-900">
                             {formatXLM(m.amount, 2)}

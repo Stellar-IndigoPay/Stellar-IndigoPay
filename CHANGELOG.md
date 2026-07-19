@@ -10,47 +10,14 @@
 
 ### Features
 
-* **frontend:** implement advanced keyboard navigation, global keyboard shortcuts, route focus management, and skip links
-  - Add `frontend/hooks/useShortcuts.ts` — custom keyboard shortcuts hook with modifier checking and input field exclusion
-  - Add `frontend/components/GlobalSearchModal.tsx` — search overlay modal accessible via Cmd+K / Ctrl+K with full keyboard navigation (arrows, Enter, Escape) and focus trap
-  - Update `frontend/pages/_app.tsx` to handle page focus management, global shortcuts, and App Shell layout (SkipToContent + Navbar wrapper)
-  - Update `frontend/components/DonateForm.tsx` to support Space/Enter keys on donation amount preset buttons
-  - Update `frontend/components/LanguageSwitcher.tsx` to prevent propagation of the Escape key
-  - Add Jest unit tests for `useShortcuts` hook in `frontend/hooks/__tests__/useShortcuts.test.ts`
-
-* **monitoring:** multi-window SLO burn-rate alerting with error budget dashboard (closes #240)
-  - Defined SLOs: donation recording (99.5%) and project listing (99.9%) over 30-day rolling windows
-  - Recording rules in `monitoring/recording-rules.yml` computing error ratios and budget remaining
-  - Multi-window burn-rate alerts: 2% in 1h (page), 5% in 6h (page), 10% in 3d (warn) for both SLOs
-  - Grafana dashboard: error budget gauges (green/yellow/red thresholds), burn-rate timeseries, top-5xx-routes table
-  - SLO definitions and burn-rate alert response runbook in `docs/performance.md`
-  - Prometheus `prometheus.yml` updated to load recording-rules.yml and alert-rules-routing.yml
-
-* **backend,monitoring:** Postgres connection pool observability dashboard with adaptive pool sizing (closes #244)
-  - New `db_pool_max` Prometheus gauge tracks the current pool capacity
-  - Adaptive pool sizing: if saturated (all connections busy with waiters) for 60 s, increase max by 25 % up to `PG_MAX_HARD_CAP` (default 50)
-  - `parameterizeQuery()` helper replaces string and numeric literals with `$N` placeholders for PII-safe slow-query logging
-  - `extractQueryType()` classifies SQL queries as SELECT/INSERT/UPDATE/DELETE/WITH/OTHER
-  - Queries taking >1 s trigger EXPLAIN (ANALYZE, BUFFERS) fire-and-forget (gated by `DB_EXPLAIN_SLOW_QUERIES=true`)
-  - Grafana dashboard: connection pool health panels (heatmap, gauges for active/idle/waiting, pool max vs active timeseries, slow query count stat)
-  - New alert rules: `DBPoolSaturated` (warn, waiting > 0 for 5 m), `DBPoolExhausted` (page, all connections busy + waiters for 10 m with PagerDuty routing)
-  - 26 new unit tests (16 pool, 10 metrics)
-
-* **frontend,backend:** real-time transparency dashboard with SLO, business metrics, and donation geo-map (closes #253)
-  - New public dashboard page at `/transparency` with platform health banner, impact stat cards, live donation map, and recent donations feed
-  - Health banner polls `/api/readyz` every 30s displaying operational/degraded/outage status with expandable detail rows
-  - Impact overview with 4 animated stat cards (total donated, CO₂ offset, active projects, unique donors) using `AnimatedNumber`
-  - Enhanced `WorldMap` component supports real-time donation markers with pulse animations and fade-out effects
-  - SLO status panel with error-budget gauges for donation and project-listing SLOs, visible only when a wallet is connected
-  - Custom hooks (`useGlobalStats`, `useSLOData`) with configurable polling intervals
-  - New backend endpoint `GET /api/admin/metrics/slo` proxies Prometheus SLO recording rules with per-query error isolation
-  - 10 frontend unit tests (4 HealthBanner, 4 StatCard, 4 SLOStatusPanel) + 4 backend SLO endpoint tests
-
-* **frontend:** implement Playwright end-to-end test suite covering critical user journeys (GF-052, closes #110)
-  - Set up Playwright configuration in `playwright.config.ts` with Next.js dev server and Chrome browser projects
-  - Implement mock fixtures for Freighter wallet injection (`freighter.ts`), Horizon API/Soroban RPC responses (`horizon.ts`), and backend REST endpoints (`api.ts`)
-  - Implement E2E specs for (1) browse projects → donate XLM (`donation.spec.ts`), (2) wallet connect → view dashboard (`dashboard.spec.ts`), and (3) admin login → platform analytics (`admin-analytics.spec.ts`)
-  - Set up GitHub Actions CI integration for automated E2E test runs
+<EmptyState
+  title="No Active Rounds"
+  description="There are currently no active rounds. Learn how the game works or refresh to check for new rounds."
+  action={{
+    label: "Refresh",
+    onClick: onRefresh,
+  }}
+/>
 
 * **backend,frontend:** JWT refresh token rotation and session management for admin auth (GF-032, closes #87)
   - Access tokens cut to 15 minutes and carry a `jti`; refresh tokens are opaque, DB-backed, and live 7 days
