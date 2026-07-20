@@ -162,10 +162,11 @@ export interface ProjectListFilters {
 
 export async function fetchProjects(
   params?: ProjectListFilters,
+  options?: { signal?: AbortSignal },
 ): Promise<ClimateProject[]> {
   const { data } = await api.get<{ success: boolean; data: ClimateProject[] }>(
     "/api/projects",
-    { params },
+    { params, signal: options?.signal },
   );
   return data.data;
 }
@@ -188,6 +189,7 @@ export interface ProjectFacets {
  */
 export async function fetchProjectFacets(
   params?: ProjectListFilters,
+  options?: { signal?: AbortSignal },
 ): Promise<ProjectFacets> {
   const { data } = await api.get<{
     success: boolean;
@@ -195,6 +197,7 @@ export async function fetchProjectFacets(
     facets?: ProjectFacets;
   }>("/api/projects", {
     params: { ...params, facets: true, limit: 1 },
+    signal: options?.signal,
   });
   return data.facets || { category: [], location: [], status: [] };
 }
