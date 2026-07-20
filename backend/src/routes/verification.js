@@ -480,6 +480,75 @@ router.get("/:id", async (req, res, next) => {
 });
 
 /**
+ * Build a simple timeline for a verification request.
+ * Returns an array of events in chronological order.
+ */
+function buildTimeline(row) {
+  const events = [];
+  if (row.submitted_at) {
+    events.push({
+      type: "submitted",
+      at: new Date(row.submitted_at).toISOString(),
+      details: `Verification request submitted by ${row.organization_name}`,
+    });
+  }
+  if (row.reviewed_at) {
+    events.push({
+      type: "reviewed",
+      at: new Date(row.reviewed_at).toISOString(),
+      details: `Status changed to ${row.status}`,
+    });
+  }
+  if (row.reviewer_notes) {
+    events.push({
+      type: "reviewer_notes",
+      at: new Date(row.reviewed_at || row.submitted_at).toISOString(),
+      details: row.reviewer_notes,
+    });
+  }
+  return events;
+}
+
+/**
+ * GET /api/verification-requests/:id/public
+ * Public endpoint exposing a privacy‑safe subset of verification data.
+ */
+router.get("/:id/public", async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM verification_requests WHERE id = $1",
+      [req.params.id],
+    );
+    const row = result.rows[0];
+    if (!row) throw new AppError("VERIFICATION_NOT_FOUND");
+
+    const safe = {
+      id: row.id,
+      organizationName: row.organization_name,
+      organizationWebsite: row.organization_website || null,
+      organizationCountry: row.organization_country || null,
+      projectName: row.project_name,
+      projectCategory: row.project_category,
+      projectLocation: row.project_location,
+      projectDescription: row.project_description || null,
+      co2PerXLM: row.co2_per_xlm?.toString ? row.co2_per_xlm.toString() : String(row.co2_per_xlm || "0"),
+      expectedAnnualTonnesCO2: row.expected_annual_tonnes_co2?.toString ? row.expected_annual_tonnes_co2.toString() : (row.expected_annual_tonnes_co2 ? String(row.expected_annual_tonnes_co2) : null),
+      supportingDocuments: row.supporting_documents || [],
+      storageBackend: row.storage_backend,
+      notes: row.notes || null,
+      status: row.status,
+      reviewerNotes: row.reviewer_notes || null,
+      submittedAt: row.submitted_at ? new Date(row.submitted_at).toISOString() : null,
+      reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
+      timeline: buildTimeline(row),
+    };
+    res.json({ success: true, data: safe });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
  * GET /api/verification-requests
  * Admin only. Returns the most recent submissions with optional filters.
  */

@@ -1422,21 +1422,24 @@ paths:
       description: |
         Record a new donation made to a project, including the transaction hash and amount.
 
-        **Idempotency:** Clients can safely retry this endpoint by supplying an
-        `Idempotency-Key` header with a UUID v4 value. The server stores the
-        response keyed by this header and replays it on subsequent requests with
-        the same key within 24 hours. If the key is missing or malformed the
-        request is processed normally (no idempotency guarantee).
+        Supports idempotent retries via the optional `Idempotency-Key` header (UUID v4).
+        When supplied the server caches the response for 24 hours. A duplicate request
+        within that window with the same key returns `200` with the original cached
+        response body instead of creating a second donation record.
       security: []
       parameters:
         - name: Idempotency-Key
           in: header
           required: false
-          description: A UUID v4 that uniquely identifies this donation request. Supplying the same key within 24 hours returns the original response without creating a duplicate record.
           schema:
             type: string
             format: uuid
-            example: "550e8400-e29b-41d4-a716-446655440000"
+            pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          description: >
+            Optional UUID v4 idempotency key. If provided, the server stores the response
+            and replays it verbatim on duplicate requests within 24 hours, preventing
+            double-recording of the same donation on retry.
+          example: "550e8400-e29b-41d4-a716-446655440000"
       requestBody:
         required: true
         content:
@@ -1444,8 +1447,8 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateDonationRequest"
       responses:
-        "200":
-          description: Donation already recorded (idempotent replay).
+        "201":
+          description: Donation recorded.
           content:
             application/json:
               schema:
@@ -1455,8 +1458,8 @@ paths:
                     type: boolean
                   data:
                     $ref: "#/components/schemas/Donation"
-        "201":
-          description: Donation recorded.
+        "200":
+          description: Idempotent replay — a donation with this Idempotency-Key was already recorded within the last 24 hours. The original response body is returned unchanged.
           content:
             application/json:
               schema:
@@ -1559,6 +1562,69 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/Donation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  /api/donations/recurring/{donorAddress}:
+    get:
+      tags: [Donations]
+      summary: List recurring donations by donor
+      operationId: listDonorRecurringDonations
+      description: Retrieve all recurring donation schedules created by a specific donor.
+      parameters:
+        - name: donorAddress
+          in: path
+          required: true
+          description: Stellar public key of the donor.
+          schema:
+            type: string
+            pattern: "^G[A-Z0-9]{55}$"
+      responses:
+        "200":
+          description: Donor recurring donation list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        donorAddress:
+                          type: string
+                        recurringId:
+                          type: integer
+                        projectId:
+                          type: string
+                        projectName:
+                          type: string
+                        projectWallet:
+                          type: string
+                        amount:
+                          type: number
+                        currency:
+                          type: string
+                        intervalSeconds:
+                          type: integer
+                        nextExecutionAt:
+                          type: string
+                          format: date-time
+                        keeperIncentive:
+                          type: number
+                        active:
+                          type: boolean
+                        createdAt:
+                          type: string
+                          format: date-time
+                        updatedAt:
+                          type: string
+                          format: date-time
         "400":
           $ref: "#/components/responses/BadRequest"
   /api/profiles/{publicKey}:

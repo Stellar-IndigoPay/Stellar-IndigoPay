@@ -1,6 +1,40 @@
 ## [Unreleased]
 
+### Performance
+
+* **frontend:** isolate LiveDonationTicker component to eliminate 3.5s page-wide re-render cycle
+  - Extract `LiveDonationTicker` into `frontend/components/LiveDonationTicker.tsx` as a `React.memo`-wrapped component
+  - Move state rotation (`tickerIndex`) and `setInterval` loop internally inside `LiveDonationTicker`
+  - Remove parent `Home` page component re-renders on ticker ticks
+  - Add unit test suite in `frontend/components/__tests__/LiveDonationTicker.test.tsx`
+
 ### Features
+
+* **backend:** Redis-backed response caching middleware with request coalescing (GF-044, closes #149)
+  - New `cacheResponse(ttlSeconds, keyBuilder)` middleware factory with X-Cache: HIT|MISS|COALESCED headers
+  - Request coalescing (single-flight) via inflight promise Map to prevent cache stampede
+  - `invalidateCache(pattern)` for declarative cache invalidation on mutating writes
+  - Cache key convention: `cache:v1:<resource>:<params_hash>` for future migration
+  - Default TTLs: 60s leaderboard, 120s project listings, 300s global stats/impact, 600s map
+  - Cache invalidation on POST `/api/donations`, POST/PATCH `/api/projects`, POST `/api/profiles`
+  - New map route `GET /api/map` returning geo-located project data (10 min cache)
+  - New Prometheus metrics: `indigopay_cache_hits_total`, `indigopay_cache_misses_total`, `indigopay_cache_coalesced_total`
+  - Cache-Control: `public, max-age=..., stale-while-revalidate=...` headers on cached responses
+  - Graceful degradation when Redis is unavailable (pass-through to database, logged warning)
+  - 18 unit tests covering cache hit/miss, coalescing, invalidation, Redis failure, hash determinism
+* **contracts:** add a multi-source TWAP price oracle with freshness protection (closes #281)
+  - Authorised reporters submit timestamped positive prices to a 20-entry circular buffer
+  - `get_price` averages the newest 10 observations and preserves the IndigoPay oracle interface
+  - Prices older than 720 ledgers use an admin-configured fallback or fail clearly when none exists
+  - Added reporter management, overflow protection, events, and comprehensive oracle tests
+
+* **frontend:** implement advanced keyboard navigation, global keyboard shortcuts, route focus management, and skip links
+  - Add `frontend/hooks/useShortcuts.ts` — custom keyboard shortcuts hook with modifier checking and input field exclusion
+  - Add `frontend/components/GlobalSearchModal.tsx` — search overlay modal accessible via Cmd+K / Ctrl+K with full keyboard navigation (arrows, Enter, Escape) and focus trap
+  - Update `frontend/pages/_app.tsx` to handle page focus management, global shortcuts, and App Shell layout (SkipToContent + Navbar wrapper)
+  - Update `frontend/components/DonateForm.tsx` to support Space/Enter keys on donation amount preset buttons
+  - Update `frontend/components/LanguageSwitcher.tsx` to prevent propagation of the Escape key
+  - Add Jest unit tests for `useShortcuts` hook in `frontend/hooks/__tests__/useShortcuts.test.ts`
 
 * **monitoring:** multi-window SLO burn-rate alerting with error budget dashboard (closes #240)
   - Defined SLOs: donation recording (99.5%) and project listing (99.9%) over 30-day rolling windows
@@ -192,6 +226,17 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [Unreleased]
+
+### Added
+- Comprehensive Soroban contract fuzzing harness with 7 property-based tests (#239)
+- ContractAction-based action-sequence fuzzing for holistic invariant checking
+- Fuzz corpus infrastructure with replayable regression tests
+- Property tests: donation totals consistency, badge monotonicity, donor count accuracy,
+  global stats consistency, vote integrity, CO₂ offset monotonicity, pause/resume idempotency
+- CI fuzz job with 60-second timeout and corpus regression step
+- FUZZ_FINDINGS.md documenting all discoveries from fuzz testing
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).

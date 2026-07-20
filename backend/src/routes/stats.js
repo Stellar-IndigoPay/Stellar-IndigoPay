@@ -6,10 +6,10 @@
 const express = require("express");
 const router = express.Router();
 const pool = require("../db/pool");
-const redis = require("../services/redis");
+const { cacheResponse } = require("../middleware/cache");
 
-const GLOBAL_STATS_CACHE_KEY = "stats:global";
-const GLOBAL_STATS_CACHE_TTL_SECONDS = 60;
+const GLOBAL_STATS_CACHE_KEY = "cache:v1:stats:global";
+const GLOBAL_STATS_CACHE_TTL_SECONDS = 300;
 
 function mapGlobalStatsRow(row = {}) {
   return {
@@ -22,13 +22,8 @@ function mapGlobalStatsRow(row = {}) {
 }
 
 // GET /api/stats/global
-router.get("/global", async (req, res, next) => {
+router.get("/global", cacheResponse(300, () => GLOBAL_STATS_CACHE_KEY), async (req, res, next) => {
   try {
-    const cached = await redis.get(GLOBAL_STATS_CACHE_KEY);
-    if (cached) {
-      return res.json(cached);
-    }
-
     const result = await pool.query(`
       WITH project_totals AS (
         SELECT
@@ -54,12 +49,6 @@ router.get("/global", async (req, res, next) => {
     `);
 
     const stats = mapGlobalStatsRow(result.rows[0]);
-    await redis.set(
-      GLOBAL_STATS_CACHE_KEY,
-      stats,
-      GLOBAL_STATS_CACHE_TTL_SECONDS,
-    );
-
     res.json(stats);
   } catch (e) {
     next(e);

@@ -8,8 +8,9 @@ const pool = require("../db/pool");
 const { AppError } = require("../errors");
 const { validate } = require("../middleware/validate");
 const { leaderboardQuerySchema } = require("../validators/schemas");
+const { cacheResponse } = require("../middleware/cache");
 
-router.get("/", validate(leaderboardQuerySchema, "query"), async (req, res, next) => {
+router.get("/", cacheResponse(60, (req) => `cache:v1:leaderboard:${require("crypto").createHash("md5").update(JSON.stringify(req.query)).digest("hex")}`), validate(leaderboardQuerySchema, "query"), async (req, res, next) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
     const period = req.query.period || "all";

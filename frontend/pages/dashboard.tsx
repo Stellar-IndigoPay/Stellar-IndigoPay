@@ -10,9 +10,15 @@ import ProjectCard from "@/components/ProjectCard";
 import ImpactCertificate from "@/components/ImpactCertificate";
 import ProjectRating from "@/components/ProjectRating";
 import Tabs from "@/components/Tabs";
+import RecurringDonationsTab from "@/components/RecurringDonationsTab";
 import { fetchProfile, fetchDonorHistory, fetchProjects } from "@/lib/api";
 import { getDueMonthlySubscriptions } from "@/lib/monthlyGiving";
 import { getXLMBalance, getFriendBotFunding, NETWORK } from "@/lib/stellar";
+import {
+  useDonorHistory,
+  useDonorProfile,
+  useImpactDonor,
+} from "@/hooks/queries";
 import {
   formatXLM,
   formatCO2,
@@ -24,28 +30,17 @@ import {
 } from "@/utils/format";
 import { explorerUrl } from "@/lib/stellar";
 import type {
-  DonorProfile,
-  Donation,
   ClimateProject,
   MonthlySubscription,
 } from "@/utils/types";
 import { useWishlist } from "@/hooks/useWishlist";
-import DashboardSkeleton from "@/components/DashboardSkeleton";
 import { QueryErrorFallback } from "@/components/QueryErrorFallback";
-import { classifyError } from "@/lib/queryErrors";
-
 export default function Dashboard() {
   const [publicKey, setPublicKey] = useState<string | null>(null);
-  const [profile, setProfile] = useState<DonorProfile | null>(null);
-  const [donations, setDonations] = useState<Donation[]>([]);
   const [balance, setBalance] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [savedProjects, setSavedProjects] = useState<ClimateProject[]>([]);
-  const [allProjects, setAllProjects] = useState<ClimateProject[]>([]);
   const [isUnfunded, setIsUnfunded] = useState(false);
-  const [loadError, setLoadError] = useState<unknown>(null);
-  const [isRetrying, setIsRetrying] = useState(false);
-  const [retryCount, setRetryCount] = useState(0);
+  const [allProjects, setAllProjects] = useState<ClimateProject[]>([]);
+  const [savedProjects, setSavedProjects] = useState<ClimateProject[]>([]);
   const [friendbotState, setFriendbotState] = useState<
     "idle" | "loading" | "success" | "error"
   >("idle");
@@ -60,97 +55,94 @@ export default function Dashboard() {
     name: string;
   } | null>(null);
 
-  useEffect(() => {
-    if (!publicKey) return;
-    setLoadError(null);
-    Promise.all([
-      fetchProfile(publicKey).catch(() => null),
-      fetchDonorHistory(publicKey),
-      getXLMBalance(publicKey).catch(() => {
-        setIsUnfunded(true);
-        return null;
-      }),
-      fetchProjects(),
-    ])
-      .then(([p, d, b, allProjects]) => {
-        setProfile(p);
-        setDonations(d);
-        if (b !== null) {
-          setBalance(b);
-          setIsUnfunded(false);
-        }
-        setAllProjects(allProjects);
-        setSavedProjects(
-          allProjects.filter((proj) => wishlist.includes(proj.id)),
-        );
+  // React Query hooks for server-state data
+  const {
+    data: profile,
+    isLoading: profileLoading,
+    error: profileError,
+    refetch: refetchProfile,
+    isRefetching: profileRefetching,
+  } = useDonorProfile(publicKey);
 
-        // Fetch pending rating
-        return fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || ""}/api/v1/ratings/pending?donorAddress=${publicKey}`,
-        );
-      })
-      .then((r) => r?.json())
-      .then((res) => {
-        if (res?.success && res.data) {
-          setPendingRating(res.data);
-        }
-      })
-      // The pending-rating banner is non-essential: a failure here must not
-      // collapse the whole dashboard into the error fallback.
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, [publicKey, wishlist]);
+  const {
+    data: donations,
+    isLoading: donationsLoading,
+    error: donationsError,
+    refetch: refetchDonations,
+    isRefetching: donationsRefetching,
+  } = useDonorHistory(publicKey);
 
+  const {
+    data: impact,
+    isLoading: impactLoading,
+    error: impactError,
+    refetch: refetchImpact,
+  } = useImpactDonor(publicKey);
+
+  // Determine if any data queries are loading
+  const loading = (profileLoading || donationsLoading || impactLoading) && !!publicKey;
+
+  // Determine if any data queries have errored
+  const loadError = profileError || donationsError || impactError;
+  const isRetrying = profileRefetching || donationsRefetching;
+
+  // Combined refetch
   const handleRetryLoad = () => {
-    if (isRetrying) return;
-    setRetryCount((c) => c + 1);
-    setIsRetrying(true);
-    setLoadError(null);
-    setLoading(true);
-    Promise.all([
-      fetchProfile(publicKey as string).catch(() => null),
-      fetchDonorHistory(publicKey as string),
-      getXLMBalance(publicKey as string).catch(() => {
-        setIsUnfunded(true);
-        return null;
-      }),
-      fetchProjects(),
-    ])
-      .then(([p, d, b, allProjects]) => {
-        setProfile(p);
-        setDonations(d);
-        if (b !== null) {
-          setBalance(b);
-          setIsUnfunded(false);
-        }
-        setAllProjects(allProjects);
-        setSavedProjects(
-          allProjects.filter((proj) => wishlist.includes(proj.id)),
-        );
-        return fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || ""}/api/v1/ratings/pending?donorAddress=${publicKey}`,
-        );
-      })
-      .then((r) => r?.json())
-      .then((res) => {
-        if (res?.success && res.data) {
-          setPendingRating(res.data);
-        }
-      })
-      // The pending-rating banner is non-essential (see initial load above).
-      .catch(() => {})
-      .finally(() => {
-        setLoading(false);
-        setIsRetrying(false);
-      });
+    refetchProfile();
+    refetchDonations();
+    refetchImpact();
   };
 
+  // Fetch projects (not part of React Query yet — out of scope for this issue)
+  useEffect(() => {
+    if (!publicKey) return;
+    fetchProjects()
+      .then((projects) => {
+        setAllProjects(projects);
+        setSavedProjects(
+          projects.filter((proj) => wishlist.includes(proj.id)),
+        );
+      })
+      .catch(() => {});
+  }, [publicKey, wishlist]);
+
+  // Fetch XLM balance from Stellar (not part of React Query)
+  useEffect(() => {
+    if (!publicKey) return;
+    getXLMBalance(publicKey)
+      .then((b) => {
+        setBalance(b);
+        setIsUnfunded(false);
+      })
+      .catch(() => {
+        setIsUnfunded(true);
+        setBalance(null);
+      });
+  }, [publicKey]);
+
+  // Fetch pending rating
+  useEffect(() => {
+    if (!publicKey) return;
+    fetch(
+      `${process.env.NEXT_PUBLIC_API_URL || ""}/api/v1/ratings/pending?donorAddress=${publicKey}`,
+    )
+      .then((r) => r.json())
+      .then((res) => {
+        if (res?.success && res.data) {
+          setPendingRating(res.data);
+        }
+      })
+      .catch(() => {});
+  }, [publicKey]);
+
+  // Due monthly subscriptions
   useEffect(() => {
     if (!publicKey) return;
     setDueSubscriptions(getDueMonthlySubscriptions());
   }, [publicKey]);
 
-  const streak = calculateStreak(donations);
+  const donationsList = donations ?? [];
+  const streak = calculateStreak(donationsList);
 
   const handleFriendbot = async () => {
     if (!publicKey) return;
@@ -193,12 +185,14 @@ export default function Dashboard() {
     );
 
   const totalDonated = profile?.totalDonatedXLM || "0";
-  const co2Estimate = Math.round(parseFloat(totalDonated) * 12); // rough estimate
+  const co2Estimate = impact
+    ? impact.co2OffsetKg
+    : Math.round(parseFloat(totalDonated) * 12); // rough estimate
   const projectsCount = profile?.projectsSupported || 0;
 
   const topBadgeTier = profile?.badges?.length ? profile.badges[0].tier : null;
   const supportedProjects = Array.from(
-    new Map(donations.map((d) => [d.projectId, d.projectId])).values(),
+    new Map(donationsList.map((d) => [d.projectId, d.projectId])).values(),
   )
     .slice(0, 50)
     .map((projectId) => {
@@ -247,21 +241,14 @@ export default function Dashboard() {
     w.document.close();
   };
 
-  if (loading)
-    return (
-      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10 animate-fade-in">
-        <DashboardSkeleton />
-      </div>
-    );
-
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10 animate-fade-in">
-      {(loadError && !loading) || isRetrying ? (
+      {loadError && !loading ? (
         <QueryErrorFallback
           error={loadError}
           onRetry={handleRetryLoad}
           isRetrying={isRetrying}
-          retryCount={retryCount}
+          retryCount={0}
           title="Couldn't load your dashboard"
         />
       ) : (
@@ -504,7 +491,7 @@ export default function Dashboard() {
                           ))}
                         </div>
                       </div>
-                      {streak.current === 0 && donations.length > 0 && (
+                      {streak.current === 0 && donationsList.length > 0 && (
                         <div className="mt-4 pt-4 border-t border-white/20 text-center">
                           <p className="text-xs text-[#A5B4FC] font-body italic">
                             Streak broken? Don&apos;t worry, every donation
@@ -554,7 +541,7 @@ export default function Dashboard() {
                       <h2 className="font-display text-lg font-semibold text-[#0F172A] dark:text-[#E2E8F0] mb-5 flex items-center gap-2">
                         <span>📜</span> Donation History
                       </h2>
-                      {donations.length === 0 ? (
+                      {donationsList.length === 0 ? (
                         <div className="text-center py-12">
                           <p className="text-4xl mb-3">🌱</p>
                           <p className="text-[#475569] dark:text-[#94A3B8] mb-4 font-body">
@@ -569,7 +556,7 @@ export default function Dashboard() {
                         </div>
                       ) : (
                         <div className="space-y-2">
-                          {donations.map((d) => (
+                          {donationsList.map((d) => (
                             <div
                               key={d.id}
                               className="flex items-center gap-4 p-4 rounded-xl bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)] hover:bg-[rgba(99,102,241,0.08)] dark:hover:bg-[rgba(129,140,248,0.10)] transition-colors border border-transparent hover:border-[rgba(99,102,241,0.10)] dark:hover:border-[rgba(129,140,248,0.12)]"
@@ -653,6 +640,11 @@ export default function Dashboard() {
                     )}
                   </div>
                 ),
+              },
+              {
+                id: "recurring",
+                label: "Recurring Donations",
+                content: <RecurringDonationsTab publicKey={publicKey} />,
               },
             ]}
           />

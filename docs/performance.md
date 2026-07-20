@@ -15,6 +15,12 @@ These targets are validated by the k6 load test at `scripts/load-test.js`
 a hard k6 `thresholds` check; the test exits with a non-zero status if it
 is violated.
 
+## Indexer SLOs
+
+- Indexer lag should stay below 50 ledgers under normal operation.
+- Autonomous backfills should recover from lag within 60 seconds for deviations of 10+ ledgers.
+- The readiness endpoint should surface indexer degradation when lag exceeds 50 ledgers.
+
 ## Running the test
 
 ```bash

@@ -30,6 +30,9 @@
 /// - [ ] Arithmetic bounds: no silent overflow
 /// - [ ] Admin-only functions reject non-admin callers
 /// - [ ] Pause-gated functions reject when contract is paused
+/// - [ ] CO₂ offset monotonicity (never decreases)
+/// - [ ] Vote integrity (resolved proposals are immutable)
+/// - [ ] Global stats consistency (get_global_stats matches aggregates)
 ///
 /// # Input generation patterns
 ///
@@ -50,7 +53,41 @@
 ///
 /// // Strings (project IDs, names)
 /// let string = "[a-z0-9-]{1,32}"; // regex strategy
+///
+/// // ContractAction-based sequence generation (preferred for holistic fuzzing)
+/// let actions = prop::collection::vec(contract_action_strategy(n_projects, n_donors), 1..100);
 /// ```
+///
+/// # Action-Sequence Fuzzing Pattern
+///
+/// For fuzzing the whole contract, use the `ContractAction` enum pattern:
+///
+/// ```ignore
+/// enum ContractAction {
+///     Donate { project_idx: usize, donor_idx: usize, amount: i128 },
+///     RegisterProject { name: String, co2_rate: u32 },
+///     PauseProject { project_idx: usize },
+///     ResumeProject { project_idx: usize },
+///     // ... add new action variants here for new functions ...
+/// }
+///
+/// fn contract_action_strategy(n_projects: usize, n_donors: usize)
+///     -> impl Strategy<Value = ContractAction>
+/// {
+///     prop_oneof![
+///         10 => (..).prop_map(|(pi, di, a)| ContractAction::Donate { .. }),
+///         1  => (..).prop_map(|(name, cr)| ContractAction::RegisterProject { .. }),
+///         // Add new action strategies here
+///     ]
+/// }
+/// ```
+///
+/// # Corpus Management
+///
+/// When a fuzz test discovers a failing input:
+/// 1. The failure is saved to `proptest-regressions/` automatically.
+/// 2. Create a deterministic replay test in the `corpus` module in `fuzz_tests.rs`.
+/// 3. Add an entry to `FUZZ_FINDINGS.md` describing the bug.
 ///
 /// Run:
 ///   cargo test --features testutils -- fuzz

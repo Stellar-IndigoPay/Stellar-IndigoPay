@@ -6,7 +6,7 @@
  * - GET /api/impact/global
  * - GET /api/impact/donor/:publicKey
  *
- * All endpoints are cached for 5 minutes (process-local).
+ * All endpoints are cached via Redis response caching middleware.
  */
 "use strict";
 
@@ -15,8 +15,8 @@ const router = express.Router();
 const pool = require("../db/pool");
 const cache = require("../services/cache");
 const { AppError } = require("../errors");
+const { cacheResponse } = require("../middleware/cache");
 
-const CACHE_TTL_MS = 5 * 60 * 1000;
 const KG_CO2_PER_TREE = 21.77; // heuristic, used for treesEquivalent
 
 function validateKey(k) {
@@ -30,21 +30,9 @@ function treesEquivalentFromKg(kg) {
   return Number((kg / KG_CO2_PER_TREE).toFixed(2));
 }
 
-function cacheKey(req) {
-  return req.originalUrl;
-}
-
-function sendCached(req, res, payload) {
-  cache.set(cacheKey(req), payload, CACHE_TTL_MS);
-  res.set("Cache-Control", "public, max-age=300");
-  return res.json(payload);
-}
-
 // GET /api/impact/project/:id
-router.get("/project/:id", async (req, res, next) => {
+router.get("/project/:id", cacheResponse(300, (req) => `cache:v1:impact:project:${req.params.id}`), async (req, res, next) => {
   try {
-    const hit = cache.get(cacheKey(req));
-    if (hit) return res.json(hit);
 
     const projectResult = await pool.query(
       `SELECT id, category, raised_xlm, co2_offset_kg
@@ -77,7 +65,7 @@ router.get("/project/:id", async (req, res, next) => {
     const kgPerXlm = raisedXlm > 0 ? projectCo2OffsetKg / raisedXlm : 0;
     const co2OffsetKg = Math.round(totalDonationsXLM * kgPerXlm);
 
-    return sendCached(req, res, {
+    res.json({
       success: true,
       data: {
         totalDonationsXLM: totalDonationsXLM.toFixed(7),
@@ -93,10 +81,8 @@ router.get("/project/:id", async (req, res, next) => {
 });
 
 // GET /api/impact/global
-router.get("/global", async (req, res, next) => {
+router.get("/global", cacheResponse(300, () => "cache:v1:impact:global"), async (req, res, next) => {
   try {
-    const hit = cache.get(cacheKey(req));
-    if (hit) return res.json(hit);
 
     const totalsResult = await pool.query(
       `SELECT
@@ -155,7 +141,7 @@ router.get("/global", async (req, res, next) => {
       co2OffsetKg: Math.round(Number.parseFloat(row.co2OffsetKg || "0")),
     }));
 
-    return sendCached(req, res, {
+    res.json({
       success: true,
       data: {
         totalDonationsXLM: totalDonationsXLM.toFixed(7),
@@ -172,12 +158,9 @@ router.get("/global", async (req, res, next) => {
 });
 
 // GET /api/impact/donor/:publicKey
-router.get("/donor/:publicKey", async (req, res, next) => {
+router.get("/donor/:publicKey", cacheResponse(300, (req) => `cache:v1:impact:donor:${req.params.publicKey}`), async (req, res, next) => {
   try {
     validateKey(req.params.publicKey);
-
-    const hit = cache.get(cacheKey(req));
-    if (hit) return res.json(hit);
 
     const totalsResult = await pool.query(
       `SELECT
@@ -219,7 +202,7 @@ router.get("/donor/:publicKey", async (req, res, next) => {
     const co2OffsetKg = Math.round(Number.parseFloat(row.co2OffsetKg || "0"));
     const topCategory = topCategoryResult.rows[0]?.category || null;
 
-    return sendCached(req, res, {
+    res.json({
       success: true,
       data: {
         totalDonatedXLM: totalDonatedXLM.toFixed(7),

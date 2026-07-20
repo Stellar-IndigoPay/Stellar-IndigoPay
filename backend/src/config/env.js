@@ -27,6 +27,7 @@ const envSchema = z.object({
   CONTRACT_ID: z.string().optional().default(""),
   ORACLE_CONTRACT_ID: z.string().optional().default(""),
   ORACLE_ADMIN_SECRET: z.string().optional().default(""),
+  KEEPER_SECRET: z.string().optional().default(""),
   RESEND_API_KEY: z.string().optional().default(""),
   EMAIL_FROM: z
     .string()

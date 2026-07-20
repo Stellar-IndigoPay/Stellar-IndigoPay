@@ -1,7 +1,7 @@
 /**
  * pages/projects/[id].tsx — Single project detail + donate
  */
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/router";
 import type { GetServerSideProps } from "next";
 import PageMeta from "@/components/PageMeta";
@@ -41,6 +41,7 @@ import {
   CATEGORY_ICONS,
   copyToClipboard,
   shortenAddress,
+  formatDate,
 } from "@/utils/format";
 import {
   accountUrl,
@@ -54,6 +55,7 @@ import type {
   ProjectCampaign,
   ProjectUpdate,
 } from "@/utils/types";
+import { trackEvent } from "@/lib/analytics";
 import { useWishlist } from "@/hooks/useWishlist";
 import { QueryErrorFallback } from "@/components/QueryErrorFallback";
 
@@ -152,6 +154,18 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
       .finally(() => setLoading(false));
   }, [id, publicKey]);
 
+  // Filter matches to only show active, non-expired, and non-exhausted pools
+  const activeMatches = useMemo(
+    () =>
+      matches.filter(
+        (m: any) =>
+          m.status === "active" &&
+          new Date(m.expiresAt) > new Date() &&
+          parseFloat(m.remainingXLM) > 0,
+      ),
+    [matches],
+  );
+
   const handleRetryLoad = () => {
     if (isRetrying || !id) return;
     setRetryCount((c) => c + 1);
@@ -178,15 +192,23 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
   };
 
   useEffect(() => {
+    if (!loading && project) {
+      trackEvent("project_detail_viewed", {
+        projectId: project.id,
+        category: project.category,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- identity stable
+  }, [loading, project?.id, project?.category]);
+
+  useEffect(() => {
     if (!project) return;
     setDiscussionLoading(true);
     fetchProjectDiscussion(project.walletAddress, 50)
       .then(setDiscussion)
       .catch(() => setDiscussion([]))
       .finally(() => setDiscussionLoading(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- project object
-    // identity changes at the same frequency as walletAddress; including
-    // project in the deps array would cause spurious refetches.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- identity stable
   }, [project?.walletAddress]);
 
   useEffect(() => {
@@ -908,24 +930,38 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
         </div>
       )}
 
-      {matches.length > 0 && (
+      {activeMatches.length > 0 && (
         <div className="card mb-6 border-green-200 bg-gradient-to-r from-green-50 to-emerald-50">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <p className="text-xs uppercase tracking-widest font-bold text-green-700 font-body mb-1">
-                Donation Matching Active
-              </p>
-              <h2 className="font-display text-xl font-semibold text-green-900">
-                Your donation will be matched up to {matches[0].multiplier}x!
-              </h2>
-              <p className="text-sm text-green-800 font-body mt-2">
-                Remaining capacity: {formatXLM(matches[0].remainingXLM)}
-              </p>
-            </div>
-            <p className="text-xs px-3 py-1 rounded-full bg-green-100 border border-green-200 text-green-800 font-body">
-              {new Date(matches[0].expiresAt).toLocaleDateString()}
-            </p>
-          </div>
+          <p className="text-xs uppercase tracking-widest font-bold text-green-700 font-body mb-3">
+            Donation Matching Active
+          </p>
+          {activeMatches.map((m: any) => {
+            const cap = parseFloat(m.capXLM);
+            const matched = parseFloat(m.matchedXLM);
+            const pct = cap > 0 ? Math.min((matched / cap) * 100, 100) : 0;
+            return (
+              <div key={m.id} className="mb-3 last:mb-0">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-sm font-semibold text-green-900 font-body">
+                    Donations matched {m.multiplier}× up to{" "}
+                    {formatXLM(m.capXLM)}
+                  </span>
+                  <span className="text-xs text-green-700 font-body">
+                    {formatXLM(m.remainingXLM)} remaining
+                  </span>
+                </div>
+                <div className="w-full h-2 bg-green-100 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-green-500 rounded-full transition-all"
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                <p className="text-xs text-green-600 font-body mt-1">
+                  Expires {formatDate(m.expiresAt)}
+                </p>
+              </div>
+            );
+          })}
         </div>
       )}
 

@@ -4,6 +4,7 @@
  */
 import { useState } from "react";
 import { connectWallet, isFreighterInstalled } from "@/lib/wallet";
+import { trackEvent } from "@/lib/analytics";
 
 interface WalletConnectProps {
   onConnect: (pk: string) => void;
@@ -28,7 +29,10 @@ export default function WalletConnect({ onConnect }: WalletConnectProps) {
       setError(e);
       return;
     }
-    if (publicKey) onConnect(publicKey);
+    if (publicKey) {
+      trackEvent("wallet_connected");
+      onConnect(publicKey);
+    }
   };
 
   return (
