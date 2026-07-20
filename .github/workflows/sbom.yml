@@ -18,10 +18,9 @@ jobs:
     name: Generate SBOM
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      # Required to write to the GitHub dependency graph API
+      # Required to write to the GitHub dependency submission API.
+      contents: write
       actions: read
-      dependency-graph: write
     strategy:
       fail-fast: false
       matrix:

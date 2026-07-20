@@ -17,12 +17,8 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || typeof message !== 'object') return false;
-
-  // The content script keeps us informed of which tab is on an IndigoPay
-  // project page, so we can show the "Donate to this project" context menu.
-  if (message.action === 'setProjectContext' && sender.tab?.id != null) {
+chrome.runtime.onMessage.addListener((message: any, sender: chrome.runtime.MessageSender) => {
+  if (message.action === "setProjectContext" && sender.tab?.id) {
     if (message.projectId) {
       tabProjects.set(sender.tab.id, message.projectId);
     } else {
@@ -76,12 +72,14 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
   updateContextMenu(tabId);
 });
 
-chrome.tabs.onUpdated.addListener((tabId) => {
-  // Force-resend project context on significant URL changes.
-  updateContextMenu(tabId);
+chrome.tabs.onUpdated.addListener((tabId: number, changeInfo) => {
+  if (changeInfo.status === "complete" || changeInfo.url) {
+    // The content script will re-evaluate and send 'setProjectContext',
+    // but we can ensure it's hidden during navigation if desired.
+  }
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => {
+chrome.tabs.onRemoved.addListener((tabId: number) => {
   tabProjects.delete(tabId);
 });
 
@@ -94,8 +92,8 @@ function updateContextMenu(tabId: number) {
   });
 }
 
-chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === 'donate-project' && tab?.id != null) {
+chrome.contextMenus.onClicked.addListener((info: chrome.contextMenus.OnClickData, tab?: chrome.tabs.Tab) => {
+  if (info.menuItemId === "donate-project" && tab?.id) {
     const projectId = tabProjects.get(tab.id);
     if (projectId) {
       chrome.storage.local.set({ pendingDonationProjectId: projectId }, () => {

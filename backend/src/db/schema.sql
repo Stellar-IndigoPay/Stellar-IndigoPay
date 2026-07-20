@@ -52,6 +52,21 @@ ALTER TABLE donations ADD COLUMN IF NOT EXISTS conversion_path     JSONB;
 ALTER TABLE donations ADD COLUMN IF NOT EXISTS converted_amount_xlm NUMERIC(20, 7);
 CREATE INDEX IF NOT EXISTS idx_donations_source_asset ON donations (source_asset) WHERE source_asset IS NOT NULL;
 
+-- Automated CO₂ offset-rate verification (see migration 018 and
+-- services/co2Verifier.js). Self-reported co2_per_xlm rates are compared
+-- against per-category industry benchmarks when a verification request is
+-- approved; the verdict lands here. Statuses: pending (not yet checked),
+-- verified (≤3× benchmark), review (3–10×), flagged (>10×, needs admin
+-- resolution), rejected (admin rejected the claimed rate).
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS co2_verification_status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS co2_verification_notes TEXT;
+ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_co2_verification_status_check;
+ALTER TABLE projects ADD CONSTRAINT projects_co2_verification_status_check
+  CHECK (co2_verification_status IN ('pending', 'verified', 'review', 'flagged', 'rejected'));
+CREATE INDEX IF NOT EXISTS idx_projects_co2_verification_status
+  ON projects (co2_verification_status)
+  WHERE co2_verification_status IN ('review', 'flagged');
+
 -- Full-text search: tsvector kept current by a trigger (see migration
 -- 013_project_search) so GET /api/projects can rank matches with ts_rank
 -- instead of relying solely on ILIKE substring matching.
@@ -181,6 +196,7 @@ CREATE TABLE IF NOT EXISTS project_ratings (
 -- donation_matches: matching offer contracts. A matcher pledges to multiply
 -- donations up to cap_xlm by multiplier (e.g. 2×). matched_xlm tracks the
 -- total matched so far; expires_at ends the offer period.
+-- status lifecycle: active → expired (time-based) | exhausted (cap reached) | cancelled (admin).
 CREATE TABLE IF NOT EXISTS donation_matches (
   id UUID PRIMARY KEY,
   project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -192,6 +208,15 @@ CREATE TABLE IF NOT EXISTS donation_matches (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Add status column to support lifecycle management (active / expired / exhausted / cancelled).
+-- The matchExpiry background service flips active pools to expired or exhausted automatically.
+ALTER TABLE donation_matches ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE donation_matches DROP CONSTRAINT IF EXISTS donation_matches_status_check;
+ALTER TABLE donation_matches ADD CONSTRAINT donation_matches_status_check
+  CHECK (status IN ('active', 'expired', 'exhausted', 'cancelled'));
+CREATE INDEX IF NOT EXISTS idx_donation_matches_status
+  ON donation_matches (status, project_id);
+
 
 -- idempotency_keys: stores response snapshots keyed by Idempotency-Key
 -- headers so safe retries of POST /api/donations replay the original
@@ -199,12 +224,13 @@ CREATE TABLE IF NOT EXISTS donation_matches (
 -- after 24 hours and are cleaned up by a background job.
 CREATE TABLE IF NOT EXISTS idempotency_keys (
   key TEXT PRIMARY KEY,
+  request_body_hash TEXT NOT NULL,
   response_status INTEGER NOT NULL,
-  response_body JSONB NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  response_body JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '24 hours')
 );
-CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at
-  ON idempotency_keys (created_at);
+CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_keys (expires_at);
 
 -- device_tokens: push notification device registrations. token is the FCM /
 -- APNs device token; platform is 'ios' or 'android'. wallet_address links
@@ -263,3 +289,17 @@ CREATE INDEX IF NOT EXISTS verification_requests_status_idx
   ON verification_requests (status, submitted_at DESC);
 CREATE INDEX IF NOT EXISTS verification_requests_wallet_idx
   ON verification_requests (wallet_address);
+
+-- idempotency_keys: stores the cached HTTP response for each Idempotency-Key
+-- header value sent by clients to POST /api/donations.  Rows older than 24 h
+-- are pruned by the idempotencyCleanup cron service so that retried requests
+-- within the same window always receive the same response body and status code.
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+  key              TEXT        PRIMARY KEY,
+  response_status  INTEGER     NOT NULL,
+  response_body    JSONB       NOT NULL,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idempotency_keys_created_at_idx
+  ON idempotency_keys (created_at);

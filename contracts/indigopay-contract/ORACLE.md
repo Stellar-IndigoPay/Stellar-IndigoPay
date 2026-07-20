@@ -1,54 +1,74 @@
-# CO2 Oracle Architecture
+# IndigoPay Price Oracle
 
-The IndigoPay contract uses an on-chain oracle to provide dynamic CO2 offset pricing. This document describes the oracle implementation, update process, and future upgrade path.
+IndigoPay uses an on-chain oracle to convert USDC donation amounts into their XLM
+equivalent. The oracle aggregates prices from multiple authorised reporters, keeps
+a bounded history, and rejects stale market data.
 
-## Current Implementation
+## Price Format
 
-The mock oracle stores a single CO2 price value that determines how grams of CO2 offset are calculated per unit of donation.
+Reporters submit a positive raw `i128` price scaled by `10^7`. For example, a raw
+observation of `80_000_000` represents a rate of 8 XLM stroops per USDC stroop.
+`get_price()` returns the scaled-down rate expected by `OracleInterface`.
 
-### Data Storage
+The optional fallback is already expressed in the value returned by
+`get_price()`. For example, configure `8` as the fallback for a rate of 8.
 
-CO2 price is stored in contract state under `DataKey::CO2OraclePrice` as an i128 value (in grams of CO2 per unit).
+## Administration
 
-### Default Price
+Initialize the oracle once with `initialize(admin)`. The admin can then manage
+reporters and the fallback:
 
-On contract initialization, the oracle price defaults to 100 grams of CO2 per XLM.
-
-## Admin Update Process
-
-Only the contract administrator can update the CO2 price:
-
-```
-call set_co2_price(admin, new_price)
-  - admin: authenticated admin address
-  - new_price: positive i128 value (grams CO2 per XLM)
-```
-
-The update is atomic and emits an `oracle_upd` event with the new price.
-
-## Integration in Donation Logic
-
-During donation processing in `record_donation`, the current oracle price is retrieved and used to calculate CO2 offset:
-
-```
-xlm_units = amount / STROOP
-co2_increment = xlm_units * oracle_price
+```text
+add_reporter(admin, reporter)
+remove_reporter(admin, reporter)
+set_fallback_price(admin, price)
 ```
 
-All donations after a price update use the new oracle value immediately.
+All three operations require the admin's authorization. Fallback prices must be
+positive. Reporter changes emit `rep_add` and `rep_rem` events.
 
-## Future Production Integration
+## Reporting and Aggregation
 
-This mock implementation is designed for easy replacement. To integrate a real price feed:
+An authorised reporter submits a price with:
 
-1. Modify `set_co2_price` to fetch from external oracle (e.g., Stellar Asset Protocol)
-2. Or replace it with a cached value updated by a separate off-chain service
-3. The `record_donation` logic remains unchanged - it always queries the current price
+```text
+report_price(reporter, raw_price)
+```
 
-The abstraction keeps the contract decoupled from any specific oracle implementation.
+The reporter must authorize the call and the price must be positive. Each report
+records the raw price, reporter address, and current ledger sequence, and emits a
+`price_upd` event.
 
-## Error Handling
+The oracle stores at most 20 observations in a circular buffer. Once full, a new
+report overwrites the oldest entry. `get_price()` computes the arithmetic mean of
+the newest 10 observations, or all available observations when fewer than 10
+exist, then divides it by `10^7`.
 
-- Price must be positive. Attempts to set zero or negative prices panic with "CO2 price must be positive".
-- Invalid authenticated admins panic with "Only admin can set CO2 price".
-- Uninitialized contracts default to 100 grams CO2/XLM when querying.
+## Freshness and Fallback Behavior
+
+The newest observation is valid through 720 ledgers after it was recorded
+(approximately one hour at five seconds per ledger). At ledger 721 and later:
+
+- `get_price()` returns the configured fallback price, if present.
+- Without a fallback, it fails with `Oracle price is stale and no fallback configured`.
+
+When there are no observations, `get_price()` also returns the configured
+fallback. Without either observations or a fallback, it fails with
+`Oracle has no observations and no fallback`.
+
+The fallback is an operational safety mechanism, not another live source. Admins
+should choose it conservatively and update it through their normal governance
+process.
+
+## IndigoPay Integration
+
+The oracle preserves the existing interface:
+
+```rust
+fn get_price(env: Env) -> i128;
+```
+
+After deployment, the IndigoPay admin registers the oracle contract with
+`set_oracle(admin, oracle_address)`. `donate_usdc` then calls `get_price()` during
+conversion; stale data without a fallback causes the donation transaction to
+fail instead of silently using an invalid rate.

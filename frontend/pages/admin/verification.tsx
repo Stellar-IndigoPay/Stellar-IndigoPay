@@ -16,7 +16,7 @@ import AdminLayout from "@/components/admin/AdminLayout";
 import VerificationTable from "@/components/admin/VerificationTable";
 import {
   adminFetch,
-  isAdminAuthenticated,
+  ensureAdminSession,
 } from "@/lib/adminAuth";
 import type { VerificationRequestResponse } from "@/lib/api";
 
@@ -88,9 +88,11 @@ export default function AdminVerificationPage() {
 
   // Check auth
   useEffect(() => {
-    if (!isAdminAuthenticated()) {
-      router.replace("/admin/login");
-    }
+    ensureAdminSession().then((ok) => {
+      if (!ok) {
+        router.replace("/admin/login");
+      }
+    });
   }, [router]);
 
   // Fetch all requests (with optional status filter)
@@ -345,3 +347,7 @@ export default function AdminVerificationPage() {
     </>
   );
 }
+
+export const getServerSideProps = async () => {
+  return { props: {} };
+};

@@ -174,60 +174,67 @@ interface ProjectResult {
   walletAddress?: string;
 }
 
-async function searchProjects(query: string): Promise<ProjectResult[]> {
-  try {
-    const res = await fetch(`${API_BASE}/api/projects?q=${encodeURIComponent(query)}`);
-    if (!res.ok) return [];
-    const json = await res.json();
-    return Array.isArray(json?.data) ? json.data : [];
-  } catch {
-    return [];
-  }
+/** HTML-escape a string to prevent XSS in rendered content. */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }
 
-function renderDropdown(projects: ProjectResult[], dropdown: HTMLUListElement) {
-  dropdown.innerHTML = '';
-  dropdownItems = [];
-  activeDropdownIndex = -1;
+/** Set a status message in the popup UI (success or error). */
+function setStatus(message: string, isError = false): void {
+  const el = document.getElementById('status-message');
+  if (!el) return;
+  el.textContent = message;
+  el.className = isError ? 'status error' : 'status success';
+  el.classList.remove('hidden');
+  setTimeout(() => el.classList.add('hidden'), 5000);
+}
 
-  if (projects.length === 0) {
-    const empty = document.createElement('li');
-    empty.className = 'search-no-results';
-    empty.textContent = 'No projects found';
-    dropdown.appendChild(empty);
-    dropdown.classList.remove('hidden');
-    return;
-  }
+/** Initialize the project search autocomplete input. */
+function initProjectSearch(): void {
+  const searchInput = document.getElementById('project-search') as HTMLInputElement | null;
+  if (!searchInput) return;
 
-  projects.forEach((p) => {
-    const li = document.createElement('li');
-    li.setAttribute('role', 'option');
-    li.innerHTML = `
-      <div class="project-avatar" aria-hidden="true">
-        <span style="font-size:18px">${getProjectEmoji(p.category)}</span>
-      </div>
-      <div>
-        <div class="search-result-name">${escapeHtml(p.name)}</div>
-        <div class="search-result-cat">${escapeHtml(p.category)}</div>
-      </div>
-    `;
-    li.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      selectProject(p);
+  const dropdown = document.getElementById('search-dropdown') as HTMLUListElement | null;
+  if (!dropdown) return;
+
+  searchInput.addEventListener('input', () => {
+    const query = searchInput.value.trim();
+    if (query.length < 2) {
       dropdown.classList.add('hidden');
-    });
-    dropdown.appendChild(li);
-    dropdownItems.push(li);
+      return;
+    }
+    debounce(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/projects?search=${encodeURIComponent(query)}&limit=5`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        const projects: ProjectResult[] = (json.data || []).map((p: any) => ({
+          id: p.id,
+          name: p.name,
+          category: p.category,
+          walletAddress: p.walletAddress,
+        }));
+        renderDropdown(projects, dropdown!);
+      } catch {
+        dropdown.classList.add('hidden');
+      }
+    }, 300);
+  });
+
+  searchInput.addEventListener('blur', () => {
+    setTimeout(() => dropdown.classList.add('hidden'), 200);
   });
 }
 
-function selectProject(p: ProjectResult) {
-  selectedProjectId = p.id;
-  const searchInput = document.getElementById('project-search') as HTMLInputElement | null;
-  if (searchInput) searchInput.value = p.name;
-  const destInput = document.getElementById('destination') as HTMLInputElement | null;
-  if (destInput && p.walletAddress) destInput.value = p.walletAddress;
-}
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let activeDropdownIndex = -1;
+let dropdownItems: HTMLLIElement[] = [];
+let selectedProjectId: string | null = null;
 
 function renderProjectList(projects: ProjectResult[]) {
   const list = document.getElementById('project-list');
@@ -496,13 +503,62 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  // Connect button
-  const connectBtn = document.getElementById('connect-btn');
-  if (connectBtn) connectBtn.addEventListener('click', connectWallet);
+  initProjectSearch();
+  initProjectListKeyNav();
+
+  // Check for pending context-menu donation
+  chrome.storage.local.get(['pendingDonationProjectId', 'pendingDonationAddress'], async (res) => {
+    if (res.pendingDonationProjectId) {
+      chrome.storage.local.remove('pendingDonationProjectId');
+      try {
+        const response = await fetch(`${API_BASE}/api/projects/${res.pendingDonationProjectId}`);
+        if (response.ok) {
+          const json = await response.json();
+          const projectData = json.data;
+          
+          const destInput = document.getElementById('destination') as HTMLInputElement | null;
+          const searchInput = document.getElementById('project-search') as HTMLInputElement | null;
+          
+          if (destInput && projectData.walletAddress) {
+            destInput.value = projectData.walletAddress;
+            selectedProjectId = projectData.id;
+          }
+          if (searchInput && projectData.name) {
+            searchInput.value = projectData.name;
+          }
+        }
+      } catch (err) {
+        console.error('Failed to pre-fill project from context menu', err);
+      }
+    } else if (res.pendingDonationAddress) {
+      chrome.storage.local.remove('pendingDonationAddress');
+      const destInput = document.getElementById('destination') as HTMLInputElement | null;
+      if (destInput) {
+        destInput.value = res.pendingDonationAddress as string;
+      }
+    }
+  });
 
   // Donation form
   const form = document.getElementById('donation-form');
-  if (form) form.addEventListener('submit', handleDonateSubmit);
+  if (!form) return;
+
+  form.addEventListener('submit', async (e) => {
+    try {
+      e.preventDefault();
+      const sourceAddress = ((document.getElementById('source-address') as HTMLInputElement)?.value ?? '').trim();
+      const destination = ((document.getElementById('destination') as HTMLInputElement)?.value ?? '').trim();
+      const amount = ((document.getElementById('amount') as HTMLInputElement)?.value ?? '').trim();
+      const memo = ((document.getElementById('memo') as HTMLInputElement)?.value ?? '').trim();
+
+      if (!sourceAddress || !destination || !amount) {
+        setStatus('Please fill in all required fields.', true);
+        return;
+      }
+    } catch {
+      // Silently ignore — the skeleton loader remains visible
+    }
+  });
 
   // Amount/destination live validation for donate button
   ['amount', 'destination'].forEach((id) => {
@@ -510,11 +566,5 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (el) el.addEventListener('input', updateDonateButtonState);
   });
 
-  initPresetButtons();
-  initProjectSearch();
-  await handlePendingDonations();
-  renderProjectList([]); // Will be replaced with real data once backend is wired
-  updateDonateButtonState();
-
-  console.log('🌿 IndigoPay popup initialized with inline donate support');
+  console.log('🌿 IndigoPay Extension initialized with donation badge (#490)');
 });

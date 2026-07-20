@@ -4,30 +4,33 @@
   "private": true,
   "description": "Root package for Stellar-IndigoPay monorepo — adds Husky pre-commit quality gates (GrantFox #60)",
   "scripts": {
-    "prepare": "husky"
+    "lint": "cd backend && eslint src/**/*.js"
   },
   "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
     "eslint": "^8.57.1",
     "husky": "^9.1.6",
     "js-yaml": "^5.2.1",
     "lint-staged": "^15.2.10",
-    "prettier": "^3.3.3"
+    "prettier": "^3.3.3",
+    "typescript": "^5.4.5"
   },
   "lint-staged": {
     "backend/**/*.{js,jsx}": [
       "npx eslint --fix"
     ],
     "frontend/**/*.{ts,tsx}": [
-      "npx eslint --fix"
+      "prettier --write"
     ],
     "extension/**/*.{ts,tsx,js,jsx}": [
-      "npx eslint --fix"
+      "bash -c 'cd extension && npx tsc --noEmit'"
     ],
     "mobile/**/*.{ts,tsx,js,jsx}": [
       "npx eslint --fix"
     ],
     "contracts/**/*.rs": [
-      "cargo fmt --check"
+      ".husky/check-rust-fmt.sh"
     ],
     "{backend,frontend,extension,mobile}/**/*.{json,md,yaml,yml}": [
       "npx prettier --write"

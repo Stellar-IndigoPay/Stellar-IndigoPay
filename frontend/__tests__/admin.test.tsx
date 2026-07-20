@@ -8,6 +8,12 @@ jest.mock("next/router", () => ({
   useRouter: () => ({ push: jest.fn(), query: {}, pathname: "/admin" }),
 }));
 
+const mockConnect = jest.fn();
+let mockPublicKey: string | null = null;
+jest.mock("@/lib/WalletProvider", () => ({
+  useWallet: () => ({ publicKey: mockPublicKey, connect: mockConnect }),
+}));
+
 const mockFetchProjects = jest.fn().mockResolvedValue([]);
 const mockFetchQueues = jest.fn().mockResolvedValue([
   {
@@ -42,7 +48,10 @@ jest.mock("@/lib/api", () => ({
   fetchDeadLetterWebhooks: (...args: unknown[]) => mockFetchDeadLetterWebhooks(...args),
   replayWebhookDelivery: jest.fn(),
   replayAllWebhookDeliveries: jest.fn(),
-  fetchWebhookDeliveries: (...args: unknown[]) => mockFetchWebhookDeliveries(...args),
+  listAdminMatches: jest.fn().mockResolvedValue([]),
+  createAdminMatch: jest.fn(),
+  updateAdminMatch: jest.fn(),
+  deleteAdminMatch: jest.fn(),
 }));
 
 describe("AdminIndex - Queue Monitoring", () => {
@@ -50,21 +59,37 @@ describe("AdminIndex - Queue Monitoring", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    // Mock window.confirm so purge flows through
-    window.confirm = jest.fn().mockReturnValue(true);
-  });
-
-  afterEach(() => {
-    window.confirm = originalConfirm;
+    // Re-apply resolved values cleared by clearAllMocks
+    mockFetchProjects.mockResolvedValue([]);
+    mockFetchQueues.mockResolvedValue([
+      {
+        queue: "webhook-deliveries",
+        active: 1,
+        waiting: 2,
+        failed: 3,
+        completed: 4,
+        depth: 3,
+        failure_rate: 0.428,
+        latency: 1.5,
+        paused: false,
+      },
+    ]);
+    mockPauseQueue.mockResolvedValue(true);
+    mockResumeQueue.mockResolvedValue(true);
+    mockPurgeQueue.mockResolvedValue(true);
+    mockFetchDeadLetterWebhooks.mockResolvedValue({ data: [], total: 0, page: 1, pageSize: 20 });
+    mockFetchWebhookDeliveries.mockResolvedValue([]);
   });
 
   test("renders wallet connect when not connected", () => {
-    render(<AdminIndex publicKey={null} onConnect={jest.fn()} />);
+    mockPublicKey = null;
+    render(<AdminIndex />);
     expect(screen.getByText("Connect your wallet to manage projects.")).toBeTruthy();
   });
 
   test("renders queue list and controls when connected", async () => {
-    render(<AdminIndex publicKey="GADMINPUBLICKEY" onConnect={jest.fn()} />);
+    mockPublicKey = "GADMINPUBLICKEY";
+    render(<AdminIndex />);
 
     // Wait for queue metrics to render
     await waitFor(() => {

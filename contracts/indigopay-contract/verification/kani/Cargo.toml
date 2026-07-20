@@ -1,0 +1,11 @@
+[package]
+name = "indigopay-verification-kani"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Add your contract crate as a path dependency
+indigopay-contract = { path = "../../indigopay-contract" }
+
+[dev-dependencies]
+kani = "0.49"

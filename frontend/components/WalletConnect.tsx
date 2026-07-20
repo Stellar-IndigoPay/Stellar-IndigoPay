@@ -4,6 +4,7 @@
  */
 import { useState } from "react";
 import { connectWallet, isFreighterInstalled } from "@/lib/wallet";
+import { trackEvent } from "@/lib/analytics";
 
 interface WalletConnectProps {
   onConnect: (pk: string) => void;
@@ -28,7 +29,10 @@ export default function WalletConnect({ onConnect }: WalletConnectProps) {
       setError(e);
       return;
     }
-    if (publicKey) onConnect(publicKey);
+    if (publicKey) {
+      trackEvent("wallet_connected");
+      onConnect(publicKey);
+    }
   };
 
   return (
@@ -72,6 +76,7 @@ export default function WalletConnect({ onConnect }: WalletConnectProps) {
         onClick={handleConnect}
         disabled={loading}
         className="btn-primary w-full flex items-center justify-center gap-2"
+        data-testid="wallet-connect-button"
       >
         {loading ? (
           <>

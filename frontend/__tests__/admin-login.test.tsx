@@ -10,20 +10,21 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 const mockPush = jest.fn();
+const mockUseRouter = jest.fn(() => ({
+  push: mockPush,
+  query: {},
+  pathname: "/admin/login",
+  replace: mockPush,
+}));
 jest.mock("next/router", () => ({
-  useRouter: () => ({
-    push: mockPush,
-    query: {},
-    pathname: "/admin/login",
-    replace: mockPush,
-  }),
+  useRouter: mockUseRouter,
 }));
 
 // Mock adminAuth
 const mockAdminLogin = jest.fn();
 jest.mock("@/lib/adminAuth", () => ({
   adminLogin: (...args: unknown[]) => mockAdminLogin(...args),
-  isAdminAuthenticated: () => false,
+  ensureAdminSession: () => Promise.resolve(false),
 }));
 
 // Mock ThemeToggle
@@ -82,8 +83,7 @@ describe("Admin Login Page", () => {
   it("calls adminLogin and redirects on successful submission", async () => {
     mockAdminLogin.mockResolvedValue({
       token: "test-token",
-      refreshToken: "test-refresh",
-      expiresIn: 3600,
+      expiresIn: 900,
     });
 
     const AdminLoginPage = require("@/pages/admin/login").default;
@@ -98,6 +98,66 @@ describe("Admin Login Page", () => {
     await waitFor(() => {
       expect(mockAdminLogin).toHaveBeenCalledWith("admin", "correct-password");
       expect(mockPush).toHaveBeenCalledWith("/admin/verification");
+    });
+  });
+
+  it("redirects to the URL in the redirect query param after login", async () => {
+    mockAdminLogin.mockResolvedValue({
+      token: "test-token",
+      expiresIn: 900,
+    });
+
+    // Simulate router.query.redirect being set
+    mockUseRouter.mockReturnValue({
+      push: mockPush,
+      query: { redirect: encodeURIComponent("/admin/verification/123") },
+      pathname: "/admin/login",
+      replace: mockPush,
+    });
+
+    const AdminLoginPage = require("@/pages/admin/login").default;
+    render(<AdminLoginPage />);
+
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("Username"), "admin");
+    await user.type(screen.getByLabelText("Password"), "correct-password");
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign In" }));
+
+    await waitFor(() => {
+      expect(mockPush).toHaveBeenCalledWith("/admin/verification/123");
+    });
+
+    // Restore mock
+    mockUseRouter.mockReturnValue({
+      push: mockPush,
+      query: {},
+      pathname: "/admin/login",
+      replace: mockPush,
+    });
+  });
+
+  it("shows session expired banner when reason=expired", () => {
+    mockUseRouter.mockReturnValue({
+      push: mockPush,
+      query: { reason: "expired" },
+      pathname: "/admin/login",
+      replace: mockPush,
+    });
+
+    const AdminLoginPage = require("@/pages/admin/login").default;
+    render(<AdminLoginPage />);
+
+    expect(
+      screen.getByText("Your session has expired. Please log in again."),
+    ).toBeInTheDocument();
+
+    // Restore mock
+    mockUseRouter.mockReturnValue({
+      push: mockPush,
+      query: {},
+      pathname: "/admin/login",
+      replace: mockPush,
     });
   });
 

@@ -43,6 +43,34 @@ groups:
             we can restore from the last 24h of WAL archives on top of
             a base backup.
 
+      - alert: PostgresFailoverInitiated
+        expr: increase(indigopay_postgres_failover_total{outcome="initiated"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          routing: pagerduty
+        annotations:
+          summary: "Postgres automatic failover has been initiated"
+          description: |
+            The automated failover pipeline detected that the primary Postgres
+            instance is unhealthy and has started promoting the standby.
+            Verify the failover Job: kubectl get jobs -n stellar-indigopay -l app=postgres-failover
+            If failover fails, execute manual procedure: docs/restore-runbook.md
+
+      - alert: PostgresFailoverFailed
+        expr: increase(indigopay_postgres_failover_total{outcome="failed"}[10m]) > 0
+        for: 1m
+        labels:
+          severity: page
+          routing: pagerduty
+        annotations:
+          summary: "Postgres automatic failover FAILED — manual intervention required"
+          description: |
+            The automated failover Job failed to promote the standby.
+            Immediate manual failover is required.
+            Runbook: docs/restore-runbook.md
+            Check failover Job logs: kubectl logs -n stellar-indigopay -l app=postgres-failover
+
       - alert: RestoreDrillFailed
         # Set by the .github/workflows/restore-drill.yml workflow via
         # a Pushgateway push. Resolves when the next drill passes.
@@ -55,3 +83,113 @@ groups:
           description: |
             The restore-drill workflow could not restore the latest
             backup. The production backup may be unrecoverable.
+
+  # ── SLO Burn-Rate Alerts ───────────────────────────────────────────
+  # Follows the multi-window, multi-burn-rate approach from the Google
+  # SRE Workbook (Chapter 5). Two critical user journeys are protected:
+  #
+  #   Donation recording  — 99.5% availability (0.5% error budget)
+  #   Project listing     — 99.9% availability (0.1% error budget)
+  #
+  # Burn-rate multipliers vs. a 30-day window:
+  #   2%  in  1 h → 14.4x   (page — immediate on-call response)
+  #   5%  in  6 h →  6.0x   (page — rapid intervention)
+  #  10%  in  3 d →  1.0x   (warn — investigate during business hours)
+  - name: indigopay-slo-burn
+    interval: 30s
+    rules:
+      # ── Donation recording: 2% burn in 1 hour (page) ─────────────
+      - alert: DonationsHighBurnRate1h
+        expr: |
+          slo:donations:error_ratio > 0.02 * 14.4
+        for: 5m
+        labels:
+          severity: page
+          routing: pagerduty
+          slo: donations-995
+        annotations:
+          summary: "Donation API burning error budget at 2%/1h (>14.4x burn rate)"
+          description: |
+            Error rate is {{ $value | humanizePercentage }}. At this burn rate
+            the 30-day error budget will be exhausted in under 2 days if
+            sustained.
+            Runbook: docs/performance.md#burn-rate-alert-response
+
+      # ── Donation recording: 5% burn in 6 hours (page) ────────────
+      - alert: DonationsHighBurnRate6h
+        expr: |
+          slo:donations:error_ratio > 0.05 * 6
+        for: 10m
+        labels:
+          severity: page
+          routing: pagerduty
+          slo: donations-995
+        annotations:
+          summary: "Donation API burning error budget at 5%/6h (>6x burn rate)"
+          description: |
+            Error rate is {{ $value | humanizePercentage }}. If sustained,
+            the error budget will exhaust in approximately
+            {{ 0.005 / $value * 30 | humanizeDuration }}.
+            Runbook: docs/performance.md#burn-rate-alert-response
+
+      # ── Donation recording: 10% burn in 3 days (warn) ────────────
+      - alert: DonationsHighBurnRate3d
+        expr: |
+          slo:donations:error_ratio > 0.10 * 1
+        for: 30m
+        labels:
+          severity: warn
+          slo: donations-995
+        annotations:
+          summary: "Donation API burning error budget at 10%/3d (>1x burn rate)"
+          description: |
+            Error rate is {{ $value | humanizePercentage }}. If the error
+            budget exceeds 50% consumed in 7 days, schedule an engineering
+            review.
+            Runbook: docs/performance.md#burn-rate-alert-response
+
+      # ── Project listing: 2% burn in 1 hour (page) ────────────────
+      - alert: ProjectsHighBurnRate1h
+        expr: |
+          slo:projects:error_ratio > 0.001 * 14.4
+        for: 5m
+        labels:
+          severity: page
+          routing: pagerduty
+          slo: projects-999
+        annotations:
+          summary: "Project listing API burning error budget at 2%/1h (>14.4x burn rate)"
+          description: |
+            Error rate is {{ $value | humanizePercentage }}. At this burn rate
+            the 30-day error budget will be exhausted rapidly.
+            Runbook: docs/performance.md#burn-rate-alert-response
+
+      # ── Project listing: 5% burn in 6 hours (page) ───────────────
+      - alert: ProjectsHighBurnRate6h
+        expr: |
+          slo:projects:error_ratio > 0.001 * 6
+        for: 10m
+        labels:
+          severity: page
+          routing: pagerduty
+          slo: projects-999
+        annotations:
+          summary: "Project listing API burning error budget at 5%/6h (>6x burn rate)"
+          description: |
+            Error rate is {{ $value | humanizePercentage }}.
+            Runbook: docs/performance.md#burn-rate-alert-response
+
+      # ── Project listing: 10% burn in 3 days (warn) ───────────────
+      - alert: ProjectsHighBurnRate3d
+        expr: |
+          slo:projects:error_ratio > 0.001 * 1
+        for: 30m
+        labels:
+          severity: warn
+          slo: projects-999
+        annotations:
+          summary: "Project listing API burning error budget at 10%/3d (>1x burn rate)"
+          description: |
+            Error rate is {{ $value | humanizePercentage }}. Schedule an
+            engineering review if the budget exceeds 50% consumed in 7 days.
+            Runbook: docs/performance.md#burn-rate-alert-response

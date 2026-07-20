@@ -83,14 +83,32 @@ groups:
   - name: stellar-indigopay-backend-database
     interval: 30s
     rules:
-      - alert: DbPoolExhausted
-        expr: db_pool_waiting_count{job="stellar-indigopay-backend"} > 5
-        for: 2m
+      - alert: DBPoolSaturated
+        expr: db_pool_waiting_count{job="stellar-indigopay-backend"} > 0
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Database connection pool has waiting clients"
+          description: |
+            {{ $value }} clients waiting for a connection.
+            Active: check db_pool_total_count, Max: check db_pool_max.
+            The pool may be saturated. Consider investigating slow queries
+            or increasing DB_POOL_MAX.
+
+      - alert: DBPoolExhausted
+        expr: db_pool_total_count{job="stellar-indigopay-backend"} >= db_pool_max{job="stellar-indigopay-backend"} AND db_pool_waiting_count{job="stellar-indigopay-backend"} > 0
+        for: 10m
         labels:
           severity: page
+          routing: pagerduty
         annotations:
-          summary: "Postgres pool has > 5 waiting clients for 2m"
-          description: "Consider raising DB_POOL_MAX or investigating slow queries."
+          summary: "Database connection pool exhausted for >10 minutes"
+          description: |
+            All connections are busy and clients are waiting.
+            Current active: {{ $value }} (check db_pool_total_count).
+            Adaptive sizing may have already increased the limit.
+            If this persists, investigate slow queries or provision more database resources.
 
       - alert: DbQuerySlow
         expr: |
@@ -116,9 +134,66 @@ groups:
           summary: "Database backup verification failed"
           description: "The nightly backup at {{ $labels.backup_path }} failed verification. Investigate immediately — the backup may be corrupt or unrecoverable."
 
+  - name: stellar-indigopay-postgres-failover-info
+    interval: 30s
+    rules:
+      - alert: PostgresFailoverSucceeded
+        expr: increase(indigopay_postgres_failover_total{outcome="succeeded"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Postgres failover completed successfully"
+          description: |
+            Standby was promoted to primary. Backend has been restarted.
+            The old primary should be investigated and re-synced before
+            attempting manual failback.
+            New primary host: check POSTGRES_PRIMARY_HOST in stellar-indigopay-config ConfigMap.
+
+      - alert: PostgresPrimaryUnhealthy
+        expr: |
+          up{job="stellar-indigopay-postgres-exporter"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          routing: pagerduty
+        annotations:
+          summary: "Postgres primary exporter is down"
+          description: |
+            The postgres-exporter scraping the primary is unreachable.
+            If the primary is genuinely down, the healthcheck sidecar will
+            trigger automated failover within 30 s.
+            Check: kubectl get pods -n stellar-indigopay -l app=postgres,role=primary
+
   - name: stellar-indigopay-backend-readiness
     interval: 30s
     rules:
+      - alert: IndexerLagHigh
+        expr: indigopay_indexer_lag_ledgers > 500
+        for: 5m
+        labels:
+          severity: page
+          routing: pagerduty
+        annotations:
+          summary: "Indexer lag is >500 ledgers (~42 minutes behind)"
+          description: "The Horizon indexer is {{ $value }} ledgers behind. Auto-backfill may be failing."
+
+      - alert: IndexerLagWarning
+        expr: indigopay_indexer_lag_ledgers > 50
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Indexer lag is >50 ledgers"
+
+      - alert: IndexerStreamDown
+        expr: rate(indigopay_indexer_stream_reconnects_total[10m]) == 0 AND indigopay_indexer_lag_ledgers > 0
+        for: 5m
+        labels:
+          severity: page
+          routing: pagerduty
+        annotations:
+          summary: "Indexer stream appears down — no reconnects and positive lag"
       - alert: ReadinessProbeFailing
         # We can't directly scrape /api/readyz, so this rule fires when the
         # in-process readiness_log metric indicates a failure. The wrapper
@@ -148,3 +223,44 @@ groups:
           severity: page
         annotations:
           summary: "Oracle price is stale (>15 min since last update)"
+
+  - name: stellar-indigopay-secret-rotation
+    interval: 30s
+    rules:
+      - alert: SecretRotationFailed
+        expr: |
+          (time() - (secret_rotation_last_timestamp{status="failed"} or secret_rotation_last_timestamp{status="rolled_back"})) < 3600
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Secret rotation failed or was rolled back in the last hour"
+          description: |
+            The most recent automated secret rotation completed with status "failed"
+            or "rolled_back". Check the GitHub Actions run linked in the rotation
+            audit log and the /health/ready endpoint immediately.
+
+      - alert: SecretRotationStuck
+        expr: |
+          time() - secret_rotation_last_timestamp{status="in_progress"} > 1800
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Secret rotation has been in_progress for > 30 minutes"
+          description: |
+            A secret rotation started at {{ $value | humanizeTimestamp }} but never
+            completed. It may be stuck. Check the GitHub Actions workflow.
+
+      - alert: SecretRotationOverdue
+        expr: |
+          time() - (secret_rotation_last_timestamp{status="completed"}) > 95 * 24 * 3600
+        for: 24h
+        labels:
+          severity: warn
+        annotations:
+          summary: "No successful secret rotation in > 95 days"
+          description: |
+            The last successful secret rotation was {{ $value | humanizeTimestamp }}.
+            Rotations are scheduled quarterly (every 91 days). Consider running
+            the workflow manually if the automated schedule has been failing.

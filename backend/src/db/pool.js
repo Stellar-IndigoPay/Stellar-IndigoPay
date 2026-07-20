@@ -48,6 +48,64 @@ function extractOperation(sql) {
   return match ? match[1].toUpperCase() : "UNKNOWN";
 }
 
+/**
+ * Extract the canonical SQL verb (SELECT/INSERT/UPDATE/DELETE/WITH) from a
+ * query string. Falls back to "OTHER" when the leading keyword is not one
+ * of the recognised DML/DQL verbs.
+ */
+function extractQueryType(text) {
+  const match = String(text).match(/^\s*(SELECT|INSERT|UPDATE|DELETE|WITH)/i);
+  return match ? match[1].toUpperCase() : "OTHER";
+}
+
+/**
+ * Best-effort PII-safe parameterisation: replaces quoted string literals
+ * and bare numeric literals with placeholder tokens so that slow-query
+ * logs never contain user data.
+ */
+function parameterizeQuery(text) {
+  return String(text)
+    .replace(/'[^']*'/g, "'$N'")
+    .replace(/\b\d+(\.\d+)?\b/g, "$N");
+}
+
+/**
+ * Fire-and-forget EXPLAIN (ANALYZE, BUFFERS) on a query that exceeded
+ * the slow-query threshold. Enabled only when DB_EXPLAIN_SLOW_QUERIES is
+ * "true" (default). Results are written to the warn-level log so they
+ * appear in production log aggregators.
+ */
+async function explainSlowQuery(sql) {
+  // Default to false: EXPLAIN ANALYZE re-executes the query, which can
+  // amplify load on an already-saturated pool. Operators must explicitly
+  // opt in by setting DB_EXPLAIN_SLOW_QUERIES=true.
+  if (process.env.DB_EXPLAIN_SLOW_QUERIES !== "true") return;
+  const safeQuery = parameterizeQuery(sql);
+  try {
+    const result = await writerPool.query(
+      `EXPLAIN (ANALYZE, BUFFERS) ${sql}`,
+    );
+    const plan = result.rows.map((r) => r["QUERY PLAN"]).join("\n");
+    logger.warn(
+      {
+        event: "slow_query_explain",
+        query: safeQuery,
+        plan,
+      },
+      `EXPLAIN for slow query: ${safeQuery.substring(0, 120)}`,
+    );
+  } catch (err) {
+    logger.warn(
+      {
+        event: "explain_error",
+        query: safeQuery,
+        err: err.message,
+      },
+      "Failed to EXPLAIN slow query",
+    );
+  }
+}
+
 function getCallerFrame() {
   const stack = new Error().stack.split("\n");
   for (let i = 2; i < stack.length; i++) {
@@ -238,19 +296,31 @@ const pool = {
         10,
       );
       if (durationMs > threshold) {
-        const queryPreview = String(sql).substring(0, 200);
+        const queryText = String(sql);
+        const parameterized = parameterizeQuery(queryText);
         const caller = getCallerFrame();
         logger.warn(
           {
             event: "slow_query",
             durationMs,
             operation,
-            queryPreview,
+            query: parameterized,
             caller,
           },
-          `Slow query: ${operation} took ${durationMs}ms`,
+          `Slow query: ${operation} took ${durationMs}ms: ${parameterized.substring(0, 120)}`,
         );
         dbSlowQueriesTotal.inc({ operation });
+
+        // Run EXPLAIN (ANALYZE, BUFFERS) for very slow queries (>1s).
+        // Fire-and-forget so we never block the response.
+        if (durationMs > 1000) {
+          explainSlowQuery(queryText).catch((explainErr) => {
+            logger.warn(
+              { event: "explain_unhandled", err: explainErr.message },
+              "Unhandled error in EXPLAIN fire-and-forget",
+            );
+          });
+        }
       }
 
       return result;
@@ -275,3 +345,8 @@ const pool = {
 };
 
 module.exports = pool;
+// Exported for unit testing (pool.test.js).
+module.exports.extractQueryType = extractQueryType;
+module.exports.parameterizeQuery = parameterizeQuery;
+module.exports.extractOperation = extractOperation;
+module.exports.explainSlowQuery = explainSlowQuery;

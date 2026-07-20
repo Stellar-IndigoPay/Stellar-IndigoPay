@@ -7,9 +7,18 @@
  * after a successful donation.
  */
 import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import DonateForm from "../DonateForm";
 import type { ClimateProject } from "@/utils/types";
+
+jest.mock("@/lib/offlineDonationQueue", () => ({
+  queueDonation: jest.fn().mockResolvedValue(null),
+  getQueuedDonations: jest.fn().mockResolvedValue([]),
+  removeQueuedDonation: jest.fn().mockResolvedValue(undefined),
+  syncQueuedDonations: jest.fn().mockResolvedValue(undefined),
+  requestBackgroundSync: jest.fn().mockResolvedValue(undefined),
+}));
 
 const project: ClimateProject = {
   id: "proj-1",
@@ -31,10 +40,22 @@ const project: ClimateProject = {
   updatedAt: "2025-01-02T00:00:00.000Z",
 };
 
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { retry: false } },
+});
+
+function Wrapper({ children }: { children: React.ReactNode }) {
+  return (
+    <QueryClientProvider client={queryClient}>
+      {children}
+    </QueryClientProvider>
+  );
+}
+
 describe("DonateForm accessibility", () => {
   it("flags the amount field with aria-invalid when under the minimum", async () => {
     const user = userEvent.setup();
-    render(<DonateForm project={project} publicKey="GAAAA" />);
+    render(<DonateForm project={project} publicKey="GAAAA" />, { wrapper: Wrapper });
     const input = screen.getByPlaceholderText(/or enter custom amount/i);
     await user.type(input, "0");
     expect(input).toHaveAttribute("aria-invalid", "true");
@@ -50,6 +71,7 @@ describe("DonateForm accessibility", () => {
     // region is wired correctly when present.
     const { container } = render(
       <DonateForm project={project} publicKey="GAAAA" />,
+      { wrapper: Wrapper },
     );
     // The "sr-only" live region exists for flow updates even when idle.
     const liveRegions = container.querySelectorAll('[aria-live="polite"]');
@@ -57,7 +79,7 @@ describe("DonateForm accessibility", () => {
   });
 
   it("does not mark the input invalid when amount is at or above the minimum", () => {
-    render(<DonateForm project={project} publicKey="GAAAA" />);
+    render(<DonateForm project={project} publicKey="GAAAA" />, { wrapper: Wrapper });
     const input = screen.getByPlaceholderText(/or enter custom amount/i);
     expect(input).toHaveAttribute("aria-invalid", "false");
   });

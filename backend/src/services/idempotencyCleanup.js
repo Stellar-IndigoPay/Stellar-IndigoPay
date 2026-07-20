@@ -27,7 +27,7 @@ let boss = null;
 async function runCleanup() {
   const result = await pool.query(
     `DELETE FROM idempotency_keys
-     WHERE created_at < NOW() - INTERVAL '24 hours'`,
+     WHERE expires_at < NOW()`,
   );
 
   const deleted = result.rowCount || 0;

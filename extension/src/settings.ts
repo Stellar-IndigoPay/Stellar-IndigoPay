@@ -12,10 +12,8 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
 
 export function loadSettings(): Promise<ExtensionSettings> {
   return new Promise((resolve) => {
-    // The chrome.storage.sync.get callback items are typed as
-    // `{ [key: string]: unknown }` by the @types/chrome typings. The
-    // double cast via `unknown` keeps the strict nullcheck checks compiler-happy.
-    chrome.storage.sync.get({ ...DEFAULT_SETTINGS }, (items) => {
+    const keys = Object.keys(DEFAULT_SETTINGS) as Array<keyof ExtensionSettings>;
+    chrome.storage.sync.get(keys, (items: { [key: string]: unknown }) => {
       resolve(items as unknown as ExtensionSettings);
     });
   });

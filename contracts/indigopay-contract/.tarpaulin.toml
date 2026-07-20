@@ -8,7 +8,7 @@
 
 [tarpaulin]
 # Target the contract crate specifically
-manifest-path = "contracts/indigopay-contract/Cargo.toml"
+manifest-path = "Cargo.toml"
 
 # Include only the contract source (exclude test helpers)
 files = ["src/lib.rs"]
@@ -28,8 +28,9 @@ report-types = ["Html", "Lcov"]
 # Output directory
 output-dir = "coverage/"
 
-# Run tests with the testutils feature so fuzz tests don't fail
-features = ["testutils"]
+# Run tests with the testutils feature (passed via CLI --features flag)
 
-# Run only unit tests (skip integration tests if any)
-test-filters = ["tests::"]
+# Fuzz tests are skipped via the CI command's `-- --skip fuzz` flag
+# because tarpaulin's `test-filters` config entry only affects which
+# tests are counted for coverage, not which tests are actually
+# executed, and the fuzz tests cause tarpaulin's internal timeout.
