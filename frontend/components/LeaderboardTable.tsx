@@ -1,18 +1,12 @@
 /**
  * components/LeaderboardTable.tsx
  */
-import { fetchLeaderboard } from "@/lib/api";
-import {
-  formatXLM,
-  formatUSDEquivalent,
-  shortenAddress,
-  badgeEmoji,
-} from "@/utils/format";
+import { formatXLM, formatUSDEquivalent, shortenAddress, badgeEmoji } from "@/utils/format";
 import { accountUrl } from "@/lib/stellar";
 import { useXlmPrice } from "@/lib/priceContext";
 import type { LeaderboardEntry } from "@/utils/types";
 import { SkeletonList } from "./Skeleton";
-import { useAsyncData } from "@/hooks/useAsyncData";
+import { useLeaderboard } from "@/hooks/queries";
 import { QueryErrorFallback } from "@/components/QueryErrorFallback";
 
 const AVATAR_COLORS = [
@@ -80,21 +74,18 @@ export default function LeaderboardTable({
     isError,
     error,
     refetch,
-    isRetrying,
-    retryCount,
-  } = useAsyncData<LeaderboardEntry[]>(() => fetchLeaderboard(limit, period), {
-    deps: [limit, period],
-  });
+    isRefetching,
+  } = useLeaderboard(limit, period);
 
   if (isLoading) return <LeaderboardTableSkeleton />;
 
-  if (isError || isRetrying)
+  if (isError || isRefetching)
     return (
       <QueryErrorFallback
         error={error}
-        onRetry={refetch}
-        isRetrying={isRetrying}
-        retryCount={retryCount}
+        onRetry={() => refetch()}
+        isRetrying={isRefetching}
+        retryCount={0}
         title="Couldn't load the leaderboard"
       />
     );

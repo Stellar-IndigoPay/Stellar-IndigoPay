@@ -4,16 +4,25 @@
  */
 import { useEffect, useState } from "react";
 import { useRouter } from "next/router";
+import dynamic from "next/dynamic";
 import AnimatedNumber from "@/components/AnimatedNumber";
 import PageMeta from "@/components/PageMeta";
 import DonationTicker from "@/components/DonationTicker";
-import WorldMap from "@/components/WorldMap";
 import { fetchImpactGlobal, fetchLeaderboard, fetchProjects } from "@/lib/api";
 import { getGlobalImpactStats } from "@/lib/stellar";
 import { formatCO2, formatXLM, shortenAddress } from "@/utils/format";
 import type { LeaderboardEntry } from "@/utils/types";
 import type { ImpactGlobalStats } from "@/lib/api";
 import ImpactSkeleton from "@/components/ImpactSkeleton";
+
+const WorldMap = dynamic(() => import("@/components/WorldMap"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex items-center justify-center h-64">
+      <span className="text-sm text-[#94A3B8] font-body">Loading map…</span>
+    </div>
+  ),
+});
 
 export default function ImpactPage() {
   const router = useRouter();

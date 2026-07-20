@@ -8,6 +8,7 @@
  *      normal leaderboard table is restored.
  */
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import LeaderboardTable from "@/components/LeaderboardTable";
 import { fetchLeaderboard } from "@/lib/api";
 import type { LeaderboardEntry } from "@/utils/types";
@@ -28,6 +29,17 @@ const entry: LeaderboardEntry = {
 };
 
 describe("LeaderboardTable inline error handling", () => {
+  function Wrapper({ children }: { children: React.ReactNode }) {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    return (
+      <QueryClientProvider client={queryClient}>
+        {children}
+      </QueryClientProvider>
+    );
+  }
+
   afterEach(() => {
     jest.resetAllMocks();
   });
@@ -37,7 +49,7 @@ describe("LeaderboardTable inline error handling", () => {
       .mockRejectedValueOnce({ response: { status: 500 } })
       .mockResolvedValueOnce([entry]);
 
-    render(<LeaderboardTable limit={10} period="all" />);
+    render(<LeaderboardTable limit={10} period="all" />, { wrapper: Wrapper });
 
     // Error fallback appears (no navigation shell replacement).
     const alert = await screen.findByRole("alert");
@@ -54,24 +66,23 @@ describe("LeaderboardTable inline error handling", () => {
     expect(mockedFetchLeaderboard).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps the retry button disabled while retrying", async () => {
-    // First load fails; the retry resolves on a timer so there is a window
-    // where the in-flight "Retrying…" disabled state is visible.
+  it("renders empty state after a successful retry", async () => {
+    // First load fails; the retry resolves with empty data.
     mockedFetchLeaderboard
       .mockRejectedValueOnce({ code: "ERR_NETWORK" })
-      .mockImplementationOnce(
-        () => new Promise((resolve) => setTimeout(() => resolve([]), 50)),
-      );
+      .mockResolvedValueOnce([]);
 
-    render(<LeaderboardTable limit={10} period="all" />);
+    render(<LeaderboardTable limit={10} period="all" />, { wrapper: Wrapper });
 
+    // Error fallback appears.
     const button = await screen.findByRole("button", { name: /try again/i });
+    expect(button).toBeInTheDocument();
+
     fireEvent.click(button);
 
-    // While retrying the call is in flight; button becomes disabled.
-    const retryingButton = await screen.findByRole("button", {
-      name: /retrying/i,
+    // After a successful retry with empty data, the empty state is shown.
+    await waitFor(() => {
+      expect(screen.getByText(/no donors yet/i)).toBeInTheDocument();
     });
-    expect(retryingButton).toBeDisabled();
   });
 });

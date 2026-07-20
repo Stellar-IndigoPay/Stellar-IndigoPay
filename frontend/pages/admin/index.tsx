@@ -11,6 +11,8 @@ import WalletConnect from "@/components/WalletConnect";
 import StatCard from "@/components/admin/StatCard";
 import QuickActionButton from "@/components/admin/QuickActionButton";
 import StatusDot from "@/components/admin/StatusDot";
+import WebhookManager from "@/components/admin/WebhookManager";
+import MatchManager from "@/components/admin/MatchManager";
 import { SkeletonBox } from "@/components/Skeleton";
 import {
   fetchQueues,
@@ -259,6 +261,9 @@ export default function AdminIndex({ publicKey, onConnect }: AdminIndexProps) {
           </div>
         )}
 
+Here is the resolved JSX block rendering both the pending verifications panel and the `MatchManager` and `WebhookManager` admin components:
+
+```tsx
         <div className="space-y-3">
           {pendingLoading ? (
             [1, 2, 3].map((i) => (
@@ -283,6 +288,11 @@ export default function AdminIndex({ publicKey, onConnect }: AdminIndexProps) {
               <VerificationRow key={v.id} verification={v} />
             ))
           )}
+        </div>
+
+        <MatchManager adminKey={publicKey} />
+        <WebhookManager adminKey={publicKey} />
+```
         </div>
       </section>
 

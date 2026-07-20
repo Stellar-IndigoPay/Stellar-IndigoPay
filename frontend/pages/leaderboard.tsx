@@ -1,16 +1,20 @@
 /**
  * pages/leaderboard.tsx — Top donors ranked by total XLM given
  */
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/router";
 import LeaderboardTable from "@/components/LeaderboardTable";
 import LeaderboardSkeleton from "@/components/LeaderboardSkeleton";
 import Link from "next/link";
 import PageMeta from "@/components/PageMeta";
+import { trackEvent } from "@/lib/analytics";
 
 type Period = "all" | "month" | "year";
 
 export default function LeaderboardPage() {
+  useEffect(() => {
+    trackEvent("leaderboard_viewed");
+  }, []);
   const router = useRouter();
   const period = (router.query.period as Period) || "all";
 

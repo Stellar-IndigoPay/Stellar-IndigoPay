@@ -1564,6 +1564,69 @@ paths:
                       $ref: "#/components/schemas/Donation"
         "400":
           $ref: "#/components/responses/BadRequest"
+  /api/donations/recurring/{donorAddress}:
+    get:
+      tags: [Donations]
+      summary: List recurring donations by donor
+      operationId: listDonorRecurringDonations
+      description: Retrieve all recurring donation schedules created by a specific donor.
+      parameters:
+        - name: donorAddress
+          in: path
+          required: true
+          description: Stellar public key of the donor.
+          schema:
+            type: string
+            pattern: "^G[A-Z0-9]{55}$"
+      responses:
+        "200":
+          description: Donor recurring donation list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        donorAddress:
+                          type: string
+                        recurringId:
+                          type: integer
+                        projectId:
+                          type: string
+                        projectName:
+                          type: string
+                        projectWallet:
+                          type: string
+                        amount:
+                          type: number
+                        currency:
+                          type: string
+                        intervalSeconds:
+                          type: integer
+                        nextExecutionAt:
+                          type: string
+                          format: date-time
+                        keeperIncentive:
+                          type: number
+                        active:
+                          type: boolean
+                        createdAt:
+                          type: string
+                          format: date-time
+                        updatedAt:
+                          type: string
+                          format: date-time
+        "400":
+          $ref: "#/components/responses/BadRequest"
   /api/profiles/{publicKey}:
     get:
       tags: [Profiles]

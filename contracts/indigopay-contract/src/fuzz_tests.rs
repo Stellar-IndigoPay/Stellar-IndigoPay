@@ -23,15 +23,13 @@ mod fuzz {
     extern crate std;
 
     use crate::{
-        BadgeTier, DataKey, GlobalStats, IndigoPayContract,
-        IndigoPayContractClient, MockOracle, Project, VoteProposal,
+        BadgeTier, DataKey, GlobalStats, IndigoPayContract, IndigoPayContractClient, MockOracle,
+        Project, VoteProposal,
     };
     use proptest::prelude::*;
     use soroban_sdk::Vec;
     use soroban_sdk::{
-        testutils::Address as _,
-        token::StellarAssetClient,
-        Address, Env, String as SorobanString,
+        testutils::Address as _, token::StellarAssetClient, Address, Env, String as SorobanString,
     };
 
     /// Helper: create a single-element signer Vec for admin calls.
@@ -1091,9 +1089,17 @@ mod fuzz {
     #[derive(Debug, Clone)]
     enum ContractAction {
         /// Donate XLM: project_idx, donor_idx, amount in stroops
-        Donate { project_idx: usize, donor_idx: usize, amount: i128 },
+        Donate {
+            project_idx: usize,
+            donor_idx: usize,
+            amount: i128,
+        },
         /// Donate USDC: project_idx, donor_idx, usdc_amount
-        DonateUsdc { project_idx: usize, donor_idx: usize, usdc_amount: i128 },
+        DonateUsdc {
+            project_idx: usize,
+            donor_idx: usize,
+            usdc_amount: i128,
+        },
         /// Register a new project: name_suffix, co2_rate
         RegisterProject { name: String, co2_rate: u32 },
         /// Pause a project by index
@@ -1101,9 +1107,16 @@ mod fuzz {
         /// Resume a project by index
         ResumeProject { project_idx: usize },
         /// Create a proposal for a project
-        CreateProposal { project_idx: usize, duration_ledgers: u32 },
+        CreateProposal {
+            project_idx: usize,
+            duration_ledgers: u32,
+        },
         /// Vote on a proposal: project_idx, voter_idx, approve
-        Vote { project_idx: usize, voter_idx: usize, approve: bool },
+        Vote {
+            project_idx: usize,
+            voter_idx: usize,
+            approve: bool,
+        },
         /// Resolve a proposal
         ResolveProposal { project_idx: usize },
     }
@@ -1195,9 +1208,7 @@ mod fuzz {
 
         // Set up USDC token and oracle for DonateUsdc fuzzing
         let usdc_admin = Address::generate(&env);
-        let usdc_token = env
-            .register_stellar_asset_contract_v2(usdc_admin)
-            .address();
+        let usdc_token = env.register_stellar_asset_contract_v2(usdc_admin).address();
         client.set_usdc_token(&admin, &usdc_token);
         let oracle_addr = env.register_contract(None, MockOracle);
         client.set_oracle(&admin, &oracle_addr);
@@ -1225,7 +1236,16 @@ mod fuzz {
             donors.push(donor);
         }
 
-        (env, cid, client, admin, project_ids, donors, token, usdc_token)
+        (
+            env,
+            cid,
+            client,
+            admin,
+            project_ids,
+            donors,
+            token,
+            usdc_token,
+        )
     }
 
     // ═══════════════════════════════════════════════════════════════════════

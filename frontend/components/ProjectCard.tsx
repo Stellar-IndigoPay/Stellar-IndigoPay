@@ -1,6 +1,7 @@
 /**
  * components/ProjectCard.tsx
  */
+import Image from "next/image";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import type { ClimateProject } from "@/utils/types";
@@ -37,6 +38,19 @@ export default function ProjectCard({ project }: { project: ClimateProject }) {
           transition={{ duration: 0.15, ease: "easeOut" }}
           className="flex flex-col h-full relative overflow-hidden"
         >
+          {/* Project image — next/image for optimized loading */}
+          {project.imageUrl && (
+            <div className="relative w-full h-48 -mx-6 -mt-6 mb-4 overflow-hidden">
+              <Image
+                src={project.imageUrl}
+                alt={`${project.name} project photo`}
+                fill
+                sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
+                className="object-cover"
+                loading="lazy"
+              />
+            </div>
+          )}
           {/* Category icon + badges */}
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">

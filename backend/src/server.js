@@ -63,6 +63,7 @@ const { start: startWebhookQueue,
   stop: stopWebhookQueue,
 } = require("./services/webhookQueue");
 const { start: startPushQueue } = require("./services/pushQueue");
+const { start: startImpactQueue } = require("./services/impactQueue");
 const { start: startIdempotencyCleanup } = require("./services/idempotencyCleanup");
 const { start: startBlacklistCleanup } = require("./services/blacklistCleanup");
 const { startCO2VerificationCron, stopCO2VerificationCron } = require("./services/co2Verifier");
@@ -72,6 +73,8 @@ const { startDLQWorker, stopDLQWorker } = require("./services/indexerDLQWorker")
 const { stop: stopSorobanEvents } = require("./services/sorobanEventService");
 const lifecycle = require("./services/lifecycle");
 const guardianService = require("./services/guardian");
+const recurringKeeper = require("./services/recurringKeeper");
+
 
 
 Sentry.init({
@@ -247,6 +250,18 @@ try {
   );
 }
 
+// Admin projection-engine management (event-sourcing rebuild endpoints).
+try {
+  const adminProjectionsRouter = require("./routes/admin/projections");
+  app.use("/api/admin/projections", adminProjectionsRouter);
+  app.use("/api/v1/admin/projections", adminProjectionsRouter);
+} catch (err) {
+  logger.error(
+    { event: "route_load_failed", route: "admin/projections", err: err.message },
+    "Failed to load admin projections route module",
+  );
+}
+
 // ── Application routes ──────────────────────────────────────────────────────
 // Each route file is mounted under both /api and /api/v1 so that the v1
 // versioned path and the legacy unversioned path stay in lockstep.
@@ -266,6 +281,8 @@ const routeMounts = [
   "notifications",
   "verification",
   "oracle",
+  "map",
+  "matches",
 ];
 
 for (const name of routeMounts) {
@@ -440,6 +457,22 @@ async function startServer() {
   await startBlacklistCleanup();
   await startCO2VerificationCron();
 
+  // Match expiry: deactivates pools that have expired (time-based) or been
+  // exhausted (cap reached). Runs every 15 minutes.
+  try {
+    const matchExpiry = require("./services/matchExpiry");
+    matchExpiry.start();
+    lifecycle.onShutdown(async () => {
+      try { matchExpiry.stop(); } catch { /* ignore */ }
+    });
+    logger.info({ event: "match_expiry_scheduled" }, "Match expiry service scheduled");
+  } catch (err) {
+    logger.error(
+      { event: "match_expiry_startup_error", err: err.message },
+      "Match expiry service could not be started",
+    );
+  }
+
   // Retention worker: a dedicated pg-boss instance schedules the config-driven
   // data-retention policies. Kept separate from the request queues so a
   // retention failure can never interfere with donation/delivery processing.
@@ -515,6 +548,16 @@ async function startServer() {
     );
   }
 
+  try {
+    recurringKeeper.start();
+    logger.info({ event: "recurring_keeper_started" }, "Recurring keeper service started");
+  } catch (err) {
+    logger.error(
+      { event: "recurring_keeper_startup_error", err: err.message },
+      "Recurring keeper service failed to start",
+    );
+  }
+
   // The Stellar Horizon stream in the indexer holds the event loop open.
   // Register a shutdown hook so the stream is closed cleanly on SIGTERM.
   lifecycle.onShutdown(async () => {
@@ -532,6 +575,11 @@ async function startServer() {
     }
     try {
       if (typeof guardianService.stop === "function") guardianService.stop();
+    } catch {
+      // ignore
+    }
+    try {
+      if (typeof recurringKeeper.stop === "function") await recurringKeeper.stop();
     } catch {
       // ignore
     }

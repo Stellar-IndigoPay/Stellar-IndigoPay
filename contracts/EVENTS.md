@@ -271,6 +271,36 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 
 ---
 
+## 27. `rec_cr` (Recurring Created)
+
+**Description**: Emitted when a donor registers a new recurring donation schedule.
+
+| Event Name | Topics                           | Data                                                                                                    | When Emitted                              |
+| ---------- | -------------------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| `rec_cr`   | `["rec_cr", donor, project_id]`  | `(recurring_id: u32, amount: i128, currency: Symbol, interval_ledgers: u32, keeper_incentive: i128, msg_hash: u32)` | When a donor registers a recurring schedule |
+
+---
+
+## 28. `rec_can` (Recurring Cancelled)
+
+**Description**: Emitted when a donor cancels an active recurring donation schedule.
+
+| Event Name | Topics                 | Data                 | When Emitted                                |
+| ---------- | ---------------------- | -------------------- | ------------------------------------------- |
+| `rec_can`  | `["rec_can", donor]`   | `(recurring_id: u32)` | When a donor cancels a recurring schedule   |
+
+---
+
+## 29. `rec_exec` (Recurring Executed)
+
+**Description**: Emitted when a keeper successfully executes a matured recurring donation schedule.
+
+| Event Name | Topics                      | Data                                                                           | When Emitted                                  |
+| ---------- | --------------------------- | ------------------------------------------------------------------------------ | --------------------------------------------- |
+| `rec_exec` | `["rec_exec", keeper, donor]`| `(recurring_id: u32, amount: i128, currency: Symbol, project_id: String)`      | When a keeper executes a recurring donation   |
+
+---
+
 ## Usage Notes
 
 - All events follow Soroban’s standard event format: `topics: Vec<Val>`, `data: Val`.

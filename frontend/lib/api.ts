@@ -272,8 +272,92 @@ export async function fetchProjectMatches(projectId: string) {
       remainingXLM: string;
       expiresAt: string;
       createdAt: string;
+      status?: string;
     }>;
   }>(`/api/projects/${projectId}/matching`);
+  return data.data;
+}
+
+export interface MatchStats {
+  matchId: string;
+  projectId: string;
+  matcherAddress: string;
+  capXLM: number;
+  matchedXLM: number;
+  status: string;
+  matchTransactions: number;
+  totalMatchedXLM: string;
+  donorsReached: number;
+  avgMatchXLM: string;
+}
+
+export async function fetchMatchStats(matchId: string): Promise<MatchStats> {
+  const { data } = await api.get<{ success: boolean; data: MatchStats }>(
+    `/api/matches/${matchId}/stats`
+  );
+  return data.data;
+}
+
+export interface AdminMatchPool {
+  id: string;
+  projectId: string;
+  projectName?: string;
+  matcherAddress: string;
+  capXLM: number;
+  multiplier: number;
+  matchedXLM: number;
+  remainingXLM: string;
+  progressPct: number;
+  expiresAt: string;
+  status: string;
+  createdAt: string;
+}
+
+export async function createAdminMatch(payload: {
+  projectId: string;
+  matcherAddress: string;
+  capXLM: number;
+  multiplier: number;
+  expiresAt: string;
+}): Promise<AdminMatchPool> {
+  const { data } = await api.post<{ success: boolean; data: AdminMatchPool }>(
+    "/api/admin/matches",
+    payload
+  );
+  return data.data;
+}
+
+export async function listAdminMatches(params?: {
+  projectId?: string;
+  status?: string;
+}): Promise<AdminMatchPool[]> {
+  const { data } = await api.get<{ success: boolean; data: AdminMatchPool[] }>(
+    "/api/admin/matches",
+    { params }
+  );
+  return data.data;
+}
+
+export async function updateAdminMatch(
+  matchId: string,
+  payload: {
+    capXLM?: number;
+    multiplier?: number;
+    expiresAt?: string;
+    status?: string;
+  }
+): Promise<AdminMatchPool> {
+  const { data } = await api.patch<{ success: boolean; data: AdminMatchPool }>(
+    `/api/admin/matches/${matchId}`,
+    payload
+  );
+  return data.data;
+}
+
+export async function deleteAdminMatch(matchId: string): Promise<AdminMatchPool> {
+  const { data } = await api.delete<{ success: boolean; data: AdminMatchPool }>(
+    `/api/admin/matches/${matchId}`
+  );
   return data.data;
 }
 
