@@ -2,6 +2,14 @@
 
 ### Performance
 
+* **frontend:** debounced project search with AbortController (#257)
+  - New `useDebounce` hook; search query debounced 300ms before `fetchProjects`
+  - In-flight list/facet requests cancelled on filter change to prevent stale overwrites
+  - Optional `signal` on `fetchProjects` / `fetchProjectFacets`
+
+
+### Performance
+
 * **frontend:** isolate LiveDonationTicker component to eliminate 3.5s page-wide re-render cycle
   - Extract `LiveDonationTicker` into `frontend/components/LiveDonationTicker.tsx` as a `React.memo`-wrapped component
   - Move state rotation (`tickerIndex`) and `setInterval` loop internally inside `LiveDonationTicker`

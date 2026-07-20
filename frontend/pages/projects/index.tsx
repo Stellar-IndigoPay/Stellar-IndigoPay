@@ -15,6 +15,7 @@ import {
 import { PROJECT_CATEGORIES, CATEGORY_ICONS } from "@/utils/format";
 import type { ClimateProject } from "@/utils/types";
 import { useAutocomplete } from "@/hooks/useAutocomplete";
+import { useDebounce } from "@/hooks/useDebounce";
 import { trackEvent } from "@/lib/analytics";
 import clsx from "clsx";
 
@@ -74,30 +75,49 @@ export default function ProjectsPage() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [setIsAutocompleteOpen]);
 
-  // Debounced search effect
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setLoading(true);
-      const filters = {
-        category: category || undefined,
-        status: status || undefined,
-        verified: verified || undefined,
-        search: search || undefined,
-        location: location || undefined,
-        co2Min: co2Min ? Number(co2Min) : undefined,
-        co2Max: co2Max ? Number(co2Max) : undefined,
-      };
-      fetchProjects({ ...filters, limit: 50 })
-        .then(setProjects)
-        .catch(console.error)
-        .finally(() => setLoading(false));
-      fetchProjectFacets(filters)
-        .then(setFacets)
-        .catch(() => setFacets(null));
-    }, 300);
+  // Debounce free-text search so keystrokes do not spam the API.
+  const debouncedSearch = useDebounce(search, 300);
 
-    return () => clearTimeout(timer);
-  }, [category, status, verified, search, location, co2Min, co2Max]);
+  // Fetch projects with AbortController so stale responses cannot overwrite newer ones.
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    setLoading(true);
+    const filters = {
+      category: category || undefined,
+      status: status || undefined,
+      verified: verified || undefined,
+      search: debouncedSearch || undefined,
+      location: location || undefined,
+      co2Min: co2Min ? Number(co2Min) : undefined,
+      co2Max: co2Max ? Number(co2Max) : undefined,
+    };
+    Promise.all([
+      fetchProjects({ ...filters, limit: 50 }, { signal: controller.signal }),
+      fetchProjectFacets(filters, { signal: controller.signal }),
+    ])
+      .then(([list, nextFacets]) => {
+        if (!active) return;
+        setProjects(list);
+        setFacets(nextFacets);
+      })
+      .catch((err: unknown) => {
+        if (!active) return;
+        // Ignore aborts; surface other errors.
+        if ((err as { name?: string; code?: string })?.name === "CanceledError") return;
+        if ((err as { name?: string })?.name === "AbortError") return;
+        if ((err as { code?: string })?.code === "ERR_CANCELED") return;
+        console.error(err);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [category, status, verified, debouncedSearch, location, co2Min, co2Max]);
 
   useEffect(() => {
     if (!loading) {
