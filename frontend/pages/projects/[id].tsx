@@ -55,6 +55,7 @@ import type {
   ProjectCampaign,
   ProjectUpdate,
 } from "@/utils/types";
+import { trackEvent } from "@/lib/analytics";
 import { useWishlist } from "@/hooks/useWishlist";
 import { QueryErrorFallback } from "@/components/QueryErrorFallback";
 
@@ -191,15 +192,23 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
   };
 
   useEffect(() => {
+    if (!loading && project) {
+      trackEvent("project_detail_viewed", {
+        projectId: project.id,
+        category: project.category,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- identity stable
+  }, [loading, project?.id, project?.category]);
+
+  useEffect(() => {
     if (!project) return;
     setDiscussionLoading(true);
     fetchProjectDiscussion(project.walletAddress, 50)
       .then(setDiscussion)
       .catch(() => setDiscussion([]))
       .finally(() => setDiscussionLoading(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- project object
-    // identity changes at the same frequency as walletAddress; including
-    // project in the deps array would cause spurious refetches.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- identity stable
   }, [project?.walletAddress]);
 
   useEffect(() => {

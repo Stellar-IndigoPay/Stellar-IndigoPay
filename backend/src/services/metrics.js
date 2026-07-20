@@ -114,6 +114,26 @@ const cacheOperationsTotal = new client.Counter({
   registers: [registry],
 });
 
+const cacheHits = new client.Counter({
+  name: "indigopay_cache_hits_total",
+  help: "Total number of Redis cache hits, labelled by route.",
+  labelNames: ["route"],
+  registers: [registry],
+});
+
+const cacheMisses = new client.Counter({
+  name: "indigopay_cache_misses_total",
+  help: "Total number of Redis cache misses (computed fresh), labelled by route.",
+  labelNames: ["route"],
+  registers: [registry],
+});
+
+const cacheCoalesced = new client.Counter({
+  name: "indigopay_cache_coalesced_total",
+  help: "Total number of requests served via request coalescing (single-flight).",
+  registers: [registry],
+});
+
 const queueJobsTotal = new client.Counter({
   name: "queue_jobs_total",
   help: "pg-boss jobs, labelled by queue and outcome (completed|failed|started).",
@@ -124,6 +144,32 @@ const queueJobsTotal = new client.Counter({
 const indexerLagSeconds = new client.Gauge({
   name: "indexer_lag_seconds",
   help: "Seconds between the latest on-chain ledger seen by the indexer and now.",
+  registers: [registry],
+});
+
+const indigopayIndexerLagLedgers = new client.Gauge({
+  name: "indigopay_indexer_lag_ledgers",
+  help: "Number of ledgers the indexer is behind the latest Horizon ledger.",
+  registers: [registry],
+});
+
+const indigopayIndexerAutoBackfillsTotal = new client.Counter({
+  name: "indigopay_indexer_auto_backfills_total",
+  help: "Total number of autonomous micro-backfills triggered by lag detection.",
+  labelNames: ["outcome"],
+  registers: [registry],
+});
+
+const indigopayIndexerStreamReconnectsTotal = new client.Counter({
+  name: "indigopay_indexer_stream_reconnects_total",
+  help: "Total number of SSE stream reconnections.",
+  registers: [registry],
+});
+
+const indexerOperationsSkippedTotal = new client.Counter({
+  name: "indexer_operations_skipped_total",
+  help: "Total number of operations skipped by the indexer.",
+  labelNames: ["reason"],
   registers: [registry],
 });
 
@@ -267,6 +313,22 @@ const postgresFailoverTotal = new client.Counter({
   labelNames: ["outcome"], // initiated, succeeded, failed
   registers: [registry],
 });
+
+// ── Recurring donation scheduler metrics ────────────────────────────────────
+
+const recurringExecutionsTotal = new client.Counter({
+  name: "indigopay_recurring_executions_total",
+  help: "Total recurring donation execution attempts, labelled by status.",
+  labelNames: ["status"], // success, failed
+  registers: [registry],
+});
+
+const recurringPending = new client.Gauge({
+  name: "indigopay_recurring_pending",
+  help: "Number of active recurring donation schedules pending execution.",
+  registers: [registry],
+});
+
 
 /**
  * Normalise an Express req.route.path / req.path to a low-cardinality
@@ -421,6 +483,9 @@ module.exports = {
   refreshDbPoolMetrics,
   refreshQueueMetrics,
   updateSecretRotationMetrics,
+  cacheHits,
+  cacheMisses,
+  cacheCoalesced,
   metrics: {
     httpRequestsTotal,
     httpRequestDurationSeconds,
@@ -434,8 +499,15 @@ module.exports = {
     dbConnectionErrorsTotal,
     dbQueryDurationSeconds,
     cacheOperationsTotal,
+    cacheHits,
+    cacheMisses,
+    cacheCoalesced,
     queueJobsTotal,
     indexerLagSeconds,
+    indigopayIndexerLagLedgers,
+    indigopayIndexerAutoBackfillsTotal,
+    indigopayIndexerStreamReconnectsTotal,
+    indexerOperationsSkippedTotal,
     indexerRunning,
     secretRotationLastTimestamp,
     readinessCheckFailedTotal,
@@ -455,5 +527,7 @@ module.exports = {
     pushSentTotal,
     pushLatencySeconds,
     postgresFailoverTotal,
+    recurringExecutionsTotal,
+    recurringPending,
   },
 };

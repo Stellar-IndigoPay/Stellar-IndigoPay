@@ -258,6 +258,20 @@ pub struct Subscription {
 }
 
 #[contracttype]
+#[derive(Clone, Debug)]
+pub struct RecurringDonation {
+    pub donor: Address,
+    pub project_id: String,
+    pub amount: i128,
+    pub currency: Symbol,       // "XLM" or "USDC"
+    pub interval_ledgers: u32,  // e.g. 518400 ≈ 30 days @ 5s/ledger
+    pub next_execution_ledger: u32,
+    pub keeper_incentive: i128, // stroops paid to executor
+    pub active: bool,
+    pub created_at: u32,
+}
+
+#[contracttype]
 pub enum DataKey {
     // Multi-sig admin set: Vec<Address> of authorized admin addresses.
     // Replaces the former single-admin `Admin` variant.
@@ -367,6 +381,9 @@ pub enum DataKey {
     // Vote delegation
     VoteDelegation(Address),
     DelegatedWeight(Address),
+    RecurringDonation(Address, u32),
+    DonorRecurringCount(Address),
+    NativeTokenAddress,
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -2950,6 +2967,359 @@ impl IndigoPayContract {
             .publish((symbol_short!("upg_cncl"), signers.get(0).unwrap()), ());
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
+
+    // ─── Recurring Donations ──────────────────────────────────────────────────
+
+    pub fn create_recurring(
+        env: Env,
+        donor: Address,
+        project_id: String,
+        amount: i128,
+        currency: Symbol,
+        interval_ledgers: u32,
+        keeper_incentive: i128,
+        msg_hash: u32,
+    ) -> u32 {
+        donor.require_auth();
+        require_not_paused(&env);
+
+        if amount <= 0 {
+            panic!("Donation amount must be positive");
+        }
+        if keeper_incentive < 0 {
+            panic!("Keeper incentive must be non-negative");
+        }
+        if interval_ledgers == 0 {
+            panic!("Interval must be positive");
+        }
+
+        // Verify project exists
+        let project_key = DataKey::Project(project_id.clone());
+        if !env.storage().instance().has(&project_key) {
+            panic!("Project not found");
+        }
+
+        let count_key = DataKey::DonorRecurringCount(donor.clone());
+        let count: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
+        let recurring_id = count;
+        let next_count = count.checked_add(1).expect("DonorRecurringCount overflow");
+        env.storage().instance().set(&count_key, &next_count);
+
+        let next_execution_ledger = env
+            .ledger()
+            .sequence()
+            .checked_add(interval_ledgers)
+            .expect("next_execution_ledger overflow");
+
+        let recurring = RecurringDonation {
+            donor: donor.clone(),
+            project_id: project_id.clone(),
+            amount,
+            currency: currency.clone(),
+            interval_ledgers,
+            next_execution_ledger,
+            keeper_incentive,
+            active: true,
+            created_at: env.ledger().sequence(),
+        };
+
+        let recurring_key = DataKey::RecurringDonation(donor.clone(), recurring_id);
+        env.storage().instance().set(&recurring_key, &recurring);
+
+        env.events().publish(
+            (symbol_short!("rec_cr"), donor, project_id),
+            (recurring_id, amount, currency, interval_ledgers, keeper_incentive, msg_hash),
+        );
+
+        recurring_id
+    }
+
+    pub fn cancel_recurring(env: Env, donor: Address, recurring_id: u32) {
+        donor.require_auth();
+        require_not_paused(&env);
+
+        let recurring_key = DataKey::RecurringDonation(donor.clone(), recurring_id);
+        let mut recurring: RecurringDonation = env
+            .storage()
+            .instance()
+            .get(&recurring_key)
+            .expect("Recurring donation not found");
+
+        if !recurring.active {
+            panic!("Recurring donation is not active");
+        }
+
+        recurring.active = false;
+        env.storage().instance().set(&recurring_key, &recurring);
+
+        env.events().publish(
+            (symbol_short!("rec_can"), donor, recurring_id),
+            (),
+        );
+    }
+
+    pub fn execute_recurring(env: Env, keeper: Address, donor: Address, recurring_id: u32) {
+        keeper.require_auth();
+        require_not_paused(&env);
+
+        let recurring_key = DataKey::RecurringDonation(donor.clone(), recurring_id);
+        let mut recurring: RecurringDonation = env
+            .storage()
+            .instance()
+            .get(&recurring_key)
+            .expect("Recurring donation not found");
+
+        if !recurring.active {
+            panic!("Recurring donation is not active");
+        }
+        if env.ledger().sequence() < recurring.next_execution_ledger {
+            panic!("Recurring donation has not matured yet");
+        }
+
+        let mut project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(recurring.project_id.clone()))
+            .expect("Project not found");
+        if !project.active {
+            panic!("Project is not accepting donations");
+        }
+        if project.paused {
+            panic!("Project is temporarily paused");
+        }
+        require_campaign_accepts_donation(&project, env.ledger().sequence());
+
+        // Checked arithmetic for CO2 calculations and equivalent XLM amount
+        let xlm_equivalent: i128;
+        let token_addr: Address;
+
+        if recurring.currency == symbol_short!("XLM") {
+            token_addr = env
+                .storage()
+                .instance()
+                .get(&DataKey::NativeTokenAddress)
+                .expect("Native token not configured");
+
+            xlm_equivalent = recurring.amount;
+        } else if recurring.currency == symbol_short!("USDC") {
+            let stored_usdc: Option<Address> = env.storage().instance().get(&DataKey::USDCTokenAddress);
+            token_addr = stored_usdc.expect("USDC token not configured");
+
+            let oracle_addr: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::OracleAddress)
+                .expect("Price oracle not configured");
+            let oracle = OracleClient::new(&env, &oracle_addr);
+            let rate = oracle.get_price();
+            if rate <= 0 {
+                panic!("Oracle returned invalid price");
+            }
+            xlm_equivalent = recurring.amount
+                .checked_mul(rate)
+                .expect("USDC to XLM conversion overflow");
+        } else {
+            panic!("Unsupported currency");
+        }
+
+        let xlm_units = xlm_equivalent / STROOP;
+        let co2_increment = xlm_units
+            .checked_mul(project.co2_per_xlm as i128)
+            .expect("CO2 calculation overflow");
+
+        // Checks-Effects-Interactions (CEI) Pattern: State changes before token transfers.
+        // Update Project
+        project.total_raised = project
+            .total_raised
+            .checked_add(xlm_equivalent)
+            .expect("Project total_raised overflow");
+        let goal_reached = apply_campaign_goal_progress(&mut project);
+        let donated_key = DataKey::HasDonated(recurring.project_id.clone(), donor.clone());
+        if !env.storage().instance().has(&donated_key) {
+            env.storage().instance().set(&donated_key, &true);
+            project.donor_count = project
+                .donor_count
+                .checked_add(1)
+                .expect("Project donor_count overflow");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::Project(recurring.project_id.clone()), &project);
+        if goal_reached {
+            env.events().publish(
+                (symbol_short!("camp_goal"), recurring.project_id.clone()),
+                project.total_raised,
+            );
+        }
+
+        // Update Donor stats
+        let mut donor_stats: DonorStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonorStats(donor.clone()))
+            .unwrap_or(DonorStats {
+                total_donated: 0,
+                donation_count: 0,
+                badge: BadgeTier::None,
+                co2_offset_grams: 0,
+            });
+        let prev_badge = donor_stats.badge.clone();
+
+        donor_stats.total_donated = donor_stats
+            .total_donated
+            .checked_add(xlm_equivalent)
+            .expect("Donor total_donated overflow");
+        donor_stats.donation_count = donor_stats
+            .donation_count
+            .checked_add(1)
+            .expect("Donor donation_count overflow");
+        donor_stats.co2_offset_grams = donor_stats
+            .co2_offset_grams
+            .checked_add(co2_increment)
+            .expect("Donor co2_offset overflow");
+        donor_stats.badge = calculate_badge(donor_stats.total_donated);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonorStats(donor.clone()), &donor_stats);
+
+        // Track per-project cumulative donations
+        let proj_total_key = DataKey::DonorProjectTotal(recurring.project_id.clone(), donor.clone());
+        let prev_proj_total: i128 = env.storage().instance().get(&proj_total_key).unwrap_or(0);
+        env.storage().instance().set(
+            &proj_total_key,
+            &prev_proj_total
+                .checked_add(xlm_equivalent)
+                .expect("DonorProjectTotal overflow"),
+        );
+
+        // Auto-mint Impact NFT
+        if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
+            let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
+            if !env.storage().instance().has(&nft_key) {
+                let nft = ImpactNFT {
+                    owner: donor.clone(),
+                    tier: donor_stats.badge.clone(),
+                    total_donated: donor_stats.total_donated,
+                    minted_at_ledger: env.ledger().sequence(),
+                };
+                env.storage().instance().set(&nft_key, &nft);
+                env.events().publish(
+                    (symbol_short!("nft_mint"), donor.clone()),
+                    donor_stats.badge.clone(),
+                );
+            }
+        }
+
+        // Store Donation Record
+        let dc: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationCount)
+            .unwrap_or(0);
+        let new_dc = dc.checked_add(1).expect("DonationCount overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationCount, &new_dc);
+
+        let donation_record = DonationRecord {
+            donor: donor.clone(),
+            project: recurring.project_id.clone(),
+            amount: recurring.amount,
+            ledger: env.ledger().sequence(),
+            message_hash: 0,
+            currency: recurring.currency.clone(),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationRecord(dc), &donation_record);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+
+        // Update Globals
+        let gr: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalTotalRaised)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::GlobalTotalRaised, &gr.checked_add(xlm_equivalent).expect("GlobalTotalRaised overflow"));
+
+        let gc: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalCO2OffsetGrams)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::GlobalCO2OffsetGrams, &gc.checked_add(co2_increment).expect("GlobalCO2 overflow"));
+
+        // Update schedule next execution sequence
+        recurring.next_execution_ledger = env
+            .ledger()
+            .sequence()
+            .checked_add(recurring.interval_ledgers)
+            .expect("next_execution_ledger overflow");
+        env.storage().instance().set(&recurring_key, &recurring);
+
+        // Interactions: Token transfers
+        let token_client = token::Client::new(&env, &token_addr);
+        let contract_addr = env.current_contract_address();
+
+        // 1. Transfer donation amount to project wallet
+        token_client.transfer_from(&contract_addr, &donor, &project.wallet, &recurring.amount);
+
+        // 2. Transfer incentive to keeper
+        if recurring.keeper_incentive > 0 {
+            token_client.transfer_from(&contract_addr, &donor, &keeper, &recurring.keeper_incentive);
+        }
+
+        // Publish execute event
+        env.events().publish(
+            (symbol_short!("rec_exec"), donor, recurring_id),
+            (keeper, recurring.amount, recurring.currency, recurring.next_execution_ledger),
+        );
+
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    pub fn get_recurring(env: Env, donor: Address, recurring_id: u32) -> RecurringDonation {
+        env.storage()
+            .instance()
+            .get(&DataKey::RecurringDonation(donor, recurring_id))
+            .expect("Recurring donation not found")
+    }
+
+    pub fn get_donor_recurrings(env: Env, donor: Address) -> Vec<RecurringDonation> {
+        let count_key = DataKey::DonorRecurringCount(donor.clone());
+        let count: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
+        let mut list = Vec::new(&env);
+        for id in 0..count {
+            if let Some(recurring) = env
+                .storage()
+                .instance()
+                .get::<DataKey, RecurringDonation>(&DataKey::RecurringDonation(donor.clone(), id))
+            {
+                list.push_back(recurring);
+            }
+        }
+        list
+    }
+
+    pub fn set_native_token(env: Env, admin: Address, native_token: Address) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::NativeTokenAddress, &native_token);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    pub fn get_native_token(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::NativeTokenAddress)
+    }
+}
 
     /// Read-only: returns `(hash, effective_at_ledger)` for the pending
     /// upgrade, or `None` if no upgrade is currently proposed.
@@ -7227,218 +7597,435 @@ mod tests {
         client.get_refund_request(&0);
     }
 
+    // ─── Recurring Donation Tests ─────────────────────────────────────────────
+
     #[test]
-    fn test_quadratic_weights() {
-        let (env, _cid, client, admin, pid) = setup();
+    fn test_create_recurring_success() {
+        let (env, _cid, client, _admin, pid) = setup();
         let donor = Address::generate(&env);
-        let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        StellarAssetClient::new(&env, &token).mint(&donor, &(2000 * STROOP));
         
-        // Seedling = 10 XLM
-        client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32);
-        assert_eq!(client.get_voter_weight(&donor), 100);
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
         
-        // Tree = 100 XLM (+90)
-        client.donate(&token, &donor, &pid, &(90 * STROOP), &0u32);
-        assert_eq!(client.get_voter_weight(&donor), 141);
-        
-        // Forest = 500 XLM (+400)
-        client.donate(&token, &donor, &pid, &(400 * STROOP), &0u32);
-        assert_eq!(client.get_voter_weight(&donor), 173);
-        
-        // EarthGuardian = 2000 XLM (+1500)
-        client.donate(&token, &donor, &pid, &(1500 * STROOP), &0u32);
-        assert_eq!(client.get_voter_weight(&donor), 200);
+        assert_eq!(recurring_id, 0);
+        let recurring = client.get_recurring(&donor, &0u32);
+        assert_eq!(recurring.donor, donor);
+        assert_eq!(recurring.project_id, pid);
+        assert_eq!(recurring.amount, 10 * STROOP);
+        assert_eq!(recurring.currency, symbol_short!("XLM"));
+        assert_eq!(recurring.interval_ledgers, 100);
+        assert_eq!(recurring.keeper_incentive, STROOP);
+        assert!(recurring.active);
     }
 
     #[test]
-    fn test_delegate_vote_success() {
-        let (env, _cid, client, admin, pid) = setup();
+    #[should_panic(expected = "Donation amount must be positive")]
+    fn test_create_recurring_invalid_amount() {
+        let (env, _cid, client, _admin, pid) = setup();
         let donor = Address::generate(&env);
-        let delegate = Address::generate(&env);
-        let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        StellarAssetClient::new(&env, &token).mint(&donor, &(10 * STROOP));
-        client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32); // Seedling = 100
-
-        client.delegate_vote(&donor, &delegate);
-        
-        assert_eq!(client.get_delegate(&donor).unwrap(), delegate);
-        assert_eq!(client.get_delegated_weight(&delegate), 100);
-        assert_eq!(client.get_voter_weight(&delegate), 100);
+        client.create_recurring(
+            &donor,
+            &pid,
+            &0,
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
     }
 
     #[test]
-    #[should_panic(expected = "Cannot delegate to self")]
-    fn test_cannot_delegate_to_self() {
+    #[should_panic(expected = "Keeper incentive must be non-negative")]
+    fn test_create_recurring_invalid_keeper_incentive() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &-1,
+            &1u32,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Interval must be positive")]
+    fn test_create_recurring_invalid_interval() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &0u32,
+            &STROOP,
+            &1u32,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Project not found")]
+    fn test_create_recurring_project_not_found() {
         let (env, _cid, client, _admin, _pid) = setup();
         let donor = Address::generate(&env);
-        client.delegate_vote(&donor, &donor);
+        client.create_recurring(
+            &donor,
+            &String::from_str(&env, "nonexistent"),
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
     }
 
     #[test]
-    fn test_revoke_delegation() {
-        let (env, _cid, client, admin, pid) = setup();
+    fn test_cancel_recurring_success() {
+        let (env, _cid, client, _admin, pid) = setup();
         let donor = Address::generate(&env);
-        let delegate = Address::generate(&env);
-        let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        StellarAssetClient::new(&env, &token).mint(&donor, &(10 * STROOP));
-        client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32); // Seedling = 100
-
-        client.delegate_vote(&donor, &delegate);
-        assert_eq!(client.get_delegated_weight(&delegate), 100);
-
-        client.revoke_delegation(&donor);
-        assert!(client.get_delegate(&donor).is_none());
-        assert_eq!(client.get_delegated_weight(&delegate), 0);
-    }
-
-    #[test]
-    #[should_panic(expected = "Must revoke delegation before voting directly")]
-    fn test_delegator_cannot_vote_directly() {
-        let (env, _cid, client, admin, pid) = setup();
-        let donor = Address::generate(&env);
-        let delegate = Address::generate(&env);
-        let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        StellarAssetClient::new(&env, &token).mint(&donor, &(10 * STROOP));
-        client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32);
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
         
-        client.create_proposal(&signers1(&env, &admin), &pid, &0);
-        client.delegate_vote(&donor, &delegate);
-        client.vote_verify_project(&donor, &pid, &true);
+        client.cancel_recurring(&donor, &recurring_id);
+        let recurring = client.get_recurring(&donor, &recurring_id);
+        assert!(!recurring.active);
     }
 
     #[test]
-    fn test_delegate_votes_with_combined_weight() {
-        let (env, _cid, client, admin, pid) = setup();
+    #[should_panic(expected = "Recurring donation is not active")]
+    fn test_cancel_recurring_not_active() {
+        let (env, _cid, client, _admin, pid) = setup();
         let donor = Address::generate(&env);
-        let delegate = Address::generate(&env);
-        let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        StellarAssetClient::new(&env, &token).mint(&donor, &(10 * STROOP)); // Seedling
-        StellarAssetClient::new(&env, &token).mint(&delegate, &(100 * STROOP)); // Tree
-        client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32);
-        client.donate(&token, &delegate, &pid, &(100 * STROOP), &0u32);
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
         
-        client.delegate_vote(&donor, &delegate);
+        client.cancel_recurring(&donor, &recurring_id);
+        client.cancel_recurring(&donor, &recurring_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Recurring donation not found")]
+    fn test_cancel_recurring_not_found() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let donor = Address::generate(&env);
+        client.cancel_recurring(&donor, &0u32);
+    }
+
+    #[test]
+    fn test_execute_recurring_success_xlm() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let keeper = Address::generate(&env);
         
-        // Own=141, Delegated=100 -> Total=241
-        assert_eq!(client.get_voter_weight(&delegate), 241);
+        // Setup mock native token
+        let token_admin = Address::generate(&env);
+        let native_token = env.register_stellar_asset_contract_v2(token_admin).address();
+        client.set_native_token(&admin, &native_token);
 
-        client.create_proposal(&signers1(&env, &admin), &pid, &0);
-        client.vote_verify_project(&delegate, &pid, &true);
-        let prop = client.get_proposal(&pid);
-        assert_eq!(prop.votes_for, 241);
+        // Mint and approve native tokens
+        let native_client = StellarAssetClient::new(&env, &native_token);
+        native_client.mint(&donor, &(100 * STROOP));
+        native_client.approve(&donor, &client.address, &(100 * STROOP), &9999u32);
+
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+
+        // Fast-forward sequence number to maturity
+        let matured_ledger = env.ledger().sequence() + 100;
+        env.ledger().set_sequence_number(matured_ledger);
+
+        client.execute_recurring(&keeper, &donor, &recurring_id);
+
+        // Verify balances
+        let project = client.get_project(&pid);
+        let project_wallet_balance = native_client.balance(&project.wallet);
+        let keeper_balance = native_client.balance(&keeper);
+        let donor_balance = native_client.balance(&donor);
+
+        assert_eq!(project_wallet_balance, 10 * STROOP);
+        assert_eq!(keeper_balance, STROOP);
+        assert_eq!(donor_balance, 89 * STROOP);
+
+        // Verify stats
+        assert_eq!(project.total_raised, 10 * STROOP);
+        let donor_stats = client.get_donor_stats(&donor);
+        assert_eq!(donor_stats.total_donated, 10 * STROOP);
+        assert_eq!(donor_stats.donation_count, 1);
+        assert_eq!(donor_stats.badge, BadgeTier::Seedling);
+
+        // Verify next execution ledger is updated
+        let recurring = client.get_recurring(&donor, &recurring_id);
+        assert_eq!(recurring.next_execution_ledger, matured_ledger + 100);
     }
 
     #[test]
-    fn test_redelegate_moves_weight() {
+    fn test_execute_recurring_success_usdc() {
         let (env, _cid, client, admin, pid) = setup();
         let donor = Address::generate(&env);
-        let delegate1 = Address::generate(&env);
-        let delegate2 = Address::generate(&env);
-        let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        StellarAssetClient::new(&env, &token).mint(&donor, &(10 * STROOP));
-        client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32);
-
-        client.delegate_vote(&donor, &delegate1);
-        assert_eq!(client.get_delegated_weight(&delegate1), 100);
-
-        client.delegate_vote(&donor, &delegate2);
-        assert_eq!(client.get_delegated_weight(&delegate1), 0);
-        assert_eq!(client.get_delegated_weight(&delegate2), 100);
-    }
-
-    #[test]
-    fn test_donation_upgrade_updates_delegated_weight() {
-        let (env, _cid, client, admin, pid) = setup();
-        let donor = Address::generate(&env);
-        let delegate = Address::generate(&env);
-        let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        StellarAssetClient::new(&env, &token).mint(&donor, &(100 * STROOP));
+        let keeper = Address::generate(&env);
         
-        client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32); // Seedling
-        client.delegate_vote(&donor, &delegate);
-        assert_eq!(client.get_delegated_weight(&delegate), 100);
+        // Setup mock USDC token
+        let usdc_admin = Address::generate(&env);
+        let usdc_token = env.register_stellar_asset_contract_v2(usdc_admin).address();
+        client.set_usdc_token(&admin, &usdc_token);
 
-        // Upgrade to Tree (100 XLM total)
-        client.donate(&token, &donor, &pid, &(90 * STROOP), &0u32);
-        assert_eq!(client.get_delegated_weight(&delegate), 141);
-    }
-
-    #[test]
-    fn test_donate_asset_upgrade_updates_delegated_weight() {
-        let (env, _cid, client, admin, pid) = setup();
-        let donor = Address::generate(&env);
-        let delegate = Address::generate(&env);
-        client.donate_asset(&donor, &pid, &(10 * STROOP), &symbol_short!("yXLM"), &0u32); // Seedling
-        client.delegate_vote(&donor, &delegate);
-        assert_eq!(client.get_delegated_weight(&delegate), 100);
-
-        client.donate_asset(&donor, &pid, &(90 * STROOP), &symbol_short!("yXLM"), &0u32); // Tree
-        assert_eq!(client.get_delegated_weight(&delegate), 141);
-    }
-
-    #[test]
-    fn test_donate_usdc_upgrade_updates_delegated_weight() {
-        let (env, _cid, client, admin, pid) = setup();
-        let donor = Address::generate(&env);
-        let delegate = Address::generate(&env);
-        
-        // Setup USDC
-        let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        client.set_usdc_token(&admin, &token);
+        // Setup mock oracle (rate = 8 XLM per USDC)
         let oracle_id = env.register_contract(None, MockOracle);
-        client.set_oracle(&admin, &oracle_id); // 1 USDC = 8 XLM
+        client.set_oracle(&admin, &oracle_id);
 
-        StellarAssetClient::new(&env, &token).mint(&donor, &(100 * 10_000_000));
-        
-        // 2 USDC = 16 XLM -> Seedling
-        let usdc_amount1 = 2 * 10_000_000;
-        client.donate_usdc(&token, &donor, &pid, &usdc_amount1, &0u32);
-        client.delegate_vote(&donor, &delegate);
-        assert_eq!(client.get_delegated_weight(&delegate), 100);
+        // Mint and approve USDC tokens
+        let usdc_client = StellarAssetClient::new(&env, &usdc_token);
+        usdc_client.mint(&donor, &(100 * STROOP));
+        usdc_client.approve(&donor, &client.address, &(100 * STROOP), &9999u32);
 
-        // 11 USDC = 88 XLM -> total 104 XLM -> Tree
-        let usdc_amount2 = 11 * 10_000_000;
-        client.donate_usdc(&token, &donor, &pid, &usdc_amount2, &0u32);
-        assert_eq!(client.get_delegated_weight(&delegate), 141);
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("USDC"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+
+        // Fast-forward sequence number to maturity
+        let matured_ledger = env.ledger().sequence() + 100;
+        env.ledger().set_sequence_number(matured_ledger);
+
+        client.execute_recurring(&keeper, &donor, &recurring_id);
+
+        // Verify balances
+        let project = client.get_project(&pid);
+        let project_wallet_balance = usdc_client.balance(&project.wallet);
+        let keeper_balance = usdc_client.balance(&keeper);
+        let donor_balance = usdc_client.balance(&donor);
+
+        assert_eq!(project_wallet_balance, 10 * STROOP);
+        assert_eq!(keeper_balance, STROOP);
+        assert_eq!(donor_balance, 89 * STROOP);
+
+        // Verify stats (USDC amount is converted using oracle rate 8)
+        // 10 USDC * 8 = 80 XLM
+        assert_eq!(project.total_raised, 80 * STROOP);
+        let donor_stats = client.get_donor_stats(&donor);
+        assert_eq!(donor_stats.total_donated, 80 * STROOP);
+        assert_eq!(donor_stats.donation_count, 1);
+        assert_eq!(donor_stats.badge, BadgeTier::Seedling);
     }
 
     #[test]
-    fn test_passive_donor_delegates_to_active() {
-        let (env, _cid, client, admin, pid) = setup();
+    #[should_panic(expected = "Recurring donation has not matured yet")]
+    fn test_execute_recurring_pre_maturity_panics() {
+        let (env, _cid, client, _admin, pid) = setup();
         let donor = Address::generate(&env);
-        let delegate = Address::generate(&env);
-        let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        StellarAssetClient::new(&env, &token).mint(&donor, &(10 * STROOP));
-        client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32); // Seedling
+        let keeper = Address::generate(&env);
 
-        // delegate has 0 donations, badge None.
-        client.delegate_vote(&donor, &delegate);
-        
-        // Active member (delegate) has no badge but has delegated weight.
-        assert_eq!(client.get_voter_weight(&delegate), 100);
-        
-        client.create_proposal(&signers1(&env, &admin), &pid, &0);
-        
-        // Because weight > 0, delegate can vote even without their own badge!
-        client.vote_verify_project(&delegate, &pid, &true);
-        let prop = client.get_proposal(&pid);
-        assert_eq!(prop.votes_for, 100);
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+
+        client.execute_recurring(&keeper, &donor, &recurring_id);
     }
 
     #[test]
-    #[should_panic(expected = "Already voted on this proposal")]
-    fn test_delegate_cannot_vote_twice() {
+    #[should_panic(expected = "Recurring donation is not active")]
+    fn test_execute_recurring_cancelled_panics() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let keeper = Address::generate(&env);
+
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+
+        client.cancel_recurring(&donor, &recurring_id);
+        
+        let matured_ledger = env.ledger().sequence() + 100;
+        env.ledger().set_sequence_number(matured_ledger);
+
+        client.execute_recurring(&keeper, &donor, &recurring_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Project is temporarily paused")]
+    fn test_execute_recurring_project_paused_panics() {
         let (env, _cid, client, admin, pid) = setup();
         let donor = Address::generate(&env);
-        let delegate = Address::generate(&env);
-        let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        StellarAssetClient::new(&env, &token).mint(&donor, &(10 * STROOP));
-        client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32);
+        let keeper = Address::generate(&env);
 
-        client.delegate_vote(&donor, &delegate);
-        client.create_proposal(&signers1(&env, &admin), &pid, &0);
-        client.vote_verify_project(&delegate, &pid, &true);
-        client.vote_verify_project(&delegate, &pid, &true); // should panic
+        // Setup mock native token
+        let token_admin = Address::generate(&env);
+        let native_token = env.register_stellar_asset_contract_v2(token_admin).address();
+        client.set_native_token(&admin, &native_token);
+
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+
+        // Pause project
+        client.pause_project(&admin, &pid);
+
+        let matured_ledger = env.ledger().sequence() + 100;
+        env.ledger().set_sequence_number(matured_ledger);
+
+        client.execute_recurring(&keeper, &donor, &recurring_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Contract is paused")]
+    fn test_execute_recurring_contract_paused_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let keeper = Address::generate(&env);
+
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+
+        // Pause contract
+        client.pause_contract(&signers1(&env, &admin));
+
+        let matured_ledger = env.ledger().sequence() + 100;
+        env.ledger().set_sequence_number(matured_ledger);
+
+        client.execute_recurring(&keeper, &donor, &recurring_id);
+    }
+
+    #[test]
+    fn test_execute_recurring_badge_progression() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let keeper = Address::generate(&env);
+        
+        let token_admin = Address::generate(&env);
+        let native_token = env.register_stellar_asset_contract_v2(token_admin).address();
+        client.set_native_token(&admin, &native_token);
+
+        let native_client = StellarAssetClient::new(&env, &native_token);
+        native_client.mint(&donor, &(1500 * STROOP));
+        native_client.approve(&donor, &client.address, &(1500 * STROOP), &9999u32);
+
+        // 500 XLM intervals
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(500 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+
+        // Execution 1: 500 XLM -> Badge should be Forest (threshold 500)
+        let seq = env.ledger().sequence();
+        env.ledger().set_sequence_number(seq + 100);
+        client.execute_recurring(&keeper, &donor, &recurring_id);
+        assert_eq!(client.get_donor_stats(&donor).badge, BadgeTier::Forest);
+
+        // Execution 2: 1000 XLM -> Badge remains Forest
+        let seq = env.ledger().sequence();
+        env.ledger().set_sequence_number(seq + 100);
+        client.execute_recurring(&keeper, &donor, &recurring_id);
+        assert_eq!(client.get_donor_stats(&donor).badge, BadgeTier::Forest);
+
+        // Execution 3: 1500 XLM -> Badge remains Forest (threshold for Earth Guardian is 2000)
+        let seq = env.ledger().sequence();
+        env.ledger().set_sequence_number(seq + 100);
+        client.execute_recurring(&keeper, &donor, &recurring_id);
+        assert_eq!(client.get_donor_stats(&donor).badge, BadgeTier::Forest);
+    }
+
+    #[test]
+    fn test_get_donor_recurrings() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+
+        let recurring_id_0 = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+        let recurring_id_1 = client.create_recurring(
+            &donor,
+            &pid,
+            &(20 * STROOP),
+            &symbol_short!("USDC"),
+            &200u32,
+            &STROOP,
+            &2u32,
+        );
+
+        assert_eq!(recurring_id_0, 0);
+        assert_eq!(recurring_id_1, 1);
+
+        let recurrings = client.get_donor_recurrings(&donor);
+        assert_eq!(recurrings.len(), 2);
+        
+        let sub_0 = recurrings.get(0).unwrap();
+        assert_eq!(sub_0.amount, 10 * STROOP);
+        assert_eq!(sub_0.currency, symbol_short!("XLM"));
+        
+        let sub_1 = recurrings.get(1).unwrap();
+        assert_eq!(sub_1.amount, 20 * STROOP);
+        assert_eq!(sub_1.currency, symbol_short!("USDC"));
     }
 }

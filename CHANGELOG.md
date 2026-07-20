@@ -10,6 +10,18 @@
 
 ### Features
 
+* **backend:** Redis-backed response caching middleware with request coalescing (GF-044, closes #149)
+  - New `cacheResponse(ttlSeconds, keyBuilder)` middleware factory with X-Cache: HIT|MISS|COALESCED headers
+  - Request coalescing (single-flight) via inflight promise Map to prevent cache stampede
+  - `invalidateCache(pattern)` for declarative cache invalidation on mutating writes
+  - Cache key convention: `cache:v1:<resource>:<params_hash>` for future migration
+  - Default TTLs: 60s leaderboard, 120s project listings, 300s global stats/impact, 600s map
+  - Cache invalidation on POST `/api/donations`, POST/PATCH `/api/projects`, POST `/api/profiles`
+  - New map route `GET /api/map` returning geo-located project data (10 min cache)
+  - New Prometheus metrics: `indigopay_cache_hits_total`, `indigopay_cache_misses_total`, `indigopay_cache_coalesced_total`
+  - Cache-Control: `public, max-age=..., stale-while-revalidate=...` headers on cached responses
+  - Graceful degradation when Redis is unavailable (pass-through to database, logged warning)
+  - 18 unit tests covering cache hit/miss, coalescing, invalidation, Redis failure, hash determinism
 * **contracts:** add a multi-source TWAP price oracle with freshness protection (closes #281)
   - Authorised reporters submit timestamped positive prices to a 20-entry circular buffer
   - `get_price` averages the newest 10 observations and preserves the IndigoPay oracle interface

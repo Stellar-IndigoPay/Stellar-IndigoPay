@@ -128,6 +128,10 @@ jobs:
       - name: Run E2E tests
         working-directory: frontend
         run: npx playwright test
+        env:
+          NEXT_PUBLIC_STELLAR_NETWORK: testnet
+          NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
+          NEXT_PUBLIC_API_URL: http://localhost:4000
       - name: Upload Playwright traces on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -180,7 +184,10 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm ci
+        # --legacy-peer-deps tolerates jest-axe@8 asserting peer jest@^29
+        # while we actually use jest@^30. Pinning the exact version in
+        # package.json + overrides keeps CI deterministic.
+        run: npm ci --legacy-peer-deps
 
       - name: Install Playwright browsers
         working-directory: frontend
@@ -191,6 +198,10 @@ jobs:
         # Visual regression snapshots are OS/font-render dependent — skip in CI,
         # run locally where the baseline images were generated.
         run: npm run test:e2e -- --reporter=html,list --grep-invert "Visual regression"
+        env:
+          NEXT_PUBLIC_STELLAR_NETWORK: testnet
+          NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
+          NEXT_PUBLIC_API_URL: http://localhost:4000
 
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4

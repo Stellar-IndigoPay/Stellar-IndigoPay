@@ -1,0 +1,9 @@
+const { setTimeout, clearTimeout, setInterval, clearInterval } = require('timers');
+global.setTimeout = setTimeout;
+global.clearTimeout = clearTimeout;
+global.setInterval = setInterval;
+global.clearInterval = clearInterval;
+globalThis.setTimeout = setTimeout;
+globalThis.clearTimeout = clearTimeout;
+globalThis.setInterval = setInterval;
+globalThis.clearInterval = clearInterval;

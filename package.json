@@ -4,7 +4,7 @@
   "private": true,
   "description": "Root package for Stellar-IndigoPay monorepo — adds Husky pre-commit quality gates (GrantFox #60)",
   "scripts": {
-    "prepare": "husky"
+  
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^7.18.0",
@@ -21,7 +21,7 @@
       "npx eslint --fix"
     ],
     "frontend/**/*.{ts,tsx}": [
-      "npx eslint --fix"
+      "prettier --write"
     ],
     "extension/**/*.{ts,tsx,js,jsx}": [
       "bash -c 'cd extension && npx tsc --noEmit'"

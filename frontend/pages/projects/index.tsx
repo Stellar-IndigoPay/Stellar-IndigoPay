@@ -15,6 +15,7 @@ import {
 import { PROJECT_CATEGORIES, CATEGORY_ICONS } from "@/utils/format";
 import type { ClimateProject } from "@/utils/types";
 import { useAutocomplete } from "@/hooks/useAutocomplete";
+import { trackEvent } from "@/lib/analytics";
 import clsx from "clsx";
 
 export default function ProjectsPage() {
@@ -97,6 +98,16 @@ export default function ProjectsPage() {
 
     return () => clearTimeout(timer);
   }, [category, status, verified, search, location, co2Min, co2Max]);
+
+  useEffect(() => {
+    if (!loading) {
+      trackEvent("project_browsed", {
+        category: category || undefined,
+        verified: verified || undefined,
+        resultCount: projects.length,
+      });
+    }
+  }, [loading, category, verified, projects.length]);
 
   useEffect(() => {
     if (!compareQuery || projects.length === 0) return;
