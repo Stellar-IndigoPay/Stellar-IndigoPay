@@ -162,10 +162,11 @@ export interface ProjectListFilters {
 
 export async function fetchProjects(
   params?: ProjectListFilters,
+  signal?: AbortSignal,
 ): Promise<ClimateProject[]> {
   const { data } = await api.get<{ success: boolean; data: ClimateProject[] }>(
     "/api/projects",
-    { params },
+    { params, signal },
   );
   return data.data;
 }
