@@ -16,8 +16,20 @@ soroban-sdk = { version = "27.0.0", features = ["testutils"] }
 proptest = "1.4"
 
 [features]
+default = ["delegation", "recurring", "refund", "governance", "emergency", "upgrade", "usdc", "campaign", "donation"]
 testutils = ["soroban-sdk/testutils"]
+delegation = []
+recurring = []
+refund = []
+governance = ["delegation"]
+emergency = []
+upgrade = []
+usdc = []
+campaign = []
+donation = []
 
 [profile.release]
 lto = true
 opt-level = "z"
+codegen-units = 1
+strip = true

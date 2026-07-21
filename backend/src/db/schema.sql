@@ -290,16 +290,70 @@ CREATE INDEX IF NOT EXISTS verification_requests_status_idx
 CREATE INDEX IF NOT EXISTS verification_requests_wallet_idx
   ON verification_requests (wallet_address);
 
--- idempotency_keys: stores the cached HTTP response for each Idempotency-Key
--- header value sent by clients to POST /api/donations.  Rows older than 24 h
--- are pruned by the idempotencyCleanup cron service so that retried requests
--- within the same window always receive the same response body and status code.
-CREATE TABLE IF NOT EXISTS idempotency_keys (
-  key              TEXT        PRIMARY KEY,
-  response_status  INTEGER     NOT NULL,
-  response_body    JSONB       NOT NULL,
-  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
 
-CREATE INDEX IF NOT EXISTS idempotency_keys_created_at_idx
-  ON idempotency_keys (created_at);
+-- -- Event sourcing: donation event store + projections (migration 026) ------
+-- Mirrors backend/src/db/migrations/026_donation_events.js so the
+-- testcontainers integration suite has the same schema as production.
+
+CREATE TABLE IF NOT EXISTS donation_events (
+  id               BIGSERIAL PRIMARY KEY,
+  event_type       VARCHAR(50)  NOT NULL,
+  aggregate_id     VARCHAR(100) NOT NULL,
+  event_data       JSONB        NOT NULL,
+  soroban_ledger   INTEGER,
+  transaction_hash VARCHAR(64),
+  created_at       TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_donation_events_aggregate ON donation_events(aggregate_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_donation_events_type ON donation_events(event_type, created_at);
+
+CREATE TABLE IF NOT EXISTS projection_donor_leaderboard (
+  donor_address     VARCHAR(56) PRIMARY KEY,
+  total_donated     NUMERIC(20, 7) NOT NULL DEFAULT 0,
+  donation_count    INTEGER         NOT NULL DEFAULT 0,
+  projects_supported INTEGER        NOT NULL DEFAULT 0,
+  total_co2_offset  NUMERIC(20, 4) NOT NULL DEFAULT 0,
+  impact_score      NUMERIC(20, 4) NOT NULL DEFAULT 0,
+  last_donation_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_proj_leaderboard_total ON projection_donor_leaderboard(total_donated DESC);
+CREATE INDEX IF NOT EXISTS idx_proj_leaderboard_impact ON projection_donor_leaderboard(impact_score DESC);
+
+CREATE TABLE IF NOT EXISTS projection_project_stats (
+  project_id        VARCHAR(36)  PRIMARY KEY,
+  raised_xlm        NUMERIC(20, 7) NOT NULL DEFAULT 0,
+  donation_count    INTEGER         NOT NULL DEFAULT 0,
+  donor_count       INTEGER         NOT NULL DEFAULT 0,
+  co2_offset_kg     NUMERIC(20, 4) NOT NULL DEFAULT 0,
+  last_donation_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_proj_project_stats_raised ON projection_project_stats(raised_xlm DESC);
+
+CREATE TABLE IF NOT EXISTS projection_donor_history (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  donor_address    VARCHAR(56) NOT NULL,
+  project_id       VARCHAR(36) NOT NULL,
+  amount_xlm       NUMERIC(20, 7) NOT NULL,
+  amount           NUMERIC(20, 7) NOT NULL DEFAULT 0,
+  currency         VARCHAR(8)  NOT NULL DEFAULT 'XLM',
+  message          TEXT,
+  transaction_hash VARCHAR(64) NOT NULL,
+  co2_offset_kg    NUMERIC(20, 4) NOT NULL DEFAULT 0,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_proj_history_donor ON projection_donor_history(donor_address, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_proj_history_project ON projection_donor_history(project_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_proj_history_tx ON projection_donor_history(transaction_hash);
+
+CREATE TABLE IF NOT EXISTS projection_global_stats (
+  id               INTEGER PRIMARY KEY DEFAULT 1,
+  total_xlm_raised NUMERIC(20, 7) NOT NULL DEFAULT 0,
+  total_co2_offset_kg NUMERIC(20, 4) NOT NULL DEFAULT 0,
+  total_donations  BIGINT         NOT NULL DEFAULT 0,
+  total_donors     INTEGER        NOT NULL DEFAULT 0,
+  total_projects   INTEGER        NOT NULL DEFAULT 0,
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO projection_global_stats (id, total_xlm_raised, total_co2_offset_kg, total_donations, total_donors, total_projects, updated_at)
+VALUES (1, 0, 0, 0, 0, 0, NOW())
+ON CONFLICT (id) DO NOTHING;

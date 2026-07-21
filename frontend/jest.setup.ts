@@ -1,3 +1,5 @@
+import React from "react";
+
 // Adds custom jest matchers like toBeInTheDocument, toHaveTextContent, etc.
 import "@testing-library/jest-dom";
 // jest-axe custom matcher used by accessibility tests (toHaveNoViolations).
@@ -32,3 +34,42 @@ Object.defineProperty(HTMLElement.prototype, "offsetParent", {
     return this.isConnected ? this.parentNode : null;
   },
 });
+
+// ── Mock next/image ─────────────────────────────────────────────────────
+// jsdom cannot resolve next/image's optimized image loading; replace it with
+// a simple <img> render that preserves className, alt, src, and data-testid.
+// Uses React.createElement to avoid JSX in a setup file.
+jest.mock(
+  "next/image",
+  () =>
+    function MockNextImage({
+      src,
+      alt = "",
+      className,
+      priority,
+      loading,
+      fill,
+      sizes,
+      ...rest
+    }: {
+      src: string;
+      alt?: string;
+      className?: string;
+      priority?: boolean;
+      loading?: "lazy" | "eager";
+      fill?: boolean;
+      sizes?: string;
+      [key: string]: unknown;
+    }) {
+      return React.createElement("img", {
+        src,
+        alt: alt || "",
+        className,
+        "data-priority": priority ? "true" : undefined,
+        "data-loading": loading,
+        "data-fill": fill ? "true" : undefined,
+        "data-sizes": sizes,
+        ...rest,
+      });
+    },
+);

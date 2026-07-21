@@ -3,13 +3,19 @@
   "version": "0.1.0",
   "scripts": {
     "build": "webpack --config webpack.config.js",
-    "dev": "webpack --watch --config webpack.config.js"
+    "dev": "webpack --watch --config webpack.config.js",
+    "test": "jest",
+    "lint": "tsc --noEmit --project tsconfig.json"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^16.0.1"
   },
   "devDependencies": {
     "@types/chrome": "^0.2.0",
+    "@types/jest": "^30.0.0",
+    "jest": "^30.4.2",
+    "jest-environment-jsdom": "^30.4.1",
+    "ts-jest": "^29.4.11",
     "ts-loader": "^9.5.1",
     "typescript": "^6.0.3",
     "webpack": "^5.90.1",

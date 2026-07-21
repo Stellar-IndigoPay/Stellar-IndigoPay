@@ -1,4 +1,9 @@
 import { withSentryConfig } from "@sentry/nextjs";
+import withBundleAnalyzer from "@next/bundle-analyzer";
+
+const withBundleAnalyzerConfig = withBundleAnalyzer({
+  enabled: process.env.ANALYZE === "true",
+});
 
 /** @type {import('next').NextConfig} */
 
@@ -53,7 +58,7 @@ function buildStaticCsp(allowFraming = false) {
     "font-src 'self' https://fonts.gstatic.com",
     // OSM tiles loaded as images; Leaflet marker icons use data: URIs.
     `img-src 'self' data: blob: ${LEAFLET_TILE_SOURCES}`,
-    `connect-src 'self' ${STELLAR_CONNECT} https://api.coingecko.com`,
+    `connect-src 'self' ${STELLAR_CONNECT} https://api.coingecko.com ${process.env.NEXT_PUBLIC_API_URL ? process.env.NEXT_PUBLIC_API_URL : ''}`,
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
@@ -66,6 +71,14 @@ const nextConfig = {
   reactStrictMode: true,
   experimental: {
     optimizePackageImports: ["@sentry/nextjs"],
+  },
+  images: {
+    remotePatterns: [
+      { protocol: "https", hostname: "**.stellar.org" },
+      { protocol: "https", hostname: "**.indigopay.com" },
+      { protocol: "http", hostname: "localhost" },
+    ],
+    formats: ["image/avif", "image/webp"],
   },
   webpack: (config) => {
     config.resolve.fallback = {
@@ -131,7 +144,8 @@ const nextConfig = {
 // printing Sentry output in CI.
 const hasSentryAuth = Boolean(process.env.SENTRY_AUTH_TOKEN);
 
-export default withSentryConfig(
+export default withBundleAnalyzerConfig(
+  withSentryConfig(
   nextConfig,
   // Second arg: Sentry webpack plugin options (source-map upload config)
   {
@@ -153,4 +167,5 @@ export default withSentryConfig(
     disableServerWebpackPlugin: !hasSentryAuth,
     disableClientWebpackPlugin: !hasSentryAuth,
   },
+  ),
 );

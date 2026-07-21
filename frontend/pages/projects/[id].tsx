@@ -3,6 +3,7 @@
  */
 import { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/router";
+import Image from "next/image";
 import type { GetServerSideProps } from "next";
 import PageMeta from "@/components/PageMeta";
 import Link from "next/link";
@@ -864,6 +865,20 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
       >
         ← Back to Projects
       </Link>
+
+      {/* Hero image — priority-loaded for LCP optimization */}
+      {project.imageUrl && (
+        <div className="relative w-full h-64 sm:h-80 md:h-96 rounded-2xl overflow-hidden mb-6">
+          <Image
+            src={project.imageUrl}
+            alt={project.name}
+            fill
+            priority
+            sizes="100vw"
+            className="object-cover"
+          />
+        </div>
+      )}
 
       {/* Celebration Banner */}
       {isComplete && (
