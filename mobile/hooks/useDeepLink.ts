@@ -22,7 +22,7 @@ export function useDeepLink() {
     // SEP-0007: web+stellar scheme
     if (url.startsWith("web+stellar:")) {
       const encoded = encodeURIComponent(url);
-      router.push(`/wallet/sep0007?uri=${encoded}`);
+      router.push(`/sep0007?uri=${encoded}`);
       return;
     }
 

@@ -11,40 +11,48 @@
   - Add image domain whitelist (`remotePatterns`) and AVIF/WebP formats in next.config.mjs
   - Mock `next/image` in jest.setup.ts for test compatibility
 * **frontend:** isolate LiveDonationTicker component to eliminate 3.5s page-wide re-render cycle
-  - Extract `LiveDonationTicker` into `frontend/components/LiveDonationTicker.tsx` as a `React.memo`-wrapped component
-  - Move state rotation (`tickerIndex`) and `setInterval` loop internally inside `LiveDonationTicker`
-  - Remove parent `Home` page component re-renders on ticker ticks
-  - Add unit test suite in `frontend/components/__tests__/LiveDonationTicker.test.tsx`
+  + Extract `LiveDonationTicker` into `frontend/components/LiveDonationTicker.tsx` as a `React.memo`-wrapped component
+  + Move state rotation (`tickerIndex`) and `setInterval` loop internally inside `LiveDonationTicker`
+  + Remove parent `Home` page component re-renders on ticker ticks
+  + Add unit test suite in `frontend/components/__tests__/LiveDonationTicker.test.tsx`
 
 ### Features
 
-Here is the resolved CHANGELOG / release notes combining all features, bug fixes, and details from both branches:
+* **frontend:** complete 100% i18n coverage across all locale dictionaries, pluralization, and locale-aware formatting (closes #264, #262)
+  - Extract all hardcoded strings into `en.json`, `fr.json`, `es.json` with 300+ keys and full key parity
+  - Enhance `useI18n()` hook in `frontend/lib/i18n.tsx` with `tPlural()` pluralization, string interpolation (`{{param}}`), and English fallback
+  - Update `frontend/utils/format.ts` with `formatNumber` and locale-aware `formatXLM` formatting
+  - Configure `.eslintrc.json` with `eslint-plugin-i18n-json` rules
+  - Update `LanguageSwitcher.tsx` with selected checkmark indicator
+  - Add comprehensive unit tests in `frontend/lib/__tests__/i18n.test.tsx` and key parity check script `check-locale-parity.js`
 
-```markdown
-* **frontend:** build premium admin dashboard home page (closes #266)
-
-* **frontend:** implement optimistic project follow/unfollow and update likes using React Query (closes #256)
+* **frontend:** refactor the admin verification queue table with `@tanstack/react-table`, sortable status/date/CO₂ columns, status filter pills, responsive mobile expansion, and server-driven pagination controls
 
 * **backend:** Redis-backed response caching middleware with request coalescing (GF-044, closes #149)
-  - New `cacheResponse(ttlSeconds, keyBuilder)` middleware factory with X-Cache: HIT|MISS|COALESCED headers
-  - Request coalescing (single-flight) via inflight promise Map to prevent cache stampede
-  - `invalidateCache(pattern)` for declarative cache invalidation on mutating writes
-  - Cache key convention: `cache:v1:<resource>:<params_hash>` for future migration
-  - Default TTLs: 60s leaderboard, 120s project listings, 300s global stats/impact, 600s map
-  - Cache invalidation on POST `/api/donations`, POST/PATCH `/api/projects`, POST `/api/profiles`
-  - New map route `GET /api/map` returning geo-located project data (10 min cache)
-  - New Prometheus metrics: `indigopay_cache_hits_total`, `indigopay_cache_misses_total`, `indigopay_cache_coalesced_total`
-  - Cache-Control: `public, max-age=..., stale-while-revalidate=...` headers on cached responses
-  - Graceful degradation when Redis is unavailable (pass-through to database, logged warning)
-  - 18 unit tests covering cache hit/miss, coalescing, invalidation, Redis failure, hash determinism
-
+  + New `cacheResponse(ttlSeconds, keyBuilder)` middleware factory with X-Cache: HIT|MISS|COALESCED headers
+  + Request coalescing (single-flight) via inflight promise Map to prevent cache stampede
+  + `invalidateCache(pattern)` for declarative cache invalidation on mutating writes
+  + Cache key convention: `cache:v1:<resource>:<params_hash>` for future migration
+  + Default TTLs: 60s leaderboard, 120s project listings, 300s global stats/impact, 600s map
+  + Cache invalidation on POST `/api/donations`, POST/PATCH `/api/projects`, POST `/api/profiles`
+  + New map route `GET /api/map` returning geo-located project data (10 min cache)
+  + New Prometheus metrics: `indigopay_cache_hits_total`,  `indigopay_cache_misses_total`,  `indigopay_cache_coalesced_total`
+  + Cache-Control: `public, max-age=..., stale-while-revalidate=...` headers on cached responses
+  + Graceful degradation when Redis is unavailable (pass-through to database, logged warning)
+  + 18 unit tests covering cache hit/miss, coalescing, invalidation, Redis failure, hash determinism
 * **contracts:** add a multi-source TWAP price oracle with freshness protection (closes #281)
-  - Authorised reporters submit timestamped positive prices to a 20-entry circular buffer
-  - `get_price` averages the newest 10 observations and preserves the IndigoPay oracle interface
-  - Prices older than 720 ledgers use an admin-configured fallback or fail clearly when none exists
-  - Added reporter management, overflow protection, events, and comprehensive oracle tests
+  + Authorised reporters submit timestamped positive prices to a 20-entry circular buffer
+  + `get_price` averages the newest 10 observations and preserves the IndigoPay oracle interface
+  + Prices older than 720 ledgers use an admin-configured fallback or fail clearly when none exists
+  + Added reporter management, overflow protection, events, and comprehensive oracle tests
 
 * **frontend:** implement advanced keyboard navigation, global keyboard shortcuts, route focus management, and skip links
+  + Add `frontend/hooks/useShortcuts.ts` — custom keyboard shortcuts hook with modifier checking and input field exclusion
+  + Add `frontend/components/GlobalSearchModal.tsx` — search overlay modal accessible via Cmd+K / Ctrl+K with full keyboard navigation (arrows, Enter, Escape) and focus trap
+  + Update `frontend/pages/_app.tsx` to handle page focus management, global shortcuts, and App Shell layout (SkipToContent + Navbar wrapper)
+  + Update `frontend/components/DonateForm.tsx` to support Space/Enter keys on donation amount preset buttons
+  + Update `frontend/components/LanguageSwitcher.tsx` to prevent propagation of the Escape key
+  + Add Jest unit tests for `useShortcuts` hook in `frontend/hooks/__tests__/useShortcuts.test.ts`
 
 * **monitoring:** multi-window SLO burn-rate alerting with error budget dashboard (closes #240)
 
@@ -124,6 +132,16 @@ Here is the resolved CHANGELOG / release notes combining all features, bug fixes
   - Export `indigopay_soroban_rpc_retries_total` Prometheus Counter
   - Update `backend/src/routes/readiness.js` to include `soroban_rpc` health check in `/api/readyz` response (reports `ok` or `degraded`)
   - Add 33-test suite `backend/src/services/circuitBreaker.test.js` covering state machine, `isRetryable` classification, retry logic, circuit breaker open/half-open/closed transitions, and Prometheus metrics
+
+### Fixed
+
+* **ci:** add `timeout-minutes` to all CI jobs across backend (15 min), frontend (5–15 min per job), and contracts (10–30 min per job) to prevent hanging builds from consuming 6 hours of runner time
+* **backend:** increase WebSocket event deadline from 500ms to 2000ms in `donations.socket.test.js` to eliminate flaky CI failures caused by Socket.IO delivery latency in Docker environments
+* **frontend:** resolve `react-hooks/exhaustive-deps` lint warnings in `RecurringDonationsTab.tsx` and `WorldMap.tsx` — wrap `fetchRecurring` in `useCallback` and replace `activeDonationMarkers` state dependency with a `useRef<Set<string>>` for deduplication
+* **contracts:** add missing `VoteDelegation(Address)` and `DelegatedWeight(Address)` variants to `DataKey` enum, fixing 12+ compilation errors from partially-merged quadratic voting feature
+* **contracts:** add missing `disputed: false` field to all `Milestone` initializers in escrow-contract integration tests (`create_job.rs`, `dispute.rs`, `common/mod.rs`), fixing 10 compilation errors
+* **contracts:** repair `fuzz_tests.rs` compilation — add `extern crate alloc` + `Ledger` import, replace strategy `.clone()` with `.boxed()`, fix `Vote` variant field name, and fix `RegisterProject` action cloning
+* **contracts:** fix `test_execute_recurring_badge_progression` token allowance — bump approved amount from 1500 to 1503 XLM to account for keeper incentives deducted by `execute_recurring`
 
 ---
 
@@ -228,143 +246,149 @@ Here is the resolved CHANGELOG / release notes combining all features, bug fixes
 
 # Changelog
 
+## Unreleased
+
+- Added SEP-0007 deep-link support for mobile donations via `web+stellar:pay` URIs, including confirmation, biometric auth, callback handling, and scan-history logging.
+
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
 ### Added
-- Comprehensive Soroban contract fuzzing harness with 7 property-based tests (#239)
-- ContractAction-based action-sequence fuzzing for holistic invariant checking
-- Fuzz corpus infrastructure with replayable regression tests
-- Property tests: donation totals consistency, badge monotonicity, donor count accuracy,
-  global stats consistency, vote integrity, CO₂ offset monotonicity, pause/resume idempotency
-- CI fuzz job with 60-second timeout and corpus regression step
-- FUZZ_FINDINGS.md documenting all discoveries from fuzz testing
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+* Comprehensive Soroban contract fuzzing harness with 7 property-based tests (#239)
+* ContractAction-based action-sequence fuzzing for holistic invariant checking
+* Fuzz corpus infrastructure with replayable regression tests
+* Property tests: donation totals consistency, badge monotonicity, donor count accuracy, 
+  global stats consistency, vote integrity, CO₂ offset monotonicity, pause/resume idempotency
+* CI fuzz job with 60-second timeout and corpus regression step
+* FUZZ_FINDINGS.md documenting all discoveries from fuzz testing
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), 
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
 ### Added
 
-- **Webhook reliability** — `webhookQueue` worker backed by pg-boss with a
+* **Webhook reliability** — `webhookQueue` worker backed by pg-boss with a
   6-attempt exponential backoff (30s → 2m → 10m → 30m → 2h → 6h) and a
-  dead-letter table (`webhook_dlq`) for permanent failures. Replaces the
+  dead-letter table ( `webhook_dlq` ) for permanent failures. Replaces the
   old fire-and-forget `fetch` with a durable retry / DLQ pipeline.
-- **Webhook signing** — `webhookSign` helper implementing GitHub-style
-  `t=…,v1=…` HMAC-SHA256 with a 5-minute replay window and constant-time
+* **Webhook signing** — `webhookSign` helper implementing GitHub-style
+`t=…,v1=…` HMAC-SHA256 with a 5-minute replay window and constant-time
   comparison. Idempotency enforced by `INSERT … ON CONFLICT DO UPDATE
-RETURNING id, (xmax=0) AS inserted` on `webhook_deliveries`.
-- **Webhook Prometheus metrics** — `webhook_deliveries_total`,
-  `webhook_delivery_attempts_total`, `webhook_delivery_duration_seconds`,
-  plus `ai_summary_tokens_total`, `ai_summary_cost_usd_total`,
-  `ai_summary_latency_seconds`, and `ai_summary_outcomes_total`.
-- New database tables: `webhook_deliveries`, `webhook_dlq`,
-  `prompt_versions`, and `ai_summary_calls`.
-- **Soroban trust model** — 48h upgrade timelock
-  (`propose_upgrade` / `execute_upgrade` / `cancel`), contract-level pause
-  (`pause_contract` / `unpause_contract`), and two-step admin transfer
-  (`transfer_admin` / `accept_admin` / `cancel`). Full threat model
+RETURNING id, (xmax=0) AS inserted ` on ` webhook_deliveries`.
+* **Webhook Prometheus metrics** — `webhook_deliveries_total`, 
+`webhook_delivery_attempts_total` , `webhook_delivery_duration_seconds` , 
+  plus `ai_summary_tokens_total` , `ai_summary_cost_usd_total` , 
+`ai_summary_latency_seconds` , and `ai_summary_outcomes_total` .
+* New database tables: `webhook_deliveries`, `webhook_dlq`, 
+`prompt_versions` , and `ai_summary_calls` .
+* **Soroban trust model** — 48h upgrade timelock
+  ( `propose_upgrade` / `execute_upgrade` / `cancel` ), contract-level pause
+  ( `pause_contract` / `unpause_contract` ), and two-step admin transfer
+  ( `transfer_admin` / `accept_admin` / `cancel` ). Full threat model
   documented in `contracts/indigopay-contract/SECURITY.md` and
-  `UPGRADE.md`.
-- Backend observability env vars documented in `.env.example`
-  (`METRICS_BEARER_TOKEN`, `INDEXER_*`, `SENTRY_*`, etc.).
-- 32 Jest cases covering metrics, lifecycle, requestId, health, and
-  readiness in `backend/__tests__/`.
+`UPGRADE.md` .
+* Backend observability env vars documented in `.env.example`
+  ( `METRICS_BEARER_TOKEN` , `INDEXER_*` , `SENTRY_*` , etc.).
+* 32 Jest cases covering metrics, lifecycle, requestId, health, and
+  readiness in `backend/__tests__/` .
 
 ### Changed
 
-- `backend/src/routes/webhook.js` defers delivery to `webhookQueue`;
+* `backend/src/routes/webhook.js` defers delivery to `webhookQueue`; 
   the public route surface is preserved so existing partners keep working.
-- `backend/src/server.js` wires `webhookQueue.start` into boot and
+* `backend/src/server.js` wires `webhookQueue.start` into boot and
   registers a lifecycle shutdown hook to drain in-flight jobs on SIGTERM.
-- Soroban contracts: extracted a shared `require_admin` helper and
+* Soroban contracts: extracted a shared `require_admin` helper and
   unified the admin panic message across all admin-only entry points.
-- `docs/README.md` indexes every document by audience (users, developers,
+* `docs/README.md` indexes every document by audience (users, developers, 
   operators, contributors).
 
 ### Fixed
 
-- `webhook.js` retry scheduler now uses `boss.send(..., { startAfter })`
+* `webhook.js` retry scheduler now uses `boss.send(..., { startAfter })`
   instead of relying on the implicit loop. A deduped enqueue returns the
   existing `deliveryId` rather than silently re-creating a row.
-- `backend/src/services/indexerService` exposes a `stop()` method so the
+* `backend/src/services/indexerService` exposes a `stop()` method so the
   Stellar Horizon stream is closed cleanly on SIGTERM.
 
-- **scripts:** ensure `scripts/setup-dev.sh` installs `mobile` and `extension` dependencies (fix README mismatch)
+* **scripts:** ensure `scripts/setup-dev.sh` installs `mobile` and `extension` dependencies (fix README mismatch)
 
-- **NetworkPolicies** — default-deny for the `indigopay` namespace plus
+* **NetworkPolicies** — default-deny for the `indigopay` namespace plus
   explicit allow policies for ingress → backend, backend → postgres +
   kube-dns, backend → redis, backend → Stellar Horizon / Soroban RPC /
-  Anthropic / Sentry, Prometheus → backend `/metrics`, and frontend →
+  Anthropic / Sentry, Prometheus → backend `/metrics` , and frontend →
   backend (the last one closes the default-deny gap for the Next.js client).
-- **Autoscaling** — `HorizontalPodAutoscaler` for backend and frontend
+* **Autoscaling** — `HorizontalPodAutoscaler` for backend and frontend
   (min 2, max 10, CPU 70% / memory 80%) and `PodDisruptionBudget` with
-  `minAvailable: 1` for both, mirrored in the Helm chart via
-  `values.autoscaling` and `values.pdb`.
-- **Helm chart** — new `_helpers.tpl` (`backendName`, `frontendName`,
-  `commonLabels`) and `values.yaml` blocks for autoscaling and PDB so
-  the chart actually renders end-to-end (`helm template` was previously
+`minAvailable: 1` for both, mirrored in the Helm chart via
+`values.autoscaling` and `values.pdb` .
+* **Helm chart** — new `_helpers.tpl` (`backendName`,  `frontendName`, 
+`commonLabels` ) and `values.yaml` blocks for autoscaling and PDB so
+  the chart actually renders end-to-end ( `helm template` was previously
   broken by missing helpers).
-- **Secrets management** — `k8s/secret.example.yaml` is the checked-in
-  template; the real `k8s/secret.yaml` is gitignored;
-  `.github/workflows/secrets-lint.yml` fails CI on placeholder leaks in
-  `k8s/`, `helm/`, and `monitoring/`. The template was rewritten to use
+* **Secrets management** — `k8s/secret.example.yaml` is the checked-in
+  template; the real `k8s/secret.yaml` is gitignored; 
+`.github/workflows/secrets-lint.yml` fails CI on placeholder leaks in
+`k8s/` , `helm/` , and `monitoring/` . The template was rewritten to use
   lint-safe `__LIKE_THIS__` markers so the lint does not trip on it.
-- **External Secrets** — `ExternalSecret` + `SecretStore` templates for
+* **External Secrets** — `ExternalSecret` + `SecretStore` templates for
   AWS Secrets Manager, an IRSA `ServiceAccount` stub, and full setup
-  documentation (`docs/external-secrets.md`).
+  documentation ( `docs/external-secrets.md` ).
 
-- **Disaster recovery** — explicit RTO / RPO table, failure modes,
+* **Disaster recovery** — explicit RTO / RPO table, failure modes, 
   secret-compromise procedure, and multi-region roadmap
-  (`docs/disaster-recovery.md`).
-- **Restore runbook** — pre-flight → provision → cutover → post-restore
-  → dry-run procedure (`docs/restore-runbook.md`).
-- **Restore-drill workflow** — monthly CI job that pulls the latest
+  ( `docs/disaster-recovery.md` ).
+* **Restore runbook** — pre-flight → provision → cutover → post-restore
+  → dry-run procedure ( `docs/restore-runbook.md` ).
+* **Restore-drill workflow** — monthly CI job that pulls the latest
   backup and asserts table row counts
-  (`.github/workflows/restore-drill.yml`).
-- **Alert routing** — Alertmanager with PagerDuty + Slack + business
+  ( `.github/workflows/restore-drill.yml` ).
+* **Alert routing** — Alertmanager with PagerDuty + Slack + business
   hours override + inhibition rules
-  (`monitoring/alertmanager-routing.yml`), plus routing-aware alert
-  rules (`BackendDown`, `BackupMissed`, `RestoreDrillFailed`).
-- **Image hardening** — `backend/Dockerfile` and `frontend/Dockerfile`
+  ( `monitoring/alertmanager-routing.yml` ), plus routing-aware alert
+  rules ( `BackendDown` , `BackupMissed` , `RestoreDrillFailed` ).
+* **Image hardening** — `backend/Dockerfile` and `frontend/Dockerfile`
   pinned to `node:20.18.1-alpine` LTS; switched to `npm ci --omit=dev`
+
   for reproducible installs.
-- **SBOM** — `anchore/sbom-action` uploads a Software Bill of Materials
+* **SBOM** — `anchore/sbom-action` uploads a Software Bill of Materials
   to the GitHub dependency graph on every push.
-- **Image scan** — Trivy scan failing on CRITICAL / HIGH with fix
+* **Image scan** — Trivy scan failing on CRITICAL / HIGH with fix
   available.
-- **Image signing** — cosign keyless signing on release tags.
-- **GitOps** — ArgoCD `Application` manifest for chart-driven
+* **Image signing** — cosign keyless signing on release tags.
+* **GitOps** — ArgoCD `Application` manifest for chart-driven
   reconciliation, Argo Rollouts stepped canary strategy with Prometheus
   success-rate analysis (header corrected to reflect default stepped
   mode rather than traffic-split canary).
-- **Observability** — Prometheus + Grafana + Alertmanager stack with
+* **Observability** — Prometheus + Grafana + Alertmanager stack with
   persistent volumes; `ServiceMonitor` + metrics port + readiness /
   liveness probes + metrics secret wiring for the backend; backend
-  `indexerService.stop()` for clean shutdown.
+`indexerService.stop()` for clean shutdown.
 
 ### Removed
 
-- `docs/openapi.yml` — stale duplicate of `docs/api/openapi.yaml`, which
+* `docs/openapi.yml` — stale duplicate of `docs/api/openapi.yaml`, which
   is the canonical OpenAPI 3.0.3 spec served by `swagger-ui-express` at
-  `/api/docs` in development.
+`/api/docs` in development.
 
 ## [1.0.0] - 2025-01-01
 
 ### Added
 
-- Wallet Connect via Freighter browser extension.
-- Browse verified climate projects with impact metrics.
-- Direct on-chain XLM donations to project wallets.
-- Soroban smart contract for donation and CO₂ offset tracking.
-- Donor leaderboard ranked by total XLM given.
-- Project updates — organisations post progress updates to donors.
-- CI/CD pipelines (lint, type-check, test, build, e2e, DAST).
-- Docker Compose development environment with hot reload.
-- Gitleaks secret scanning in CI.
-- Backend API with Express and PostgreSQL.
-- Mobile app (React Native / Expo).
-- Browser extension.
-- Helm chart for Kubernetes deployment.
+* Wallet Connect via Freighter browser extension.
+* Browse verified climate projects with impact metrics.
+* Direct on-chain XLM donations to project wallets.
+* Soroban smart contract for donation and CO₂ offset tracking.
+* Donor leaderboard ranked by total XLM given.
+* Project updates — organisations post progress updates to donors.
+* CI/CD pipelines (lint, type-check, test, build, e2e, DAST).
+* Docker Compose development environment with hot reload.
+* Gitleaks secret scanning in CI.
+* Backend API with Express and PostgreSQL.
+* Mobile app (React Native / Expo).
+* Browser extension.
+* Helm chart for Kubernetes deployment.

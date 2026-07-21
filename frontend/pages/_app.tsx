@@ -16,6 +16,8 @@ import { PriceProvider } from "@/lib/priceContext";
 import { WalletProvider } from "@/lib/WalletProvider";
 import { ErrorBoundary } from "@/lib/ErrorBoundary";
 import useOnlineStatus from "@/hooks/useOnlineStatus";
+import useShortcuts from "@/hooks/useShortcuts";
+import GlobalSearchModal from "@/components/GlobalSearchModal";
 import ConnectivityBanner from "@/components/ConnectivityBanner";
 import OfflineFallback from "@/components/OfflineFallback";
 import InstallPrompt from "@/components/InstallPrompt";
@@ -50,6 +52,29 @@ Here is the resolved body block for `_app.tsx`:
 ```typescript
   const router = useRouter();
   const isOnline = useOnlineStatus();
+  const [searchOpen, setSearchOpen] = useState(false);
+
+  useShortcuts([
+    { key: "k", meta: true, handler: () => setSearchOpen(true), description: "Open search" },
+    { key: "h", ctrl: true, handler: () => router.push("/"), description: "Go home" },
+    { key: "d", ctrl: true, handler: () => router.push("/dashboard"), description: "Dashboard" },
+  ]);
+
+  useEffect(() => {
+    const handleRouteChange = () => {
+      setTimeout(() => {
+        const mainContent = document.getElementById("main-content");
+        if (mainContent) {
+          mainContent.focus();
+        } else {
+          document.querySelector("h1")?.focus();
+        }
+      }, 100);
+    };
+
+    router.events.on("routeChangeComplete", handleRouteChange);
+    return () => router.events.off("routeChangeComplete", handleRouteChange);
+  }, [router]);
 
   // Create QueryClient once per session so cache survives page navigations.
   const [queryClient] = useState(
@@ -120,46 +145,44 @@ Here is the resolved body block for `_app.tsx`:
           <I18nProvider>
             <PriceProvider>
               <WalletProvider>
-                <Head>
-                  <title>
-                    Stellar-IndigoPay — Fund the planet. One XLM at a time.
-                  </title>
-                  <meta
-                    name="description"
-                    content="Donate directly to verified climate projects on Stellar. 100% on-chain, zero fees, maximum impact."
-                  />
-                  <meta
-                    name="viewport"
-                    content="width=device-width, initial-scale=1"
-                  />
-                </Head>
-
-                {/* Font variable injection — next/font injects CSS custom properties
-                    so Tailwind can reference them. Apply to the outermost wrapper
-                    consumed by the ThemeProvider's rendered div. */}
-                <div className={`${inter.variable} ${display.variable}`}>
-                  <ConnectivityBanner isOnline={isOnline} />
-                  <SkipToContent />
-
-                  <main id="main-content" tabIndex={-1}>
-                    <OfflineFallback isOnline={isOnline} />
-                    {/* `initial={false}` prevents the entrance animation on the
-                        first SSR paint; `mode="wait"` lets the outgoing page
-                        finish exiting before the incoming one mounts, which keeps
-                        route changes smooth for both forward and back/forward
-                        navigations. Keying by `router.asPath` (including the
-                        query string) ensures dynamic routes animate too. */}
-                    <AnimatePresence mode="wait" initial={false}>
-                      <PageTransition key={router.asPath}>
-                        <Component {...pageProps} />
-                      </PageTransition>
-                    </AnimatePresence>
-                  </main>
-
-                  <CookieConsent />
-                  <InstallPrompt />
-                  <ThemeTiedToaster />
-                </div>
+              <Head>
+                <title>
+                  Stellar-IndigoPay — Fund the planet. One XLM at a time.
+                </title>
+                <meta
+                  name="description"
+                  content="Donate directly to verified climate projects on Stellar. 100% on-chain, zero fees, maximum impact."
+                />
+                <meta
+                  name="viewport"
+                  content="width=device-width, initial-scale=1"
+                />
+              </Head>
+              {/* Font variable injection — next/font injects CSS custom properties
+                  so Tailwind can reference them. Apply to the outermost wrapper
+                  consumed by the ThemeProvider's rendered div. */}
+              <div className={`${inter.variable} ${display.variable}`}>
+              <ConnectivityBanner isOnline={isOnline} />
+              <SkipToContent />
+              <main id="main-content" tabIndex={-1}>
+                <OfflineFallback isOnline={isOnline} />
+                {/* `initial={false}` prevents the entrance animation on the
+                    first SSR paint; `mode="wait"` lets the outgoing page
+                    finish exiting before the incoming one mounts, which keeps
+                    route changes smooth for both forward and back/forward
+                    navigations. Keying by `router.asPath` (including the
+                    query string) ensures dynamic routes animate too. */}
+                <AnimatePresence mode="wait" initial={false}>
+                  <PageTransition key={router.asPath}>
+                    <Component {...pageProps} />
+                  </PageTransition>
+                </AnimatePresence>
+              </main>
+              <CookieConsent />
+              <InstallPrompt />
+              <ThemeTiedToaster />
+              {searchOpen && <GlobalSearchModal onClose={() => setSearchOpen(false)} />}
+              </div>
               </WalletProvider>
             </PriceProvider>
           </I18nProvider>

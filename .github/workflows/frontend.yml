@@ -112,16 +112,23 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci --legacy-peer-deps
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        id: playwright-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('frontend/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-playwright-
+  working-directory: frontend
+  run: npm ci --legacy-peer-deps
+- name: Install json-server for mock API
+  run: npm install -g json-server
+- name: Start mock API server
+  working-directory: frontend
+  run: npx json-server --watch tests/e2e/fixtures/db.json --port 4000 &
+  env:
+    NODE_ENV: test
+- name: Cache Playwright browsers
+  uses: actions/cache@v4
+  id: playwright-cache
+  with:
+    path: ~/.cache/ms-playwright
+    key: ${{ runner.os }}-playwright-${{ hashFiles('frontend/package-lock.json') }}
+    restore-keys: |
+      ${{ runner.os }}-playwright-
       - name: Install Playwright browsers (with dependencies)
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
@@ -130,6 +137,13 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit == 'true'
         run: npx playwright install-deps chromium
         working-directory: frontend
+      - name: Build frontend for E2E
+        working-directory: frontend
+        run: npm run build
+        env:
+          NEXT_PUBLIC_STELLAR_NETWORK: testnet
+          NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
+          NEXT_PUBLIC_API_URL: http://localhost:4000
       - name: Run E2E tests
         working-directory: frontend
         run: npx playwright test
@@ -258,6 +272,13 @@ jobs:
         working-directory: frontend
         run: npx playwright install --with-deps chromium firefox webkit
 
+      - name: Build frontend for E2E
+        working-directory: frontend
+        run: npm run build
+        env:
+          NEXT_PUBLIC_STELLAR_NETWORK: testnet
+          NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
+          NEXT_PUBLIC_API_URL: http://localhost:4000
       - name: Run Playwright tests
         working-directory: frontend
         # Visual regression snapshots are OS/font-render dependent — skip in CI,

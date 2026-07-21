@@ -49,6 +49,7 @@ The current persisted keys are:
 - `DataKey::RefundCount` _(#290 donation refund)_
 - `DataKey::RefundForDonation(u32)` _(#290 donation refund)_
 - `DataKey::DonationCO2Offset(u32)` _(#290 donation refund — CO₂ snapshot per donation)_
+- `DataKey::SubProjectIds(String)` _(#391 cross-contract project registry — sub-project index per parent)_
 
 Do not rename or remove these variants, change their argument order, or reorder/remove fields from stored structs such as `Project`, `DonorStats`, `ImpactNFT`, `ProjectMilestoneNFT`, `VoteProposal`, or `GlobalStats` without adding an explicit migration path. New fields should be handled through a new storage version or a new key namespace so existing v1 values remain decodable.
 

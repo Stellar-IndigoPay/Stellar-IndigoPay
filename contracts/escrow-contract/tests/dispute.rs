@@ -109,11 +109,13 @@ fn test_resolve_dispute_refund_client() {
         name: SorobanString::from_str(&env, "M1"),
         percentage: 50,
         released: false,
+        disputed: false,
     });
     milestones.push_back(escrow_contract::Milestone {
         name: SorobanString::from_str(&env, "M2"),
         percentage: 50,
         released: false,
+        disputed: false,
     });
 
     client.create_job(
