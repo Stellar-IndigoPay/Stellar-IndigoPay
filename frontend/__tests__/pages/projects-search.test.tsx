@@ -86,6 +86,7 @@ describe("ProjectsPage search and filters", () => {
           verified: true,
           status: "active",
         }),
+        expect.anything(), // AbortSignal, added for request cancellation (#257)
       );
     });
   });
@@ -114,6 +115,7 @@ describe("ProjectsPage search and filters", () => {
       expect(mockFetchProjects).toHaveBeenCalledTimes(1);
       expect(mockFetchProjects).toHaveBeenCalledWith(
         expect.objectContaining({ search: "forest" }),
+        expect.anything(), // AbortSignal, added for request cancellation (#257)
       );
     });
   });
@@ -255,5 +257,124 @@ describe("ProjectsPage search and filters", () => {
       const region = screen.getByText(/Showing 1 project/i);
       expect(region.getAttribute("aria-live")).toBe("polite");
     });
+  });
+
+  // ─── AbortController tests (#257) ──────────────────────────────────────────
+
+  test("aborts the in-flight request when a newer search supersedes it", async () => {
+    let firstSignal: AbortSignal | undefined;
+    mockFetchProjects.mockImplementation((_params: unknown, signal?: AbortSignal) => {
+      firstSignal = signal;
+      return new Promise(() => {
+        /* never resolves — simulates a slow first request */
+      });
+    });
+
+    render(<ProjectsPage />);
+    const input = screen.getByLabelText("Search projects");
+
+    fireEvent.change(input, { target: { value: "reforestation" } });
+    await act(async () => {
+      jest.advanceTimersByTime(300);
+    });
+    expect(firstSignal?.aborted).toBe(false);
+
+    // A second, different search value supersedes the first in-flight one.
+    mockFetchProjects.mockImplementation(() => new Promise(() => {}));
+    fireEvent.change(input, { target: { value: "ocean cleanup" } });
+    await act(async () => {
+      jest.advanceTimersByTime(300);
+    });
+
+    expect(firstSignal?.aborted).toBe(true);
+  });
+
+  test('shows a "Searching..." indicator while a search request is in-flight, and hides it after resolving', async () => {
+    render(<ProjectsPage />);
+    await act(async () => {
+      jest.advanceTimersByTime(300);
+    });
+    await waitFor(() => expect(mockFetchProjects).toHaveBeenCalledTimes(1));
+
+    let resolveFetch: (value: ClimateProject[]) => void = () => {};
+    mockFetchProjects.mockReturnValue(
+      new Promise((resolve) => {
+        resolveFetch = resolve;
+      }),
+    );
+
+    const input = screen.getByLabelText("Search projects");
+    fireEvent.change(input, { target: { value: "solar" } });
+    await act(async () => {
+      jest.advanceTimersByTime(300);
+    });
+
+    expect(await screen.findByText(/searching/i)).toBeInTheDocument();
+
+    await act(async () => {
+      resolveFetch([MOCK_PROJECT]);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText(/searching/i)).not.toBeInTheDocument();
+    });
+  });
+
+  test("logs but does not crash on a non-abort search error", async () => {
+    const consoleErrorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    render(<ProjectsPage />);
+    await act(async () => {
+      jest.advanceTimersByTime(300);
+    });
+    await waitFor(() => expect(mockFetchProjects).toHaveBeenCalledTimes(1));
+
+    mockFetchProjects.mockRejectedValue(new Error("Network down"));
+    const input = screen.getByLabelText("Search projects");
+    fireEvent.change(input, { target: { value: "wind" } });
+
+    await act(async () => {
+      jest.advanceTimersByTime(300);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(consoleErrorSpy).toHaveBeenCalledWith("Search failed:", expect.any(Error));
+    consoleErrorSpy.mockRestore();
+  });
+
+  test("does not log or act on an aborted request's own rejection", async () => {
+    mockFetchProjects.mockImplementation((_params: unknown, signal?: AbortSignal) => {
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          const err: any = new Error("canceled");
+          err.name = "AbortError";
+          reject(err);
+        });
+      });
+    });
+    const consoleErrorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+
+    render(<ProjectsPage />);
+    const input = screen.getByLabelText("Search projects");
+
+    fireEvent.change(input, { target: { value: "first" } });
+    await act(async () => {
+      jest.advanceTimersByTime(300);
+    });
+
+    // Triggering a second search aborts the first in-flight request.
+    fireEvent.change(input, { target: { value: "second" } });
+    await act(async () => {
+      jest.advanceTimersByTime(300);
+    });
+
+    // The AbortError from the superseded first request must never be
+    // logged as a failure.
+    expect(consoleErrorSpy).not.toHaveBeenCalledWith(
+      "Search failed:",
+      expect.objectContaining({ name: "AbortError" }),
+    );
+    consoleErrorSpy.mockRestore();
   });
 });

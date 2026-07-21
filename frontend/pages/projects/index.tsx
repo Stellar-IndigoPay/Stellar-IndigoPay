@@ -43,6 +43,10 @@ export default function ProjectsPage() {
     handleKeyDown,
   } = useAutocomplete<string>(fetchTagSuggestions);
 
+  // Debounce the free-text search value only — category/status/etc. are
+  // click-driven, not typed, so they don't need debouncing (issue #257).
+  const debouncedSearch = useDebounce(search, 300);
+
   const category = (router.query.category as string) || "";
   const status = (router.query.status as string) || "active";
   const verified = (router.query.verified as string) === "true";
@@ -79,30 +83,47 @@ export default function ProjectsPage() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [setIsAutocompleteOpen]);
 
-  // Debounced search effect
+  // Fetch projects whenever any filter changes. `search` comes in already
+  // debounced (via `debouncedSearch`), so typing doesn't fire a request per
+  // keystroke. An AbortController cancels any still-in-flight request when
+  // a newer one starts, so a slow response for a stale query can never
+  // overwrite fresher results (issue #257).
   useEffect(() => {
-    const timer = setTimeout(() => {
+    const controller = new AbortController();
+
+    async function loadProjects() {
       setLoading(true);
       const filters = {
         category: category || undefined,
         status: status || undefined,
         verified: verified || undefined,
-        search: search || undefined,
+        search: debouncedSearch || undefined,
         location: location || undefined,
         co2Min: co2Min ? Number(co2Min) : undefined,
         co2Max: co2Max ? Number(co2Max) : undefined,
       };
-      fetchProjects({ ...filters, limit: 50 })
-        .then(setProjects)
-        .catch(console.error)
-        .finally(() => setLoading(false));
+      try {
+        const results = await fetchProjects(
+          { ...filters, limit: 50 },
+          controller.signal,
+        );
+        setProjects(results);
+      } catch (err: any) {
+        if (err?.name !== "AbortError" && err?.code !== "ERR_CANCELED") {
+          console.error("Search failed:", err);
+        }
+      } finally {
+        setLoading(false);
+      }
+
       fetchProjectFacets(filters)
         .then(setFacets)
         .catch(() => setFacets(null));
-    }, 300);
+    }
 
-    return () => clearTimeout(timer);
-  }, [category, status, verified, search, location, co2Min, co2Max]);
+    loadProjects();
+    return () => controller.abort();
+  }, [category, status, verified, debouncedSearch, location, co2Min, co2Max]);
 
   useEffect(() => {
     if (!loading) {
@@ -380,7 +401,14 @@ export default function ProjectsPage() {
           aria-controls="tag-autocomplete-list"
           className="input-field pl-10 relative z-10"
         />
-
+        {loading && search && (
+          <span
+            className="absolute right-4 top-1/2 -translate-y-1/2 text-xs text-[#8aaa8a] dark:text-forest-300 z-10"
+            aria-live="polite"
+          >
+            Searching...
+          </span>
+        )}
         {/* Tag autocomplete dropdown */}
         {isAutocompleteOpen && (
           <ul
