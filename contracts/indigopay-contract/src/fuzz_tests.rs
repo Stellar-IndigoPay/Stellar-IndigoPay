@@ -29,8 +29,11 @@ mod fuzz {
     use proptest::prelude::*;
     use soroban_sdk::Vec;
     use soroban_sdk::{
-        testutils::Address as _, token::StellarAssetClient, Address, Env, String as SorobanString,
+        testutils::Address as _, testutils::Ledger as _, token::StellarAssetClient, Address, Env,
+        String as SorobanString,
     };
+    use std::format;
+    use std::string::String;
 
     /// Helper: create a single-element signer Vec for admin calls.
     fn signers1(env: &Env, a: &Address) -> Vec<Address> {
@@ -884,11 +887,13 @@ mod fuzz {
             client.donate(&token, &donor, &project_id, &amount, &42u32);
 
             let stats = client.get_donor_stats(&donor);
+            // Must mirror `voting_weight_from_badge` in lib.rs exactly —
+            // see the comment on the same table further up in this file.
             let expected_weight = match stats.badge {
-                BadgeTier::Seedling => 1u32,
-                BadgeTier::Tree => 3u32,
-                BadgeTier::Forest => 10u32,
-                BadgeTier::EarthGuardian => 25u32,
+                BadgeTier::Seedling => 100u32,
+                BadgeTier::Tree => 141u32,
+                BadgeTier::Forest => 173u32,
+                BadgeTier::EarthGuardian => 200u32,
                 BadgeTier::None => 0u32,
             };
 
@@ -1068,7 +1073,8 @@ mod fuzz {
         client.vote_verify_project(&donor_earth, &project_id, &true);
 
         let proposal = client.get_proposal(&project_id);
-        assert_eq!(proposal.votes_for, 26u32);
+        // Seedling (100) + EarthGuardian (200), per voting_weight_from_badge in lib.rs
+        assert_eq!(proposal.votes_for, 300u32);
     }
 
     #[test]
@@ -1122,12 +1128,12 @@ mod fuzz {
     }
 
     /// Strategy for generating valid donation amounts: 1 stroop to 100K XLM.
-    fn donation_amount_strategy() -> impl Strategy<Value = i128> {
+    fn donation_amount_strategy() -> impl Strategy<Value = i128> + Clone {
         1i128..=100_000i128 * STROOP
     }
 
     /// Strategy for generating valid CO₂ rates: 1 to MAX_CO2_PER_XLM.
-    fn co2_rate_strategy() -> impl Strategy<Value = u32> {
+    fn co2_rate_strategy() -> impl Strategy<Value = u32> + Clone {
         1u32..=MAX_CO2_PER_XLM
     }
 
@@ -1170,7 +1176,7 @@ mod fuzz {
                 }),
             2 => (project_idx.clone(), donor_idx.clone(), proptest::bool::ANY)
                 .prop_map(|(pi, di, a)| ContractAction::Vote {
-                    project_idx: pi, donor_idx: di, approve: a
+                    project_idx: pi, voter_idx: di, approve: a
                 }),
             1 => project_idx.clone()
                 .prop_map(|pi| ContractAction::ResolveProposal { project_idx: pi }),
@@ -1535,11 +1541,15 @@ mod fuzz {
 
                 // Try voting
                 let badge = client.get_badge(&donor);
+                // Must mirror `voting_weight_from_badge` in lib.rs exactly —
+                // this fuzz test models the contract's real weight table
+                // rather than an independent one, so a future change to
+                // lib.rs's weights needs a matching update here too.
                 let weight = match badge {
-                    BadgeTier::Seedling => 1u32,
-                    BadgeTier::Tree => 3u32,
-                    BadgeTier::Forest => 10u32,
-                    BadgeTier::EarthGuardian => 25u32,
+                    BadgeTier::Seedling => 100u32,
+                    BadgeTier::Tree => 141u32,
+                    BadgeTier::Forest => 173u32,
+                    BadgeTier::EarthGuardian => 200u32,
                     BadgeTier::None => 0u32,
                 };
 
@@ -1676,7 +1686,7 @@ mod fuzz {
                 );
                 prop_assert!(result.is_err(),
                     "pause_project should panic when project is deactivated");
-                return;
+                return Ok(());
             }
 
             if pause_active {
@@ -2013,10 +2023,10 @@ mod fuzz {
             mint_tokens(&env, &token, &donor, 500 * STROOP);
             client.donate(&token, &donor, &project_id, &(500 * STROOP), &MSG_HASH);
 
-            // Forest badge = weight 10
+            // Forest badge = weight 173, per voting_weight_from_badge in lib.rs
             client.vote_verify_project(&donor, &project_id, &true);
             let proposal = client.get_proposal(&project_id);
-            assert_eq!(proposal.votes_for, 10);
+            assert_eq!(proposal.votes_for, 173);
             assert!(!proposal.resolved);
 
             // Advance past deadline

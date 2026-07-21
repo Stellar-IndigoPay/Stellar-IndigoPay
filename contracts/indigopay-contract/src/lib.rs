@@ -351,6 +351,12 @@ pub enum DataKey {
     RecurringDonation(Address, u32),
     DonorRecurringCount(Address),
     NativeTokenAddress,
+    // Vote delegation: donor -> delegate they've handed their voting
+    // weight to. Cleared by `revoke_delegation`.
+    VoteDelegation(Address),
+    // Cumulative voting weight (sum of delegators' badge-derived weights)
+    // currently delegated to this address. Adjusted on delegate/revoke.
+    DelegatedWeight(Address),
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
