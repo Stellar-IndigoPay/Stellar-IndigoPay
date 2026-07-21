@@ -28,6 +28,7 @@ usdc = []
 campaign = []
 donation = []
 zk = []
+vesting = []
 
 [profile.release]
 lto = true

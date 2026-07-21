@@ -299,6 +299,34 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 | ---------- | --------------------------- | ------------------------------------------------------------------------------ | --------------------------------------------- |
 | `rec_exec` | `["rec_exec", keeper, donor]`| `(recurring_id: u32, amount: i128, currency: Symbol, project_id: String)`      | When a keeper executes a recurring donation   |
 
+## 30. `vest_crt` (Vesting Created)
+
+**Description**: Emitted when a donor creates a time-locked vesting donation schedule.
+
+| Event Name | Topics                           | Data                                                                                                    | When Emitted                   |
+| ---------- | -------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| `vest_crt` | `["vest_crt", donor, project_id]` | `(schedule_id: u32, total_amount: i128, amount_per_installment: i128, installment_count: u32, interval_ledgers: u32, msg_hash: u32)` | When donor calls `donate_vested` |
+
+---
+
+## 31. `vest_clm` (Vesting Claimed)
+
+**Description**: Emitted when a vested installment is claimed by anyone after the interval elapses.
+
+| Event Name | Topics                    | Data                                                     | When Emitted                          |
+| ---------- | ------------------------- | -------------------------------------------------------- | ------------------------------------- |
+| `vest_clm` | `["vest_clm", project_id]` | `(schedule_id: u32, amount: i128, remaining: u32)`       | When `claim_vested_installment` fires |
+
+---
+
+## 32. `vest_can` (Vesting Cancelled)
+
+**Description**: Emitted when a donor cancels a vesting schedule and receives back the unvested amount.
+
+| Event Name | Topics                            | Data                                      | When Emitted                    |
+| ---------- | --------------------------------- | ----------------------------------------- | ------------------------------- |
+| `vest_can` | `["vest_can", donor, project_id]` | `(schedule_id: u32, unvested_amount: i128)` | When donor calls `cancel_vesting` |
+
 ---
 
 ## Usage Notes
