@@ -1136,7 +1136,14 @@ impl IndigoPayContract {
 
     #[allow(clippy::too_many_arguments)]
     /// Backward-compatible public donation entrypoint.
-    pub fn donate(env: Env, token: Address, donor: Address, project_id: String, amount: i128, msg_hash: u32) {
+    pub fn donate(
+        env: Env,
+        token: Address,
+        donor: Address,
+        project_id: String,
+        amount: i128,
+        msg_hash: u32,
+    ) {
         Self::donate_with_privacy(env, token, donor, project_id, amount, msg_hash, false)
     }
 
@@ -1278,7 +1285,9 @@ impl IndigoPayContract {
             let prev_proj_total: i128 = env.storage().instance().get(&proj_total_key).unwrap_or(0);
             env.storage().instance().set(
                 &proj_total_key,
-                &prev_proj_total.checked_add(amount).expect("DonorProjectTotal overflow"),
+                &prev_proj_total
+                    .checked_add(amount)
+                    .expect("DonorProjectTotal overflow"),
             );
         }
 
@@ -1322,11 +1331,18 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::DonationRecord(dc), &donation_record);
-        env.storage().instance().set(&DataKey::DonationDonor(dc), &donor);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationDonor(dc), &donor);
         if anonymous {
             let key = DataKey::AnonymousDonationCount(project_id.clone());
             let count: u32 = env.storage().instance().get(&key).unwrap_or(0);
-            env.storage().instance().set(&key, &count.checked_add(1).expect("AnonymousDonationCount overflow"));
+            env.storage().instance().set(
+                &key,
+                &count
+                    .checked_add(1)
+                    .expect("AnonymousDonationCount overflow"),
+            );
         }
         // Snapshot CO₂ offset for exact reversal on refund (#290).
         env.storage()
@@ -1358,7 +1374,11 @@ impl IndigoPayContract {
         token_client.transfer(&donor, &project.wallet, &amount);
 
         env.events().publish(
-            (symbol_short!("donated"), public_donor(&env, &donor, anonymous), project_id.clone()),
+            (
+                symbol_short!("donated"),
+                public_donor(&env, &donor, anonymous),
+                project_id.clone(),
+            ),
             (amount, donor_stats.badge.clone(), msg_hash),
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
@@ -1381,8 +1401,23 @@ impl IndigoPayContract {
     /// `source_asset_code` is a short symbol identifying the source asset
     /// (e.g. "yXLM", "USDT", "BTC") for the on-chain donation record.
     /// Backward-compatible path-payment entrypoint.
-    pub fn donate_asset(env: Env, donor: Address, project_id: String, xlm_amount: i128, source_asset_code: Symbol, msg_hash: u32) {
-        Self::donate_asset_with_privacy(env, donor, project_id, xlm_amount, source_asset_code, msg_hash, false)
+    pub fn donate_asset(
+        env: Env,
+        donor: Address,
+        project_id: String,
+        xlm_amount: i128,
+        source_asset_code: Symbol,
+        msg_hash: u32,
+    ) {
+        Self::donate_asset_with_privacy(
+            env,
+            donor,
+            project_id,
+            xlm_amount,
+            source_asset_code,
+            msg_hash,
+            false,
+        )
     }
 
     /// Record a path-payment donation with an attribution preference.
@@ -1485,7 +1520,9 @@ impl IndigoPayContract {
             let prev_proj_total: i128 = env.storage().instance().get(&proj_total_key).unwrap_or(0);
             env.storage().instance().set(
                 &proj_total_key,
-                &prev_proj_total.checked_add(xlm_amount).expect("DonorProjectTotal overflow"),
+                &prev_proj_total
+                    .checked_add(xlm_amount)
+                    .expect("DonorProjectTotal overflow"),
             );
         }
 
@@ -1529,11 +1566,18 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::DonationRecord(dc), &donation_record);
-        env.storage().instance().set(&DataKey::DonationDonor(dc), &donor);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationDonor(dc), &donor);
         if anonymous {
             let key = DataKey::AnonymousDonationCount(project_id.clone());
             let count: u32 = env.storage().instance().get(&key).unwrap_or(0);
-            env.storage().instance().set(&key, &count.checked_add(1).expect("AnonymousDonationCount overflow"));
+            env.storage().instance().set(
+                &key,
+                &count
+                    .checked_add(1)
+                    .expect("AnonymousDonationCount overflow"),
+            );
         }
         // Snapshot CO₂ offset for exact reversal on refund (#290).
         env.storage()
@@ -1566,7 +1610,11 @@ impl IndigoPayContract {
         // project wallet in the same Stellar transaction.
 
         env.events().publish(
-            (symbol_short!("donated"), public_donor(&env, &donor, anonymous), project_id.clone()),
+            (
+                symbol_short!("donated"),
+                public_donor(&env, &donor, anonymous),
+                project_id.clone(),
+            ),
             (xlm_amount, donor_stats.badge.clone(), msg_hash),
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
@@ -1976,7 +2024,10 @@ impl IndigoPayContract {
 
     /// Number of donations whose donor address is intentionally withheld.
     pub fn get_anonymous_donation_count(env: Env, project_id: String) -> u32 {
-        env.storage().instance().get(&DataKey::AnonymousDonationCount(project_id)).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&DataKey::AnonymousDonationCount(project_id))
+            .unwrap_or(0)
     }
 
     /// Returns all four global counters in a single contract call.
@@ -2514,9 +2565,23 @@ impl IndigoPayContract {
     /// Donate USDC. Converts to XLM-equivalent for global stats using a price oracle stub.
     #[cfg(feature = "usdc")]
     /// Backward-compatible USDC entrypoint.
-    #[cfg(feature = "usdc")]
-    pub fn donate_usdc(env: Env, usdc_token: Address, donor: Address, project_id: String, usdc_amount: i128, msg_hash: u32) {
-        Self::donate_usdc_with_privacy(env, usdc_token, donor, project_id, usdc_amount, msg_hash, false)
+    pub fn donate_usdc(
+        env: Env,
+        usdc_token: Address,
+        donor: Address,
+        project_id: String,
+        usdc_amount: i128,
+        msg_hash: u32,
+    ) {
+        Self::donate_usdc_with_privacy(
+            env,
+            usdc_token,
+            donor,
+            project_id,
+            usdc_amount,
+            msg_hash,
+            false,
+        )
     }
 
     /// Donate USDC with an explicit public-attribution preference.
@@ -2673,11 +2738,18 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::DonationRecord(dc), &donation_record);
-        env.storage().instance().set(&DataKey::DonationDonor(dc), &donor);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationDonor(dc), &donor);
         if anonymous {
             let key = DataKey::AnonymousDonationCount(project_id.clone());
             let count: u32 = env.storage().instance().get(&key).unwrap_or(0);
-            env.storage().instance().set(&key, &count.checked_add(1).expect("AnonymousDonationCount overflow"));
+            env.storage().instance().set(
+                &key,
+                &count
+                    .checked_add(1)
+                    .expect("AnonymousDonationCount overflow"),
+            );
         }
         // Snapshot CO₂ offset for exact reversal on refund (#290).
         env.storage()
@@ -2712,7 +2784,9 @@ impl IndigoPayContract {
             let prev_proj_total: i128 = env.storage().instance().get(&proj_total_key).unwrap_or(0);
             env.storage().instance().set(
                 &proj_total_key,
-                &prev_proj_total.checked_add(xlm_equivalent).expect("DonorProjectTotal overflow"),
+                &prev_proj_total
+                    .checked_add(xlm_equivalent)
+                    .expect("DonorProjectTotal overflow"),
             );
         }
 
@@ -2721,7 +2795,11 @@ impl IndigoPayContract {
         token_client.transfer(&donor, &project_wallet, &usdc_amount);
 
         env.events().publish(
-            (symbol_short!("donated"), public_donor(&env, &donor, anonymous), project_id),
+            (
+                symbol_short!("donated"),
+                public_donor(&env, &donor, anonymous),
+                project_id,
+            ),
             (usdc_amount, symbol_short!("USDC"), msg_hash),
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
