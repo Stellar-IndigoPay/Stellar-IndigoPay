@@ -281,7 +281,7 @@ export default function ProjectsPage() {
           aria-label="Active filters"
           className="flex flex-wrap items-center gap-2 mb-4"
         >
-          <span className="text-xs text-[#8aaa8a] dark:text-forest-300 font-body">
+          <span className="text-xs text-[var(--text-secondary)] font-body">
             Active filters:
           </span>
           {category && (
@@ -358,7 +358,7 @@ export default function ProjectsPage() {
 
       {/* Search */}
       <div className="relative mb-6" ref={searchRef}>
-        <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[#8aaa8a] dark:text-forest-300 z-10">
+        <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[var(--text-secondary)] z-10">
           🔍
         </span>
         <input
@@ -465,7 +465,7 @@ export default function ProjectsPage() {
               </div>
               <span className="flex-1 text-left">
                 ✓ Verified only{" "}
-                <span className="text-xs text-[#8aaa8a] dark:text-forest-300">
+                <span className="text-xs text-[var(--text-secondary)]">
                   ({projects.filter((p) => p.verified).length})
                 </span>
               </span>
