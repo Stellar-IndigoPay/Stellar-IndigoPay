@@ -54,7 +54,7 @@ async function onboardProject(verificationRequest) {
   }
 
   const existingProject = await pool.query(
-    `SELECT id, webhook_secret FROM projects WHERE wallet_address = $1 AND name = $2`,
+    "SELECT id, webhook_secret FROM projects WHERE wallet_address = $1 AND name = $2",
     [walletAddress, projectName],
   );
 
@@ -65,7 +65,7 @@ async function onboardProject(verificationRequest) {
     finalWebhookSecret = existingProject.rows[0].webhook_secret || webhookSecret;
     if (!existingProject.rows[0].webhook_secret) {
       await pool.query(
-        `UPDATE projects SET webhook_secret = $1, updated_at = NOW() WHERE id = $2`,
+        "UPDATE projects SET webhook_secret = $1, updated_at = NOW() WHERE id = $2",
         [finalWebhookSecret, createdProjectId],
       );
     }
