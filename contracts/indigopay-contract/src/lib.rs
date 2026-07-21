@@ -438,6 +438,7 @@ const EMERGENCY_WITHDRAWAL_TIMELOCK: u32 = 120_960;
 const REFUND_COOLDOWN_LEDGERS: u32 = 17_280;
 
 /// Hard cap on platform fee: 500 basis points = 5%.
+#[cfg(feature = "fees")]
 const MAX_PLATFORM_FEE_BPS: u32 = 500;
 
 /// Read the stored admin set. Panics if not initialized.
@@ -517,7 +518,7 @@ fn require_not_paused(env: &Env) {
 /// Read the configured platform fee in basis points.
 /// Returns 0 when the `fees` feature is disabled or no fee has been configured,
 /// preserving backward compatibility.
-fn read_platform_fee_bps(env: &Env) -> u32 {
+fn read_platform_fee_bps(_env: &Env) -> u32 {
     #[cfg(feature = "fees")]
     {
         env.storage()
@@ -541,9 +542,7 @@ fn split_fee(amount: i128, fee_bps: u32) -> (i128, i128) {
         .checked_mul(fee_bps as i128)
         .expect("Fee calculation overflow")
         / 10_000;
-    let project_amount = amount
-        .checked_sub(fee)
-        .expect("Amount minus fee underflow");
+    let project_amount = amount.checked_sub(fee).expect("Amount minus fee underflow");
     (project_amount, fee)
 }
 
@@ -1180,8 +1179,10 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::PlatformTreasury, &treasury);
-        env.events()
-            .publish((symbol_short!("treas_set"), signers.get(0).unwrap()), treasury);
+        env.events().publish(
+            (symbol_short!("treas_set"), signers.get(0).unwrap()),
+            treasury,
+        );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
@@ -1389,6 +1390,7 @@ impl IndigoPayContract {
 
         // ── Interaction: external call happens after every effect is durable.
         let fee_bps = read_platform_fee_bps(&env);
+        #[allow(unused_variables)]
         let (project_amount, fee_amount) = split_fee(amount, fee_bps);
 
         let token_client = token::Client::new(&env, &token);
@@ -1894,6 +1896,7 @@ impl IndigoPayContract {
 
         // Fee split for anonymous donations.
         let fee_bps = read_platform_fee_bps(&env);
+        #[allow(unused_variables)]
         let (project_amount, fee_amount) = split_fee(amount, fee_bps);
 
         #[cfg(feature = "fees")]
@@ -2775,6 +2778,7 @@ impl IndigoPayContract {
 
         // Fee split for USDC donations.
         let fee_bps = read_platform_fee_bps(&env);
+        #[allow(unused_variables)]
         let (project_usdc, fee_amount) = split_fee(usdc_amount, fee_bps);
 
         #[cfg(feature = "fees")]
