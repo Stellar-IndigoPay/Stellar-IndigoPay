@@ -6,6 +6,8 @@
  * payload from the API response.
  */
 import axios from "axios";
+import { getAdminToken } from "@/lib/adminAuth";
+import { server } from "@/lib/stellar";
 import type {
   ClimateProject,
   Donation,
@@ -1172,6 +1174,59 @@ export async function fetchQueues(adminKey: string): Promise<QueueMetric[]> {
       headers: { "X-Admin-Key": adminKey },
     },
   );
+  return data.data;
+}
+
+export async function fetchIndexerStatus(adminKey: string) {
+  const { data } = await api.get<{
+    success: boolean;
+    data: {
+      indexer: { isRunning: boolean; lastProcessedLedger: number };
+      cursor: { lastProcessedLedger: number; backfillInProgress: boolean };
+    };
+  }>("/api/admin/indexer/status", {
+    headers: { "X-Admin-Key": adminKey },
+  });
+
+  // Calculate lag if possible by querying Horizon ledger tip
+  let lagLedgers: number | null = null;
+  try {
+    const latestLedgers = await server.ledgers().limit(1).order("desc").call();
+    if (latestLedgers.records && latestLedgers.records.length > 0) {
+      const latestSequence = latestLedgers.records[0].sequence;
+      const lastProcessed = data.data?.cursor?.lastProcessedLedger || data.data?.indexer?.lastProcessedLedger || 0;
+      if (latestSequence > 0 && lastProcessed > 0) {
+        lagLedgers = Math.max(0, latestSequence - lastProcessed);
+      }
+    }
+  } catch (err) {
+    // best effort, fail silently
+  }
+
+  return {
+    ...data,
+    active: data.data?.indexer?.isRunning ?? false,
+    lagLedgers,
+  };
+}
+
+export async function fetchVerificationRequests(params?: {
+  status?: string;
+  limit?: number;
+  page?: number;
+}): Promise<VerificationRequestResponse[]> {
+  const token = getAdminToken();
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  const { data } = await api.get<{
+    success: boolean;
+    data: VerificationRequestResponse[];
+  }>("/api/verification-requests", {
+    params,
+    headers,
+  });
   return data.data;
 }
 

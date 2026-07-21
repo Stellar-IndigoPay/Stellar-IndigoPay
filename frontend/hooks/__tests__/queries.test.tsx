@@ -1,3 +1,6 @@
+Here is the complete, resolved unit test file for `hooks/__tests__/queries.test.ts` containing all test cases and fixtures from both branches:
+
+```typescript
 /**
  * hooks/__tests__/queries.test.ts
  * Unit tests for React Query hooks
@@ -6,6 +9,7 @@ import React from "react";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  useProjectQuery,
   useDonorHistory,
   useDonorProfile,
   useLeaderboard,
@@ -15,9 +19,11 @@ import {
   useRecordDonation,
   useFollowProject,
   useUnfollowProject,
+  useToggleUpdateLike,
   queryKeys,
 } from "../queries";
 import {
+  fetchProject,
   fetchDonorHistory,
   fetchLeaderboard,
   fetchGlobalStats,
@@ -27,10 +33,13 @@ import {
   recordDonation,
   followProject,
   unfollowProject,
+  toggleUpdateLike,
+  fetchUpdateLikes,
 } from "@/lib/api";
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 jest.mock("@/lib/api", () => ({
+  fetchProject: jest.fn(),
   fetchDonorHistory: jest.fn(),
   fetchLeaderboard: jest.fn(),
   fetchGlobalStats: jest.fn(),
@@ -40,8 +49,11 @@ jest.mock("@/lib/api", () => ({
   recordDonation: jest.fn(),
   followProject: jest.fn(),
   unfollowProject: jest.fn(),
+  toggleUpdateLike: jest.fn(),
+  fetchUpdateLikes: jest.fn(),
 }));
 
+const mockFetchProject = fetchProject as jest.Mock;
 const mockFetchDonorHistory = fetchDonorHistory as jest.Mock;
 const mockFetchLeaderboard = fetchLeaderboard as jest.Mock;
 const mockFetchGlobalStats = fetchGlobalStats as jest.Mock;
@@ -51,21 +63,33 @@ const mockFetchImpactGlobal = fetchImpactGlobal as jest.Mock;
 const mockRecordDonation = recordDonation as jest.Mock;
 const mockFollowProject = followProject as jest.Mock;
 const mockUnfollowProject = unfollowProject as jest.Mock;
+const mockToggleUpdateLike = toggleUpdateLike as jest.Mock;
+const mockFetchUpdateLikes = fetchUpdateLikes as jest.Mock;
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Helpers & Fixtures ────────────────────────────────────────────────────────
 
-function createWrapper() {
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      queries: { retry: false },
-    },
-  });
+function createWrapper(customQueryClient?: QueryClient) {
+  const queryClient =
+    customQueryClient ??
+    new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: Infinity },
+        mutations: { retry: false },
+      },
+    });
   return function Wrapper({ children }: { children: React.ReactNode }) {
     return (
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     );
   };
 }
+
+const mockProject = {
+  id: "proj-123",
+  name: "Ocean Cleanup",
+  followCount: 5,
+  isFollowing: false,
+};
 
 const donationsFixture = [
   {
@@ -123,6 +147,24 @@ const impactGlobalFixture = {
 };
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+describe("useProjectQuery", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("returns project data", async () => {
+    mockFetchProject.mockResolvedValue(mockProject);
+
+    const { result } = renderHook(
+      () => useProjectQuery("proj-123", undefined, "wallet-123"),
+      { wrapper: createWrapper() },
+    );
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual(mockProject);
+  });
+});
 
 describe("useDonorHistory", () => {
   beforeEach(() => {
@@ -240,27 +282,17 @@ describe("useRecordDonation", () => {
   it("calls recordDonation and invalidates related queries on success", async () => {
     mockRecordDonation.mockResolvedValue({ id: "d1" });
 
-    // Use a shared QueryClient to verify invalidation
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
 
-    // Pre-populate cache with some data
     queryClient.setQueryData(queryKeys.donorHistory("GABC123"), donationsFixture);
     queryClient.setQueryData(queryKeys.leaderboard(), leaderboardFixture);
     queryClient.setQueryData(queryKeys.globalStats(), globalStatsFixture);
     queryClient.setQueryData(queryKeys.impactDonor("GABC123"), impactDonorFixture);
 
-    function Wrapper({ children }: { children: React.ReactNode }) {
-      return (
-        <QueryClientProvider client={queryClient}>
-          {children}
-        </QueryClientProvider>
-      );
-    }
-
     const { result } = renderHook(() => useRecordDonation(), {
-      wrapper: Wrapper,
+      wrapper: createWrapper(queryClient),
     });
 
     await result.current.mutateAsync({
@@ -272,9 +304,6 @@ describe("useRecordDonation", () => {
 
     expect(mockRecordDonation).toHaveBeenCalled();
 
-    // Verify the mutation was called with the correct donation payload.
-    // React Query wraps mutationFn calls so we check the call's presence
-    // and validate cache invalidation below.
     const callArg = mockRecordDonation.mock.calls[0]?.[0];
     expect(callArg).toMatchObject({
       projectId: "p1",
@@ -283,7 +312,6 @@ describe("useRecordDonation", () => {
       transactionHash: "tx1",
     });
 
-    // After invalidation, queries should be marked as stale
     const donorHistoryState = queryClient.getQueryState(
       queryKeys.donorHistory("GABC123"),
     );
@@ -309,16 +337,8 @@ describe("useFollowProject", () => {
     });
     queryClient.setQueryData(["project", "p1"], { id: "p1" });
 
-    function Wrapper({ children }: { children: React.ReactNode }) {
-      return (
-        <QueryClientProvider client={queryClient}>
-          {children}
-        </QueryClientProvider>
-      );
-    }
-
     const { result } = renderHook(() => useFollowProject(), {
-      wrapper: Wrapper,
+      wrapper: createWrapper(queryClient),
     });
 
     await result.current.mutateAsync({
@@ -329,6 +349,73 @@ describe("useFollowProject", () => {
     expect(mockFollowProject).toHaveBeenCalledWith("p1", "GABC123");
     const projectState = queryClient.getQueryState(["project", "p1"]);
     expect(projectState?.isInvalidated).toBe(true);
+  });
+
+  it("optimistically updates follow count and state, and refetches on settle", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: Infinity },
+        mutations: { retry: false },
+      },
+    });
+    queryClient.setQueryData(["project", "proj-123"], mockProject);
+
+    let resolveMutation: (val: any) => void = () => {};
+    mockFollowProject.mockReturnValue(
+      new Promise((resolve) => {
+        resolveMutation = resolve;
+      }),
+    );
+
+    const invalidateSpy = jest.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => useFollowProject("wallet-123"), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    result.current.mutate("proj-123");
+
+    await waitFor(() => {
+      const cachedProject = queryClient.getQueryData<any>([
+        "project",
+        "proj-123",
+      ]);
+      expect(cachedProject.isFollowing).toBe(true);
+      expect(cachedProject.followCount).toBe(6);
+    });
+
+    resolveMutation({ isFollowing: true, followCount: 6 });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(invalidateSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["project", "proj-123"] }),
+    );
+  });
+
+  it("rolls back state and follow count on API failure", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: Infinity },
+        mutations: { retry: false },
+      },
+    });
+    queryClient.setQueryData(["project", "proj-123"], mockProject);
+
+    mockFollowProject.mockRejectedValue(new Error("API Error"));
+
+    const { result } = renderHook(() => useFollowProject("wallet-123"), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    result.current.mutate("proj-123");
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    const cachedProject = queryClient.getQueryData<any>([
+      "project",
+      "proj-123",
+    ]);
+    expect(cachedProject.isFollowing).toBe(false);
+    expect(cachedProject.followCount).toBe(5);
   });
 });
 
@@ -345,16 +432,8 @@ describe("useUnfollowProject", () => {
     });
     queryClient.setQueryData(["project", "p1"], { id: "p1" });
 
-    function Wrapper({ children }: { children: React.ReactNode }) {
-      return (
-        <QueryClientProvider client={queryClient}>
-          {children}
-        </QueryClientProvider>
-      );
-    }
-
     const { result } = renderHook(() => useUnfollowProject(), {
-      wrapper: Wrapper,
+      wrapper: createWrapper(queryClient),
     });
 
     await result.current.mutateAsync({
@@ -365,5 +444,120 @@ describe("useUnfollowProject", () => {
     expect(mockUnfollowProject).toHaveBeenCalledWith("p1", "GABC123");
     const projectState = queryClient.getQueryState(["project", "p1"]);
     expect(projectState?.isInvalidated).toBe(true);
+  });
+
+  it("optimistically updates and refetches on settle", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: Infinity },
+        mutations: { retry: false },
+      },
+    });
+    const followedProject = { ...mockProject, isFollowing: true, followCount: 6 };
+    queryClient.setQueryData(["project", "proj-123"], followedProject);
+
+    let resolveMutation: (val: any) => void = () => {};
+    mockUnfollowProject.mockReturnValue(
+      new Promise((resolve) => {
+        resolveMutation = resolve;
+      }),
+    );
+
+    const { result } = renderHook(() => useUnfollowProject("wallet-123"), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    result.current.mutate("proj-123");
+
+    await waitFor(() => {
+      const cachedProject = queryClient.getQueryData<any>([
+        "project",
+        "proj-123",
+      ]);
+      expect(cachedProject.isFollowing).toBe(false);
+      expect(cachedProject.followCount).toBe(5);
+    });
+
+    resolveMutation({ isFollowing: false, followCount: 5 });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  });
+
+  it("rolls back on API failure", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: Infinity },
+        mutations: { retry: false },
+      },
+    });
+    const followedProject = { ...mockProject, isFollowing: true, followCount: 6 };
+    queryClient.setQueryData(["project", "proj-123"], followedProject);
+
+    mockUnfollowProject.mockRejectedValue(new Error("API Error"));
+
+    const { result } = renderHook(() => useUnfollowProject("wallet-123"), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    result.current.mutate("proj-123");
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    const cachedProject = queryClient.getQueryData<any>([
+      "project",
+      "proj-123",
+    ]);
+    expect(cachedProject.isFollowing).toBe(true);
+    expect(cachedProject.followCount).toBe(6);
+  });
+});
+
+describe("useToggleUpdateLike", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("optimistically toggles like and updates count, and rolls back on failure", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: Infinity },
+        mutations: { retry: false },
+      },
+    });
+    const initialLikeState = { liked: false, likeCount: 10 };
+    queryClient.setQueryData(["updateLikes", "upd-456"], initialLikeState);
+
+    let rejectMutation: (err: any) => void = () => {};
+    mockToggleUpdateLike.mockReturnValue(
+      new Promise((resolve, reject) => {
+        rejectMutation = reject;
+      }),
+    );
+
+    const { result } = renderHook(() => useToggleUpdateLike("wallet-123"), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    result.current.mutate("upd-456");
+
+    await waitFor(() => {
+      const optimisticState = queryClient.getQueryData<any>([
+        "updateLikes",
+        "upd-456",
+      ]);
+      expect(optimisticState.liked).toBe(true);
+      expect(optimisticState.likeCount).toBe(11);
+    });
+
+    rejectMutation(new Error("API Error"));
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    const rolledBackState = queryClient.getQueryData<any>([
+      "updateLikes",
+      "upd-456",
+    ]);
+    expect(rolledBackState.liked).toBe(false);
+    expect(rolledBackState.likeCount).toBe(10);
+  });
+});
+```
   });
 });

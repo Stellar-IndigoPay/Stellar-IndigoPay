@@ -1,11 +1,11 @@
+Here is the complete, resolved `hooks/queries.ts` code ready to paste back:
+
+```typescript
 /**
  * hooks/queries.ts — React Query hooks for server-state management
  *
  * Central query and mutation hooks for donor history, leaderboard,
- * global stats, impact stats, and donation recording. Replaces the
- * manual useEffect + useState pattern with @tanstack/react-query for
- * automatic background refetching, request deduplication, cache
- * invalidation, and optimistic UI updates.
+ * global stats, impact stats, project queries, likes, and donation recording.
  */
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -18,11 +18,17 @@ import {
   recordDonation,
   followProject,
   unfollowProject,
+  toggleUpdateLike,
+  fetchUpdateLikes,
+  fetchProject,
 } from "@/lib/api";
+import type { ClimateProject } from "@/utils/types";
+import { toast } from "sonner";
 
 // ── Query key factories ──────────────────────────────────────────────────────
 
 export const queryKeys = {
+  project: (projectId: string) => ["project", projectId] as const,
   donorHistory: (publicKey: string | null) =>
     ["donorHistory", publicKey] as const,
   donorProfile: (publicKey: string | null) =>
@@ -33,9 +39,32 @@ export const queryKeys = {
   impactDonor: (publicKey: string | null) =>
     ["impactDonor", publicKey] as const,
   impactGlobal: () => ["impactGlobal"] as const,
+  updateLikes: (updateId: string) => ["updateLikes", updateId] as const,
 };
 
+export interface LikeState {
+  liked: boolean;
+  likeCount: number;
+}
+
 // ── Query hooks ──────────────────────────────────────────────────────────────
+
+/**
+ * Fetch project details by ID.
+ * Enabled when projectId is provided.
+ */
+export function useProjectQuery(
+  projectId: string,
+  initialData?: ClimateProject,
+  publicKey?: string,
+) {
+  return useQuery<ClimateProject>({
+    queryKey: queryKeys.project(projectId),
+    queryFn: () => fetchProject(projectId, publicKey),
+    initialData,
+    enabled: !!projectId,
+  });
+}
 
 /**
  * Fetch donation history for a donor.
@@ -115,16 +144,22 @@ export function useImpactGlobal() {
   });
 }
 
+/**
+ * Fetch like state for a project update.
+ */
+export function useUpdateLikesQuery(updateId: string, publicKey?: string) {
+  return useQuery<LikeState>({
+    queryKey: queryKeys.updateLikes(updateId),
+    queryFn: () => fetchUpdateLikes(updateId, publicKey),
+    enabled: !!updateId,
+  });
+}
+
 // ── Mutation hooks ───────────────────────────────────────────────────────────
 
 /**
  * Record a donation after an on-chain transaction succeeds.
- * On success, invalidates:
- *  - donorHistory for the donating address
- *  - donorProfile for the donating address
- *  - leaderboard (all periods)
- *  - globalStats
- *  - impactDonor for the donating address
+ * On success, invalidates related donor and global queries.
  */
 export function useRecordDonation() {
   const queryClient = useQueryClient();
@@ -143,45 +178,177 @@ export function useRecordDonation() {
 }
 
 /**
- * Follow a project.
- * On success, invalidates the project query so the follow count updates.
+ * Follow a project with optimistic UI updates and rollback on error.
+ * Supports passing string `projectId` or object `{ projectId, walletAddress }`.
  */
-export function useFollowProject() {
+export function useFollowProject(
+  publicKey?: string,
+  options?: { onError?: (err: any) => void },
+) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      projectId,
-      walletAddress,
-    }: {
-      projectId: string;
-      walletAddress: string;
-    }) => followProject(projectId, walletAddress),
-    onSuccess: (_data, variables) => {
-      queryClient.invalidateQueries({
-        queryKey: ["project", variables.projectId],
-      });
+    mutationFn: async (
+      args: string | { projectId: string; walletAddress: string },
+    ) => {
+      const pid = typeof args === "string" ? args : args.projectId;
+      const wallet = typeof args === "string" ? publicKey! : args.walletAddress;
+      return followProject(pid, wallet);
+    },
+    onMutate: async (args) => {
+      const projectId = typeof args === "string" ? args : args.projectId;
+
+      await queryClient.cancelQueries({ queryKey: queryKeys.project(projectId) });
+
+      const previous = queryClient.getQueryData<ClimateProject>(
+        queryKeys.project(projectId),
+      );
+
+      queryClient.setQueryData<ClimateProject>(
+        queryKeys.project(projectId),
+        (old) =>
+          old
+            ? {
+                ...old,
+                isFollowing: true,
+                followCount: (old.followCount || 0) + 1,
+              }
+            : undefined,
+      );
+
+      return { previous, projectId };
+    },
+    onError: (err, args, context) => {
+      const projectId =
+        context?.projectId || (typeof args === "string" ? args : args.projectId);
+
+      if (context?.previous) {
+        queryClient.setQueryData(queryKeys.project(projectId), context.previous);
+      }
+      toast.error("Failed to follow project. Please try again.");
+      if (options?.onError) {
+        options.onError(err);
+      }
+    },
+    onSettled: (_data, _error, args, context) => {
+      const projectId =
+        context?.projectId || (typeof args === "string" ? args : args.projectId);
+      queryClient.invalidateQueries({ queryKey: queryKeys.project(projectId) });
     },
   });
 }
 
 /**
- * Unfollow a project.
- * On success, invalidates the project query so the follow count updates.
+ * Unfollow a project with optimistic UI updates and rollback on error.
+ * Supports passing string `projectId` or object `{ projectId, walletAddress }`.
  */
-export function useUnfollowProject() {
+export function useUnfollowProject(
+  publicKey?: string,
+  options?: { onError?: (err: any) => void },
+) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      projectId,
-      walletAddress,
-    }: {
-      projectId: string;
-      walletAddress: string;
-    }) => unfollowProject(projectId, walletAddress),
-    onSuccess: (_data, variables) => {
-      queryClient.invalidateQueries({
-        queryKey: ["project", variables.projectId],
+    mutationFn: async (
+      args: string | { projectId: string; walletAddress: string },
+    ) => {
+      const pid = typeof args === "string" ? args : args.projectId;
+      const wallet = typeof args === "string" ? publicKey! : args.walletAddress;
+      return unfollowProject(pid, wallet);
+    },
+    onMutate: async (args) => {
+      const projectId = typeof args === "string" ? args : args.projectId;
+
+      await queryClient.cancelQueries({ queryKey: queryKeys.project(projectId) });
+
+      const previous = queryClient.getQueryData<ClimateProject>(
+        queryKeys.project(projectId),
+      );
+
+      queryClient.setQueryData<ClimateProject>(
+        queryKeys.project(projectId),
+        (old) =>
+          old
+            ? {
+                ...old,
+                isFollowing: false,
+                followCount: Math.max((old.followCount || 0) - 1, 0),
+              }
+            : undefined,
+      );
+
+      return { previous, projectId };
+    },
+    onError: (err, args, context) => {
+      const projectId =
+        context?.projectId || (typeof args === "string" ? args : args.projectId);
+
+      if (context?.previous) {
+        queryClient.setQueryData(queryKeys.project(projectId), context.previous);
+      }
+      toast.error("Failed to unfollow project. Please try again.");
+      if (options?.onError) {
+        options.onError(err);
+      }
+    },
+    onSettled: (_data, _error, args, context) => {
+      const projectId =
+        context?.projectId || (typeof args === "string" ? args : args.projectId);
+      queryClient.invalidateQueries({ queryKey: queryKeys.project(projectId) });
+    },
+  });
+}
+
+/**
+ * Toggle like status on a project update with optimistic update and rollback.
+ */
+export function useToggleUpdateLike(
+  publicKey: string,
+  options?: { onError?: (err: any) => void },
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (updateId: string) => toggleUpdateLike(updateId, publicKey),
+    onMutate: async (updateId) => {
+      await queryClient.cancelQueries({
+        queryKey: queryKeys.updateLikes(updateId),
       });
+
+      const previous = queryClient.getQueryData<LikeState>(
+        queryKeys.updateLikes(updateId),
+      );
+
+      queryClient.setQueryData<LikeState>(
+        queryKeys.updateLikes(updateId),
+        (old) => {
+          const liked = !old?.liked;
+          const likeCount = old?.liked
+            ? Math.max((old.likeCount || 0) - 1, 0)
+            : (old?.likeCount || 0) + 1;
+          return { liked, likeCount };
+        },
+      );
+
+      return { previous, updateId };
+    },
+    onError: (err, updateId, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(
+          queryKeys.updateLikes(updateId),
+          context.previous,
+        );
+      }
+      toast.error("Failed to update like. Please try again.");
+      if (options?.onError) {
+        options.onError(err);
+      }
+    },
+    onSettled: (_data, _error, updateId) => {
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.updateLikes(updateId),
+      });
+    },
+  });
+}
+```
     },
   });
 }

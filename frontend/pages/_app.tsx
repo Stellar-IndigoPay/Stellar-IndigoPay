@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import type { AppProps } from "next/app";
 import Head from "next/head";
+import { useState } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useRouter } from "next/router";
 import { AnimatePresence } from "framer-motion";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -33,6 +35,21 @@ import "@/styles/globals.css";
 // SkipToContent lives at the very top so it is the first focusable
 // element on the page (satisfies WCAG 2.4.1 Bypass Blocks).
 export default function App({ Component, pageProps }: AppProps) {
+const [queryClient] = useState(
+  () =>
+    new QueryClient({
+      defaultOptions: {
+        queries: {
+          refetchOnWindowFocus: false,
+          retry: false,
+        },
+      },
+    }),
+);
+
+Here is the resolved body block for `_app.tsx`:
+
+```typescript
   const router = useRouter();
   const isOnline = useOnlineStatus();
   const [searchOpen, setSearchOpen] = useState(false);
@@ -105,11 +122,13 @@ export default function App({ Component, pageProps }: AppProps) {
     };
 
     navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+
     navigator.serviceWorker.addEventListener("message", (event) => {
       if (event.data?.type === "sync-queued-donations") {
         handleOnlineSync();
       }
     });
+
     window.addEventListener("online", handleOnlineSync);
 
     handleOnlineSync();
@@ -118,6 +137,7 @@ export default function App({ Component, pageProps }: AppProps) {
       window.removeEventListener("online", handleOnlineSync);
     };
   }, []);
+
   return (
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
@@ -170,4 +190,8 @@ export default function App({ Component, pageProps }: AppProps) {
       </QueryClientProvider>
     </ErrorBoundary>
   );
+```
+    </ErrorBoundary>
+  );
 }
+

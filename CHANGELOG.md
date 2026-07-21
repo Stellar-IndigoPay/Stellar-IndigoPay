@@ -55,14 +55,8 @@
   + Add Jest unit tests for `useShortcuts` hook in `frontend/hooks/__tests__/useShortcuts.test.ts`
 
 * **monitoring:** multi-window SLO burn-rate alerting with error budget dashboard (closes #240)
-  - Defined SLOs: donation recording (99.5%) and project listing (99.9%) over 30-day rolling windows
-  - Recording rules in `monitoring/recording-rules.yml` computing error ratios and budget remaining
-  - Multi-window burn-rate alerts: 2% in 1h (page), 5% in 6h (page), 10% in 3d (warn) for both SLOs
-  - Grafana dashboard: error budget gauges (green/yellow/red thresholds), burn-rate timeseries, top-5xx-routes table
-  - SLO definitions and burn-rate alert response runbook in `docs/performance.md`
-  - Prometheus `prometheus.yml` updated to load recording-rules.yml and alert-rules-routing.yml
 
-- **backend,monitoring:** Postgres connection pool observability dashboard with adaptive pool sizing (closes #244)
+* **backend,monitoring:** Postgres connection pool observability dashboard with adaptive pool sizing (closes #244)
   - New `db_pool_max` Prometheus gauge tracks the current pool capacity
   - Adaptive pool sizing: if saturated (all connections busy with waiters) for 60 s, increase max by 25 % up to `PG_MAX_HARD_CAP` (default 50)
   - `parameterizeQuery()` helper replaces string and numeric literals with `$N` placeholders for PII-safe slow-query logging
@@ -72,7 +66,7 @@
   - New alert rules: `DBPoolSaturated` (warn, waiting > 0 for 5 m), `DBPoolExhausted` (page, all connections busy + waiters for 10 m with PagerDuty routing)
   - 26 new unit tests (16 pool, 10 metrics)
 
-- **frontend,backend:** real-time transparency dashboard with SLO, business metrics, and donation geo-map (closes #253)
+* **frontend,backend:** real-time transparency dashboard with SLO, business metrics, and donation geo-map (closes #253)
   - New public dashboard page at `/transparency` with platform health banner, impact stat cards, live donation map, and recent donations feed
   - Health banner polls `/api/readyz` every 30s displaying operational/degraded/outage status with expandable detail rows
   - Impact overview with 4 animated stat cards (total donated, CO₂ offset, active projects, unique donors) using `AnimatedNumber`
@@ -82,11 +76,12 @@
   - New backend endpoint `GET /api/admin/metrics/slo` proxies Prometheus SLO recording rules with per-query error isolation
   - 10 frontend unit tests (4 HealthBanner, 4 StatCard, 4 SLOStatusPanel) + 4 backend SLO endpoint tests
 
-- **frontend:** implement Playwright end-to-end test suite covering critical user journeys (GF-052, closes #110)
+* **frontend:** implement Playwright end-to-end test suite covering critical user journeys (GF-052, closes #110)
   - Set up Playwright configuration in `playwright.config.ts` with Next.js dev server and Chrome browser projects
   - Implement mock fixtures for Freighter wallet injection (`freighter.ts`), Horizon API/Soroban RPC responses (`horizon.ts`), and backend REST endpoints (`api.ts`)
   - Implement E2E specs for (1) browse projects → donate XLM (`donation.spec.ts`), (2) wallet connect → view dashboard (`dashboard.spec.ts`), and (3) admin login → platform analytics (`admin-analytics.spec.ts`)
   - Set up GitHub Actions CI integration for automated E2E test runs
+```
 
 - **backend,frontend:** JWT refresh token rotation and session management for admin auth (GF-032, closes #87)
   - Access tokens cut to 15 minutes and carry a `jti`; refresh tokens are opaque, DB-backed, and live 7 days
