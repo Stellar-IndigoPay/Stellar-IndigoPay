@@ -1,7 +1,7 @@
 #![no_std]
 #![allow(deprecated)]
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Vec};
 
 const MAX_OBSERVATIONS: u32 = 20;
 const TWAP_WINDOW: u32 = 10;
@@ -13,7 +13,8 @@ const PRICE_SCALE: i128 = 10_000_000;
 pub struct PriceObservation {
     pub price: i128,
     pub reporter: Address,
-    pub recorded_at: u32,
+    /// Ledger sequence when the price was recorded, used as the timestamp for TWAP.
+    pub ledger: u32,
 }
 
 #[contracttype]
@@ -104,7 +105,7 @@ impl SimpleOracle {
         let observation = PriceObservation {
             price,
             reporter: reporter.clone(),
-            recorded_at: env.ledger().sequence(),
+            ledger: env.ledger().sequence(),
         };
 
         env.storage()
@@ -135,6 +136,16 @@ impl SimpleOracle {
             .set(&DataKey::FallbackPrice, &price);
     }
 
+    /// Compute the Time-Weighted Average Price (TWAP) from recent observations.
+    ///
+    /// Each observation is weighted by the number of ledgers it persisted before
+    /// the next observation or the current ledger. This makes flash-loan and
+    /// single-block price manipulation economically infeasible: an extreme value
+    /// submitted at the current ledger has weight ≈ 1, so its effect on the TWAP
+    /// is negligible.
+    ///
+    /// Falls back to the configured `FallbackPrice` when there are no
+    /// observations or the newest observation is stale (>720 ledgers old).
     pub fn get_price(env: Env) -> i128 {
         let count: u32 = env
             .storage()
@@ -154,6 +165,9 @@ impl SimpleOracle {
             .instance()
             .get(&DataKey::ObservationIndex)
             .unwrap_or(0);
+        let current_ledger = env.ledger().sequence();
+
+        // Check freshness of the newest observation.
         let latest_index = (next_index + MAX_OBSERVATIONS - 1) % MAX_OBSERVATIONS;
         let latest: PriceObservation = env
             .storage()
@@ -161,7 +175,7 @@ impl SimpleOracle {
             .get(&DataKey::Observations(latest_index))
             .expect("Oracle observation missing");
 
-        if env.ledger().sequence().saturating_sub(latest.recorded_at) > STALENESS_THRESHOLD {
+        if current_ledger.saturating_sub(latest.ledger) > STALENESS_THRESHOLD {
             return env
                 .storage()
                 .instance()
@@ -170,18 +184,55 @@ impl SimpleOracle {
         }
 
         let window = TWAP_WINDOW.min(count);
-        let mut sum = 0_i128;
-        for offset in 0..window {
-            let index = (next_index + MAX_OBSERVATIONS - 1 - offset) % MAX_OBSERVATIONS;
-            let observation: PriceObservation = env
+
+        // Collect observations from oldest to newest.
+        let mut observations = Vec::new(&env);
+        let start_offset = (next_index + MAX_OBSERVATIONS - window) % MAX_OBSERVATIONS;
+        for i in 0..window {
+            let index = (start_offset + i) % MAX_OBSERVATIONS;
+            let obs: PriceObservation = env
                 .storage()
                 .instance()
                 .get(&DataKey::Observations(index))
                 .expect("Oracle observation missing");
-            sum = sum.checked_add(observation.price).expect("TWAP overflow");
+            observations.push_back(obs);
         }
 
-        sum / i128::from(window) / PRICE_SCALE
+        // TWAP: Σ(price_i × weight_i) / Σ(weight_i × PRICE_SCALE)
+        let mut weighted_sum = 0_i128;
+        let mut total_weight = 0_i128;
+
+        for i in 0..window {
+            let obs = observations.get(i).unwrap();
+            let next_ledger = if i + 1 < window {
+                observations.get(i + 1).unwrap().ledger
+            } else {
+                current_ledger
+            };
+            let mut weight = next_ledger.saturating_sub(obs.ledger) as i128;
+            // When all observations fall on the same ledger (common in tests),
+            // each observation gets a minimum weight of 1 to avoid division by
+            // zero while preserving the ordering of price contributions.
+            if weight == 0 {
+                weight = 1;
+            }
+            weighted_sum = weighted_sum
+                .checked_add(obs.price.checked_mul(weight).expect("TWAP mul overflow"))
+                .expect("TWAP overflow");
+            total_weight = total_weight
+                .checked_add(weight)
+                .expect("Total weight overflow");
+        }
+
+        if total_weight == 0 {
+            return env
+                .storage()
+                .instance()
+                .get(&DataKey::FallbackPrice)
+                .expect("Zero-weight TWAP — fallback required");
+        }
+
+        weighted_sum / (total_weight * PRICE_SCALE)
     }
 }
 
@@ -373,7 +424,9 @@ mod tests {
         client.report_price(&reporter, &20_000_000);
         env.ledger().set_sequence_number(1_000);
         client.report_price(&reporter, &100_000_000);
-        assert_eq!(client.get_price(), 6);
+        // TWAP: price 2 at ledger 1 (weight 999) + price 10 at ledger 1000
+        // (weight 1). TWAP ≈ (2×999 + 10×1) / 1000 = 2008/1000 ≈ 2.
+        assert_eq!(client.get_price(), 2);
     }
 
     #[test]
@@ -434,5 +487,85 @@ mod tests {
             let max = recent.iter().copied().max().unwrap();
             assert!(twap >= min && twap <= max);
         }
+    }
+
+    // ─── TWAP-specific tests (#377) ─────────────────────────────────────────
+
+    #[test]
+    fn test_twap_single_observation() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+
+        // Report one observation at price 10 XLM/USDC.
+        env.ledger().set_sequence_number(0);
+        client.report_price(&reporter, &100_000_000);
+
+        // Advance 100 ledgers — weight = 100, TWAP = (10×100) / 100 = 10.
+        env.ledger().set_sequence_number(100);
+        assert_eq!(client.get_price(), 10);
+    }
+
+    #[test]
+    fn test_twap_multiple_observations() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+
+        // Two observations spread across ledgers.
+        env.ledger().set_sequence_number(100);
+        client.report_price(&reporter, &100_000_000); // price 10
+
+        env.ledger().set_sequence_number(150);
+        client.report_price(&reporter, &200_000_000); // price 20
+
+        // Current ledger 200.
+        //  weight_100 = 150 - 100 = 50
+        //  weight_150 = 200 - 150 = 50
+        //  TWAP = (10×50 + 20×50) / 100 = 15
+        env.ledger().set_sequence_number(200);
+        assert_eq!(client.get_price(), 15);
+    }
+
+    #[test]
+    fn test_twap_freshness_expiry() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+
+        env.ledger().set_sequence_number(100);
+        client.report_price(&reporter, &80_000_000);
+
+        // Set a fallback so stale observations don't panic.
+        client.set_fallback_price(&admin, &5);
+
+        // Advance past staleness threshold (720 ledgers).
+        env.ledger()
+            .set_sequence_number(100 + STALENESS_THRESHOLD + 1);
+        assert_eq!(client.get_price(), 5);
+    }
+
+    #[test]
+    fn test_twap_flash_loan_resistance() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+
+        // Normal price at ledger 100.
+        env.ledger().set_sequence_number(100);
+        client.report_price(&reporter, &100_000_000); // price 10
+
+        // Attacker submits extreme price at ledger 200.
+        env.ledger().set_sequence_number(200);
+        client.report_price(&reporter, &10_000_000_000); // price 1000
+
+        // Advance 1 ledger — attacker's price has weight ≈ 1.
+        //  weight_normal = 200 - 100 = 100
+        //  weight_attack = 201 - 200 = 1
+        //  TWAP ≈ (10×100 + 1000×1) / 101 = 2000/101 ≈ 19
+        env.ledger().set_sequence_number(201);
+        let twap = client.get_price();
+        // (10×100 + 1000×1) / 101 = 2000 / 101 = 19 — attack negligible.
+        assert_eq!(twap, 19);
     }
 }

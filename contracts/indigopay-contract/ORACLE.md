@@ -36,13 +36,44 @@ report_price(reporter, raw_price)
 ```
 
 The reporter must authorize the call and the price must be positive. Each report
-records the raw price, reporter address, and current ledger sequence, and emits a
-`price_upd` event.
+records the raw price, reporter address, and current ledger sequence (`ledger`
+field), and emits a `price_upd` event.
 
 The oracle stores at most 20 observations in a circular buffer. Once full, a new
-report overwrites the oldest entry. `get_price()` computes the arithmetic mean of
-the newest 10 observations, or all available observations when fewer than 10
-exist, then divides it by `10^7`.
+report overwrites the oldest entry.
+
+### Time-Weighted Average Price (TWAP)
+
+`get_price()` computes a **Time-Weighted Average Price** of the newest 10
+observations (or all available when fewer than 10 exist). Unlike a simple
+arithmetic mean, TWAP weights each observation by the number of ledgers it
+persisted before being replaced:
+
+```
+TWAP = Σ(price_i × weight_i) / (Σ(weight_i) × PRICE_SCALE)
+
+where:
+  weight_i = next_observation.ledger - current_observation.ledger
+  (newest observation: current_ledger - newest.ledger)
+```
+
+**Edge cases:**
+- **Same-ledger observations**: When multiple observations fall on the same
+  ledger (e.g., rapid reporting), each receives a minimum weight of 1 so the
+  result is equivalent to an arithmetic mean.
+- **Single observation**: Weighted for the time elapsed since recording, so
+  `get_price()` returns the observation's price regardless of elapsed time.
+
+**Flash-loan resistance example:**
+
+| Ledger | Observation | Weight | Contribution |
+|--------|-------------|--------|-------------|
+| 100 | price 10 | 10 | 100 |
+| 200 | price 1000 (attacker) | 1 | 1000 |
+| 201 (current) | — | — | — |
+
+TWAP = (10×100 + 1000×1) / 101 = 19. The attack moved the price from 10 to 19 —
+a 90% swing that's still far from the attacker's target of 1000.
 
 ## Freshness and Fallback Behavior
 
@@ -51,6 +82,9 @@ The newest observation is valid through 720 ledgers after it was recorded
 
 - `get_price()` returns the configured fallback price, if present.
 - Without a fallback, it fails with `Oracle price is stale and no fallback configured`.
+
+The freshness check uses the newest observation's ledger regardless of weight —
+a stale observation always triggers the fallback.
 
 When there are no observations, `get_price()` also returns the configured
 fallback. Without either observations or a fallback, it fails with

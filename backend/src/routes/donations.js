@@ -24,6 +24,8 @@ const { enqueueProfileUpdate } = require("../services/profileQueue");
 const { enqueueImpactRecalc } = require("../services/impactQueue");
 const { enqueuePushNotification } = require("../services/pushQueue");
 const { server } = require("../services/stellar");
+const oracleService = require("../services/oracleService");
+const { generateReceiptPdf, hashReceiptContent, signReceipt } = require("../services/receiptGenerator");
 const { invalidateProjectRelatedCache } = require("../services/cacheManager");
 const donationLimiter = createRateLimiter(10, 1); // 10 requests per minute
 
@@ -75,6 +77,7 @@ async function recordDonation(req, res, next) {
       sourceAsset,
       conversionPath,
       convertedAmountXLM,
+      anonymous = false,
     } = req.body;
 
     if (!donorAddress || !/^G[A-Z0-9]{55}$/.test(donorAddress)) {
@@ -132,12 +135,17 @@ async function recordDonation(req, res, next) {
     await client.query("BEGIN");
     inTransaction = true;
 
+    // Lock the XLM/USD rate at recording time. A missing cached rate is
+    // deliberately stored as NULL rather than inventing a value later.
+    const fiatRate = currency === "XLM" ? oracleService.getCurrentPrice() : null;
+    const fiatAmount = fiatRate ? parsedAmount * fiatRate : null;
     const donationResult = await client.query(
       `INSERT INTO donations (
         id, project_id, donor_address, amount_xlm, amount, currency, message,
-        transaction_hash, source_asset, conversion_path, converted_amount_xlm, created_at
+        transaction_hash, source_asset, conversion_path, converted_amount_xlm,
+        anonymous, fiat_amount_usd, fiat_rate_at_donation, created_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
       RETURNING *`,
       [
         uuid(),
@@ -151,6 +159,9 @@ async function recordDonation(req, res, next) {
         sourceAsset || null,
         conversionPath != null ? JSON.stringify(conversionPath) : null,
         convertedAmountXLM ? parseFloat(convertedAmountXLM) : null,
+        Boolean(anonymous),
+        fiatAmount,
+        fiatRate,
       ],
     );
 
@@ -167,6 +178,9 @@ async function recordDonation(req, res, next) {
       conversion_path: conversionPath || null,
       converted_amount_xlm: convertedAmountXLM ? parseFloat(convertedAmountXLM) : null,
       created_at: new Date().toISOString(),
+      anonymous: Boolean(anonymous),
+      fiat_amount_usd: fiatAmount,
+      fiat_rate_at_donation: fiatRate,
     };
 
     // Check for active matching offers
@@ -239,12 +253,20 @@ async function recordDonation(req, res, next) {
     await client.query("COMMIT");
     inTransaction = false;
 
-    enqueueProfileUpdate(donorAddress).catch((err) => {
+    if (!anonymous) enqueueProfileUpdate(donorAddress).catch((err) => {
       logger.error(
         { event: "profile_update_enqueue_failed", err, donorAddress },
         "Failed to enqueue profile update job",
       );
     });
+    if (!anonymous) {
+      enqueueProfileUpdate(donorAddress).catch((err) => {
+        logger.error(
+          { event: "profile_update_enqueue_failed", err, donorAddress },
+          "Failed to enqueue profile update job",
+        );
+      });
+    }
 
     enqueueImpactRecalc({
       donationId: recordedDonation.id,
@@ -296,6 +318,7 @@ async function recordDonation(req, res, next) {
     await invalidateProjectRelatedCache(projectId);
 
     const mappedDonation = mapDonationRow(donationResult.rows[0]);
+    if (anonymous) mappedDonation.donorAddress = null;
     donationEvents.emit("new_donation", mappedDonation);
 
     invalidateCache(`cache:v1:projects:detail:${projectId}`);
@@ -346,6 +369,45 @@ router.get("/stream", (req, res) => {
     clearInterval(keepAlive);
     donationEvents.off("new_donation", onNewDonation);
   });
+});
+
+// GET /api/donations/:id/receipt - return the immutable, signed tax receipt.
+router.get("/:id/receipt", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!uuidValidator.safeParse(id).success) throw new AppError("VALIDATION_ERROR", { field: "id" });
+    const existing = await pool.query(
+      "SELECT pdf FROM donation_receipts WHERE donation_id = $1", [id],
+    );
+    if (existing.rows[0]) {
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="indigopay-receipt-${id}.pdf"`);
+      return res.send(existing.rows[0].pdf);
+    }
+    const result = await pool.query(
+      `SELECT d.*, p.name AS project_name, p.wallet_address, p.co2_offset_kg,
+        CASE WHEN p.raised_xlm > 0 THEN d.amount_xlm * (p.co2_offset_kg::numeric / p.raised_xlm) ELSE 0 END AS co2_offset_kg
+       FROM donations d JOIN projects p ON p.id = d.project_id WHERE d.id = $1`, [id],
+    );
+    const donation = result.rows[0];
+    if (!donation) throw new AppError("DONATION_NOT_FOUND");
+    if (donation.anonymous) throw new AppError("NOT_FOUND");
+    const receiptId = uuid();
+    const issuedAt = new Date().toISOString();
+    const proof = JSON.stringify({ receiptId, donationId: id, transactionHash: donation.transaction_hash, issuedAt });
+    const receiptHash = hashReceiptContent(proof);
+    const signature = signReceipt(receiptHash);
+    const pdf = generateReceiptPdf({ donation, project: { name: donation.project_name, wallet_address: donation.wallet_address }, receiptId, issuedAt, receiptHash, signature });
+    await pool.query(
+      `INSERT INTO donation_receipts (id, donation_id, receipt_hash, signature, pdf)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (donation_id) DO NOTHING`, [receiptId, id, receiptHash, signature, pdf],
+    );
+    await pool.query("UPDATE donations SET receipt_generated_at = NOW() WHERE id = $1", [id]);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="indigopay-receipt-${id}.pdf"`);
+    return res.send(pdf);
+  } catch (e) { return next(e); }
 });
 
 // GET /api/donations/project/:id

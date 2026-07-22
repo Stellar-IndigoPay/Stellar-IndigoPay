@@ -50,9 +50,8 @@ function buildStaticCsp(allowFraming = false) {
     : "frame-ancestors 'none'";
   return [
     "default-src 'self'",
-    // Static fallback uses unsafe-inline; middleware.ts replaces this with a
-    // nonce + strict-dynamic pair which achieves an A grade on csp-evaluator.
-    "script-src 'self' 'unsafe-inline'",
+    // static fallback uses placeholder nonce for inline scripts; actual nonce injected by middleware
+    `script-src 'self' 'nonce-{nonce}' https://*.stellar.org`,
     // unpkg serves the Leaflet CSS stylesheet loaded dynamically in ProjectMap.
     `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com ${UNPKG}`,
     "font-src 'self' https://fonts.gstatic.com",
@@ -64,6 +63,7 @@ function buildStaticCsp(allowFraming = false) {
     "form-action 'self'",
     frameAncestors,
     "upgrade-insecure-requests",
+    "report-uri /api/csp-report",
   ].join("; ");
 }
 
@@ -94,7 +94,7 @@ const nextConfig = {
       {
         // Applied to every route.  middleware.ts overrides Content-Security-Policy
         // with the nonce-stamped version for all HTML responses.
-        source: "/(.*)",
+        source: "/((?!api/csp-report).*)",
         headers: [
           { key: "Content-Security-Policy", value: buildStaticCsp(false) },
           // Security headers (Issue #472)

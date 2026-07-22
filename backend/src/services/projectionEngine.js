@@ -81,6 +81,9 @@ const projections = {
     async handler(event, ctx) {
       const d = event.event_data || {};
       if (event.event_type === "DonationRecorded") {
+        // Private donations remain part of project/global projections, but
+        // must never create or change a public donor leaderboard entry.
+        if (d.anonymous) return;
         const donor = d.donorAddress;
         const amount = Number(d.amountXLM || 0);
         const co2 = Number(d.co2OffsetKg || 0);

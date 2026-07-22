@@ -198,6 +198,8 @@ function mapDonationRow(row) {
     message: row.message,
     transactionHash: row.transaction_hash,
     createdAt: toIso(row.created_at),
+    anonymous: Boolean(row.anonymous),
+    receiptGeneratedAt: toIso(row.receipt_generated_at),
   };
 
   if (row.amount_xlm !== null && row.amount_xlm !== undefined) {
