@@ -12,6 +12,10 @@ jest.mock("../services/matchQueue", () => ({
   enqueueMatchDonation: jest.fn().mockResolvedValue(undefined),
 }));
 
+jest.mock("../services/oracleService", () => ({
+  getCurrentPrice: jest.fn(() => null),
+}));
+
 const http = require("http");
 const express = require("express");
 const { Server: SocketServer } = require("socket.io");
