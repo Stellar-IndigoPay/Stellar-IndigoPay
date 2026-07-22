@@ -28,6 +28,7 @@ const PgBoss = require("pg-boss");
 const pool = require("../db/pool");
 const logger = require("../logger");
 const { metrics } = require("./metrics");
+const { decryptPrivateKey } = require("./mtlsEncryption");
 const {
   computeEventId,
   sign,
@@ -214,14 +215,66 @@ async function processDelivery(deliveryId, inMemoryOverrides) {
   const signature = sign(body, secret, timestamp);
 
   metrics.webhookAttemptsTotal.inc({ event_type: row.event_type });
-  const result = await postSigned(url, body, {
-    eventId: row.event_id,
-    eventType: row.event_type,
-    deliveryId,
-    timestamp,
-    signature,
-    attempt: row.attempts + 1,
-  });
+
+  // mTLS: when the project has an enabled configuration, present a client
+  // certificate and verify the partner's server against their CA.
+  let httpsAgent;
+  let mtlsConfig = null;
+  try {
+    mtlsConfig = await getMTLSConfig(row.project_id);
+  } catch (err) {
+    logger.error(
+      { event: "webhook_mtls_config_error", projectId: row.project_id, err: err.message },
+      "failed to load mTLS config",
+    );
+  }
+
+  if (mtlsConfig && mtlsConfig.enabled) {
+    try {
+      httpsAgent = new https.Agent({
+        cert: mtlsConfig.client_cert,
+        key: decryptPrivateKey(
+          mtlsConfig.client_key_encrypted,
+          mtlsConfig.client_key_iv,
+        ),
+        ca: mtlsConfig.ca_cert || undefined,
+        rejectUnauthorized: true, // Always verify the server cert chain.
+      });
+    } catch (err) {
+      await markTerminal(deliveryId, "failed", `mtls config error: ${err.message}`);
+      metrics.webhookDeliveriesTotal.inc({ outcome: "skipped" });
+      logger.error(
+        { event: "webhook_mtls_init_error", deliveryId, err: err.message },
+        "failed to build mTLS agent",
+      );
+      return;
+    }
+    // Export the certificate expiry gauge so Prometheus/Alertmanager can warn
+    // ahead of rotation.
+    if (mtlsConfig.cert_expires_at) {
+      const secondsUntil = Math.floor(
+        (new Date(mtlsConfig.cert_expires_at).getTime() - Date.now()) / 1000,
+      );
+      metrics.mtlsCertExpirySeconds.set(
+        { project_id: row.project_id },
+        secondsUntil,
+      );
+    }
+  }
+
+  const result = await postSigned(
+    url,
+    body,
+    {
+      eventId: row.event_id,
+      eventType: row.event_type,
+      deliveryId,
+      timestamp,
+      signature,
+      attempt: row.attempts + 1,
+    },
+    httpsAgent,
+  );
 
   if (result.ok) {
     await pool.query(
@@ -367,7 +420,24 @@ async function markTerminal(deliveryId, status, error) {
   );
 }
 
-function postSigned(urlString, body, headers) {
+/**
+ * Load the mTLS configuration for a project, if any. Returns the row or
+ * null when no config exists (plain HTTPS fallback path).
+ *
+ * @param {string} projectId
+ * @returns {Promise<object|null>}
+ */
+async function getMTLSConfig(projectId) {
+  const { rows } = await pool.query(
+    `SELECT enabled, ca_cert, client_cert, client_key_encrypted, client_key_iv, cert_expires_at
+       FROM webhook_mtls_config
+      WHERE project_id = $1`,
+    [projectId],
+  );
+  return rows[0] || null;
+}
+
+function postSigned(urlString, body, headers, httpsAgent) {
   return new Promise((resolve) => {
     let urlObj;
     try {
@@ -376,39 +446,42 @@ function postSigned(urlString, body, headers) {
       return resolve({ ok: false, error: `invalid URL: ${err.message}` });
     }
     const lib = urlObj.protocol === "https:" ? https : http;
-    const req = lib.request(
-      {
-        hostname: urlObj.hostname,
-        port: urlObj.port || (urlObj.protocol === "https:" ? 443 : 80),
-        path: urlObj.pathname + urlObj.search,
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(body),
-          "User-Agent": USER_AGENT,
-          "X-Webhook-Id": headers.eventId,
-          "X-Webhook-Event-Type": headers.eventType,
-          "X-Webhook-Delivery-Id": headers.deliveryId,
-          "X-Webhook-Timestamp": String(headers.timestamp),
-          "X-Webhook-Signature": headers.signature,
-          "X-Webhook-Attempt": String(headers.attempt),
-        },
-        timeout: TIMEOUT_MS,
+    const libOptions = {
+      hostname: urlObj.hostname,
+      port: urlObj.port || (urlObj.protocol === "https:" ? 443 : 80),
+      path: urlObj.pathname + urlObj.search,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+        "User-Agent": USER_AGENT,
+        "X-Webhook-Id": headers.eventId,
+        "X-Webhook-Event-Type": headers.eventType,
+        "X-Webhook-Delivery-Id": headers.deliveryId,
+        "X-Webhook-Timestamp": String(headers.timestamp),
+        "X-Webhook-Signature": headers.signature,
+        "X-Webhook-Attempt": String(headers.attempt),
       },
-      (res) => {
-        res.on("data", () => {});
-        res.on("end", () => {
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            return resolve({ ok: true, statusCode: res.statusCode });
-          }
-          resolve({
-            ok: false,
-            statusCode: res.statusCode,
-            error: `non-2xx: ${res.statusCode}`,
-          });
+      timeout: TIMEOUT_MS,
+    };
+    // For HTTPS deliveries with mTLS enabled, attach the client cert agent so
+    // Node presents our certificate and verifies the server against the CA.
+    if (urlObj.protocol === "https:" && httpsAgent) {
+      libOptions.agent = httpsAgent;
+    }
+    const req = lib.request(libOptions, (res) => {
+      res.on("data", () => {});
+      res.on("end", () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          return resolve({ ok: true, statusCode: res.statusCode });
+        }
+        resolve({
+          ok: false,
+          statusCode: res.statusCode,
+          error: `non-2xx: ${res.statusCode}`,
         });
-      },
-    );
+      });
+    });
     req.on("error", (err) => resolve({ ok: false, error: err.message }));
     req.on("timeout", () => {
       req.destroy();
@@ -440,6 +513,8 @@ module.exports = {
   processDelivery,
   replayDelivery,
   // Re-export for tests / advanced callers
+  postSigned,
+  getMTLSConfig,
   sign,
   computeEventId,
   DEFAULT_REPLAY_WINDOW_SECONDS,
