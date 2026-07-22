@@ -23,7 +23,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.91.0
-          targets: wasm32v1-none
+          targets: wasm32-unknown-unknown
           components: rustfmt, clippy
 
       - name: Cache Rust dependencies
@@ -41,16 +41,16 @@ jobs:
         run: "cargo test --features testutils --workspace -- --skip fuzz"
 
       - name: Build WASM (slim)
-        run: cargo build --workspace --target wasm32v1-none --release --no-default-features
+        run: cargo build --workspace --target wasm32-unknown-unknown --release --no-default-features
 
       - name: Install wasm-opt
         run: sudo apt-get update -qq && sudo apt-get install -y -qq binaryen
 
       - name: Check WASM size
         run: |
-          wasm-opt -Oz target/wasm32v1-none/release/indigopay_contract.wasm \
-            -o target/wasm32v1-none/release/indigopay_contract.opt.wasm
-          size=$(stat -c%s target/wasm32v1-none/release/indigopay_contract.opt.wasm)
+          wasm-opt -Oz target/wasm32-unknown-unknown/release/indigopay_contract.wasm \
+            -o target/wasm32-unknown-unknown/release/indigopay_contract.opt.wasm
+          size=$(stat -c%s target/wasm32-unknown-unknown/release/indigopay_contract.opt.wasm)
           echo "WASM size (slim + wasm-opt): $size bytes"
           if [ $size -gt 65536 ]; then
             echo "Error: WASM binary exceeds 64KB limit"
