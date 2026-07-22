@@ -649,7 +649,7 @@ fn impact_merkle_key(env: &Env, project_id: &String, report_id: &String) -> Byte
 /// Read the configured platform fee in basis points.
 /// Returns 0 when the `fees` feature is disabled or no fee has been configured,
 /// preserving backward compatibility.
-fn read_platform_fee_bps(_env: &Env) -> u32 {
+fn read_platform_fee_bps(env: &Env) -> u32 {
     #[cfg(feature = "fees")]
     {
         env.storage()
@@ -659,6 +659,7 @@ fn read_platform_fee_bps(_env: &Env) -> u32 {
     }
     #[cfg(not(feature = "fees"))]
     {
+        let _ = env;
         0
     }
 }
@@ -1708,6 +1709,7 @@ impl IndigoPayContract {
 
     /// Record a path-payment donation with an attribution preference.
     #[cfg(any(feature = "donation", feature = "testutils"))]
+    #[allow(clippy::too_many_arguments)]
     pub fn donate_asset_with_privacy(
         env: Env,
         source_asset: Address,
@@ -6156,6 +6158,11 @@ mod tests {
             &(env.ledger().sequence() + 1_000),
         );
         let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&donor, &(30 * STROOP));
         client.add_allowed_token(&client.get_admin(), &token);
         client.donate_asset(
             &token,
