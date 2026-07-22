@@ -8,8 +8,9 @@ const pool = require("../db/pool");
 const { AppError } = require("../errors");
 const { validate } = require("../middleware/validate");
 const { leaderboardQuerySchema } = require("../validators/schemas");
+const { cacheResponse } = require("../middleware/cache");
 
-router.get("/", validate(leaderboardQuerySchema, "query"), async (req, res, next) => {
+router.get("/", cacheResponse(60, (req) => `cache:v1:leaderboard:${require("crypto").createHash("md5").update(JSON.stringify(req.query)).digest("hex")}`), validate(leaderboardQuerySchema, "query"), async (req, res, next) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
     const period = req.query.period || "all";
@@ -18,67 +19,57 @@ router.get("/", validate(leaderboardQuerySchema, "query"), async (req, res, next
 
     const onlyVerified = req.query.onlyVerified === "true";
 
-    let query = `
-      SELECT p.public_key, p.display_name, p.badges,
-             COALESCE(SUM(d.amount_xlm), 0)::NUMERIC AS total_donated_xlm,
-             COUNT(DISTINCT d.project_id)::INTEGER AS projects_supported,
-             COALESCE(
-               SUM(
-                 CASE
-                   WHEN pr.raised_xlm > 0 THEN (d.amount_xlm * (pr.co2_offset_kg::numeric / pr.raised_xlm))
-                   ELSE 0
-                 END
-               ),
-               0
-             )::NUMERIC AS total_co2_offset_kg,
-             (
-               COALESCE(SUM(d.amount_xlm), 0) * 0.7 +
-               (
-                 COALESCE(
-                   SUM(
-                     CASE
-                       WHEN pr.raised_xlm > 0 THEN (d.amount_xlm * (pr.co2_offset_kg::numeric / pr.raised_xlm))
-                       ELSE 0
-                     END
-                   ),
-                   0
-                 ) / 100
-               ) * 0.3
-             )::NUMERIC AS impact_score
-      FROM profiles p
-      LEFT JOIN donations d ON p.public_key = d.donor_address
-    `;
-
+    // The leaderboard is now served from the `projection_donor_leaderboard`
+    // materialised view, which is maintained deterministically by the
+    // projection engine from the `donation_events` event store. This replaces
+    // the previous live aggregate over `donations` + `profiles`. `profiles`
+    // is joined only for the human-readable display name and badge tier,
+    // which are profile attributes not derivable from the event stream.
+    let where = " WHERE 1=1 ";
+    const values = [limit];
     if (period === "month") {
-      query += " AND d.created_at >= NOW() - INTERVAL '30 days' ";
+      where += " AND lb.last_donation_at >= NOW() - INTERVAL '30 days' ";
     } else if (period === "year") {
-      query += " AND d.created_at >= NOW() - INTERVAL '1 year' ";
+      where += " AND lb.last_donation_at >= NOW() - INTERVAL '1 year' ";
     }
 
+    // `onlyVerified` requires checking the projects a donor contributed to.
+    // We compute that against the live `donations`/`projects` join (a donor's
+    // verification standing is a property of the projects they supported).
+    let verifiedJoin = "";
     if (onlyVerified) {
-      query += `
-        WHERE NOT EXISTS (
+      verifiedJoin = `
+        AND NOT EXISTS (
           SELECT 1 FROM donations d2
           JOIN projects pr ON d2.project_id = pr.id
-          WHERE d2.donor_address = p.public_key AND pr.verified = false
+          WHERE d2.donor_address = lb.donor_address AND pr.verified = false
         )
         AND EXISTS (
           SELECT 1 FROM donations d3
           JOIN projects pr2 ON d3.project_id = pr2.id
-          WHERE d3.donor_address = p.public_key AND pr2.verified = true
+          WHERE d3.donor_address = lb.donor_address AND pr2.verified = true
         )
       `;
     }
 
-    query += `
-      LEFT JOIN projects pr ON pr.id = d.project_id
-      GROUP BY p.public_key, p.display_name, p.badges
-      ORDER BY ${sortBy} DESC
+    const query = `
+      SELECT lb.donor_address AS public_key,
+             p.display_name,
+             p.badges,
+             lb.total_donated AS total_donated_xlm,
+             lb.projects_supported,
+             lb.total_co2_offset AS total_co2_offset_kg,
+             lb.impact_score
+      FROM projection_donor_leaderboard lb
+      LEFT JOIN profiles p ON p.public_key = lb.donor_address
+      ${where}
+      ${verifiedJoin}
+      ORDER BY ${sortBy === "impact_score" ? "lb.impact_score" : "lb.total_donated"} DESC
       LIMIT $1
     `;
 
     // eslint-disable-next-line sql-injection/no-sql-injection
-    const result = await pool.query(query, [limit]);
+    const result = await pool.query(query, values);
     const entries = result.rows.map((p, i) => ({
       rank: i + 1,
       publicKey: p.public_key,
@@ -151,18 +142,17 @@ router.post("/snapshot", async (req, res, next) => {
 
     const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
 
-    // Compute this calendar month's top donors
+    // Compute this calendar month's top donors from the projection.
     const topResult = await pool.query(
-      `SELECT p.public_key, p.display_name, p.badges,
-              COALESCE(SUM(d.amount_xlm), 0)::NUMERIC AS total_xlm
-       FROM profiles p
-       LEFT JOIN donations d
-         ON p.public_key = d.donor_address
-        AND d.created_at >= DATE_TRUNC('month', NOW())
-        AND d.created_at <  DATE_TRUNC('month', NOW()) + INTERVAL '1 month'
-       GROUP BY p.public_key, p.display_name, p.badges
-       HAVING COALESCE(SUM(d.amount_xlm), 0) > 0
-       ORDER BY total_xlm DESC
+      `SELECT lb.donor_address AS public_key,
+              p.display_name,
+              p.badges,
+              lb.total_donated AS total_xlm
+       FROM projection_donor_leaderboard lb
+       LEFT JOIN profiles p ON p.public_key = lb.donor_address
+       WHERE lb.last_donation_at >= DATE_TRUNC('month', NOW())
+         AND lb.last_donation_at <  DATE_TRUNC('month', NOW()) + INTERVAL '1 month'
+       ORDER BY lb.total_donated DESC
        LIMIT $1`,
       [limit],
     );

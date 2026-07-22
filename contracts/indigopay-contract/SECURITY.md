@@ -210,3 +210,28 @@ Max donation scenarios:
 ### Conclusion
 
 No silent overflows possible. All operations that could exceed i128::MAX will panic with descriptive messages. The contract is safe for production use with any realistic donation volume.
+
+## Donation Refund (#290)
+
+### Trust model
+
+`approve_refund` requires **both** admin authorization (`require_admin_for_routine`) **and** `project.wallet.require_auth()`. This means the token transfer from project wallet → donor happens atomically inside `approve_refund` (CEI ordering — all counter decrements are written before the transfer fires). If the project wallet does not co-sign, the approval reverts entirely.
+
+This provides on-chain enforcement that "Approved = Paid" for three of the four motivating scenarios:
+- Donor sent to the wrong project
+- Donor entered the wrong amount
+- Technical error in the transaction
+
+The fourth scenario (project found to be fraudulent) is **unresolvable on-chain without escrow** — if the project wallet is adversarial, it will not co-sign the refund. This is a known limitation. The 24-hour cooldown + admin review provides the safety net; the project wallet co-sign closes the gap for honest-mistake cases.
+
+### Pre-upgrade CO₂ limitation
+
+CO₂ offset values for donations are snapshotted in `DataKey::DonationCO2Offset(u32)` at donation time. Pre-upgrade donations lack this key, so refunds for those donations use `co2_offset_grams = 0` — meaning `GlobalCO2OffsetGrams` is not reversed for pre-upgrade refunds. This creates a small, bounded, one-directional drift: the global counter may be marginally overstated relative to true refunded volume. This is an accepted, documented limitation.
+
+### Badge permanence
+
+Badge tiers and minted NFTs are **never** downgraded or burned on refund. The refund adjusts `total_donated` and `co2_offset_grams` but does not call `calculate_badge()`. A donor who reaches EarthGuardian and later refunds all donations keeps their EarthGuardian badge and any minted ImpactNFTs. This is a deliberate design choice — badges are permanent artifacts, not live counters.
+
+### Underflow protection
+
+All counter decrements on refund use `checked_sub(...).expect("...underflow on refund")`, consistent with the `checked_add` convention used for donations. If a refund would drive any counter negative, the transaction panics and reverts.

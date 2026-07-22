@@ -22,10 +22,15 @@ export default function LanguageSwitcher() {
                  text-[#227239] dark:text-[#81c784] rounded-lg px-2 py-1.5
                  focus:outline-none focus:ring-2 focus:ring-[rgba(34,114,57,0.30)] dark:focus:ring-[rgba(96,208,123,0.40)]"
       aria-label="Language"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.stopPropagation();
+        }
+      }}
     >
       {LOCALES.map((l) => (
         <option key={l.code} value={l.code}>
-          {l.flag} {l.label}
+          {l.flag} {l.label} {locale === l.code ? "✓" : ""}
         </option>
       ))}
     </select>
