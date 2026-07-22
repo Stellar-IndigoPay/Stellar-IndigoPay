@@ -166,7 +166,6 @@ export default function ProjectAdmin() {
     for (const d of donations) {
       const donorAddress =
         d.anonymous || !d.donorAddress ? "Anonymous" : d.donorAddress;
-      const donorAddress = d.donorAddress;
       if (!donorAddress) continue;
       const amount = parseFloat(d.amountXLM || d.amount || "0");
       const curr = byDonor.get(donorAddress) || {
