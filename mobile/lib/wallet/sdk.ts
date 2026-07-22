@@ -23,7 +23,7 @@
 import {
   Keypair,
   Networks,
-  Server,
+  Horizon,
   TransactionBuilder,
   StrKey,
 } from "@stellar/stellar-sdk";
@@ -371,11 +371,11 @@ export async function hasWallet(): Promise<boolean> {
  * Fetch the XLM balance for a Stellar account from Horizon.
  */
 export async function getBalance(publicKey: string): Promise<WalletBalance> {
-  const server = new Server(HORIZON_URL);
+  const server = new Horizon.Server(HORIZON_URL);
   try {
     const account = await server.loadAccount(publicKey);
     const xlmBalance =
-      account.balances.find((b) => b.asset_type === "native")?.balance || "0";
+      account.balances.find((b: any) => b.asset_type === "native")?.balance || "0";
     return { xlm: xlmBalance };
   } catch (err: any) {
     if (err?.response?.status === 404) {
@@ -444,8 +444,8 @@ export async function buildPaymentTransaction(params: {
   memo?: string;
 }): Promise<string> {
   const { Operation, Asset, Memo } = await import("@stellar/stellar-sdk");
-  const server = new Server(HORIZON_URL);
-  const sourceAccount = await server.loadAccount(params.sourcePublicKey);
+  const txServer = new Horizon.Server(HORIZON_URL);
+  const sourceAccount = await txServer.loadAccount(params.sourcePublicKey);
 
   const builder = new TransactionBuilder(sourceAccount, {
     fee: "100",
@@ -475,7 +475,7 @@ export async function submitTransaction(signedXDR: string): Promise<{
   hash: string;
   ledger: number;
 }> {
-  const server = new Server(HORIZON_URL);
+  const server = new Horizon.Server(HORIZON_URL);
   const transaction = TransactionBuilder.fromXDR(
     signedXDR,
     NETWORK_PASSPHRASE,

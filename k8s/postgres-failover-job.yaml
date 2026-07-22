@@ -1,0 +1,82 @@
+# k8s/postgres-failover-job.yaml — Automated Postgres Failover Job
+#
+# This Job is created dynamically by the postgres-healthcheck sidecar
+# when it detects the primary has been down for >30 s. It can also be
+# triggered manually for testing:
+#
+#   kubectl create -f k8s/postgres-failover-job.yaml -n stellar-indigopay
+#
+# The failover script is stored in a ConfigMap (postgres-failover-script)
+# and mounted at /scripts/failover.sh to avoid the fragile multi-level
+# JSON/shell escaping that would otherwise be required.
+#
+# Failover sequence (see postgres-failover-script.yaml for the full script):
+#   1. Verify standby is reachable and in recovery mode
+#   2. Push Prometheus metric (outcome=initiated)
+#   3. Promote standby to primary (pg_ctl promote)
+#   4. Patch postgres-svc and postgres-primary-svc Service selectors
+#   5. Update ConfigMap with new primary host
+#   6. Rolling restart backend Deployment
+#   7. Wait for backend pods to be ready
+#   8. Push Prometheus metric (outcome=succeeded or failed)
+#   9. Send Slack notification
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postgres-failover
+  namespace: stellar-indigopay
+  labels:
+    app: postgres-failover
+    component: database-failover
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app: postgres-failover
+    spec:
+      serviceAccountName: postgres-failover-sa
+      restartPolicy: Never
+      containers:
+        - name: failover
+          image: bitnami/kubectl:latest
+          command:
+            - /bin/sh
+            - /scripts/failover.sh
+          env:
+            - name: NAMESPACE
+              value: stellar-indigopay
+            - name: STANDBY_POD
+              value: postgres-standby-0
+            - name: BACKEND_METRICS_URL
+              value: http://backend-svc:4000/api/admin/failover-metric
+            - name: FAILOVER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: FAILOVER_METRICS_TOKEN
+                  optional: true
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: SLACK_WEBHOOK_URL
+                  optional: true
+          volumeMounts:
+            - name: failover-script
+              mountPath: /scripts
+              readOnly: true
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+      volumes:
+        - name: failover-script
+          configMap:
+            name: postgres-failover-script
+            defaultMode: 0755

@@ -24,11 +24,15 @@ cargo test --features testutils
 
 ### Fuzz Tests
 
-To run fuzz tests, use the following command:
+To run fuzz tests, use the following command. The `FUZZ_ITERATIONS` env var
+controls how many proptest cases each property test runs (default: 256).
 
 ```bash
-# Run fuzz tests
-cargo test --features testutils fuzz
+# Run fuzz tests (default: 256 cases per test)
+cargo test --features testutils -- fuzz
+
+# Run with a custom case count
+FUZZ_ITERATIONS=1000 cargo test --features testutils -- fuzz
 ```
 
 ### Expected Output

@@ -140,3 +140,189 @@ describe("metrics service", () => {
     expect(registry.contentType).toMatch(/text\/plain/);
   });
 });
+
+describe("dbPoolMax gauge", () => {
+  test("refreshDbPoolMetrics sets db_pool_max from pool.max", () => {
+    const fakePool = { totalCount: 5, idleCount: 3, waitingCount: 0, max: 20 };
+    refreshDbPoolMetrics(fakePool);
+    const text = require("./metrics").registry.metrics();
+    return text.then((body) => {
+      expect(body).toMatch(/db_pool_max\{[^}]*\} 20/);
+    });
+  });
+
+  test("refreshDbPoolMetrics sets db_pool_max from pool.options.max as fallback", () => {
+    const fakePool = {
+      totalCount: 2,
+      idleCount: 1,
+      waitingCount: 0,
+      max: undefined,
+      options: { max: 15 },
+    };
+    refreshDbPoolMetrics(fakePool);
+    const text = require("./metrics").registry.metrics();
+    return text.then((body) => {
+      expect(body).toMatch(/db_pool_max\{[^}]*\} 15/);
+    });
+  });
+
+  test("refreshDbPoolMetrics defaults db_pool_max to 1 when both are missing", () => {
+    const fakePool = {
+      totalCount: 0,
+      idleCount: 0,
+      waitingCount: 0,
+      max: undefined,
+      options: {},
+    };
+    refreshDbPoolMetrics(fakePool);
+    const text = require("./metrics").registry.metrics();
+    return text.then((body) => {
+      expect(body).toMatch(/db_pool_max\{[^}]*\} 1/);
+    });
+  });
+});
+
+describe("adaptive pool sizing", () => {
+  let logger;
+
+  beforeEach(() => {
+    logger = require("../logger");
+    logger.info.mockClear();
+    logger.warn.mockClear();
+    logger.error.mockClear();
+  });
+
+  test("increases pool max after 4 consecutive saturated checks", () => {
+    const pool = { totalCount: 20, idleCount: 0, waitingCount: 2, max: 20, options: { max: 20 } };
+
+    // 3 consecutive saturated checks — no resize yet
+    for (let i = 0; i < 3; i++) {
+      refreshDbPoolMetrics(pool);
+    }
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "adaptive_pool_sizing" }),
+      expect.any(String),
+    );
+    expect(pool.options.max).toBe(20);
+
+    // 4th check triggers resize (20 → 25)
+    refreshDbPoolMetrics(pool);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "adaptive_pool_sizing",
+        oldMax: 20,
+        newMax: 25,
+        waitingCount: 2,
+      }),
+      expect.any(String),
+    );
+    expect(pool.options.max).toBe(25);
+  });
+
+  test("does not increase when not saturated (total < max)", () => {
+    const pool = { totalCount: 15, idleCount: 2, waitingCount: 0, max: 20, options: { max: 20 } };
+
+    for (let i = 0; i < 5; i++) {
+      refreshDbPoolMetrics(pool);
+    }
+
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "adaptive_pool_sizing" }),
+      expect.any(String),
+    );
+    expect(pool.options.max).toBe(20);
+  });
+
+  test("does not increase when saturated but no waiting clients", () => {
+    const pool = { totalCount: 20, idleCount: 0, waitingCount: 0, max: 20, options: { max: 20 } };
+
+    for (let i = 0; i < 5; i++) {
+      refreshDbPoolMetrics(pool);
+    }
+
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "adaptive_pool_sizing" }),
+      expect.any(String),
+    );
+    expect(pool.options.max).toBe(20);
+  });
+
+  test("resets saturation counter when conditions clear", () => {
+    const pool = { totalCount: 20, idleCount: 0, waitingCount: 2, max: 20, options: { max: 20 } };
+
+    // 2 saturated checks
+    for (let i = 0; i < 2; i++) {
+      refreshDbPoolMetrics(pool);
+    }
+
+    // Condition clears
+    pool.waitingCount = 0;
+    pool.idleCount = 2;
+    refreshDbPoolMetrics(pool);
+
+    // Go back to saturated — counter restarts
+    pool.waitingCount = 3;
+    pool.idleCount = 0;
+    for (let i = 0; i < 3; i++) {
+      refreshDbPoolMetrics(pool);
+    }
+    // Only 3 saturated after reset → no resize yet
+    expect(pool.options.max).toBe(20);
+  });
+
+  test("respects PG_MAX_HARD_CAP ceiling (default 50)", () => {
+    const pool = {
+      totalCount: 48,
+      idleCount: 0,
+      waitingCount: 1,
+      max: 48,
+      options: { max: 48 },
+    };
+
+    for (let i = 0; i < 4; i++) {
+      refreshDbPoolMetrics(pool);
+    }
+
+    // 48 × 1.25 = 60, capped at 50
+    expect(pool.options.max).toBe(50);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "adaptive_pool_sizing",
+        oldMax: 48,
+        newMax: 50,
+      }),
+      expect.any(String),
+    );
+  });
+
+  test("does not increase when already at or above hard cap", () => {
+    const pool = {
+      totalCount: 50,
+      idleCount: 0,
+      waitingCount: 4,
+      max: 50,
+      options: { max: 50 },
+    };
+
+    for (let i = 0; i < 5; i++) {
+      refreshDbPoolMetrics(pool);
+    }
+
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "adaptive_pool_sizing" }),
+      expect.any(String),
+    );
+    expect(pool.options.max).toBe(50);
+  });
+
+  test("uses pool.max directly when pool.options is absent", () => {
+    const pool = { totalCount: 10, idleCount: 0, waitingCount: 1, max: 10 };
+
+    for (let i = 0; i < 4; i++) {
+      refreshDbPoolMetrics(pool);
+    }
+
+    // 10 × 1.25 = 12.5 → ceil → 13
+    expect(pool.max).toBe(13);
+  });
+});

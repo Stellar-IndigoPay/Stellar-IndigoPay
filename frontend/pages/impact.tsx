@@ -4,17 +4,30 @@
  */
 import { useEffect, useState } from "react";
 import { useRouter } from "next/router";
+import dynamic from "next/dynamic";
 import AnimatedNumber from "@/components/AnimatedNumber";
 import PageMeta from "@/components/PageMeta";
 import DonationTicker from "@/components/DonationTicker";
-import WorldMap from "@/components/WorldMap";
 import { fetchImpactGlobal, fetchLeaderboard, fetchProjects } from "@/lib/api";
 import { getGlobalImpactStats } from "@/lib/stellar";
 import { formatCO2, formatXLM, shortenAddress } from "@/utils/format";
 import type { LeaderboardEntry } from "@/utils/types";
 import type { ImpactGlobalStats } from "@/lib/api";
+import ImpactSkeleton from "@/components/ImpactSkeleton";
+
+import { useI18n } from "@/lib/i18n";
+
+const WorldMap = dynamic(() => import("@/components/WorldMap"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex items-center justify-center h-64">
+      <span className="text-sm text-[#94A3B8] font-body">Loading map…</span>
+    </div>
+  ),
+});
 
 export default function ImpactPage() {
+  const { t } = useI18n();
   const router = useRouter();
   const [stats, setStats] = useState<ImpactGlobalStats | null>(null);
   const [sorobanStats, setSorobanStats] = useState<{
@@ -54,16 +67,18 @@ export default function ImpactPage() {
   const impactJsonLd = {
     "@context": "https://schema.org",
     "@type": "WebPage",
-    name: "Global Impact | Stellar IndigoPay",
+    name: `${t("impact.title")} | Stellar IndigoPay`,
     url: canonicalUrl,
-    description: "Witness the real-time community impact of Stellar IndigoPay donors.",
+    description: t("impact.subtitle"),
   };
+
+  if (isLoading) return <ImpactSkeleton />;
 
   return (
     <div className="min-h-screen bg-[#FAFAFE] dark:bg-[#0A0A1A] font-body text-[#0F172A] dark:text-[#E2E8F0] pb-20">
       <PageMeta
-        title="Global Impact | Stellar IndigoPay"
-        description="Witness the real-time community impact of Stellar IndigoPay donors."
+        title={`${t("impact.title")} | Stellar IndigoPay`}
+        description={t("impact.subtitle")}
         canonicalUrl={canonicalUrl}
         jsonLd={impactJsonLd}
       />
@@ -72,11 +87,10 @@ export default function ImpactPage() {
         {/* Header Section */}
         <div className="text-center mb-16">
           <h1 className="text-4xl md:text-6xl font-display font-bold text-[#0F172A] dark:text-[#E2E8F0] tracking-tight leading-tight">
-            Our <span className="text-gradient">Global Impact</span>
+            {t("impact.title")}
           </h1>
           <p className="mt-4 text-lg text-[#4F46E5] dark:text-[#818CF8] max-w-2xl mx-auto">
-            Transparency on-chain. Witness what the community has achieved
-            together for our planet.
+            {t("impact.subtitle")}
           </p>
         </div>
 

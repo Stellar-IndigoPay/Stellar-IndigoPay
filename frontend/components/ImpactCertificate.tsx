@@ -8,6 +8,7 @@ import {
   shortenAddress,
 } from "@/utils/format";
 import type { BadgeTier } from "@/utils/types";
+import { useI18n } from "@/lib/i18n";
 
 export default function ImpactCertificate(props: {
   donorAddress: string;
@@ -17,6 +18,7 @@ export default function ImpactCertificate(props: {
   badgeTier: BadgeTier | null;
   projectsSupported: Array<{ id: string; name: string }>;
 }) {
+  const { t } = useI18n();
   const {
     donorAddress,
     donorName,
@@ -40,11 +42,10 @@ export default function ImpactCertificate(props: {
               Stellar-IndigoPay
             </p>
             <h2 className="font-display text-3xl font-bold leading-tight text-white">
-              Impact Certificate
+              {t("certificate.title")}
             </h2>
             <p className="text-[#C7D2FE] text-sm mt-2 font-body">
-              This certificate recognizes climate impact achieved through
-              on-chain donations.
+              {t("certificate.subtitle")}
             </p>
           </div>
           <div className="w-16 h-16 rounded-2xl bg-white/10 backdrop-blur-sm border border-white/20 flex items-center justify-center text-3xl">
@@ -56,13 +57,13 @@ export default function ImpactCertificate(props: {
       <div className="px-8 py-8">
         <div className="text-center mb-8">
           <p className="text-sm text-[#475569] dark:text-[#94A3B8] font-body">
-            Presented to
+            {t("certificate.presentedTo")}
           </p>
           <p className="font-display text-3xl font-bold text-[#0F172A] dark:text-[#E2E8F0] mt-2">
             {donorName?.trim() ? donorName : shortenAddress(donorAddress)}
           </p>
           <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-2 font-body">
-            Donor Address: {shortenAddress(donorAddress, 10)}
+            {t("certificate.donorAddress", { address: shortenAddress(donorAddress, 10) })}
           </p>
         </div>
 
@@ -75,7 +76,7 @@ export default function ImpactCertificate(props: {
               {formatXLM(totalDonatedXLM)}
             </p>
             <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-1 font-body uppercase tracking-wider font-bold opacity-60">
-              Total Donated
+              {t("certificate.totalDonated")}
             </p>
           </div>
           <div className="card text-center border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)]">
@@ -86,7 +87,7 @@ export default function ImpactCertificate(props: {
               {formatCO2(totalCO2OffsetKg)}
             </p>
             <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-1 font-body uppercase tracking-wider font-bold opacity-60">
-              CO₂ Offset
+              {t("certificate.co2Offset")}
             </p>
           </div>
           <div className="card text-center border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)]">
@@ -94,17 +95,17 @@ export default function ImpactCertificate(props: {
               {badgeTier ? badgeEmoji(badgeTier) : "🏅"}
             </div>
             <p className="font-display font-bold text-[#0F172A] dark:text-[#E2E8F0] text-lg">
-              {badgeTier ? badgeLabel(badgeTier) : "Supporter"}
+              {badgeTier ? badgeLabel(badgeTier) : t("certificate.supporter")}
             </p>
             <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-1 font-body uppercase tracking-wider font-bold opacity-60">
-              Badge Tier
+              {t("certificate.badgeTier")}
             </p>
           </div>
         </div>
 
         <div className="rounded-2xl border border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)] bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)] p-5">
           <h3 className="font-display font-bold text-[#0F172A] dark:text-[#E2E8F0] mb-2">
-            Projects Supported
+            {t("certificate.projectsSupported")}
           </h3>
           {projectsSupported.length === 0 ? (
             <p className="text-sm text-[#475569] dark:text-[#94A3B8] font-body">

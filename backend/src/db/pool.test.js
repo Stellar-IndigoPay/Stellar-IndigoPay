@@ -1,5 +1,165 @@
 "use strict";
 
+// ── Helper function tests (no mocking needed) ─────────────────────────────
+
+describe("parameterizeQuery", () => {
+  let parameterizeQuery;
+
+  beforeAll(() => {
+    jest.resetModules();
+    jest.doMock("../logger", () => ({
+      error: jest.fn(),
+      warn: jest.fn(),
+      info: jest.fn(),
+    }));
+    jest.doMock("../services/metrics", () => ({
+      metrics: {
+        dbQueryDurationSeconds: { observe: jest.fn() },
+        dbSlowQueriesTotal: { inc: jest.fn() },
+        dbConnectionErrorsTotal: { inc: jest.fn() },
+      },
+    }));
+    parameterizeQuery = require("./pool").parameterizeQuery;
+  });
+
+  afterAll(() => {
+    jest.dontMock("../logger");
+    jest.dontMock("../services/metrics");
+  });
+
+  test("replaces single-quoted string literals with $N placeholder", () => {
+    const result = parameterizeQuery(
+      "SELECT * FROM users WHERE name = 'Alice' AND city = 'Paris'",
+    );
+    expect(result).toBe("SELECT * FROM users WHERE name = '$N' AND city = '$N'");
+  });
+
+  test("replaces numeric literals with $N placeholder", () => {
+    const result = parameterizeQuery("SELECT * FROM items WHERE price > 42 AND qty = 100");
+    expect(result).toMatch(/price > \$N/);
+    expect(result).toMatch(/qty = \$N/);
+  });
+
+  test("handles floating-point numeric literals", () => {
+    const result = parameterizeQuery("UPDATE prices SET rate = 1.25 WHERE id = 5");
+    expect(result).toMatch(/rate = \$N/);
+    expect(result).toMatch(/id = \$N/);
+  });
+
+  test("leaves non-literal text unchanged", () => {
+    const result = parameterizeQuery("SELECT column FROM table");
+    expect(result).toBe("SELECT column FROM table");
+  });
+
+  test("handles SQL with mixed literals and identifiers", () => {
+    const result = parameterizeQuery(
+      "INSERT INTO orders (user_id, amount) VALUES (7, 19.99)",
+    );
+    // Identifiers (user_id, amount) are preserved; only value literals are replaced.
+    expect(result).toBe(
+      "INSERT INTO orders (user_id, amount) VALUES ($N, $N)",
+    );
+  });
+});
+
+describe("extractQueryType", () => {
+  let extractQueryType;
+
+  beforeAll(() => {
+    jest.resetModules();
+    jest.doMock("../logger", () => ({
+      error: jest.fn(),
+      warn: jest.fn(),
+      info: jest.fn(),
+    }));
+    jest.doMock("../services/metrics", () => ({
+      metrics: {
+        dbQueryDurationSeconds: { observe: jest.fn() },
+        dbSlowQueriesTotal: { inc: jest.fn() },
+        dbConnectionErrorsTotal: { inc: jest.fn() },
+      },
+    }));
+    extractQueryType = require("./pool").extractQueryType;
+  });
+
+  afterAll(() => {
+    jest.dontMock("../logger");
+    jest.dontMock("../services/metrics");
+  });
+
+  test("extracts SELECT from leading keyword", () => {
+    expect(extractQueryType("SELECT * FROM users")).toBe("SELECT");
+  });
+
+  test("extracts INSERT from leading keyword", () => {
+    expect(extractQueryType("INSERT INTO users (name) VALUES ('x')")).toBe("INSERT");
+  });
+
+  test("extracts UPDATE from leading keyword", () => {
+    expect(extractQueryType("UPDATE users SET name = 'x'")).toBe("UPDATE");
+  });
+
+  test("extracts DELETE from leading keyword", () => {
+    expect(extractQueryType("DELETE FROM users WHERE id = 1")).toBe("DELETE");
+  });
+
+  test("extracts WITH from CTE prefix", () => {
+    expect(extractQueryType("WITH cte AS (SELECT 1) SELECT * FROM cte")).toBe("WITH");
+  });
+
+  test("returns OTHER for unrecognised keywords", () => {
+    expect(extractQueryType("SET statement_timeout = '3s'")).toBe("OTHER");
+  });
+
+  test("is case-insensitive", () => {
+    expect(extractQueryType("  select count(*) from users")).toBe("SELECT");
+  });
+
+  test("handles leading whitespace", () => {
+    expect(extractQueryType("\n\t  DELETE FROM logs")).toBe("DELETE");
+  });
+});
+
+describe("extractOperation", () => {
+  let extractOperation;
+
+  beforeAll(() => {
+    jest.resetModules();
+    jest.doMock("../logger", () => ({
+      error: jest.fn(),
+      warn: jest.fn(),
+      info: jest.fn(),
+    }));
+    jest.doMock("../services/metrics", () => ({
+      metrics: {
+        dbQueryDurationSeconds: { observe: jest.fn() },
+        dbSlowQueriesTotal: { inc: jest.fn() },
+        dbConnectionErrorsTotal: { inc: jest.fn() },
+      },
+    }));
+    extractOperation = require("./pool").extractOperation;
+  });
+
+  afterAll(() => {
+    jest.dontMock("../logger");
+    jest.dontMock("../services/metrics");
+  });
+
+  test("extracts first word regardless of SQL keyword type", () => {
+    expect(extractOperation("CREATE INDEX idx ON users(name)")).toBe("CREATE");
+  });
+
+  test("uppercases the extracted keyword", () => {
+    expect(extractOperation("explain analyze select 1")).toBe("EXPLAIN");
+  });
+
+  test("returns UNKNOWN for empty or whitespace strings", () => {
+    expect(extractOperation("   ")).toBe("UNKNOWN");
+  });
+});
+
+// ── Pool integration tests ──────────────────────────────────────────────────
+
 describe("db/pool read replica routing", () => {
   let MockPool;
   let instances;

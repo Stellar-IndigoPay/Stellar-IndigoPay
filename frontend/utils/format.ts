@@ -6,22 +6,45 @@ import { formatDistanceToNow, format } from "date-fns";
 import type { ProjectStatus, BadgeTier } from "./types";
 
 /**
+ * Format a number using Intl.NumberFormat according to the specified locale.
+ *
+ * @param value - Number to format.
+ * @param locale - Locale string (default: "en").
+ * @returns Formatted number string.
+ */
+export function formatNumber(value: number, locale = "en"): string {
+  return new Intl.NumberFormat(locale).format(value);
+}
+
+/**
  * Format an amount as XLM with locale separators.
  *
  * @param amount - Amount in XLM (string or number).
- * @param decimals - Maximum fractional digits to show.
+ * @param decimalsOrLocale - Maximum fractional digits or locale string.
+ * @param locale - Locale string if decimals is passed as second arg.
  * @returns Formatted string like `"1,234.56 XLM"`.
- * @throws {Error} Never throws; returns `"0 XLM"` for invalid input.
- *
- * @example
- * formatXLM(12.3456) // "12.35 XLM"
- * @example
- * formatXLM("1000", 0) // "1,000 XLM"
  */
-export function formatXLM(amount: string | number, decimals = 2): string {
+export function formatXLM(
+  amount: string | number,
+  decimalsOrLocale: number | string = 2,
+  locale = "en"
+): string {
+  let decimals = 2;
+  let loc = "en";
+  if (typeof decimalsOrLocale === "number") {
+    decimals = decimalsOrLocale;
+    loc = locale;
+  } else if (typeof decimalsOrLocale === "string") {
+    loc = decimalsOrLocale;
+  }
   const n = typeof amount === "string" ? parseFloat(amount) : amount;
   if (isNaN(n)) return "0 XLM";
-  return `${n.toLocaleString("en-US", { maximumFractionDigits: decimals })} XLM`;
+  return (
+    new Intl.NumberFormat(loc, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: decimals,
+    }).format(n) + " XLM"
+  );
 }
 
 /**

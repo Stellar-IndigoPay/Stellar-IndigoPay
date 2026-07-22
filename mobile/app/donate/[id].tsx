@@ -27,7 +27,7 @@ import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import {
   Keypair,
-  Server,
+  Horizon,
   TransactionBuilder,
   Networks,
   Operation,
@@ -61,7 +61,11 @@ type StatusKind = "success" | "error" | "info" | null;
 
 export default function DonateScreen() {
   const { colors } = useTheme();
-  const { id } = useLocalSearchParams();
+  const { id, prefillAmount, prefillMemo } = useLocalSearchParams<{
+    id?: string;
+    prefillAmount?: string;
+    prefillMemo?: string;
+  }>();
   const { isOnline } = useConnectivity();
 
   const bio = useBiometricAuth();
@@ -216,7 +220,7 @@ export default function DonateScreen() {
     setStatusMessage("Signing and submitting your donation...");
 
     try {
-      const server = new Server(HORIZON_URL);
+      const server = new Horizon.Server(HORIZON_URL);
       const sourceAccount = await server.loadAccount(publicKey);
 
       const transaction = new TransactionBuilder(sourceAccount, {
@@ -321,8 +325,7 @@ export default function DonateScreen() {
             }
           },
         },
-      ],
-      "plain-text-input",
+    ],
     );
   };
 

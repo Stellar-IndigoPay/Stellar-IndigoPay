@@ -25,23 +25,15 @@ const pool = require("../db/pool");
 const { handleDonation, setUsdcToXlmRate } = require("./indexerDonationHandler");
 const { enqueue: enqueueDLQ } = require("./indexerDLQWorker");
 const logger = require("../logger");
-const { Counter } = require("prom-client");
-const { registry } = require("./metrics");
+const { metrics } = require("./metrics");
+const { runBackfill } = require("./indexerBackfill");
 
-// ─── Prometheus metrics (owned by this service) ────────────────────────────
-const indexerStreamReconnects = new Counter({
-  name: "indexer_stream_reconnects_total",
-  help: "Total number of Horizon SSE stream reconnections",
-  labelNames: ["reason"],
-  registers: [registry],
-});
-
-const indexerOperationsSkipped = new Counter({
-  name: "indexer_operations_skipped_total",
-  help: "Total number of operations skipped by the indexer",
-  labelNames: ["reason"],
-  registers: [registry],
-});
+const {
+  indigopayIndexerStreamReconnectsTotal: indexerStreamReconnects,
+  indexerOperationsSkippedTotal: indexerOperationsSkipped,
+  indigopayIndexerLagLedgers: indexerLagLedgers,
+  indigopayIndexerAutoBackfillsTotal: indexerAutoBackfillsTotal,
+} = metrics;
 
 // ─── SSE reconnection backoff ───────────────────────────────────────────────
 const BACKOFF_INITIAL_MS = 1000;
@@ -57,6 +49,13 @@ let horizonStream = null;
 let reconnectTimer = null;
 let reconnectAttempt = 0;
 let lastProcessedLedger = 0;
+let currentLag = 0;
+let lagCheckTimer = null;
+let lagCheckIntervalMs = Number(process.env.INDEXER_LAG_CHECK_INTERVAL_MS || 30_000);
+let lagBackoffMs = lagCheckIntervalMs;
+let maxLagBackoffMs = 5 * 60 * 1000;
+let lastLagCheckAt = null;
+let lastBackfillOutcome = null;
 
 // ── USDC configuration ──────────────────────────────────────────────────────
 let usdcTokenAddress = null;
@@ -258,7 +257,7 @@ function scheduleReconnect(reason) {
     BACKOFF_MAX_MS,
   );
 
-  indexerStreamReconnects.inc({ reason: reason || "unknown" });
+  indexerStreamReconnects.inc();
 
   logger.info(
     { event: "indexer_reconnect_scheduled", attempt: reconnectAttempt, delayMs: delay },
@@ -285,6 +284,115 @@ function scheduleReconnect(reason) {
   }
 }
 
+async function checkLag() {
+  const checkResult = {
+    lag: currentLag,
+    triggeredBackfill: false,
+    outcome: null,
+  };
+
+  try {
+    const cursor = await readCursor();
+    const ledgerRoot = await stellarServer.ledgers().order("desc").limit(1).call();
+    const latestLedger = ledgerRoot?.records?.[0]?.sequence || cursor;
+    const lag = Math.max(0, latestLedger - cursor);
+    lastProcessedLedger = Math.max(lastProcessedLedger, cursor);
+    currentLag = lag;
+    checkResult.lag = lag;
+    lastLagCheckAt = Date.now();
+    indexerLagLedgers.set(lag);
+
+    if (lag >= Number(process.env.INDEXER_LAG_BACKFILL_THRESHOLD || 10)) {
+      checkResult.triggeredBackfill = true;
+      try {
+        const result = await runBackfill({ fromLedger: cursor + 1, toLedger: latestLedger });
+        const outcome = result.errors > 0 ? "partial" : "success";
+        indexerAutoBackfillsTotal.inc({ outcome });
+        lastBackfillOutcome = outcome;
+        checkResult.outcome = outcome;
+        lagBackoffMs = Math.max(lagCheckIntervalMs, 1000);
+        logger.warn(
+          { event: "indexer_auto_backfill_triggered", lag, fromLedger: cursor + 1, toLedger: latestLedger, outcome },
+          "Autonomous micro-backfill triggered after lag detection",
+        );
+      } catch (err) {
+        indexerAutoBackfillsTotal.inc({ outcome: "failed" });
+        lastBackfillOutcome = "failed";
+        checkResult.outcome = "failed";
+        lagBackoffMs = Math.min(Math.max(lagBackoffMs * 2, lagCheckIntervalMs), maxLagBackoffMs);
+        logger.error(
+          { event: "indexer_auto_backfill_failed", lag, err: err.message },
+          "Autonomous micro-backfill failed",
+        );
+      }
+    } else {
+      lagBackoffMs = Math.max(lagCheckIntervalMs, 1000);
+    }
+  } catch (err) {
+    checkResult.error = err.message;
+    logger.error({ event: "indexer_lag_check_error", err: err.message }, "Lag check failed");
+  }
+
+  startLagMonitor();
+  return checkResult;
+}
+
+function startLagMonitor() {
+  if (lagCheckTimer) {
+    clearInterval(lagCheckTimer);
+    lagCheckTimer = null;
+  }
+
+  lagCheckTimer = setInterval(() => {
+    checkLag().catch(() => {});
+  }, lagBackoffMs);
+
+  if (typeof lagCheckTimer.unref === "function") {
+    lagCheckTimer.unref();
+  }
+}
+
+function stopLagMonitor() {
+  if (lagCheckTimer) {
+    clearInterval(lagCheckTimer);
+    lagCheckTimer = null;
+  }
+}
+
+function setLagRuntimeState(state = {}) {
+  if (state.currentLag !== undefined) {
+    currentLag = state.currentLag;
+  } else if (state.currentCursorLedger !== undefined && state.latestLedger !== undefined) {
+    currentLag = Math.max(0, state.latestLedger - state.currentCursorLedger);
+  }
+
+  if (state.lastProcessedLedger !== undefined) {
+    lastProcessedLedger = state.lastProcessedLedger;
+  }
+
+  lastLagCheckAt = state.lastCheckedAt ?? lastLagCheckAt;
+  lagBackoffMs = state.backoffMs ?? lagBackoffMs;
+  lastBackfillOutcome = state.lastBackfillOutcome ?? lastBackfillOutcome;
+}
+
+function getLagRuntimeState() {
+  return {
+    currentLag,
+    lastProcessedLedger,
+    lastCheckedAt: lastLagCheckAt,
+    backoffMs: lagBackoffMs,
+    lastBackfillOutcome,
+  };
+}
+
+function resetLagRuntimeState() {
+  currentLag = 0;
+  lastProcessedLedger = 0;
+  lastLagCheckAt = null;
+  lagBackoffMs = Number(process.env.INDEXER_LAG_CHECK_INTERVAL_MS || 30_000);
+  lastBackfillOutcome = null;
+}
+
 // ─── Lifecycle ──────────────────────────────────────────────────────────────
 
 /**
@@ -300,6 +408,9 @@ async function startIndexer(socketIo) {
   projectWalletsInterval = setInterval(updateProjectWallets, 10 * 60 * 1000);
   if (typeof projectWalletsInterval.unref === "function")
     projectWalletsInterval.unref();
+
+  lagBackoffMs = Number(process.env.INDEXER_LAG_CHECK_INTERVAL_MS || 30_000);
+  await checkLag();
 
   logger.info(
     { event: "indexer_started", usdcEnabled: Boolean(usdcTokenAddress) },
@@ -321,6 +432,10 @@ function getStatus() {
     usdcTokenConfigured: Boolean(usdcTokenAddress),
     usdcToXlmRate,
     reconnectAttempt,
+    lagLedgers: currentLag,
+    lastLagCheckAt,
+    backoffMs: lagBackoffMs,
+    lastBackfillOutcome,
     timestamp: new Date().toISOString(),
   };
 }
@@ -341,6 +456,8 @@ async function stop() {
     projectWalletsInterval = null;
   }
 
+  stopLagMonitor();
+
   isRunning = false;
   reconnectAttempt = 0;
 }
@@ -351,4 +468,9 @@ module.exports = {
   stop,
   handleDonation,
   updateProjectWallets,
+  checkLag,
+  runLagCheck: checkLag,
+  setLagRuntimeState,
+  getLagRuntimeState,
+  resetLagRuntimeState,
 };
