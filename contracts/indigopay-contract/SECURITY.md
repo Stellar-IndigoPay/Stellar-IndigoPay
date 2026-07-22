@@ -4,6 +4,8 @@ This document records the security review of the IndigoPay contract.
 
 ## Phase A — Trust model hardening (two-step admin, contract pause, 48h upgrade timelock)
 
+> **Note**: Phase A introduced two-step admin transfer with single-admin keys. Phase B (below) supersedes the admin model with multi-sig threshold signatures. The two-step transfer is preserved but redesigned as an in-place swap within the admin set. The contract pause and upgrade timelock remain unchanged.
+
 The previous design had three single-admin SPOFs:
 
 1. **Admin transfer was instant** — a single compromised signature could silently give the attacker full control.
@@ -59,20 +61,97 @@ Helpers:
 - `get_pending_upgrade() -> Option<(BytesN<32>, u32)>` — hash + effective_at ledger of the pending upgrade, or `None`.
 - `get_last_executed_upgrade() -> Option<BytesN<32>>` — hash of the most-recently executed upgrade. `None` if the contract has never been upgraded.
 
+## Phase B — Multi-sig admin with threshold signatures
+
+Phase B replaces the single-admin model (`DataKey::Admin`) with a multi-signature admin system supporting M-of-N threshold signatures.
+
+### Problem addressed
+
+A single compromised admin key could: deactivate all projects, pause the contract indefinitely, propose a malicious upgrade (with 48h delay), change the USDC token address, or change the oracle address. Multi-sig raises the bar from "compromise one key" to "compromise M of N keys simultaneously."
+
+### New data model
+
+| Key                 | Type             | Description                                     |
+| ------------------- | ---------------- | ----------------------------------------------- |
+| `DataKey::AdminSet` | `Vec<Address>`   | Set of authorized admin addresses               |
+| `DataKey::AdminThreshold` | `u32`     | Number of valid admin signatures required for critical operations |
+
+The former `DataKey::Admin` variant is removed.
+
+### Admin action tiers
+
+**Critical actions** (require M-of-N signatures):
+- `propose_upgrade`, `cancel_upgrade`
+- `pause_contract`, `unpause_contract`
+- `transfer_admin`, `cancel_admin_transfer`
+- `deactivate_all_projects`
+- `create_proposal`, `veto_proposal`
+- `add_admin`, `remove_admin`, `update_threshold`
+
+**Routine actions** (require 1-of-N signature):
+- `register_project`, `batch_register_projects`
+- `deactivate_project`, `pause_project`, `resume_project`
+- `update_project_co2_rate`
+- `set_usdc_token`, `set_oracle`, `set_donation_rate_limit`
+
+### Multi-sig verification (`verify_m_of_n`)
+
+The core verification function iterates the supplied `signers` vec:
+
+1. Calls `signer.require_auth()` on each address (Soroban host-level cryptographic verification)
+2. Checks membership in the admin set
+3. **Deduplicates**: a `counted` vec ensures each address is counted only once, preventing a single compromised key from satisfying the threshold by passing itself multiple times
+4. Panics with `"Insufficient admin signatures: M/N required"` if valid count < threshold
+
+### Admin set management
+
+All admin set mutations require M-of-N signatures:
+
+- **`add_admin(signers, new_admin)`** — adds a new address. Panics if already an admin.
+- **`remove_admin(signers, admin_to_remove)`** — removes an address. Panics if it would leave the set empty, or if the resulting set is smaller than the current threshold (forces explicit `update_threshold` first).
+- **`update_threshold(signers, new_threshold)`** — updates the threshold. Must satisfy `1 <= threshold <= admin_set.len()`.
+
+### Two-step admin transfer (in-place swap)
+
+The two-step transfer is redesigned as an in-place swap that preserves the admin set size and threshold:
+
+1. **Step 1** — M-of-N admins call `transfer_admin(signers, old_admin, new_admin)`. Validates that `old_admin` is in the set and `new_admin` is not. Stores `(old_admin, new_admin)` tuple under `DataKey::PendingAdmin`.
+2. **Step 2** — `new_admin` calls `accept_admin()`. Performs a staleness check on both `old_admin` (must still be in set) and `new_admin` (must not have been independently added). Swaps `old_admin` for `new_admin` in-place within the admin set.
+3. **Cancel** — M-of-N admins call `cancel_admin_transfer(signers)` to clear the pending entry.
+
+**Security properties**:
+- The admin set size N and threshold are never modified by a transfer
+- The M-of-N group authorizes "swap A for B", not "dissolve everything"
+- Staleness guards prevent both `old_admin` removal and `new_admin` independent addition from corrupting the set
+- `new_admin` must self-authenticate via `accept_admin` (proves key control)
+
+### Initialization
+
+```rust
+pub fn initialize(env: Env, admins: Vec<Address>, threshold: u32)
+```
+
+Validates: `admins` is non-empty, `threshold >= 1`, `threshold <= admins.len()`.
+
+**Backward compatibility**: when threshold=1 and the admin set contains one address, behavior is identical to the previous single-admin model.
+
 ### Event audit trail
 
-Every state change in the new trust model emits an indexed event for indexer consumers:
+Every state change in the trust model emits an indexed event for indexer consumers:
 
 | Event topic  | Trigger                                        |
 | ------------ | ---------------------------------------------- |
-| `ad_xfer`    | `transfer_admin` queued                        |
-| `ad_acc`     | `accept_admin` promoted                        |
+| `ad_xfer`    | `transfer_admin` queued (old_admin → new_admin) |
+| `ad_acc`     | `accept_admin` swap completed                  |
 | `ad_xfc`     | `cancel_admin_transfer` cleared                |
 | `paused`     | `pause_contract` set the pause flag            |
 | `unpause`    | `unpause_contract` lifted the pause flag       |
 | `upg_prop`   | `propose_upgrade` queued (hash + effective_at) |
 | `upg_exec`   | `execute_upgrade` swapped the WASM             |
-| `upg_cncl` | `cancel_upgrade` dropped the pending upgrade   |
+| `upg_cncl`   | `cancel_upgrade` dropped the pending upgrade   |
+| `admin_add`  | `add_admin` added a new admin to the set       |
+| `admin_rmv`  | `remove_admin` removed an admin from the set   |
+| `thresh_up`  | `update_threshold` changed the threshold       |
 
 ---
 
@@ -131,3 +210,28 @@ Max donation scenarios:
 ### Conclusion
 
 No silent overflows possible. All operations that could exceed i128::MAX will panic with descriptive messages. The contract is safe for production use with any realistic donation volume.
+
+## Donation Refund (#290)
+
+### Trust model
+
+`approve_refund` requires **both** admin authorization (`require_admin_for_routine`) **and** `project.wallet.require_auth()`. This means the token transfer from project wallet → donor happens atomically inside `approve_refund` (CEI ordering — all counter decrements are written before the transfer fires). If the project wallet does not co-sign, the approval reverts entirely.
+
+This provides on-chain enforcement that "Approved = Paid" for three of the four motivating scenarios:
+- Donor sent to the wrong project
+- Donor entered the wrong amount
+- Technical error in the transaction
+
+The fourth scenario (project found to be fraudulent) is **unresolvable on-chain without escrow** — if the project wallet is adversarial, it will not co-sign the refund. This is a known limitation. The 24-hour cooldown + admin review provides the safety net; the project wallet co-sign closes the gap for honest-mistake cases.
+
+### Pre-upgrade CO₂ limitation
+
+CO₂ offset values for donations are snapshotted in `DataKey::DonationCO2Offset(u32)` at donation time. Pre-upgrade donations lack this key, so refunds for those donations use `co2_offset_grams = 0` — meaning `GlobalCO2OffsetGrams` is not reversed for pre-upgrade refunds. This creates a small, bounded, one-directional drift: the global counter may be marginally overstated relative to true refunded volume. This is an accepted, documented limitation.
+
+### Badge permanence
+
+Badge tiers and minted NFTs are **never** downgraded or burned on refund. The refund adjusts `total_donated` and `co2_offset_grams` but does not call `calculate_badge()`. A donor who reaches EarthGuardian and later refunds all donations keeps their EarthGuardian badge and any minted ImpactNFTs. This is a deliberate design choice — badges are permanent artifacts, not live counters.
+
+### Underflow protection
+
+All counter decrements on refund use `checked_sub(...).expect("...underflow on refund")`, consistent with the `checked_add` convention used for donations. If a refund would drive any counter negative, the transaction panics and reverts.

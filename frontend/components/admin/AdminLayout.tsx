@@ -3,12 +3,12 @@
  *
  * Wraps admin pages with a top navigation bar that includes links to the
  * verification queue, projects (placeholder), and logout. Checks admin
- * auth and redirects to /admin/login when no token is present.
+ * auth and redirects to /admin/login when there is no usable session.
  */
 import { useRouter } from "next/router";
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import { isAdminAuthenticated, adminLogout } from "@/lib/adminAuth";
+import { adminLogout } from "@/lib/adminAuth";
+import AdminRouteGuard from "@/components/admin/AdminRouteGuard";
 import ThemeToggle from "@/components/ThemeToggle";
 import clsx from "clsx";
 
@@ -18,44 +18,21 @@ interface AdminLayoutProps {
 
 const NAV_LINKS = [
   { href: "/admin/verification", label: "Verification Queue" },
+  { href: "/admin/co2-flags", label: "CO₂ Flags" },
   { href: "/admin", label: "Projects" },
+  { href: "/admin/audit", label: "Audit Log" },
 ];
 
 export default function AdminLayout({ children }: AdminLayoutProps) {
   const router = useRouter();
-  const [authed, setAuthed] = useState(false);
-  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    const authed = isAdminAuthenticated();
-    setAuthed(authed);
-    setLoading(false);
-    if (!authed) {
-      router.replace("/admin/login");
-    }
-  }, [router]);
-
-  const handleLogout = () => {
-    adminLogout();
+  const handleLogout = async () => {
+    await adminLogout();
     router.replace("/admin/login");
   };
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-[var(--bg)] flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-8 h-8 rounded-full border-2 border-[var(--primary)] border-t-transparent animate-spin" />
-          <p className="text-sm text-[var(--muted)] font-body">Checking auth…</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!authed) {
-    return null; // Will redirect via the useEffect above
-  }
-
   return (
+    <AdminRouteGuard>
     <div className="min-h-screen bg-[var(--bg)]">
       {/* Admin nav bar */}
       <nav className="sticky top-0 z-50 bg-white/80 dark:bg-[#0A0A1A]/80 backdrop-blur-xl border-b border-[rgba(99,102,241,0.10)] dark:border-[rgba(129,140,248,0.12)] shadow-sm dark:shadow-none">
@@ -140,5 +117,6 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
         {children}
       </main>
     </div>
+    </AdminRouteGuard>
   );
 }

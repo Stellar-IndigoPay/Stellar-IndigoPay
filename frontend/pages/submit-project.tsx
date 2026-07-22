@@ -4,11 +4,10 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { notifyAdmin, submitProject } from "@/lib/api";
 import { PROJECT_CATEGORIES } from "@/utils/format";
-import {
-  submitProjectSchema,
-  type SubmitProjectFormData,
-} from "@/lib/validation";
 import FormField from "@/components/FormField";
+import { useFormValidation } from "@/hooks/useFormValidation";
+import { projectSubmissionSchema, walletAddressSchema, positiveNumberString } from "@/lib/validation/schemas";
+import { z } from "zod";
 
 type Step = "org" | "project" | "wallet" | "methodology" | "done";
 
@@ -21,29 +20,11 @@ const STEP_LABELS: Record<Step, string> = {
   done: "Submitted",
 };
 
-const IMPACT_METRICS_OPTIONS = [
+const IMPACT_METRICS = [
   { label: "CO₂ Reduction", value: "co2-reduction" },
   { label: "Tree Planting", value: "tree-planting" },
   { label: "Community Jobs", value: "community-jobs" },
 ];
-
-/**
- * Field sets per step — used by `trigger()` to validate only the fields
- * visible in the current step before advancing.
- */
-const STEP_FIELDS: Record<
-  Exclude<Step, "methodology" | "done">,
-  (keyof SubmitProjectFormData | `${string}.${string}`)[]
-> = {
-  org: [
-    "organization.name",
-    "organization.website",
-    "organization.country",
-    "organization.contactEmail",
-  ],
-  project: ["name", "category", "description", "location", "goalXLM"],
-  wallet: ["walletAddress"],
-};
 
 export default function SubmitProjectPage() {
   const router = useRouter();
@@ -51,6 +32,51 @@ export default function SubmitProjectPage() {
   const [submitting, setSubmitting] = useState(false);
   const [serverError, setServerError] = useState("");
   const [reviewTimeline, setReviewTimeline] = useState("");
+
+  const orgStepSchema = z.object({
+    orgName: z.string().min(1, "Required"),
+    orgWebsite: z.string().url("Invalid URL").optional().or(z.literal("")),
+    orgCountry: z.string().optional(),
+    contactEmail: z.string().email("Invalid email"),
+  });
+
+  const projectStepSchema = z.object({
+    projectName: z.string().min(3, "name must be between 3 and 120 characters").max(120, "name must be between 3 and 120 characters"),
+    category: z.enum(PROJECT_CATEGORIES as [string, ...string[]]),
+    description: z.string().min(10, "description must be between 10 and 5000 characters").max(5000, "description must be between 10 and 5000 characters"),
+    location: z.string().min(2, "location must be between 2 and 200 characters").max(200, "location must be between 2 and 200 characters"),
+    goalXLM: positiveNumberString,
+  });
+
+  const walletStepSchema = z.object({
+    walletAddress: walletAddressSchema,
+  });
+
+  const methodologyStepSchema = z.object({
+    co2MethodologyName: z.string().min(1, "Required"),
+    co2VerificationBody: z.string().optional(),
+    co2AnnualTonnes: positiveNumberString,
+    co2DocumentUrl: z.string().url("Invalid URL").optional().or(z.literal("")),
+    impactMetrics: z.array(z.string()).optional(),
+  });
+
+  const orgValidation = useFormValidation(orgStepSchema);
+  const projectValidation = useFormValidation(projectStepSchema);
+  const walletValidation = useFormValidation(walletStepSchema);
+  const methodologyValidation = useFormValidation(methodologyStepSchema);
+
+  const currentValidation =
+    step === "org"
+      ? orgValidation
+      : step === "project"
+        ? projectValidation
+        : step === "wallet"
+          ? walletValidation
+          : step === "methodology"
+            ? methodologyValidation
+            : null;
+
+  const fieldErrors = (currentValidation ? currentValidation.errors : {}) as Record<string, string | undefined>;
 
   const {
     register,
@@ -81,7 +107,19 @@ export default function SubmitProjectPage() {
     mode: "onTouched",
   });
 
-  const impactMetrics = watch("impactMetrics");
+  const set =
+    (field: keyof FormData) =>
+    (
+      e: React.ChangeEvent<
+        HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
+      >,
+    ) => {
+      setForm((prev) => ({ ...prev, [field]: e.target.value }));
+      orgValidation.clearField(field as any);
+      projectValidation.clearField(field as any);
+      walletValidation.clearField(field as any);
+      methodologyValidation.clearField(field as any);
+    };
 
   const toggleImpactMetric = (value: string) => {
     const current = impactMetrics ?? [];
@@ -91,28 +129,40 @@ export default function SubmitProjectPage() {
     setValue("impactMetrics", updated);
   };
 
-  // Build flattened error paths for nested objects
-  const getFieldError = (
-    parent: "organization" | "co2Methodology",
-    field: string,
-  ): string | undefined => {
-    const parentErrors =
-      errors[parent] as
-        | Record<string, { message?: string }>
-        | undefined;
-    return parentErrors?.[field]?.message;
-  };
-
-  async function validateAndNext() {
-    const stepFields = STEP_FIELDS[step as keyof typeof STEP_FIELDS];
-    if (!stepFields || stepFields.length === 0) {
-      const idx = STEPS.indexOf(step);
-      if (idx < STEPS.length - 2) setStep(STEPS[idx + 1]);
-      return;
+  function validateStep(): boolean {
+    if (step === "org") {
+      return orgValidation.validate({
+        orgName: form.orgName,
+        orgWebsite: form.orgWebsite,
+        orgCountry: form.orgCountry,
+        contactEmail: form.contactEmail,
+      });
     }
-
-    const valid = await trigger(stepFields as any);
-    if (!valid) return;
+    if (step === "project") {
+      return projectValidation.validate({
+        projectName: form.projectName,
+        category: form.category,
+        description: form.description,
+        location: form.location,
+        goalXLM: form.goalXLM,
+      });
+    }
+    if (step === "wallet") {
+      return walletValidation.validate({
+        walletAddress: form.walletAddress,
+      });
+    }
+    if (step === "methodology") {
+      return methodologyValidation.validate({
+        co2MethodologyName: form.co2MethodologyName,
+        co2VerificationBody: form.co2VerificationBody,
+        co2AnnualTonnes: form.co2AnnualTonnes,
+        co2DocumentUrl: form.co2DocumentUrl,
+        impactMetrics: form.impactMetrics,
+      });
+    }
+    return true;
+  }
 
     const idx = STEPS.indexOf(step);
     if (idx < STEPS.length - 2) setStep(STEPS[idx + 1]);
@@ -245,89 +295,101 @@ export default function SubmitProjectPage() {
         ))}
       </div>
 
-      <form onSubmit={handleSubmit(onSubmit)} noValidate>
-        <div className="card p-6 space-y-5">
-          {/* Step: org */}
-          {step === "org" && (
-            <>
-              <h2 className="font-display text-xl font-bold text-forest-900">
-                Organization Info
-              </h2>
-              <FormField
-                label="Organization Name"
-                required
-                error={getFieldError("organization", "name")}
+      <div className="card p-6 space-y-5">
+        {/* Step: org */}
+        {step === "org" && (
+          <>
+            <h2 className="font-display text-xl font-bold text-forest-900">
+              Organization Info
+            </h2>
+            <FormField name="orgName" label="Organization Name *" error={fieldErrors.orgName}>
+              <input
+                className="input-field"
+                value={form.orgName}
+                onChange={set("orgName")}
                 placeholder="Acme Climate Foundation"
                 {...register("organization.name")}
               />
-              <FormField
-                label="Website"
-                error={getFieldError("organization", "website")}
+            </FormField>
+            <FormField name="orgWebsite" label="Website" error={fieldErrors.orgWebsite}>
+              <input
+                className="input-field"
+                value={form.orgWebsite}
+                onChange={set("orgWebsite")}
                 placeholder="https://acme.org"
                 {...register("organization.website")}
               />
-              <FormField
-                label="Country"
-                required
-                error={getFieldError("organization", "country")}
+            </FormField>
+            <FormField name="orgCountry" label="Country" error={fieldErrors.orgCountry}>
+              <input
+                className="input-field"
+                value={form.orgCountry}
+                onChange={set("orgCountry")}
                 placeholder="Kenya"
                 {...register("organization.country")}
               />
-              <FormField
-                label="Contact Email"
-                required
+            </FormField>
+            <FormField name="contactEmail" label="Contact Email *" error={fieldErrors.contactEmail}>
+              <input
+                className="input-field"
                 type="email"
                 error={getFieldError("organization", "contactEmail")}
                 placeholder="hello@acme.org"
                 {...register("organization.contactEmail")}
               />
-            </>
-          )}
+            </FormField>
+          </>
+        )}
 
-          {/* Step: project */}
-          {step === "project" && (
-            <>
-              <h2 className="font-display text-xl font-bold text-forest-900">
-                Project Details
-              </h2>
-              <FormField
-                label="Project Name"
-                required
-                error={errors.name?.message}
+        {/* Step: project */}
+        {step === "project" && (
+          <>
+            <h2 className="font-display text-xl font-bold text-forest-900">
+              Project Details
+            </h2>
+            <FormField name="projectName" label="Project Name *" error={fieldErrors.projectName}>
+              <input
+                className="input-field"
+                value={form.projectName}
+                onChange={set("projectName")}
                 placeholder="Acme Solar Farm Phase 1"
                 {...register("name")}
               />
-              <FormField
-                as="select"
-                label="Category"
-                required
-                error={errors.category?.message}
-                {...register("category")}
+            </FormField>
+            <FormField name="category" label="Category *" error={fieldErrors.category}>
+              <select
+                className="input-field"
+                value={form.category}
+                onChange={set("category")}
               >
                 {PROJECT_CATEGORIES.map((c) => (
                   <option key={c} value={c}>
                     {c}
                   </option>
                 ))}
-              </FormField>
-              <FormField
-                as="textarea"
-                label="Description"
-                required
-                error={errors.description?.message}
+              </select>
+            </FormField>
+            <FormField name="description" label="Description *" error={fieldErrors.description}>
+              <textarea
+                className="input-field min-h-[100px] resize-y"
+                value={form.description}
+                onChange={set("description")}
                 placeholder="Describe the project's goals, impact, and methods…"
                 {...register("description")}
               />
-              <FormField
-                label="Location"
-                required
-                error={errors.location?.message}
+            </FormField>
+            <FormField name="location" label="Location *" error={fieldErrors.location}>
+              <input
+                className="input-field"
+                value={form.location}
+                onChange={set("location")}
                 placeholder="Nairobi, Kenya"
                 {...register("location")}
               />
-              <FormField
-                label="Funding Goal (XLM)"
-                required
+            </FormField>
+            <FormField name="goalXLM" label="Funding Goal (XLM) *" error={fieldErrors.goalXLM}>
+              <input
+                className="input-field"
                 type="number"
                 min="1"
                 step="any"
@@ -335,60 +397,83 @@ export default function SubmitProjectPage() {
                 placeholder="50000"
                 {...register("goalXLM")}
               />
-            </>
-          )}
+            </FormField>
+          </>
+        )}
 
-          {/* Step: wallet */}
-          {step === "wallet" && (
-            <>
-              <h2 className="font-display text-xl font-bold text-forest-900">
-                Stellar Wallet
-              </h2>
-              <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body">
-                Donations will be sent directly to this Stellar address. Make
-                sure you control it.
-              </p>
-              <FormField
-                label="Stellar Wallet Address"
-                required
-                error={errors.walletAddress?.message}
+        {/* Step: wallet */}
+        {step === "wallet" && (
+          <>
+            <h2 className="font-display text-xl font-bold text-forest-900">
+              Stellar Wallet
+            </h2>
+            <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body">
+              Donations will be sent directly to this Stellar address. Make sure
+              you control it.
+            </p>
+            <FormField
+              name="walletAddress"
+              label="Stellar Wallet Address *"
+              error={fieldErrors.walletAddress}
+            >
+              <input
+                className="input-field font-mono text-sm"
+                value={form.walletAddress}
+                onChange={set("walletAddress")}
                 placeholder="GABC…"
                 spellCheck={false}
                 {...register("walletAddress")}
               />
-              <p className="text-xs text-[#8aaa8a] dark:text-forest-300 font-body">
-                Starts with G and is 56 characters long. Testnet and mainnet
-                addresses are both accepted.
-              </p>
-            </>
-          )}
+            </FormField>
+            <p className="text-xs text-[#8aaa8a] dark:text-forest-300 font-body">
+              Starts with G and is 56 characters long. Testnet and mainnet
+              addresses are both accepted.
+            </p>
+          </>
+        )}
 
-          {/* Step: methodology */}
-          {step === "methodology" && (
-            <>
-              <h2 className="font-display text-xl font-bold text-forest-900">
-                CO₂ Methodology
-              </h2>
-              <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body">
-                Tell us how your project measures and verifies carbon reduction.
-              </p>
-              <FormField
-                label="Methodology Name"
-                required
-                error={getFieldError("co2Methodology", "name")}
+        {/* Step: methodology */}
+        {step === "methodology" && (
+          <>
+            <h2 className="font-display text-xl font-bold text-forest-900">
+              CO₂ Methodology
+            </h2>
+            <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body">
+              Tell us how your project measures and verifies carbon reduction.
+            </p>
+            <FormField
+              name="co2MethodologyName"
+              label="Methodology Name *"
+              error={fieldErrors.co2MethodologyName}
+            >
+              <input
+                className="input-field"
+                value={form.co2MethodologyName}
+                onChange={set("co2MethodologyName")}
                 placeholder="Verra VM0007"
                 {...register("co2Methodology.name")}
               />
-              <FormField
-                label="Verification Body"
-                required
-                error={getFieldError("co2Methodology", "verificationBody")}
+            </FormField>
+            <FormField
+              name="co2VerificationBody"
+              label="Verification Body"
+              error={fieldErrors.co2VerificationBody}
+            >
+              <input
+                className="input-field"
+                value={form.co2VerificationBody}
+                onChange={set("co2VerificationBody")}
                 placeholder="Gold Standard, Verra, etc."
                 {...register("co2Methodology.verificationBody")}
               />
-              <FormField
-                label="Annual CO₂ Reduction (tonnes)"
-                required
+            </FormField>
+            <FormField
+              name="co2AnnualTonnes"
+              label="Annual CO₂ Reduction (tonnes) *"
+              error={fieldErrors.co2AnnualTonnes}
+            >
+              <input
+                className="input-field"
                 type="number"
                 min="1"
                 step="any"
@@ -396,32 +481,47 @@ export default function SubmitProjectPage() {
                 placeholder="1200"
                 {...register("co2Methodology.annualTonnesCO2")}
               />
-              <FormField
-                label="Supporting Document URL"
-                error={getFieldError("co2Methodology", "documentUrl")}
+            </FormField>
+            <FormField
+              name="co2DocumentUrl"
+              label="Supporting Document URL"
+              error={fieldErrors.co2DocumentUrl}
+            >
+              <input
+                className="input-field"
+                value={form.co2DocumentUrl}
+                onChange={set("co2DocumentUrl")}
                 placeholder="https://…"
                 {...register("co2Methodology.documentUrl")}
               />
+            </FormField>
 
-              <FormField label="Impact Metrics">
-                <div className="flex flex-col gap-2 rounded-xl border border-[rgba(34,114,57,0.12)] bg-[#f8fcf8] p-3">
-                  {IMPACT_METRICS_OPTIONS.map((metric) => (
-                    <label
-                      key={metric.value}
-                      className="flex items-center gap-2 text-sm text-[#5a7a5a] cursor-pointer font-body"
-                    >
-                      <input
-                        type="checkbox"
-                        className="h-4 w-4 rounded border-[#8aaa8a] text-emerald-600 focus:ring-emerald-500"
-                        checked={(impactMetrics ?? []).includes(metric.value)}
-                        onChange={() => toggleImpactMetric(metric.value)}
-                        aria-label={metric.label}
-                      />
-                      <span>{metric.label}</span>
-                    </label>
-                  ))}
-                </div>
-              </FormField>
+            <FormField name="impactMetrics" label="Impact Metrics">
+              <div className="flex flex-col gap-2 rounded-xl border border-[rgba(34,114,57,0.12)] bg-[#f8fcf8] p-3">
+                {IMPACT_METRICS.map((metric) => (
+                  <label
+                    key={metric.value}
+                    className="flex items-center gap-2 text-sm text-[#5a7a5a]"
+                  >
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 rounded border-[#8aaa8a] text-emerald-600 focus:ring-emerald-500"
+                      checked={form.impactMetrics.includes(metric.value)}
+                      onChange={() => toggleImpactMetric(metric.value)}
+                      aria-label={metric.label}
+                    />
+                    <span>{metric.label}</span>
+                  </label>
+                ))}
+              </div>
+            </FormField>
+
+            {serverError && (
+              <p className="text-sm text-red-500 font-body">{serverError}</p>
+            )}
+          </>
+        )}
+      </div>
 
               {serverError && (
                 <p className="text-sm text-red-500 font-body">{serverError}</p>

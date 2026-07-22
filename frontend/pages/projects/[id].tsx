@@ -1,17 +1,16 @@
-/**
- * pages/projects/[id].tsx — Single project detail + donate
+﻿/**
+ * pages/projects/[id].tsx â€” Single project detail + donate
  */
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/router";
-import Head from "next/head";
+import Image from "next/image";
 import type { GetServerSideProps } from "next";
+import PageMeta from "@/components/PageMeta";
 import Link from "next/link";
 import DonateForm from "@/components/DonateForm";
 import DonationFeed from "@/components/DonationFeed";
-import ProjectProgressBar, {
-  ProjectProgressBarSkeleton,
-} from "@/components/ProjectProgressBar";
-import { SkeletonBox, SkeletonAvatar } from "@/components/Skeleton";
+import ProjectProgressBar from "@/components/ProjectProgressBar";
+import ProjectDetailSkeleton from "@/components/ProjectDetailSkeleton";
 import ToastNotification, {
   type ToastItem,
 } from "@/components/ToastNotification";
@@ -43,6 +42,7 @@ import {
   CATEGORY_ICONS,
   copyToClipboard,
   shortenAddress,
+  formatDate,
 } from "@/utils/format";
 import {
   accountUrl,
@@ -56,11 +56,11 @@ import type {
   ProjectCampaign,
   ProjectUpdate,
 } from "@/utils/types";
+import { trackEvent } from "@/lib/analytics";
 import { useWishlist } from "@/hooks/useWishlist";
+import { QueryErrorFallback } from "@/components/QueryErrorFallback";
 
 interface ProjectDetailProps {
-  publicKey: string | null;
-  onConnect: (pk: string) => void;
   ogProject?: {
     name: string;
     description: string;
@@ -70,17 +70,17 @@ interface ProjectDetailProps {
   } | null;
 }
 
-export default function ProjectDetail({
-  publicKey,
-  onConnect,
-  ogProject,
-}: ProjectDetailProps) {
+export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
   const router = useRouter();
   const { id } = router.query;
   const { t } = useI18n();
 
+  const [publicKey, setPublicKey] = useState<string | null>(null);
   const [project, setProject] = useState<ClimateProject | null>(null);
   const [updates, setUpdates] = useState<ProjectUpdate[]>([]);
+  const [loadError, setLoadError] = useState<unknown>(null);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
   const [updateLikes, setUpdateLikes] = useState<
     Record<string, { liked: boolean; likeCount: number }>
   >({});
@@ -136,6 +136,7 @@ export default function ProjectDetail({
 
   useEffect(() => {
     if (!id) return;
+    setLoadError(null);
     Promise.all([
       fetchProject(id as string, publicKey ?? undefined),
       fetchProjectUpdates(id as string),
@@ -150,9 +151,56 @@ export default function ProjectDetail({
         setIsFollowing(p.isFollowing ?? false);
         setFollowCount(p.followCount ?? 0);
       })
-      .catch(() => router.push("/projects"))
+      .catch((err) => setLoadError(err))
       .finally(() => setLoading(false));
-  }, [id]);
+  }, [id, publicKey]);
+
+  // Filter matches to only show active, non-expired, and non-exhausted pools
+  const activeMatches = useMemo(
+    () =>
+      matches.filter(
+        (m: any) =>
+          m.status === "active" &&
+          new Date(m.expiresAt) > new Date() &&
+          parseFloat(m.remainingXLM) > 0,
+      ),
+    [matches],
+  );
+
+  const handleRetryLoad = () => {
+    if (isRetrying || !id) return;
+    setRetryCount((c) => c + 1);
+    setIsRetrying(true);
+    setLoadError(null);
+    setLoading(true);
+    Promise.all([
+      fetchProject(id as string, publicKey ?? undefined),
+      fetchProjectUpdates(id as string),
+      fetchProjectMatches(id as string),
+    ])
+      .then(([p, u, m]) => {
+        setProject(p);
+        setUpdates(u);
+        setMatches(m);
+        setIsFollowing(p.isFollowing ?? false);
+        setFollowCount(p.followCount ?? 0);
+      })
+      .catch((err) => setLoadError(err))
+      .finally(() => {
+        setLoading(false);
+        setIsRetrying(false);
+      });
+  };
+
+  useEffect(() => {
+    if (!loading && project) {
+      trackEvent("project_detail_viewed", {
+        projectId: project.id,
+        category: project.category,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- identity stable
+  }, [loading, project?.id, project?.category]);
 
   useEffect(() => {
     if (!project) return;
@@ -161,6 +209,7 @@ export default function ProjectDetail({
       .then(setDiscussion)
       .catch(() => setDiscussion([]))
       .finally(() => setDiscussionLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- identity stable
   }, [project?.walletAddress]);
 
   useEffect(() => {
@@ -207,7 +256,7 @@ export default function ProjectDetail({
       setIsFollowing(result.isFollowing);
       setFollowCount(result.followCount);
     } catch {
-      // silently fail — button will revert on next load
+      // silently fail â€” button will revert on next load
     } finally {
       setFollowLoading(false);
     }
@@ -527,7 +576,7 @@ export default function ProjectDetail({
         </head>
         <body>
           <div class="header">
-            <div class="logo">🌱</div>
+            <div class="logo">ðŸŒ±</div>
             <h1>Stellar IndigoPay</h1>
             <div class="subtitle">Project Impact Report</div>
           </div>
@@ -535,12 +584,12 @@ export default function ProjectDetail({
           <div class="project-header">
             <h2 class="project-title">${project.name}</h2>
             <div class="project-meta">
-              <span>📍 ${project.location}</span>
-              <span>📅 Report Date: ${reportDate}</span>
+              <span>ðŸ“ ${project.location}</span>
+              <span>ðŸ“… Report Date: ${reportDate}</span>
             </div>
             <div class="badges">
-              ${project.verified ? '<span class="badge badge-verified">✓ Verified Project</span>' : ""}
-              ${pct >= 100 ? '<span class="badge badge-funded">✅ Fully Funded</span>' : ""}
+              ${project.verified ? '<span class="badge badge-verified">âœ“ Verified Project</span>' : ""}
+              ${pct >= 100 ? '<span class="badge badge-funded">âœ… Fully Funded</span>' : ""}
               <span class="badge badge-category">${project.category}</span>
             </div>
           </div>
@@ -554,24 +603,24 @@ export default function ProjectDetail({
             <h3 class="section-title">Impact Metrics</h3>
             <div class="stats-grid">
               <div class="stat-card">
-                <div class="stat-icon">💰</div>
+                <div class="stat-icon">ðŸ’°</div>
                 <div class="stat-value">${formatXLM(project.raisedXLM)}</div>
                 <div class="stat-label">Total Raised</div>
               </div>
               <div class="stat-card">
-                <div class="stat-icon">🎯</div>
+                <div class="stat-icon">ðŸŽ¯</div>
                 <div class="stat-value">${formatXLM(project.goalXLM)}</div>
                 <div class="stat-label">Funding Goal</div>
               </div>
               <div class="stat-card">
-                <div class="stat-icon">👥</div>
+                <div class="stat-icon">ðŸ‘¥</div>
                 <div class="stat-value">${project.donorCount.toLocaleString()}</div>
                 <div class="stat-label">Total Donors</div>
               </div>
               <div class="stat-card">
-                <div class="stat-icon">♻️</div>
+                <div class="stat-icon">â™»ï¸</div>
                 <div class="stat-value">${formatCO2(project.co2OffsetKg)}</div>
-                <div class="stat-label">CO₂ Offset</div>
+                <div class="stat-label">COâ‚‚ Offset</div>
               </div>
             </div>
           </div>
@@ -624,11 +673,11 @@ export default function ProjectDetail({
           </div>
           
           <div class="footer">
-            <div class="footer-logo">🌍</div>
+            <div class="footer-logo">ðŸŒ</div>
             <p>
               <strong>Stellar IndigoPay</strong><br>
               Blockchain-powered climate finance<br>
-              Open Source • Built on Stellar • Powered by Soroban
+              Open Source â€¢ Built on Stellar â€¢ Powered by Soroban
             </p>
             <p style="margin-top: 15px;">
               Learn more at stellar-indigopay.org
@@ -698,41 +747,58 @@ export default function ProjectDetail({
     }
   };
 
+  const appUrl =
+    process.env.NEXT_PUBLIC_APP_URL || "https://stellar-indigopay.app";
+  const canonicalUrl = `${appUrl}${router.asPath.split("?")[0]}`;
+  const ogTitle = ogProject
+    ? `${ogProject.name} â€” Stellar IndigoPay`
+    : "Stellar IndigoPay";
+  const ogDescription = ogProject
+    ? `${ogProject.description.slice(0, 160).trimEnd()}â€¦ Support this ${ogProject.category} project on Stellar IndigoPay.`
+    : "Donate XLM directly to verified climate projects on Stellar.";
+  const ogImage = ogProject?.imageUrl
+    ? ogProject.imageUrl
+    : `${appUrl}/api/og?title=${encodeURIComponent(ogTitle)}&subtitle=${encodeURIComponent(ogDescription)}`;
+  const projectJsonLd = project
+    ? {
+        "@context": "https://schema.org",
+        "@type": "Project",
+        name: project.name,
+        description: project.description,
+        image: project.imageUrl || ogImage,
+        url: canonicalUrl,
+        location: project.location
+          ? { "@type": "Place", name: project.location }
+          : undefined,
+        keywords: project.tags?.join(", "),
+      }
+    : null;
+
+  if ((loadError && !loading && !project) || isRetrying)
+    return (
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10">
+        <QueryErrorFallback
+          error={loadError}
+          onRetry={handleRetryLoad}
+          isRetrying={isRetrying}
+          retryCount={retryCount}
+          title="Couldn't load this project"
+        />
+      </div>
+    );
+
   if (loading || !project)
     return (
-      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10 animate-pulse pointer-events-none">
-        <Head>
-          <title>
-            {ogProject?.name
-              ? `${ogProject.name} — Stellar IndigoPay`
-              : "Project — Stellar IndigoPay"}
-          </title>
-        </Head>
-        <SkeletonBox className="h-6 rounded w-1/4 mb-6" palette="forest" />
-        <div className="card space-y-4">
-          <div className="flex items-start gap-4 mb-5">
-            <SkeletonAvatar size="lg" palette="forest" />
-            <div className="flex-1 space-y-3">
-              <div className="flex gap-2">
-                <SkeletonBox className="h-6 rounded-full w-20" palette="forest" />
-                <SkeletonBox className="h-6 rounded-full w-16" palette="forest" />
-              </div>
-              <SkeletonBox className="h-8 rounded w-2/3" palette="forest" />
-              <SkeletonBox className="h-4 rounded w-1/3" palette="forest" />
-            </div>
-          </div>
-          <ProjectProgressBarSkeleton palette="forest" />
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="stat-card text-center space-y-2">
-                <SkeletonBox className="h-6 rounded w-8 mx-auto" palette="forest" />
-                <SkeletonBox className="h-5 rounded w-16 mx-auto" palette="forest" />
-                <SkeletonBox className="h-3 rounded w-12 mx-auto" palette="forest" />
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
+      <>
+        <PageMeta
+          title={ogTitle}
+          description={ogDescription}
+          canonicalUrl={canonicalUrl}
+          ogImage={ogImage}
+          jsonLd={projectJsonLd || undefined}
+        />
+        <ProjectDetailSkeleton />
+      </>
     );
 
   const pct = progressPercent(project.raisedXLM, project.goalXLM);
@@ -754,38 +820,21 @@ export default function ProjectDetail({
 
   let analogy = "";
   if (treesEquivalent === 0) analogy = "Enter an amount to see your impact!";
-  else if (treesEquivalent < 1) analogy = "A tiny sprout of change! 🌱";
-  else if (treesEquivalent < 10) analogy = "A small grove taking root! 🌳";
-  else if (treesEquivalent < 50) analogy = "A growing mini-forest! 🌲";
-  else analogy = "A massive impact for our planet! 🌍";
-
-  const appUrl =
-    process.env.NEXT_PUBLIC_APP_URL || "https://stellar-indigopay.app";
-  const ogTitle = ogProject
-    ? `${ogProject.name} — Stellar IndigoPay`
-    : "Stellar IndigoPay";
-  const ogDescription = ogProject
-    ? `${ogProject.description.slice(0, 160).trimEnd()}… Support this ${ogProject.category} project on Stellar IndigoPay.`
-    : "Donate XLM directly to verified climate projects on Stellar.";
-  const ogImage = ogProject?.imageUrl || `${appUrl}/og-default.png`;
+  else if (treesEquivalent < 1) analogy = "A tiny sprout of change! ðŸŒ±";
+  else if (treesEquivalent < 10) analogy = "A small grove taking root! ðŸŒ³";
+  else if (treesEquivalent < 50) analogy = "A growing mini-forest! ðŸŒ²";
+  else analogy = "A massive impact for our planet! ðŸŒ";
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10 pb-24 sm:pb-10 animate-fade-in">
-      <Head>
-        <title>{ogTitle}</title>
-        <meta name="indigopay:project:id" content={project.id} />
-        <meta name="description" content={ogDescription} />
-        <meta property="og:type" content="website" />
-        <meta property="og:title" content={ogTitle} />
-        <meta property="og:description" content={ogDescription} />
-        <meta property="og:image" content={ogImage} />
-        <meta property="og:image:width" content="1200" />
-        <meta property="og:image:height" content="630" />
-        <meta name="twitter:card" content="summary_large_image" />
-        <meta name="twitter:title" content={ogTitle} />
-        <meta name="twitter:description" content={ogDescription} />
-        <meta name="twitter:image" content={ogImage} />
-      </Head>
+      <PageMeta
+        title={ogTitle}
+        description={ogDescription}
+        canonicalUrl={canonicalUrl}
+        ogType="article"
+        ogImage={ogImage}
+        jsonLd={projectJsonLd || undefined}
+      />
       <ToastNotification
         toasts={toasts}
         onDismiss={(toastId) =>
@@ -814,15 +863,29 @@ export default function ProjectDetail({
         href="/projects"
         className="inline-flex items-center gap-1 text-sm text-[#5a7a5a] dark:text-[#8aaa8a] hover:text-forest-700 transition-colors mb-6 font-body"
       >
-        ← Back to Projects
+        â† Back to Projects
       </Link>
+
+      {/* Hero image â€” priority-loaded for LCP optimization */}
+      {project.imageUrl && (
+        <div className="relative w-full h-64 sm:h-80 md:h-96 rounded-2xl overflow-hidden mb-6">
+          <Image
+            src={project.imageUrl}
+            alt={project.name}
+            fill
+            priority
+            sizes="100vw"
+            className="object-cover"
+          />
+        </div>
+      )}
 
       {/* Celebration Banner */}
       {isComplete && (
         <div className="celebration-banner mb-6 bg-gradient-to-r from-emerald-500 via-green-500 to-teal-500 text-white rounded-2xl p-8 text-center shadow-2xl border-4 border-white relative overflow-hidden">
           <div className="absolute inset-0 bg-gradient-to-br from-white/10 to-transparent pointer-events-none" />
           <div className="relative z-10">
-            <div className="text-6xl mb-4 animate-bounce">🎉</div>
+            <div className="text-6xl mb-4 animate-bounce">ðŸŽ‰</div>
             <h2 className="font-display text-3xl sm:text-4xl font-bold mb-3">
               Fully Funded!
             </h2>
@@ -832,7 +895,7 @@ export default function ProjectDetail({
               possible.
             </p>
             <div className="mt-6 inline-flex items-center gap-2 bg-white/20 backdrop-blur-sm px-6 py-3 rounded-full border border-white/30">
-              <span className="text-2xl">✅</span>
+              <span className="text-2xl">âœ…</span>
               <span className="font-semibold text-lg">
                 {formatXLM(project.raisedXLM)} raised of{" "}
                 {formatXLM(project.goalXLM)} goal
@@ -882,41 +945,55 @@ export default function ProjectDetail({
         </div>
       )}
 
-      {matches.length > 0 && (
+      {activeMatches.length > 0 && (
         <div className="card mb-6 border-green-200 bg-gradient-to-r from-green-50 to-emerald-50">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <p className="text-xs uppercase tracking-widest font-bold text-green-700 font-body mb-1">
-                Donation Matching Active
-              </p>
-              <h2 className="font-display text-xl font-semibold text-green-900">
-                Your donation will be matched up to {matches[0].multiplier}x!
-              </h2>
-              <p className="text-sm text-green-800 font-body mt-2">
-                Remaining capacity: {formatXLM(matches[0].remainingXLM)}
-              </p>
-            </div>
-            <p className="text-xs px-3 py-1 rounded-full bg-green-100 border border-green-200 text-green-800 font-body">
-              {new Date(matches[0].expiresAt).toLocaleDateString()}
-            </p>
-          </div>
+          <p className="text-xs uppercase tracking-widest font-bold text-green-700 font-body mb-3">
+            Donation Matching Active
+          </p>
+          {activeMatches.map((m: any) => {
+            const cap = parseFloat(m.capXLM);
+            const matched = parseFloat(m.matchedXLM);
+            const pct = cap > 0 ? Math.min((matched / cap) * 100, 100) : 0;
+            return (
+              <div key={m.id} className="mb-3 last:mb-0">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-sm font-semibold text-green-900 font-body">
+                    Donations matched {m.multiplier}Ã— up to{" "}
+                    {formatXLM(m.capXLM)}
+                  </span>
+                  <span className="text-xs text-green-700 font-body">
+                    {formatXLM(m.remainingXLM)} remaining
+                  </span>
+                </div>
+                <div className="w-full h-2 bg-green-100 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-green-500 rounded-full transition-all"
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                <p className="text-xs text-green-600 font-body mt-1">
+                  Expires {formatDate(m.expiresAt)}
+                </p>
+              </div>
+            );
+          })}
         </div>
       )}
 
       <div className="grid lg:grid-cols-3 gap-6">
-        {/* ── Main content ────────────────────────────────────────────── */}
+        {/* â”€â”€ Main content â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
         <div className="lg:col-span-2 space-y-6">
           {/* Header card */}
           <div className="card">
             <div className="flex items-start gap-4 mb-5">
               <div className="w-14 h-14 rounded-2xl bg-forest-100 flex items-center justify-center text-3xl border border-forest-200 flex-shrink-0">
-                {CATEGORY_ICONS[project.category] || "🌿"}
+                {CATEGORY_ICONS[project.category] || "ðŸŒ¿"}
               </div>
               <div className="flex-1">
                 <div className="flex flex-wrap items-center gap-2 mb-2">
                   {isComplete ? (
                     <span className="badge text-xs px-3 py-1.5 rounded-full bg-gradient-to-r from-green-500 to-emerald-600 text-white border-2 border-white shadow-lg font-body font-bold animate-pulse">
-                      ✅ Fully Funded
+                      âœ… Fully Funded
                     </span>
                   ) : (
                     <span className={statusClass(project.status)}>
@@ -925,11 +1002,11 @@ export default function ProjectDetail({
                   )}
                   {project.onChainVerified ? (
                     <span className="badge-verified text-xs px-2.5 py-1 rounded-full bg-forest-100 text-forest-800 border border-forest-300 font-body font-bold shadow-sm">
-                      On-chain verified ✓
+                      On-chain verified âœ“
                     </span>
                   ) : project.verified ? (
                     <span className="badge-verified text-xs px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200 font-body">
-                      ✓ Verified
+                      âœ“ Verified
                     </span>
                   ) : null}
                   <span className="text-xs text-[#8aaa8a] dark:text-forest-300 bg-forest-50 px-2.5 py-1 rounded-full border border-forest-100 font-body">
@@ -940,18 +1017,20 @@ export default function ProjectDetail({
                     className="btn-secondary text-xs py-1 px-3 ml-auto"
                     title="Share this project"
                   >
-                    {shareState === "copied" ? "✓ Link copied!" : "Share 🌍"}
+                    {shareState === "copied" ? "âœ“ Link copied!" : "Share ðŸŒ"}
                   </button>
-                  {/* Analytics link — visible to wallet owner only */}
-                  {publicKey && project && publicKey === project.walletAddress && (
-                    <Link
-                      href={`/projects/${project.id}/analytics`}
-                      className="text-xs py-1 px-3 rounded-lg border font-medium bg-forest-600 text-white border-forest-600 hover:bg-forest-700 transition-colors"
-                    >
-                      Analytics 📊
-                    </Link>
-                  )}
-                  {/* Follow button — visible to connected wallets only */}
+                  {/* Analytics link â€” visible to wallet owner only */}
+                  {publicKey &&
+                    project &&
+                    publicKey === project.walletAddress && (
+                      <Link
+                        href={`/projects/${project.id}/analytics`}
+                        className="text-xs py-1 px-3 rounded-lg border font-medium bg-forest-600 text-white border-forest-600 hover:bg-forest-700 transition-colors"
+                      >
+                        Analytics ðŸ“Š
+                      </Link>
+                    )}
+                  {/* Follow button â€” visible to connected wallets only */}
                   {publicKey && (
                     <button
                       onClick={handleToggleFollow}
@@ -966,9 +1045,9 @@ export default function ProjectDetail({
                       }
                     >
                       {followLoading
-                        ? "…"
+                        ? "â€¦"
                         : isFollowing
-                          ? `✓ Following${followCount > 0 ? ` (${followCount})` : ""}`
+                          ? `âœ“ Following${followCount > 0 ? ` (${followCount})` : ""}`
                           : `Follow${followCount > 0 ? ` (${followCount})` : ""}`}
                     </button>
                   )}
@@ -1005,11 +1084,11 @@ export default function ProjectDetail({
                 </h1>
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1">
                   <p className="text-[#5a7a5a] dark:text-[#8aaa8a] text-sm font-body">
-                    📍 {project.location}
+                    ðŸ“ {project.location}
                   </p>
                   {(project.averageRating || 0) > 0 && (
                     <div className="flex items-center gap-1">
-                      <span className="text-amber-400 text-sm">★</span>
+                      <span className="text-amber-400 text-sm">â˜…</span>
                       <span className="text-forest-900 text-sm font-bold">
                         {project.averageRating?.toFixed(1)}
                       </span>
@@ -1026,7 +1105,7 @@ export default function ProjectDetail({
             <div className="mb-5">
               {isComplete ? (
                 <div className="bg-gradient-to-r from-green-500 to-emerald-600 text-white px-5 py-4 rounded-xl text-center font-semibold text-lg shadow-lg">
-                  🎉 Goal Reached!
+                  ðŸŽ‰ Goal Reached!
                 </div>
               ) : (
                 <div className="space-y-3">
@@ -1051,17 +1130,17 @@ export default function ProjectDetail({
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               {[
                 {
-                  icon: "👥",
+                  icon: "ðŸ‘¥",
                   label: "Donors",
                   value: project.donorCount.toString(),
                 },
                 {
-                  icon: "♻️",
-                  label: "CO₂ Offset",
+                  icon: "â™»ï¸",
+                  label: "COâ‚‚ Offset",
                   value: formatCO2(project.co2OffsetKg),
                 },
                 {
-                  icon: "🎯",
+                  icon: "ðŸŽ¯",
                   label: "Goal",
                   value: formatXLM(project.goalXLM),
                 },
@@ -1072,7 +1151,7 @@ export default function ProjectDetail({
                     <p className="font-semibold text-forest-900 text-sm font-body">
                       {s.value}
                     </p>
-                    {s.label === "CO₂ Offset" && (
+                    {s.label === "COâ‚‚ Offset" && (
                       <span
                         className="tooltip"
                         onClick={(e) => {
@@ -1085,10 +1164,10 @@ export default function ProjectDetail({
                           className="w-3.5 h-3.5 flex items-center justify-center rounded-full bg-forest-100 text-[8px] text-forest-600 border border-forest-200 hover:bg-forest-200 transition-colors focus:outline-none focus:ring-1 focus:ring-forest-400"
                           aria-label="CO2 offset estimate methodology info"
                         >
-                          ℹ️
+                          â„¹ï¸
                         </button>
                         <span className="tooltip-text" role="tooltip">
-                          Estimated CO₂ offset based on this project&apos;s
+                          Estimated COâ‚‚ offset based on this project&apos;s
                           declared impact rate per XLM donated. Actual results
                           may vary.
                         </span>
@@ -1112,7 +1191,7 @@ export default function ProjectDetail({
                 className="address-tag hover:border-forest-300 transition-colors"
               >
                 {project.walletAddress.slice(0, 8)}...
-                {project.walletAddress.slice(-6)} ↗
+                {project.walletAddress.slice(-6)} â†—
               </a>
               <button
                 onClick={handleCopyWallet}
@@ -1171,7 +1250,7 @@ export default function ProjectDetail({
               </button>
             </div>
 
-            {/* QR code — tap to reveal; lets Freighter mobile scan-to-donate
+            {/* QR code â€” tap to reveal; lets Freighter mobile scan-to-donate
                 without copying the wallet address manually (issue #405) */}
             <div className="mt-3">
               <WalletAddressQRCode
@@ -1181,7 +1260,7 @@ export default function ProjectDetail({
             </div>
           </div>
 
-          {/* AI-generated impact summary — sits above the full description so
+          {/* AI-generated impact summary â€” sits above the full description so
               donors can decide in <30s whether to read more. The owner sees a
               Refresh button; everyone sees the disclaimer. */}
           {(project.aiSummary ||
@@ -1190,7 +1269,7 @@ export default function ProjectDetail({
               <div className="flex items-start justify-between gap-3 mb-2">
                 <div className="flex items-center gap-2">
                   <span className="text-lg" aria-hidden="true">
-                    ✨
+                    âœ¨
                   </span>
                   <h2 className="font-display text-base font-semibold text-forest-900">
                     Impact at a glance
@@ -1225,7 +1304,7 @@ export default function ProjectDetail({
                     className="text-xs font-semibold text-forest-700 hover:text-forest-900 disabled:opacity-50 disabled:cursor-not-allowed font-body"
                   >
                     {aiSummaryState === "loading"
-                      ? "Generating…"
+                      ? "Generatingâ€¦"
                       : project.aiSummary
                         ? "Refresh summary"
                         : "Generate summary"}
@@ -1252,11 +1331,73 @@ export default function ProjectDetail({
 
               <p className="mt-3 text-[11px] text-[#7a9a7a] font-body leading-snug">
                 AI-generated from this project&rsquo;s description. May contain
-                inaccuracies — read the full description below before donating.
+                inaccuracies â€” read the full description below before donating.
                 {project.aiSummaryGeneratedAt && (
                   <> Generated {timeAgo(project.aiSummaryGeneratedAt)}.</>
                 )}
               </p>
+            </div>
+          )}
+
+          {/* COâ‚‚ Rate Verification Status */}
+          {(project as any).co2VerificationStatus &&
+            (project as any).co2VerificationStatus !== "pending" && (
+            <div
+              className={`card border-l-4 ${
+                (project as any).co2VerificationStatus === "verified"
+                  ? "border-emerald-500 bg-emerald-50/40"
+                  : (project as any).co2VerificationStatus === "flagged"
+                    ? "border-red-500 bg-red-50/40"
+                    : "border-amber-500 bg-amber-50/40"
+              }`}
+            >
+              <div className="flex items-start gap-3">
+                <span className="text-xl mt-0.5">
+                  {(project as any).co2VerificationStatus === "verified"
+                    ? "âœ…"
+                    : (project as any).co2VerificationStatus === "flagged"
+                      ? "ðŸš©"
+                      : "âš ï¸"}
+                </span>
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <h2 className="font-display text-base font-semibold text-forest-900">
+                      COâ‚‚ Rate Verification
+                    </h2>
+                    <span
+                      className={`text-[10px] uppercase tracking-wider font-bold px-2 py-0.5 rounded-full ${
+                        (project as any).co2VerificationStatus === "verified"
+                          ? "bg-emerald-200 text-emerald-800"
+                          : (project as any).co2VerificationStatus === "flagged"
+                            ? "bg-red-200 text-red-800"
+                            : "bg-amber-200 text-amber-800"
+                      }`}
+                    >
+                      {(project as any).co2VerificationStatus === "verified"
+                        ? "Verified â€” within scientific estimates"
+                        : (project as any).co2VerificationStatus === "flagged"
+                          ? "Flagged â€” rate exceeds independent estimates"
+                          : "Under review"}
+                    </span>
+                  </div>
+                  {(project as any).co2VerificationNotes && (
+                    <p className="text-sm text-forest-900/80 leading-relaxed font-body mt-1">
+                      {(project as any).co2VerificationNotes}
+                    </p>
+                  )}
+                  <p className="mt-2 text-[11px] text-[#7a9a7a] font-body leading-snug">
+                    This project&apos;s claimed COâ‚‚ offset rate has been
+                    compared against independent scientific benchmarks for its
+                    category and location.{" "}
+                    <Link
+                      href="/transparency"
+                      className="text-forest-600 hover:underline font-semibold"
+                    >
+                      Learn more about our verification methodology â†’
+                    </Link>
+                  </p>
+                </div>
+              </div>
             </div>
           )}
 
@@ -1311,7 +1452,7 @@ export default function ProjectDetail({
                             rel="noopener noreferrer"
                             className="text-[10px] text-forest-500 hover:text-emerald-600 font-bold uppercase tracking-widest transition-colors"
                           >
-                            Proof ↗
+                            Proof â†—
                           </a>
                         )}
                       </div>
@@ -1497,7 +1638,7 @@ export default function ProjectDetail({
                               : "text-[#8aaa8a] dark:text-forest-300 hover:text-red-400"
                           } disabled:opacity-50`}
                         >
-                          <span>{like?.liked ? "❤️" : "🤍"}</span>
+                          <span>{like?.liked ? "â¤ï¸" : "ðŸ¤"}</span>
                           <span>{like?.likeCount ?? 0}</span>
                         </button>
                       </div>
@@ -1523,7 +1664,7 @@ export default function ProjectDetail({
                   {
                     id: `${d.id}`,
                     title: "New donation received",
-                    description: `${shortenAddress(d.donorAddress)} just donated ${formatXLM(d.amountXLM || d.amount || "0")}`,
+        description: `${d.anonymous || !d.donorAddress ? "Anonymous" : shortenAddress(d.donorAddress)} just donated ${formatXLM(d.amountXLM || d.amount || "0")}`,
                     createdAt: Date.now(),
                   },
                 ]);
@@ -1542,13 +1683,13 @@ export default function ProjectDetail({
               </span>
             </div>
             <p className="text-xs text-[#5a7a5a] dark:text-[#8aaa8a] font-body mb-4">
-              Discuss by donating — messages are Stellar transaction memos from
+              Discuss by donating â€” messages are Stellar transaction memos from
               real donations.
             </p>
 
             {discussionLoading ? (
               <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body">
-                Loading discussion…
+                Loading discussionâ€¦
               </p>
             ) : discussion.length === 0 ? (
               <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body">
@@ -1558,7 +1699,7 @@ export default function ProjectDetail({
             ) : (
               <div className="space-y-3">
                 {discussion.slice(-50).map((m) => {
-                  const suggested = `Reply to ${m.from.slice(0, 6)}…: `;
+                  const suggested = `Reply to ${m.from.slice(0, 6)}â€¦: `;
                   const replyMemo =
                     suggested.length <= 100
                       ? suggested
@@ -1576,13 +1717,13 @@ export default function ProjectDetail({
                             rel="noopener noreferrer"
                             className="font-semibold text-forest-700 hover:underline"
                           >
-                            {m.from.slice(0, 6)}…{m.from.slice(-6)}
+                            {m.from.slice(0, 6)}â€¦{m.from.slice(-6)}
                           </a>
-                          <span className="mx-2">•</span>
+                          <span className="mx-2">â€¢</span>
                           <span className="font-semibold text-forest-900">
                             {formatXLM(m.amount, 2)}
                           </span>
-                          <span className="mx-2">•</span>
+                          <span className="mx-2">â€¢</span>
                           <span>{timeAgo(m.createdAt)}</span>
                         </div>
                         <button
@@ -1609,7 +1750,7 @@ export default function ProjectDetail({
           </div>
         </div>
 
-        {/* ── Sidebar ─────────────────────────────────────────────────── */}
+        {/* â”€â”€ Sidebar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
         <div className="space-y-4">
           {/* Sticky mobile donate button */}
           <div className="fixed bottom-0 left-0 right-0 z-40 p-3 bg-white/95 backdrop-blur-sm border-t border-forest-200 sm:hidden">
@@ -1621,7 +1762,7 @@ export default function ProjectDetail({
                 Donate to {project.name}
               </a>
             ) : (
-              <WalletConnect onConnect={onConnect} />
+              <WalletConnect onConnect={setPublicKey} />
             )}
           </div>
 
@@ -1664,13 +1805,13 @@ export default function ProjectDetail({
             {calcAmountNum > 0 && (
               <div className="p-3 bg-white rounded-lg border border-forest-100 shadow-sm animate-fade-in">
                 <div className="flex items-center gap-2 mb-1">
-                  <span className="text-lg">♻️</span>
+                  <span className="text-lg">â™»ï¸</span>
                   <span className="font-semibold text-forest-800 text-sm font-body">
                     {formatCO2(estimatedCO2)} offset
                   </span>
                 </div>
                 <div className="flex items-center gap-2 mb-2">
-                  <span className="text-lg">🌳</span>
+                  <span className="text-lg">ðŸŒ³</span>
                   <span className="font-semibold text-forest-800 text-sm font-body">
                     ~{treesEquivalent.toFixed(1)} trees/year
                   </span>
@@ -1718,14 +1859,14 @@ export default function ProjectDetail({
               <p className="text-center text-[#5a7a5a] dark:text-[#8aaa8a] text-sm mb-4 font-body">
                 Connect your wallet to donate
               </p>
-              <WalletConnect onConnect={onConnect} />
+              <WalletConnect onConnect={setPublicKey} />
             </div>
           )}
 
           {/* Share card */}
           <div className="card text-center bg-forest-50 border-forest-200">
             <p className="font-display font-semibold text-forest-900 mb-2">
-              Spread the word 🌍
+              Spread the word ðŸŒ
             </p>
             <p className="text-xs text-[#5a7a5a] dark:text-[#8aaa8a] mb-3 font-body">
               Share this project with friends and family to increase its impact.
@@ -1739,7 +1880,7 @@ export default function ProjectDetail({
                 aria-label="Copy Link"
               >
                 {shareState === "copied" ? (
-                  "✓"
+                  "âœ“"
                 ) : (
                   <svg
                     className="w-5 h-5 flex-shrink-0"
@@ -1767,14 +1908,14 @@ export default function ProjectDetail({
               href={`/donate/${project.id}`}
               className="btn-secondary text-sm py-2 px-4 w-full mt-2 inline-flex items-center justify-center gap-2"
             >
-              📱 Generate Donation QR
+              ðŸ“± Generate Donation QR
             </Link>
           </div>
 
           {/* Impact Report card */}
           <div className="card text-center bg-forest-50 border-forest-200">
             <p className="font-display font-semibold text-forest-900 mb-2">
-              Impact Report 📊
+              Impact Report ðŸ“Š
             </p>
             <p className="text-xs text-[#5a7a5a] dark:text-[#8aaa8a] mb-3 font-body">
               Download a print-friendly summary of this project&apos;s progress
@@ -1784,32 +1925,35 @@ export default function ProjectDetail({
               onClick={handlePrintReport}
               className="btn-primary text-sm py-2 px-4 w-full inline-flex items-center justify-center gap-2"
             >
-              📄 Download Report
+              ðŸ“„ Download Report
             </button>
           </div>
 
-          {/* Embed Widget — visible to wallet owner only (issue #74) */}
+          {/* Embed Widget â€” visible to wallet owner only (issue #74) */}
           {publicKey && project && publicKey === project.walletAddress && (
-            <EmbedWidgetSection projectId={project.id} projectName={project.name} />
+            <EmbedWidgetSection
+              projectId={project.id}
+              projectName={project.name}
+            />
           )}
 
           {/* Subscribe card */}
           <div className="card bg-forest-50 border-forest-200">
             <p className="font-display font-semibold text-forest-900 mb-1">
-              Get project updates 🔔
+              Get project updates ðŸ””
             </p>
             <p className="text-xs text-[#5a7a5a] dark:text-[#8aaa8a] mb-3 font-body">
               Receive an email when this project posts new updates.
             </p>
             {subscriberCount !== null && (
               <p className="text-xs text-[#8aaa8a] dark:text-forest-300 font-body mb-3">
-                📬 {subscriberCount.toLocaleString()}{" "}
+                ðŸ“¬ {subscriberCount.toLocaleString()}{" "}
                 {subscriberCount === 1 ? "subscriber" : "subscribers"}
               </p>
             )}
             {subState === "success" ? (
               <p className="text-sm text-green-700 font-body text-center py-2 font-semibold">
-                ✓ Thank you for subscribing!
+                âœ“ Thank you for subscribing!
               </p>
             ) : (
               <form onSubmit={handleSubscribe} className="space-y-2">
@@ -1829,7 +1973,7 @@ export default function ProjectDetail({
                   disabled={subState === "loading"}
                   className="btn-primary text-sm py-2 px-4 w-full disabled:opacity-60"
                 >
-                  {subState === "loading" ? "Subscribing…" : "Subscribe"}
+                  {subState === "loading" ? "Subscribingâ€¦" : "Subscribe"}
                 </button>
               </form>
             )}
@@ -1902,7 +2046,7 @@ function formatCountdown(deadline: string, nowMs: number) {
   return `${hours}h ${minutes}m ${seconds}s`;
 }
 
-// ── Embed Widget Section (Issue #74) ───────────────────────────────────────
+// â”€â”€ Embed Widget Section (Issue #74) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function EmbedWidgetSection({
   projectId,
@@ -1947,7 +2091,7 @@ window.addEventListener('message', (event) => {
   return (
     <div className="card bg-forest-50 border-forest-200">
       <p className="font-display font-semibold text-forest-900 mb-2">
-        Embed Donation Widget 📦
+        Embed Donation Widget ðŸ“¦
       </p>
       <p className="text-xs text-[#5a7a5a] dark:text-[#8aaa8a] mb-3 font-body">
         Add this donation widget to your website so supporters can donate
@@ -1960,8 +2104,9 @@ window.addEventListener('message', (event) => {
         onClick={handleCopyEmbed}
         className="btn-primary text-sm py-2 px-4 w-full inline-flex items-center justify-center gap-2"
       >
-        {embedCopied ? "✓ Copied!" : "📋 Copy Embed Code"}
+        {embedCopied ? "âœ“ Copied!" : "ðŸ“‹ Copy Embed Code"}
       </button>
     </div>
   );
 }
+

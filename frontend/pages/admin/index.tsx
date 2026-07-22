@@ -2,9 +2,11 @@
  * pages/admin/index.tsx — Admin dashboard listing all projects with status.
  */
 import { useState, useEffect } from "react";
+import { useWallet } from "@/lib/WalletProvider";
 import Link from "next/link";
 import WalletConnect from "@/components/WalletConnect";
 import WebhookManager from "@/components/admin/WebhookManager";
+import MatchManager from "@/components/admin/MatchManager";
 import {
   fetchProjects,
   updateProjectStatus,
@@ -20,12 +22,8 @@ import { formatXLM, shortenAddress } from "@/utils/format";
 import type { ClimateProject } from "@/utils/types";
 import { SkeletonBox } from "@/components/Skeleton";
 
-interface AdminIndexProps {
-  publicKey: string | null;
-  onConnect: (pk: string) => void;
-}
-
-export default function AdminIndex({ publicKey, onConnect }: AdminIndexProps) {
+export default function AdminIndex() {
+  const { publicKey, connect: onConnect } = useWallet();
   const [projects, setProjects] = useState<ClimateProject[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -168,10 +166,13 @@ export default function AdminIndex({ publicKey, onConnect }: AdminIndexProps) {
           Admin
         </p>
         <h1 className="font-display text-3xl font-bold text-forest-900 mb-1">
-          All Projects
+          Admin Dashboard
         </h1>
         <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body">
-          Manage project approvals, registrations, and match funds.
+          Manage project approvals, registrations, and match funds.{" "}
+          <Link href="/admin/analytics" className="text-indigo-600 hover:underline font-medium">
+            View Analytics →
+          </Link>
         </p>
       </div>
 
@@ -384,6 +385,7 @@ export default function AdminIndex({ publicKey, onConnect }: AdminIndexProps) {
             </div>
           </div>
 
+          <MatchManager adminKey={publicKey} />
           <WebhookManager adminKey={publicKey} />
         </div>
       )}

@@ -1,4 +1,4 @@
-// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+// Jest Snapshot v1, https://goo.gl/fbAQLP
 
 exports[`DonorProfile Component matches snapshot for badge tier: EarthGuardian 1`] = `
 <div>
@@ -35,15 +35,86 @@ exports[`DonorProfile Component matches snapshot for badge tier: EarthGuardian 1
               </span>
             </div>
           </div>
-          <button
-            aria-label="Copy profile URL to clipboard"
-            class="btn-secondary text-sm flex items-center gap-2"
+          <div
+            aria-label="Share this profile"
+            class="flex flex-wrap items-center gap-2 "
+            role="group"
           >
-            <span>
-              🔗
-            </span>
-             Share my impact
-          </button>
+            <a
+              aria-label="Share on Twitter / X"
+              class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all duration-200 bg-[#1DA1F2]/10 text-[#1DA1F2] border border-[#1DA1F2]/20 hover:bg-[#1DA1F2] hover:text-white hover:border-[#1DA1F2] hover:shadow-md hover:shadow-[#1DA1F2]/20 active:scale-95"
+              href="https://twitter.com/intent/tweet?url=http%3A%2F%2Flocalhost%2F&text=Test%20Donor%20donated%201%2C000%20XLM%20to%205%20climate%20projects%20on%20%40StellarIndigoPay!%20%F0%9F%8C%8D%20Check%20out%20the%20impact%3A"
+              rel="noopener noreferrer"
+              target="_blank"
+              title="Share Test Donor's impact on Stellar IndigoPay"
+            >
+              <svg
+                aria-hidden="true"
+                class="w-4 h-4"
+                fill="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"
+                />
+              </svg>
+              <span
+                class="hidden sm:inline"
+              >
+                Twitter
+              </span>
+            </a>
+            <a
+              aria-label="Share on LinkedIn"
+              class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all duration-200 bg-[#0A66C2]/10 text-[#0A66C2] border border-[#0A66C2]/20 hover:bg-[#0A66C2] hover:text-white hover:border-[#0A66C2] hover:shadow-md hover:shadow-[#0A66C2]/20 active:scale-95"
+              href="https://www.linkedin.com/sharing/share-offsite/?url=http%3A%2F%2Flocalhost%2F"
+              rel="noopener noreferrer"
+              target="_blank"
+              title="Share Test Donor's impact on Stellar IndigoPay"
+            >
+              <svg
+                aria-hidden="true"
+                class="w-4 h-4"
+                fill="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"
+                />
+              </svg>
+              <span
+                class="hidden sm:inline"
+              >
+                LinkedIn
+              </span>
+            </a>
+            <button
+              aria-label="Copy profile link to clipboard"
+              class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all duration-200 bg-[rgba(34,114,57,0.08)] text-[#227239] border border-[rgba(34,114,57,0.15)] hover:bg-[#227239] hover:text-white hover:border-[#227239] hover:shadow-md hover:shadow-[rgba(34,114,57,0.15)] active:scale-95"
+              title="Copy link"
+            >
+              <svg
+                aria-hidden="true"
+                class="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2.5"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"
+                />
+                <path
+                  d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"
+                />
+              </svg>
+              <span>
+                Copy link
+              </span>
+            </button>
+          </div>
         </div>
         <p
           class="mt-4 text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body leading-relaxed border-t border-[rgba(34,114,57,0.08)] pt-4"
@@ -96,61 +167,6 @@ exports[`DonorProfile Component matches snapshot for badge tier: EarthGuardian 1
             Jan 1, 2023
           </p>
         </div>
-      </div>
-      <div
-        class="card"
-      >
-        <h2
-          class="label mb-3"
-        >
-          Earned Badges
-        </h2>
-        <div
-          class="flex flex-wrap gap-2"
-        >
-          <div
-            class="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border bg-blue-50 text-blue-700 border-blue-200"
-            title="Earth Guardian — earned Jan 1, 2023"
-          >
-            <span
-              aria-label="Earth Guardian"
-              class="text-base leading-none"
-              role="img"
-            >
-              🌍
-            </span>
-            Earth Guardian
-          </div>
-        </div>
-      </div>
-      <div
-        class="card"
-      >
-        <h2
-          class="label mb-1"
-        >
-          Claim your Impact NFT
-        </h2>
-        <p
-          class="text-sm text-[#5a7a5a] font-body mb-4"
-        >
-          Mint an on-chain
-           
-          <span
-            class="font-semibold text-blue-700"
-          >
-            🌍
-             
-            Earth Guardian
-          </span>
-           
-          Impact NFT for your contributions.
-        </p>
-        <button
-          class="btn-primary text-sm"
-        >
-          🔗 Connect Freighter to claim
-        </button>
       </div>
       <div
         class="card"
@@ -241,15 +257,86 @@ exports[`DonorProfile Component matches snapshot for badge tier: Forest 1`] = `
               </span>
             </div>
           </div>
-          <button
-            aria-label="Copy profile URL to clipboard"
-            class="btn-secondary text-sm flex items-center gap-2"
+          <div
+            aria-label="Share this profile"
+            class="flex flex-wrap items-center gap-2 "
+            role="group"
           >
-            <span>
-              🔗
-            </span>
-             Share my impact
-          </button>
+            <a
+              aria-label="Share on Twitter / X"
+              class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all duration-200 bg-[#1DA1F2]/10 text-[#1DA1F2] border border-[#1DA1F2]/20 hover:bg-[#1DA1F2] hover:text-white hover:border-[#1DA1F2] hover:shadow-md hover:shadow-[#1DA1F2]/20 active:scale-95"
+              href="https://twitter.com/intent/tweet?url=http%3A%2F%2Flocalhost%2F&text=Test%20Donor%20donated%201%2C000%20XLM%20to%205%20climate%20projects%20on%20%40StellarIndigoPay!%20%F0%9F%8C%8D%20Check%20out%20the%20impact%3A"
+              rel="noopener noreferrer"
+              target="_blank"
+              title="Share Test Donor's impact on Stellar IndigoPay"
+            >
+              <svg
+                aria-hidden="true"
+                class="w-4 h-4"
+                fill="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"
+                />
+              </svg>
+              <span
+                class="hidden sm:inline"
+              >
+                Twitter
+              </span>
+            </a>
+            <a
+              aria-label="Share on LinkedIn"
+              class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all duration-200 bg-[#0A66C2]/10 text-[#0A66C2] border border-[#0A66C2]/20 hover:bg-[#0A66C2] hover:text-white hover:border-[#0A66C2] hover:shadow-md hover:shadow-[#0A66C2]/20 active:scale-95"
+              href="https://www.linkedin.com/sharing/share-offsite/?url=http%3A%2F%2Flocalhost%2F"
+              rel="noopener noreferrer"
+              target="_blank"
+              title="Share Test Donor's impact on Stellar IndigoPay"
+            >
+              <svg
+                aria-hidden="true"
+                class="w-4 h-4"
+                fill="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"
+                />
+              </svg>
+              <span
+                class="hidden sm:inline"
+              >
+                LinkedIn
+              </span>
+            </a>
+            <button
+              aria-label="Copy profile link to clipboard"
+              class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all duration-200 bg-[rgba(34,114,57,0.08)] text-[#227239] border border-[rgba(34,114,57,0.15)] hover:bg-[#227239] hover:text-white hover:border-[#227239] hover:shadow-md hover:shadow-[rgba(34,114,57,0.15)] active:scale-95"
+              title="Copy link"
+            >
+              <svg
+                aria-hidden="true"
+                class="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2.5"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"
+                />
+                <path
+                  d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"
+                />
+              </svg>
+              <span>
+                Copy link
+              </span>
+            </button>
+          </div>
         </div>
         <p
           class="mt-4 text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body leading-relaxed border-t border-[rgba(34,114,57,0.08)] pt-4"
@@ -302,61 +389,6 @@ exports[`DonorProfile Component matches snapshot for badge tier: Forest 1`] = `
             Jan 1, 2023
           </p>
         </div>
-      </div>
-      <div
-        class="card"
-      >
-        <h2
-          class="label mb-3"
-        >
-          Earned Badges
-        </h2>
-        <div
-          class="flex flex-wrap gap-2"
-        >
-          <div
-            class="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border bg-teal-50 text-teal-700 border-teal-200"
-            title="Forest — earned Jan 1, 2023"
-          >
-            <span
-              aria-label="Forest"
-              class="text-base leading-none"
-              role="img"
-            >
-              🌲
-            </span>
-            Forest
-          </div>
-        </div>
-      </div>
-      <div
-        class="card"
-      >
-        <h2
-          class="label mb-1"
-        >
-          Claim your Impact NFT
-        </h2>
-        <p
-          class="text-sm text-[#5a7a5a] font-body mb-4"
-        >
-          Mint an on-chain
-           
-          <span
-            class="font-semibold text-teal-700"
-          >
-            🌲
-             
-            Forest
-          </span>
-           
-          Impact NFT for your contributions.
-        </p>
-        <button
-          class="btn-primary text-sm"
-        >
-          🔗 Connect Freighter to claim
-        </button>
       </div>
       <div
         class="card"
@@ -418,7 +450,7 @@ exports[`DonorProfile Component matches snapshot for badge tier: None 1`] = `
     class="min-h-screen bg-leaf"
   >
     <div
-      class="max-w-2xl mx-auto px-4 py-10 space-y-6"
+      class="max-w-2xl mx-auto px-4 py-10 space-y-6 animate-pulse pointer-events-none"
     >
       <div
         class="card shadow-green"
@@ -430,133 +462,147 @@ exports[`DonorProfile Component matches snapshot for badge tier: None 1`] = `
             class="flex items-center gap-4"
           >
             <div
-              class="w-14 h-14 rounded-full bg-[#e8f3e8] border-2 border-[rgba(34,114,57,0.20)] flex items-center justify-center text-2xl select-none"
+              class="animate-pulse pointer-events-none select-none w-16 h-16 rounded-full bg-forest-100 border border-forest-200 "
+            />
+            <div
+              class="space-y-2"
             >
-              🌿
-            </div>
-            <div>
-              <h1
-                class="font-display text-xl font-semibold text-[#1a2e1a] leading-tight"
-              >
-                Test Donor
-              </h1>
-              <span
-                class="address-tag mt-1 inline-block"
-              >
-                G12345…012345
-              </span>
+              <div
+                class="animate-pulse pointer-events-none select-none bg-forest-100 h-5 rounded w-40"
+              />
+              <div
+                class="animate-pulse pointer-events-none select-none bg-forest-100 h-3 rounded w-28"
+              />
             </div>
           </div>
-          <button
-            aria-label="Copy profile URL to clipboard"
-            class="btn-secondary text-sm flex items-center gap-2"
-          >
-            <span>
-              🔗
-            </span>
-             Share my impact
-          </button>
+          <div
+            class="animate-pulse pointer-events-none select-none bg-forest-100 h-9 rounded-xl w-24"
+          />
         </div>
-        <p
-          class="mt-4 text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body leading-relaxed border-t border-[rgba(34,114,57,0.08)] pt-4"
+        <div
+          class="mt-4 pt-4 border-t border-[rgba(34,114,57,0.08)]"
         >
-          Test bio
-        </p>
+          <div
+            class="animate-pulse pointer-events-none select-none bg-forest-100 h-4 rounded w-full"
+          />
+          <div
+            class="animate-pulse pointer-events-none select-none bg-forest-100 h-4 rounded w-2/3 mt-2"
+          />
+        </div>
       </div>
       <div
         class="grid grid-cols-2 sm:grid-cols-3 gap-3"
       >
         <div
-          class="stat-card flex flex-col gap-1"
-        >
-          <p
-            class="label"
-          >
-            Total Donated
-          </p>
-          <p
-            class="font-display text-2xl font-semibold text-[#227239]"
-          >
-            1,000 XLM
-          </p>
-        </div>
+          class="card h-20"
+        />
         <div
-          class="stat-card flex flex-col gap-1"
-        >
-          <p
-            class="label"
-          >
-            Projects Supported
-          </p>
-          <p
-            class="font-display text-2xl font-semibold text-[#227239]"
-          >
-            5
-          </p>
-        </div>
+          class="card h-20"
+        />
         <div
-          class="stat-card flex flex-col gap-1"
+          class="card h-20"
+        />
+      </div>
+      <div
+        class="card"
+      >
+        <div
+          class="animate-pulse pointer-events-none select-none bg-forest-100 h-5 rounded w-32 mb-3"
+        />
+        <div
+          class="flex flex-wrap gap-2"
         >
-          <p
-            class="label"
-          >
-            Member Since
-          </p>
-          <p
-            class="font-display text-2xl font-semibold text-[#227239]"
-          >
-            Jan 1, 2023
-          </p>
+          <div
+            class="animate-pulse pointer-events-none select-none h-5 rounded-full w-16 bg-forest-50 w-24 h-7"
+          />
+          <div
+            class="animate-pulse pointer-events-none select-none h-5 rounded-full w-16 bg-forest-50 w-24 h-7"
+          />
         </div>
       </div>
       <div
         class="card"
       >
-        <h2
-          class="label mb-1"
-        >
-          Recent Donations
-        </h2>
-        <div>
-          <div
-            class="flex items-center justify-between py-3 border-b border-[rgba(34,114,57,0.07)] last:border-0 gap-3"
-          >
-            <div
-              class="flex flex-col gap-0.5 min-w-0"
-            >
-              <span
-                class="address-tag truncate max-w-[160px] sm:max-w-xs"
-              >
-                Project 
-                proj-1
-              </span>
-            </div>
-            <div
-              class="flex flex-col items-end gap-0.5 shrink-0"
-            >
-              <span
-                class="font-semibold text-[#227239] font-body text-sm"
-              >
-                100 XLM
-              </span>
-              <span
-                class="text-[10px] text-[#5a7a5a] dark:text-[#8aaa8a]"
-              >
-                Jan 1, 2023
-              </span>
-            </div>
-          </div>
-        </div>
+        <div
+          class="animate-pulse pointer-events-none select-none bg-forest-100 h-5 rounded w-40 mb-2"
+        />
+        <div
+          class="animate-pulse pointer-events-none select-none bg-forest-100 h-3 rounded w-3/4 mb-4"
+        />
+        <div
+          class="animate-pulse pointer-events-none select-none bg-forest-100 h-10 rounded-xl w-full"
+        />
       </div>
       <div
-        class="text-center pb-4"
+        class="card"
       >
-        <a
-          class="btn-ghost text-sm"
-          href="/projects"
+        <div
+          class="animate-pulse pointer-events-none select-none bg-forest-100 h-5 rounded w-36 mb-3"
+        />
+        <div
+          class="space-y-2"
         >
-          ← Browse all projects
-        </a>
+          <div
+            class="flex items-center gap-4 p-4 rounded-xl bg-[rgba(34,114,57,0.04)] border border-transparent"
+          >
+            <div
+              class="animate-pulse pointer-events-none select-none w-8 h-8 rounded-full bg-forest-100 border border-forest-200 "
+            />
+            <div
+              class="flex-1 space-y-2"
+            >
+              <div
+                class="animate-pulse pointer-events-none select-none bg-forest-100 h-3 rounded w-1/3"
+              />
+              <div
+                class="animate-pulse pointer-events-none select-none bg-forest-100 h-2 rounded w-1/4"
+              />
+            </div>
+            <div
+              class="animate-pulse pointer-events-none select-none bg-forest-100 h-4 rounded w-16"
+            />
+          </div>
+          <div
+            class="flex items-center gap-4 p-4 rounded-xl bg-[rgba(34,114,57,0.04)] border border-transparent"
+          >
+            <div
+              class="animate-pulse pointer-events-none select-none w-8 h-8 rounded-full bg-forest-100 border border-forest-200 "
+            />
+            <div
+              class="flex-1 space-y-2"
+            >
+              <div
+                class="animate-pulse pointer-events-none select-none bg-forest-100 h-3 rounded w-1/3"
+              />
+              <div
+                class="animate-pulse pointer-events-none select-none bg-forest-100 h-2 rounded w-1/4"
+              />
+            </div>
+            <div
+              class="animate-pulse pointer-events-none select-none bg-forest-100 h-4 rounded w-16"
+            />
+          </div>
+          <div
+            class="flex items-center gap-4 p-4 rounded-xl bg-[rgba(34,114,57,0.04)] border border-transparent"
+          >
+            <div
+              class="animate-pulse pointer-events-none select-none w-8 h-8 rounded-full bg-forest-100 border border-forest-200 "
+            />
+            <div
+              class="flex-1 space-y-2"
+            >
+              <div
+                class="animate-pulse pointer-events-none select-none bg-forest-100 h-3 rounded w-1/3"
+              />
+              <div
+                class="animate-pulse pointer-events-none select-none bg-forest-100 h-2 rounded w-1/4"
+              />
+            </div>
+            <div
+              class="animate-pulse pointer-events-none select-none bg-forest-100 h-4 rounded w-16"
+            />
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -598,15 +644,86 @@ exports[`DonorProfile Component matches snapshot for badge tier: Seedling 1`] = 
               </span>
             </div>
           </div>
-          <button
-            aria-label="Copy profile URL to clipboard"
-            class="btn-secondary text-sm flex items-center gap-2"
+          <div
+            aria-label="Share this profile"
+            class="flex flex-wrap items-center gap-2 "
+            role="group"
           >
-            <span>
-              🔗
-            </span>
-             Share my impact
-          </button>
+            <a
+              aria-label="Share on Twitter / X"
+              class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all duration-200 bg-[#1DA1F2]/10 text-[#1DA1F2] border border-[#1DA1F2]/20 hover:bg-[#1DA1F2] hover:text-white hover:border-[#1DA1F2] hover:shadow-md hover:shadow-[#1DA1F2]/20 active:scale-95"
+              href="https://twitter.com/intent/tweet?url=http%3A%2F%2Flocalhost%2F&text=Test%20Donor%20donated%201%2C000%20XLM%20to%205%20climate%20projects%20on%20%40StellarIndigoPay!%20%F0%9F%8C%8D%20Check%20out%20the%20impact%3A"
+              rel="noopener noreferrer"
+              target="_blank"
+              title="Share Test Donor's impact on Stellar IndigoPay"
+            >
+              <svg
+                aria-hidden="true"
+                class="w-4 h-4"
+                fill="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"
+                />
+              </svg>
+              <span
+                class="hidden sm:inline"
+              >
+                Twitter
+              </span>
+            </a>
+            <a
+              aria-label="Share on LinkedIn"
+              class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all duration-200 bg-[#0A66C2]/10 text-[#0A66C2] border border-[#0A66C2]/20 hover:bg-[#0A66C2] hover:text-white hover:border-[#0A66C2] hover:shadow-md hover:shadow-[#0A66C2]/20 active:scale-95"
+              href="https://www.linkedin.com/sharing/share-offsite/?url=http%3A%2F%2Flocalhost%2F"
+              rel="noopener noreferrer"
+              target="_blank"
+              title="Share Test Donor's impact on Stellar IndigoPay"
+            >
+              <svg
+                aria-hidden="true"
+                class="w-4 h-4"
+                fill="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"
+                />
+              </svg>
+              <span
+                class="hidden sm:inline"
+              >
+                LinkedIn
+              </span>
+            </a>
+            <button
+              aria-label="Copy profile link to clipboard"
+              class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all duration-200 bg-[rgba(34,114,57,0.08)] text-[#227239] border border-[rgba(34,114,57,0.15)] hover:bg-[#227239] hover:text-white hover:border-[#227239] hover:shadow-md hover:shadow-[rgba(34,114,57,0.15)] active:scale-95"
+              title="Copy link"
+            >
+              <svg
+                aria-hidden="true"
+                class="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2.5"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"
+                />
+                <path
+                  d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"
+                />
+              </svg>
+              <span>
+                Copy link
+              </span>
+            </button>
+          </div>
         </div>
         <p
           class="mt-4 text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body leading-relaxed border-t border-[rgba(34,114,57,0.08)] pt-4"
@@ -659,61 +776,6 @@ exports[`DonorProfile Component matches snapshot for badge tier: Seedling 1`] = 
             Jan 1, 2023
           </p>
         </div>
-      </div>
-      <div
-        class="card"
-      >
-        <h2
-          class="label mb-3"
-        >
-          Earned Badges
-        </h2>
-        <div
-          class="flex flex-wrap gap-2"
-        >
-          <div
-            class="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border bg-emerald-50 text-emerald-700 border-emerald-200"
-            title="Seedling — earned Jan 1, 2023"
-          >
-            <span
-              aria-label="Seedling"
-              class="text-base leading-none"
-              role="img"
-            >
-              🌱
-            </span>
-            Seedling
-          </div>
-        </div>
-      </div>
-      <div
-        class="card"
-      >
-        <h2
-          class="label mb-1"
-        >
-          Claim your Impact NFT
-        </h2>
-        <p
-          class="text-sm text-[#5a7a5a] font-body mb-4"
-        >
-          Mint an on-chain
-           
-          <span
-            class="font-semibold text-emerald-700"
-          >
-            🌱
-             
-            Seedling
-          </span>
-           
-          Impact NFT for your contributions.
-        </p>
-        <button
-          class="btn-primary text-sm"
-        >
-          🔗 Connect Freighter to claim
-        </button>
       </div>
       <div
         class="card"
@@ -804,15 +866,86 @@ exports[`DonorProfile Component matches snapshot for badge tier: Tree 1`] = `
               </span>
             </div>
           </div>
-          <button
-            aria-label="Copy profile URL to clipboard"
-            class="btn-secondary text-sm flex items-center gap-2"
+          <div
+            aria-label="Share this profile"
+            class="flex flex-wrap items-center gap-2 "
+            role="group"
           >
-            <span>
-              🔗
-            </span>
-             Share my impact
-          </button>
+            <a
+              aria-label="Share on Twitter / X"
+              class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all duration-200 bg-[#1DA1F2]/10 text-[#1DA1F2] border border-[#1DA1F2]/20 hover:bg-[#1DA1F2] hover:text-white hover:border-[#1DA1F2] hover:shadow-md hover:shadow-[#1DA1F2]/20 active:scale-95"
+              href="https://twitter.com/intent/tweet?url=http%3A%2F%2Flocalhost%2F&text=Test%20Donor%20donated%201%2C000%20XLM%20to%205%20climate%20projects%20on%20%40StellarIndigoPay!%20%F0%9F%8C%8D%20Check%20out%20the%20impact%3A"
+              rel="noopener noreferrer"
+              target="_blank"
+              title="Share Test Donor's impact on Stellar IndigoPay"
+            >
+              <svg
+                aria-hidden="true"
+                class="w-4 h-4"
+                fill="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"
+                />
+              </svg>
+              <span
+                class="hidden sm:inline"
+              >
+                Twitter
+              </span>
+            </a>
+            <a
+              aria-label="Share on LinkedIn"
+              class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all duration-200 bg-[#0A66C2]/10 text-[#0A66C2] border border-[#0A66C2]/20 hover:bg-[#0A66C2] hover:text-white hover:border-[#0A66C2] hover:shadow-md hover:shadow-[#0A66C2]/20 active:scale-95"
+              href="https://www.linkedin.com/sharing/share-offsite/?url=http%3A%2F%2Flocalhost%2F"
+              rel="noopener noreferrer"
+              target="_blank"
+              title="Share Test Donor's impact on Stellar IndigoPay"
+            >
+              <svg
+                aria-hidden="true"
+                class="w-4 h-4"
+                fill="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"
+                />
+              </svg>
+              <span
+                class="hidden sm:inline"
+              >
+                LinkedIn
+              </span>
+            </a>
+            <button
+              aria-label="Copy profile link to clipboard"
+              class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all duration-200 bg-[rgba(34,114,57,0.08)] text-[#227239] border border-[rgba(34,114,57,0.15)] hover:bg-[#227239] hover:text-white hover:border-[#227239] hover:shadow-md hover:shadow-[rgba(34,114,57,0.15)] active:scale-95"
+              title="Copy link"
+            >
+              <svg
+                aria-hidden="true"
+                class="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2.5"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"
+                />
+                <path
+                  d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"
+                />
+              </svg>
+              <span>
+                Copy link
+              </span>
+            </button>
+          </div>
         </div>
         <p
           class="mt-4 text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body leading-relaxed border-t border-[rgba(34,114,57,0.08)] pt-4"
@@ -865,61 +998,6 @@ exports[`DonorProfile Component matches snapshot for badge tier: Tree 1`] = `
             Jan 1, 2023
           </p>
         </div>
-      </div>
-      <div
-        class="card"
-      >
-        <h2
-          class="label mb-3"
-        >
-          Earned Badges
-        </h2>
-        <div
-          class="flex flex-wrap gap-2"
-        >
-          <div
-            class="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border bg-green-50 text-green-700 border-green-200"
-            title="Tree — earned Jan 1, 2023"
-          >
-            <span
-              aria-label="Tree"
-              class="text-base leading-none"
-              role="img"
-            >
-              🌳
-            </span>
-            Tree
-          </div>
-        </div>
-      </div>
-      <div
-        class="card"
-      >
-        <h2
-          class="label mb-1"
-        >
-          Claim your Impact NFT
-        </h2>
-        <p
-          class="text-sm text-[#5a7a5a] font-body mb-4"
-        >
-          Mint an on-chain
-           
-          <span
-            class="font-semibold text-green-700"
-          >
-            🌳
-             
-            Tree
-          </span>
-           
-          Impact NFT for your contributions.
-        </p>
-        <button
-          class="btn-primary text-sm"
-        >
-          🔗 Connect Freighter to claim
-        </button>
       </div>
       <div
         class="card"

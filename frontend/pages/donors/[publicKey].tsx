@@ -8,7 +8,7 @@ import Head from "next/head";
 import Link from "next/link";
 import { useRouter } from "next/router";
 import { useEffect, useState, useCallback } from "react";
-import { fetchProfile, fetchDonorHistory } from "@/lib/api";
+import { fetchProfile } from "@/lib/api";
 import {
   CONTRACT_ID,
   buildMintImpactNftTransaction,
@@ -20,9 +20,12 @@ import {
   connectWallet,
   signTransactionWithWallet,
 } from "@/lib/wallet";
+import { useDonorHistory, useDonorProfile } from "@/hooks/queries";
 import type { DonorProfile, Donation, BadgeTier } from "@/utils/types";
 import { formatXLM } from "@/utils/format";
-import { SkeletonBox, SkeletonAvatar } from "@/components/Skeleton";
+import DonorProfileSkeleton from "@/components/DonorProfileSkeleton";
+import ShareButton, { donorShareText } from "@/components/ShareButton";
+import { QueryErrorFallback } from "@/components/QueryErrorFallback";
 
 // ── Badge helpers ─────────────────────────────────────────────────────────────
 
@@ -121,6 +124,21 @@ function StatCard({
 function DonationRow({ donation }: { donation: Donation }) {
   const amount = donation.amount ?? donation.amountXLM ?? "0";
   const currency = donation.currency ?? "XLM";
+  const [downloading, setDownloading] = useState(false);
+
+  const downloadReceipt = async () => {
+    setDownloading(true);
+    try {
+      const response = await fetch(`/api/donations/${donation.id}/receipt`);
+      if (!response.ok) throw new Error("Receipt unavailable");
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `indigopay-receipt-${donation.id}.pdf`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } finally { setDownloading(false); }
+  };
 
   return (
     <div className="flex items-center justify-between py-3 border-b border-[rgba(34,114,57,0.07)] last:border-0 gap-3">
@@ -143,6 +161,10 @@ function DonationRow({ donation }: { donation: Donation }) {
         <span className="text-[10px] text-[#5a7a5a] dark:text-[#8aaa8a]">
           {formatDate(donation.createdAt)}
         </span>
+        <button type="button" onClick={downloadReceipt} disabled={downloading}
+          className="text-[10px] text-[#227239] underline disabled:opacity-50">
+          {downloading ? "Preparing receipt…" : donation.receiptGeneratedAt ? "Download receipt" : "Download tax receipt"}
+        </button>
       </div>
     </div>
   );
@@ -171,74 +193,6 @@ function ProfileNotFound({ publicKey }: { publicKey: string }) {
   );
 }
 
-// ── Skeleton loader ───────────────────────────────────────────────────────────
-
-function ProfileSkeleton() {
-  return (
-    <div className="animate-pulse pointer-events-none space-y-6 max-w-2xl mx-auto px-4 py-10">
-      <div className="flex items-center gap-4">
-        <SkeletonAvatar size="lg" palette="forest" />
-        <div className="space-y-2 flex-1">
-          <SkeletonBox className="h-5 rounded w-1/3" palette="forest" />
-          <SkeletonBox className="h-3 rounded w-1/2" palette="forest" />
-        </div>
-      </div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-        {[0, 1, 2].map((i) => (
-          <div key={i} className="stat-card h-20" />
-        ))}
-      </div>
-      <div className="card space-y-3">
-        {[0, 1, 2, 3].map((i) => (
-          <SkeletonBox key={i} className="h-4 rounded w-full" palette="forest" />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ── Share button ──────────────────────────────────────────────────────────────
-
-function ShareButton({ url }: { url: string }) {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(url);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2200);
-    } catch {
-      // fallback for older browsers
-      const el = document.createElement("textarea");
-      el.value = url;
-      document.body.appendChild(el);
-      el.select();
-      document.execCommand("copy");
-      document.body.removeChild(el);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2200);
-    }
-  }, [url]);
-
-  return (
-    <button
-      onClick={handleCopy}
-      className="btn-secondary text-sm flex items-center gap-2"
-      aria-label="Copy profile URL to clipboard"
-    >
-      {copied ? (
-        <>
-          <span>✅</span> Copied!
-        </>
-      ) : (
-        <>
-          <span>🔗</span> Share my impact
-        </>
-      )}
-    </button>
-  );
-}
-
 // ── Claim NFT card ────────────────────────────────────────────────────────────
 
 /** Order of badge tiers, lowest → highest, used to pick the donor's top tier. */
@@ -246,8 +200,6 @@ const TIER_ORDER: BadgeTier[] = ["seedling", "tree", "forest", "earth"];
 
 /**
  * Returns the highest badge tier the donor has earned, or null if none.
- * The issue asks us to "check current badge tier"; the current tier is the
- * highest one reflected by the profile (which mirrors the on-chain badge).
  */
 function highestTier(badges: { tier: BadgeTier }[]): BadgeTier | null {
   let best: BadgeTier | null = null;
@@ -283,11 +235,8 @@ function ClaimNftCard({ profile }: { profile: DonorProfile }) {
   const [error, setError] = useState<string | null>(null);
   const [minted, setMinted] = useState<MintedNft | null>(null);
 
-  // The tier the donor is eligible to claim (their current/highest badge).
   const tier = highestTier(profile.badges);
 
-  // On mount, see if a wallet is already authorised so we can match it to the
-  // profile owner (the contract's `mint_impact_nft` requires the donor to sign).
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -334,7 +283,6 @@ function ClaimNftCard({ profile }: { profile: DonorProfile }) {
     }
 
     try {
-      // 1. Re-check the current badge tier from the API right before minting.
       setStep("checking");
       const fresh = await fetchProfile(profile.publicKey);
       const currentTier = highestTier(fresh.badges);
@@ -344,7 +292,6 @@ function ClaimNftCard({ profile }: { profile: DonorProfile }) {
         );
       }
 
-      // 2. Build the Soroban mint_impact_nft(donor, tier) transaction.
       setStep("building");
       const tx = await buildMintImpactNftTransaction({
         contractId: CONTRACT_ID,
@@ -352,7 +299,6 @@ function ClaimNftCard({ profile }: { profile: DonorProfile }) {
         tier: currentTier,
       });
 
-      // 3. Prompt Freighter to sign.
       setStep("signing");
       const { signedXDR, error: signErr } = await signTransactionWithWallet(
         tx.toXDR(),
@@ -363,7 +309,6 @@ function ClaimNftCard({ profile }: { profile: DonorProfile }) {
         );
       }
 
-      // 4. Submit via Soroban RPC and wait for the mint ledger.
       setStep("submitting");
       const { hash, ledger } = await submitSorobanTransaction(signedXDR);
 
@@ -379,9 +324,6 @@ function ClaimNftCard({ profile }: { profile: DonorProfile }) {
     }
   }, [connectedKey, profile.publicKey]);
 
-  // ── Render ────────────────────────────────────────────────────────────────
-
-  // Successfully minted: show the NFT with its tier name and mint ledger.
   if (minted) {
     const meta = BADGE_META[minted.tier];
     return (
@@ -417,7 +359,6 @@ function ClaimNftCard({ profile }: { profile: DonorProfile }) {
     );
   }
 
-  // No badge tier yet — nothing to claim.
   if (!tier) return null;
 
   const meta = BADGE_META[tier];
@@ -476,66 +417,90 @@ export default function DonorProfilePage() {
   const router = useRouter();
   const { publicKey } = router.query as { publicKey?: string };
 
-  const [profile, setProfile] = useState<DonorProfile | null>(null);
-  const [donations, setDonations] = useState<Donation[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [notFound, setNotFound] = useState(false);
+  // React Query hooks for server-state data
+  const {
+    data: profile,
+    isLoading: profileLoading,
+    error: profileError,
+    refetch: refetchProfile,
+    isRefetching: profileRefetching,
+  } = useDonorProfile(publicKey ?? null);
 
-  useEffect(() => {
-    if (!publicKey) return;
+  const {
+    data: donations,
+    isLoading: donationsLoading,
+    error: donationsError,
+    refetch: refetchDonations,
+    isRefetching: donationsRefetching,
+  } = useDonorHistory(publicKey ?? null);
 
-    let cancelled = false;
-    setLoading(true);
-    setNotFound(false);
+  const loading = (profileLoading || donationsLoading);
+  const loadError = profileError || donationsError;
+  const isRetrying = profileRefetching || donationsRefetching;
 
-    (async () => {
-      try {
-        const [prof, hist] = await Promise.all([
-          fetchProfile(publicKey),
-          fetchDonorHistory(publicKey),
-        ]);
-        if (!cancelled) {
-          setProfile(prof);
-          setDonations(hist.slice(0, 10));
-        }
-      } catch (err: unknown) {
-        if (!cancelled) {
-          // Treat 404 or any error fetching the profile as "not found"
-          const status = (err as { response?: { status?: number } })?.response
-            ?.status;
-          if (!status || status === 404) {
-            setNotFound(true);
-          } else {
-            setNotFound(true); // graceful fallback for other errors
-          }
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
+  // Detect 404 for profile-not-set-up state.
+  // A 404 from the profile endpoint means the donor hasn't created a profile.
+  const is404 =
+    (profileError as { response?: { status?: number } } | null)?.response
+      ?.status === 404;
+  const isRealError = loadError && !is404;
+  const notFound =
+    !loading &&
+    !isRealError &&
+    !profile &&
+    !!publicKey;
 
-    return () => {
-      cancelled = true;
-    };
-  }, [publicKey]);
+  const handleRetryLoad = useCallback(() => {
+    refetchProfile();
+    refetchDonations();
+  }, [refetchProfile, refetchDonations]);
 
   // ── Derived values ───────────────────────────────────────────────────────
+
+  const appUrl =
+    process.env.NEXT_PUBLIC_APP_URL || "https://stellar-indigopay.app";
 
   const displayName =
     profile?.displayName || (publicKey ? shortenKey(publicKey) : "Donor");
 
   const profileUrl = typeof window !== "undefined" ? window.location.href : "";
 
+  const ogImageUrl = publicKey
+    ? `${appUrl}/api/og/donor/${publicKey}`
+    : `${appUrl}/og-default.png`;
+
   const ogTitle = `${displayName} — Stellar IndigoPay Donor`;
   const ogDescription = profile
     ? `${displayName} has donated ${formatXLM(profile.totalDonatedXLM)} to ${profile.projectsSupported} climate project${profile.projectsSupported !== 1 ? "s" : ""} on Stellar IndigoPay.`
     : "View this donor's climate impact on Stellar IndigoPay.";
 
+  const shareText = profile
+    ? donorShareText(
+        displayName,
+        profile.totalDonatedXLM,
+        profile.projectsSupported,
+      )
+    : ogDescription;
+
   // ── Render ───────────────────────────────────────────────────────────────
 
-  if (!publicKey || loading) return <ProfileSkeleton />;
-  if (notFound) return <ProfileNotFound publicKey={publicKey} />;
+  if (!publicKey || loading) return <DonorProfileSkeleton />;
+  if (isRealError || isRetrying)
+    return (
+      <div className="max-w-2xl mx-auto px-4 py-10">
+        <QueryErrorFallback
+          error={loadError}
+          onRetry={handleRetryLoad}
+          isRetrying={isRetrying}
+          retryCount={0}
+          title="Couldn't load this donor"
+        />
+      </div>
+    );
+  if (notFound || (is404 && !!publicKey)) return <ProfileNotFound publicKey={publicKey} />;
   if (!profile) return null;
+
+  const donationsList = (donations ?? []).slice(0, 10);
 
   return (
     <>
@@ -547,10 +512,14 @@ export default function DonorProfilePage() {
         <meta property="og:description" content={ogDescription} />
         <meta property="og:type" content="profile" />
         {profileUrl && <meta property="og:url" content={profileUrl} />}
-        {/* Twitter card */}
-        <meta name="twitter:card" content="summary" />
+        <meta property="og:image" content={ogImageUrl} />
+        <meta property="og:image:width" content="1200" />
+        <meta property="og:image:height" content="630" />
+        {/* Twitter card — large image preview */}
+        <meta name="twitter:card" content="summary_large_image" />
         <meta name="twitter:title" content={ogTitle} />
         <meta name="twitter:description" content={ogDescription} />
+        <meta name="twitter:image" content={ogImageUrl} />
       </Head>
 
       <div className="min-h-screen bg-leaf">
@@ -572,7 +541,11 @@ export default function DonorProfilePage() {
                   </span>
                 </div>
               </div>
-              <ShareButton url={profileUrl} />
+              <ShareButton
+                url={profileUrl}
+                text={shareText}
+                title={`Share ${displayName}'s impact on Stellar IndigoPay`}
+              />
             </div>
 
             {profile.bio && (
@@ -616,13 +589,13 @@ export default function DonorProfilePage() {
           {/* ── Donation history ────────────────────────────────────────── */}
           <div className="card">
             <h2 className="label mb-1">Recent Donations</h2>
-            {donations.length === 0 ? (
+            {donationsList.length === 0 ? (
               <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] py-4 text-center font-body">
                 No donations recorded yet.
               </p>
             ) : (
               <div>
-                {donations.map((d) => (
+                {donationsList.map((d) => (
                   <DonationRow key={d.id} donation={d} />
                 ))}
               </div>

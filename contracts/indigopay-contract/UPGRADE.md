@@ -45,6 +45,12 @@ The current persisted keys are:
 - `DataKey::PendingUpgrade` _(Phase A 48h timelock)_
 - `DataKey::UpgradeEffectiveAt` _(Phase A 48h timelock)_
 - `DataKey::LastExecutedUpgrade` _(Phase A 48h timelock)_
+- `DataKey::RefundRequest(u32)` _(#290 donation refund)_
+- `DataKey::RefundCount` _(#290 donation refund)_
+- `DataKey::RefundForDonation(u32)` _(#290 donation refund)_
+- `DataKey::DonationCO2Offset(u32)` _(#290 donation refund — CO₂ snapshot per donation)_
+- `DataKey::SubProjectIds(String)` _(#391 cross-contract project registry — sub-project index per parent)_
+- **Storage version tracking** _(#379 — Symbol-keyed, not a DataKey variant)_
 
 Do not rename or remove these variants, change their argument order, or reorder/remove fields from stored structs such as `Project`, `DonorStats`, `ImpactNFT`, `ProjectMilestoneNFT`, `VoteProposal`, or `GlobalStats` without adding an explicit migration path. New fields should be handled through a new storage version or a new key namespace so existing v1 values remain decodable.
 
@@ -70,12 +76,61 @@ This confirms the storage keys and value layouts used by existing donation state
 - `test_cancel_upgrade_clears_pending` and `test_cancel_upgrade_during_timelock_succeeds` — verify the cancel path.
 - `test_get_pending_upgrade` — verifies the read-only getter returns the correct `(hash, effective_at)` tuple.
 
+## Storage Versioning and Migration (#379)
+
+The contract uses a `DataKey::StorageVersion` key to track the current schema
+version. This enables automated storage migrations after contract upgrades:
+
+### Version constants
+
+- `CURRENT_STORAGE_VERSION` — defined at the top of `lib.rs`. Bump this and add
+  a migration step in `migrate()` whenever a struct layout, DataKey variant,
+  or stored value encoding changes in a backward-incompatible way.
+- `DataKey::StorageVersion` — persists the version number after each migration
+  step completes, ensuring no step is applied twice.
+
+### How migrations work
+
+1. `initialize()` sets `StorageVersion = CURRENT_STORAGE_VERSION` for new
+   contracts, so they skip all historical migrations.
+2. For upgraded contracts, `execute_upgrade()` calls `migrate()` immediately
+   after swapping the WASM.
+3. `migrate()` reads the current `StorageVersion`, applies each pending
+   migration step sequentially (e.g., `migrate_v1_to_v2`), and updates
+   `StorageVersion` after each step.
+4. The final assertion in `migrate()` panics if `StorageVersion` does not
+   equal `CURRENT_STORAGE_VERSION`, catching incomplete migration sequences
+   at upgrade time.
+
+### Adding a new migration
+
+1. Bump `CURRENT_STORAGE_VERSION`.
+2. Add the migration function (e.g., `migrate_v2_to_v3`).
+3. Add a `if current < NEW_VERSION { migrate_v2_to_v3(env); set_storage_version(NEW_VERSION); }`
+   block in `migrate()`.
+4. Handle backward-incompatible changes — rename old keys, transform stored
+   values, or backfill missing entries — inside the migration function.
+
+### Example migration (v1 → v2)
+
+The v1→v2 migration is empty because v1 storage is v2-compatible. It exists
+solely to establish the migration framework pattern. When the first real
+schema change is introduced, replace it with actual data transformations.
+
 ## Validation
 
 Run the focused regression test:
 
 ```bash
 cargo test -p indigopay-contract --lib test_upgrade_preserves_donation_state_and_storage_keys
+```
+
+Run the storage versioning tests:
+
+```bash
+cargo test -p indigopay-contract --lib test_storage_version_initialized
+cargo test -p indigopay-contract --lib test_migration_runs_on_upgrade
+cargo test -p indigopay-contract --lib test_migration_idempotent
 ```
 
 Run the timelock regression test:

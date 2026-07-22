@@ -2,9 +2,10 @@
  * pages/projects/index.tsx — Browse all climate projects
  */
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import dynamic from "next/dynamic";
+import type { GetServerSideProps } from "next";
 import { useRouter } from "next/router";
 import ProjectCard, { ProjectCardSkeleton } from "@/components/ProjectCard";
-import ProjectComparison from "@/components/ProjectComparison";
 import {
   fetchProjects,
   fetchProjectFacets,
@@ -14,7 +15,13 @@ import {
 import { PROJECT_CATEGORIES, CATEGORY_ICONS } from "@/utils/format";
 import type { ClimateProject } from "@/utils/types";
 import { useAutocomplete } from "@/hooks/useAutocomplete";
+import { trackEvent } from "@/lib/analytics";
 import clsx from "clsx";
+
+const ProjectComparison = dynamic(
+  () => import("@/components/ProjectComparison"),
+  { ssr: false },
+);
 
 export default function ProjectsPage() {
   const router = useRouter();
@@ -59,7 +66,7 @@ export default function ProjectsPage() {
     if (searchQuery && !search) {
       setSearch(searchQuery);
     }
-  }, [searchQuery]);
+  }, [searchQuery, search, setSearch]);
 
   // Click outside listener for autocomplete
   useEffect(() => {
@@ -70,7 +77,7 @@ export default function ProjectsPage() {
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
+  }, [setIsAutocompleteOpen]);
 
   // Debounced search effect
   useEffect(() => {
@@ -96,6 +103,16 @@ export default function ProjectsPage() {
 
     return () => clearTimeout(timer);
   }, [category, status, verified, search, location, co2Min, co2Max]);
+
+  useEffect(() => {
+    if (!loading) {
+      trackEvent("project_browsed", {
+        category: category || undefined,
+        verified: verified || undefined,
+        resultCount: projects.length,
+      });
+    }
+  }, [loading, category, verified, projects.length]);
 
   useEffect(() => {
     if (!compareQuery || projects.length === 0) return;
@@ -155,7 +172,7 @@ export default function ProjectsPage() {
       }, 500);
       return () => clearTimeout(timer);
     },
-    [router, router.query, setSearch],
+    [router, setSearch],
   );
 
   const handleSelectTag = (tag: string) => {
@@ -631,3 +648,9 @@ export default function ProjectsPage() {
     </div>
   );
 }
+
+// Forces per-request SSR so the CSP nonce set in middleware.ts reaches
+// _document.tsx — see the matching comment in pages/index.tsx.
+export const getServerSideProps: GetServerSideProps = async () => {
+  return { props: {} };
+};

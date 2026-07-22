@@ -11,12 +11,13 @@
     "db:rollback:n": "node src/db/migrate.js --rollback",
     "lint": "eslint src/**/*.js",
     "docs": "typedoc --options typedoc.json",
-    "test": "jest --runInBand",
+    "test": "jest --maxWorkers=2",
     "load-test": "k6 run ../scripts/load-test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",
     "@humanwhocodes/object-schema": "^2.0.3",
+    "@parse/node-apn": "^8.1.0",
     "@sentry/node": "^7.51.0",
     "@sentry/tracing": "^7.51.0",
     "@stellar/stellar-sdk": "^12.0.0",
@@ -27,6 +28,7 @@
     "expo-server-sdk": "^5.0.0",
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",
+    "google-auth-library": "^10.9.0",
     "helmet": "^8.2.0",
     "iconv-lite": "^0.7.2",
     "ioredis": "^5.4.2",
@@ -61,7 +63,7 @@
     "socket.io-client": "^4.8.3",
     "supertest": "^7.0.0",
     "testcontainers": "^10.28.0",
-    "typedoc": "^0.28.0"
+    "semver": "^7.5.4"
   },
   "engines": {
     "node": ">=18.0.0"

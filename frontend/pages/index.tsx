@@ -2,10 +2,12 @@
  * pages/index.tsx — IndigoPay landing page
  */
 import Link from "next/link";
-import Head from "next/head";
+import type { GetServerSideProps } from "next";
 import { useState, useRef, useEffect } from "react";
+import PageMeta from "@/components/PageMeta";
 import WalletConnect from "@/components/WalletConnect";
 import { useCountUp } from "@/hooks/useCountUp";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 import {
   fetchGlobalStats,
   fetchFeaturedProject,
@@ -17,18 +19,9 @@ import { formatCO2, formatXLM, progressPercent } from "@/utils/format";
 import type { GlobalStats, CategoryStats } from "@/lib/api";
 import type { ClimateProject } from "@/utils/types";
 
-interface HomeProps {
-  publicKey: string | null;
-  onConnect: (pk: string) => void;
-}
+import LiveDonationTicker from "@/components/LiveDonationTicker";
+import type { Donation as LiveDonationTickerItem } from "@/components/LiveDonationTicker";
 
-interface LiveDonationTickerItem {
-  id: string;
-  projectId: string;
-  projectName: string;
-  amountXLM: string;
-  createdAt: string;
-}
 
 const FEATURES = [
   {
@@ -109,7 +102,8 @@ function getCategoryIcon(category: string): string {
   return match ? match.icon : "📁";
 }
 
-export default function Home({ publicKey, onConnect }: HomeProps) {
+export default function Home() {
+  const [publicKey, setPublicKey] = useState<string | null>(null);
   const [showConnect, setShowConnect] = useState(false);
   const [globalStats, setGlobalStats] = useState<GlobalStats | null>(null);
   const [featuredProject, setFeaturedProject] = useState<ClimateProject | null>(
@@ -119,7 +113,6 @@ export default function Home({ publicKey, onConnect }: HomeProps) {
   const [liveDonations, setLiveDonations] = useState<LiveDonationTickerItem[]>(
     [],
   );
-  const [tickerIndex, setTickerIndex] = useState(0);
 
   useEffect(() => {
     let closeStream: (() => void) | null = null;
@@ -168,29 +161,26 @@ export default function Home({ publicKey, onConnect }: HomeProps) {
     };
   }, []);
 
-  useEffect(() => {
-    if (liveDonations.length <= 1) return;
-    const timer = window.setInterval(() => {
-      setTickerIndex((current) => (current + 1) % liveDonations.length);
-    }, 3500);
-    return () => window.clearInterval(timer);
-  }, [liveDonations.length]);
 
-  useEffect(() => {
-    if (tickerIndex >= liveDonations.length) {
-      setTickerIndex(0);
-    }
-  }, [liveDonations.length, tickerIndex]);
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || "https://stellar-indigopay.app";
+  const canonicalUrl = `${appUrl}/`;
+  const homeJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    name: "Stellar IndigoPay",
+    url: canonicalUrl,
+    description:
+      "Stellar IndigoPay connects donors with verified climate projects worldwide. Donations go directly on-chain — no banks, no delays, no fees swallowed by middlemen.",
+  };
 
   return (
     <div className="relative overflow-hidden">
-      <Head>
-        <title>Stellar IndigoPay — Fund the planet. One XLM at a time.</title>
-        <meta
-          name="description"
-          content="Stellar IndigoPay connects donors with verified climate projects worldwide. Donations go directly on-chain — no banks, no delays, no fees swallowed by middlemen."
-        />
-      </Head>
+      <PageMeta
+        title="Stellar IndigoPay — Fund the planet. One XLM at a time."
+        description="Stellar IndigoPay connects donors with verified climate projects worldwide. Donations go directly on-chain — no banks, no delays, no fees swallowed by middlemen."
+        canonicalUrl={canonicalUrl}
+        jsonLd={homeJsonLd}
+      />
       {/* Background gradient */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
         <div className="absolute top-0 inset-x-0 h-[600px] bg-gradient-to-b from-[rgba(79,70,229,0.03)] via-[rgba(124,58,237,0.02)] to-transparent dark:from-[rgba(129,140,248,0.05)] dark:via-[rgba(139,92,246,0.03)]" />
@@ -222,8 +212,10 @@ export default function Home({ publicKey, onConnect }: HomeProps) {
             {publicKey ? (
               <>
                 <Link
+                  key="browse-projects-connected"
                   href="/projects"
                   className="btn-primary text-base px-8 py-3.5 gap-2"
+                  data-testid="browse-projects-link"
                 >
                   <svg
                     className="w-5 h-5"
@@ -241,8 +233,10 @@ export default function Home({ publicKey, onConnect }: HomeProps) {
                   Browse Projects
                 </Link>
                 <Link
+                  key="my-impact"
                   href="/dashboard"
                   className="btn-secondary text-base px-8 py-3.5"
+                  data-testid="my-impact-link"
                 >
                   My Impact
                 </Link>
@@ -250,8 +244,10 @@ export default function Home({ publicKey, onConnect }: HomeProps) {
             ) : (
               <>
                 <button
+                  key="start-donating"
                   onClick={() => setShowConnect(true)}
                   className="btn-primary text-base px-8 py-3.5 gap-2"
+                  data-testid="start-donating-button"
                 >
                   <svg
                     className="w-5 h-5"
@@ -269,8 +265,10 @@ export default function Home({ publicKey, onConnect }: HomeProps) {
                   Start Donating
                 </button>
                 <Link
+                  key="browse-projects-disconnected"
                   href="/projects"
                   className="btn-secondary text-base px-8 py-3.5"
+                  data-testid="browse-projects-link"
                 >
                   Browse Projects
                 </Link>
@@ -418,58 +416,18 @@ export default function Home({ publicKey, onConnect }: HomeProps) {
         </div>
       </div>
 
-      {/* Wallet connect modal */}
+      {/* Wallet connect modal (accessible: focus trap + Esc to close + aria-modal). */}
       {showConnect && !publicKey && (
-        <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-sm">
-            <WalletConnect
-              onConnect={(pk) => {
-                onConnect(pk);
-                setShowConnect(false);
-              }}
-            />
-            <button
-              onClick={() => setShowConnect(false)}
-              className="mt-4 w-full text-center text-sm text-[#8aaa8a] dark:text-forest-300 hover:text-[#5a7a5a] dark:hover:text-[#8aaa8a] transition-colors font-body"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
+        <ConnectWalletDialog
+          onConnect={(pk) => {
+            setPublicKey(pk);
+            setShowConnect(false);
+          }}
+          onClose={() => setShowConnect(false)}
+        />
       )}
 
-      <LiveDonationTicker donations={liveDonations} activeIndex={tickerIndex} />
-    </div>
-  );
-}
-
-function LiveDonationTicker({
-  donations,
-  activeIndex,
-}: {
-  donations: LiveDonationTickerItem[];
-  activeIndex: number;
-}) {
-  if (donations.length === 0) return null;
-  const item = donations[activeIndex];
-
-  return (
-    <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-[rgba(99,102,241,0.20)] dark:border-[rgba(129,140,248,0.20)] bg-[#0F172A]/95 dark:bg-[#0A0A1A]/95 backdrop-blur px-4 py-2.5">
-      <div className="max-w-6xl mx-auto flex items-center gap-3 text-sm text-white font-body">
-        <span className="inline-flex items-center gap-2 text-[11px] uppercase tracking-widest text-[#818CF8] font-bold">
-          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shadow-sm shadow-emerald-500/50" />
-          Live donations
-        </span>
-        <p key={item.id} className="animate-fade-in-up">
-          just donated <strong>{formatXLM(item.amountXLM)}</strong> to{" "}
-          <Link
-            href={`/projects/${item.projectId}`}
-            className="text-[#A5B4FC] hover:text-[#818CF8] transition-colors"
-          >
-            {item.projectName}
-          </Link>
-        </p>
-      </div>
+      <LiveDonationTicker donations={liveDonations} />
     </div>
   );
 }
@@ -636,3 +594,66 @@ function StatItem({ stat }: { stat: any }) {
     </div>
   );
 }
+
+/**
+ * ConnectWalletDialog — inline accessible modal used on the landing page.
+ * Mirrors the WAI-ARIA dialog pattern so the wallet connect flow satisfies
+ * WCAG 2.4.3 (Focus Order) and 2.1.2 (No Keyboard Trap).
+ */
+function ConnectWalletDialog({
+  onConnect,
+  onClose,
+}: {
+  onConnect: (pk: string) => void;
+  onClose: () => void;
+}) {
+  const containerRef = useFocusTrap<HTMLDivElement>({
+    active: true,
+    onEscape: onClose,
+  });
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    cancelButtonRef.current?.focus();
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, []);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div ref={containerRef} className="w-full max-w-sm">
+        <div role="dialog" aria-modal="true" aria-labelledby="connect-wallet-title">
+          <h2 id="connect-wallet-title" className="sr-only">
+            Connect your Stellar wallet
+          </h2>
+          <WalletConnect onConnect={onConnect} />
+        </div>
+        <button
+          ref={cancelButtonRef}
+          onClick={onClose}
+          className="mt-4 w-full text-center text-sm text-[#475569] dark:text-[#94A3B8] hover:text-[#4F46E5] dark:hover:text-[#818CF8] transition-colors font-body focus:outline-none focus:ring-2 focus:ring-[rgba(99,102,241,0.30)] rounded"
+          aria-label="Cancel wallet connection"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Forces per-request SSR. Without a data-fetching method, Next.js applies
+// Automatic Static Optimization and pre-renders this page with no request
+// context, so `_document.tsx` never sees the CSP nonce set by middleware.ts
+// and every <script> tag gets rendered without one — the browser then
+// blocks all of them under the nonce-based CSP and the page never hydrates.
+export const getServerSideProps: GetServerSideProps = async () => {
+  return { props: {} };
+};

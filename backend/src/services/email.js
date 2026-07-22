@@ -236,6 +236,254 @@ function buildText({ project, update, projectUrl }) {
   ].join("\n");
 }
 
+function buildDigestHtml({ digest, dashboardUrl, unsubscribeUrl }) {
+  const donationRows = digest.recentDonations
+    .map(
+      (donation) =>
+        `<tr><td style="padding:8px 0;border-bottom:1px solid #E2E8F0;font-size:14px;color:#334155;">${escHtml(donation.projectName)}</td><td style="padding:8px 0;border-bottom:1px solid #E2E8F0;font-size:14px;color:#334155;">${donation.amountXLM} XLM</td><td style="padding:8px 0;border-bottom:1px solid #E2E8F0;font-size:14px;color:#334155;">${donation.co2OffsetKg} kg</td></tr>`,
+    )
+    .join("");
+
+  const donationTable = digest.recentDonations.length
+    ? `<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-top:20px;"><thead><tr><th align="left" style="padding:8px 0;color:#0F172A;font-size:13px;border-bottom:1px solid #E2E8F0;">Project</th><th align="right" style="padding:8px 0;color:#0F172A;font-size:13px;border-bottom:1px solid #E2E8F0;">Amount</th><th align="right" style="padding:8px 0;color:#0F172A;font-size:13px;border-bottom:1px solid #E2E8F0;">CO₂</th></tr></thead><tbody>${donationRows}</tbody></table>`
+    : "";
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#FAFAFE;font-family:'Inter',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#FAFAFE;padding:32px 0;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;max-width:600px;width:100%;">
+        <tr><td style="background:#4F46E5;padding:24px 32px;">
+          <p style="margin:0;color:#ffffff;font-size:20px;font-weight:700;">✦ Stellar-IndigoPay</p>
+          <p style="margin:4px 0 0;color:#C7D2FE;font-size:13px;">Your impact digest is ready</p>
+        </td></tr>
+        <tr><td style="padding:32px;">
+          <h1 style="margin:0 0 12px;font-size:22px;color:#0F172A;">Impact summary</h1>
+          <p style="margin:0 0 24px;font-size:15px;color:#334155;line-height:1.6;">Here’s what your contributions achieved over the last period.</p>
+
+          <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+            <tr>
+              <td style="background:#EEF2FF;border-radius:12px;padding:18px;text-align:center;vertical-align:top;">
+                <p style="margin:0;font-size:24px;font-weight:700;color:#4F46E5;">${digest.totalDonatedXLM.toFixed(2)} XLM</p>
+                <p style="margin:8px 0 0;font-size:12px;color:#64748B;">Total donated</p>
+              </td>
+              <td style="width:16px;"></td>
+              <td style="background:#EEF2FF;border-radius:12px;padding:18px;text-align:center;vertical-align:top;">
+                <p style="margin:0;font-size:24px;font-weight:700;color:#4F46E5;">${digest.co2OffsetKg.toFixed(2)} kg</p>
+                <p style="margin:8px 0 0;font-size:12px;color:#64748B;">Estimated CO₂ offset</p>
+              </td>
+            </tr>
+          </table>
+
+          <p style="margin:0 0 6px;font-size:13px;color:#0F172A;font-weight:700;">Projects supported</p>
+          <p style="margin:0 0 18px;font-size:14px;color:#334155;line-height:1.6;">${escHtml(digest.projectNames.join(", ") || "No projects listed")}</p>
+
+          ${donationTable}
+
+          <p style="margin:24px 0 0;font-size:14px;color:#334155;line-height:1.6;">Manage your giving and notification settings anytime on your dashboard.</p>
+          <p style="margin:8px 0 24px;font-size:14px;color:#334155;line-height:1.6;"><a href="${dashboardUrl}" style="color:#4F46E5;text-decoration:underline;">Open dashboard</a></p>
+          <p style="margin:0;font-size:12px;color:#94A3B8;">If you'd like to stop receiving digest summaries, <a href="${unsubscribeUrl}" style="color:#4F46E5;text-decoration:underline;">click here to unsubscribe</a>.</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
+function buildDigestText({ digest, dashboardUrl, unsubscribeUrl }) {
+  const lines = [
+    "Stellar-IndigoPay — Impact digest",
+    "",
+    `Total donated: ${digest.totalDonatedXLM.toFixed(2)} XLM`,
+    `Estimated CO₂ offset: ${digest.co2OffsetKg.toFixed(2)} kg`,
+    `Projects supported: ${digest.projectNames.join(", ")}`,
+    "",
+    "Recent donations:",
+  ];
+
+  if (digest.recentDonations.length) {
+    for (const donation of digest.recentDonations) {
+      lines.push(
+        `- ${donation.projectName}: ${donation.amountXLM.toFixed(2)} XLM, ${donation.co2OffsetKg.toFixed(2)} kg`,
+      );
+    }
+  } else {
+    lines.push("- No donations in this period.");
+  }
+
+  lines.push("", `Manage your account: ${dashboardUrl}`);
+  lines.push(`Unsubscribe from digest emails: ${unsubscribeUrl}`);
+  return lines.join("\n");
+}
+
+async function sendOnboardingEmail({
+  to,
+  projectName,
+  projectId,
+  webhookSecret,
+  webhookUrl,
+  dashboardUrl,
+  setupGuideUrl,
+}) {
+  if (!RESEND_API_KEY) {
+    if (process.env.NODE_ENV !== "test") {
+      console.warn("[email] RESEND_API_KEY not set — skipping onboarding email");
+    }
+    return;
+  }
+  const html = buildOnboardingHtml({
+    projectName,
+    webhookUrl,
+    dashboardUrl,
+    setupGuideUrl,
+    webhookSecret,
+  });
+  const text = buildOnboardingText({
+    projectName,
+    projectId,
+    webhookUrl,
+    dashboardUrl,
+    setupGuideUrl,
+    webhookSecret,
+  });
+
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: FROM_ADDRESS,
+      to: [to],
+      subject: sanitizeHeader(`Welcome to Stellar IndigoPay — ${projectName}`),
+      html,
+      text,
+    }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Resend onboarding email failed: ${errBody}`);
+  }
+
+  return await res.json();
+}
+
+function buildOnboardingHtml({
+  projectName,
+  webhookUrl,
+  dashboardUrl,
+  setupGuideUrl,
+  webhookSecret,
+}) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#FAFAFE;font-family:'Inter',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#FAFAFE;padding:32px 0;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;max-width:600px;width:100%;">
+        <tr><td style="background:#4F46E5;padding:24px 32px;"><p style="margin:0;color:#ffffff;font-size:20px;font-weight:700;">Welcome to Stellar IndigoPay</p></td></tr>
+        <tr><td style="padding:32px;">
+          <p style="margin:0 0 8px;font-size:13px;color:#94A3B8;text-transform:uppercase;letter-spacing:.05em;">Your project is verified</p>
+          <h1 style="margin:0 0 16px;font-size:22px;color:#0F172A;">${escHtml(projectName)}</h1>
+          <p style="margin:0 0 24px;font-size:15px;color:#334155;line-height:1.6;">Your project has been approved and is now active on Stellar IndigoPay. Start by completing the setup checklist below.</p>
+          <table width="100%" cellpadding="0" cellspacing="0" style="background:#F8FAFC;border-radius:12px;padding:20px;">
+            <tr><td style="padding:12px 0;font-size:14px;color:#334155;">• Verify wallet ownership</td></tr>
+            <tr><td style="padding:12px 0;font-size:14px;color:#334155;">• Configure webhook endpoint</td></tr>
+            <tr><td style="padding:12px 0;font-size:14px;color:#334155;">• Create your first campaign</td></tr>
+            <tr><td style="padding:12px 0;font-size:14px;color:#334155;">• Post a project update</td></tr>
+            <tr><td style="padding:12px 0;font-size:14px;color:#334155;">• Embed donation widget on your site</td></tr>
+          </table>
+          <p style="margin:24px 0 0;font-size:14px;color:#334155;line-height:1.6;">Your webhook secret is:</p>
+          <pre style="background:#F1F5F9;border-radius:8px;padding:16px;font-size:13px;color:#0F172A;overflow-x:auto;">${escHtml(webhookSecret)}</pre>
+          <p style="margin:16px 0 0;font-size:14px;color:#334155;line-height:1.6;">Use it when configuring your webhook endpoint to receive signed milestone notifications.</p>
+          <a href="${dashboardUrl}" style="display:inline-block;margin-top:20px;background:#4F46E5;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:8px;font-size:14px;font-weight:600;">Open Dashboard</a>
+          <a href="${setupGuideUrl}" style="display:inline-block;margin-top:20px;margin-left:12px;background:#E2E8F0;color:#0F172A;text-decoration:none;padding:12px 24px;border-radius:8px;font-size:14px;font-weight:600;">View setup guide</a>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
+function buildOnboardingText({
+  projectName,
+  projectId,
+  webhookUrl,
+  dashboardUrl,
+  setupGuideUrl,
+  webhookSecret,
+}) {
+  return [
+    `Welcome to Stellar IndigoPay — ${projectName}`,
+    "",
+    "Your project has been approved and is now active on the platform.",
+    "",
+    "Setup checklist:",
+    "- Verify wallet ownership",
+    "- Configure webhook endpoint",
+    "- Create your first campaign",
+    "- Post a project update",
+    "- Embed the donation widget on your site",
+    "",
+    `Project dashboard: ${dashboardUrl}`,
+    `Project details: ${webhookUrl}`,
+    `Setup guide: ${setupGuideUrl}`,
+    "",
+    "Your webhook secret:",
+    webhookSecret,
+  ].join("\n");
+}
+
+async function sendDigestEmail({
+  to,
+  digest,
+  dashboardUrl,
+  unsubscribeUrl,
+  subject,
+}) {
+  if (!RESEND_API_KEY) {
+    if (process.env.NODE_ENV !== "test") {
+      console.warn("[email] RESEND_API_KEY not set — skipping digest email");
+    }
+    return;
+  }
+
+  const html = buildDigestHtml({ digest, dashboardUrl, unsubscribeUrl });
+  const text = buildDigestText({ digest, dashboardUrl, unsubscribeUrl });
+
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: FROM_ADDRESS,
+      to: [to],
+      subject: sanitizeHeader(subject),
+      html,
+      text,
+      headers: {
+        "List-Unsubscribe": `<${unsubscribeUrl}>`,
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Resend digest email failed: ${errBody}`);
+  }
+
+  return await res.json();
+}
+
 /**
  * Strip CR/LF from a string to keep user-controlled text out of
  * RFC-822 headers (SMTP header injection). Applied everywhere we
@@ -255,4 +503,9 @@ function escHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
-module.exports = { sendUpdateNotifications, sendAdminVerificationNotification };
+module.exports = {
+  sendUpdateNotifications,
+  sendAdminVerificationNotification,
+  sendOnboardingEmail,
+  sendDigestEmail,
+};

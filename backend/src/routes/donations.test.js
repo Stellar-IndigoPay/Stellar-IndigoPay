@@ -12,6 +12,10 @@ jest.mock("../services/stellar", () => ({
   server: { getTransaction: jest.fn().mockResolvedValue({ successful: true }) },
 }));
 
+jest.mock("../services/oracleService", () => ({
+  getCurrentPrice: jest.fn(() => null),
+}));
+
 jest.mock("../services/profileQueue", () => ({
   enqueueProfileUpdate: jest.fn().mockResolvedValue(undefined),
 }));
@@ -20,6 +24,7 @@ const { server } = require("../services/stellar");
 const pool = require("../db/pool");
 const { computeBadges } = require("../services/store");
 const { enqueueProfileUpdate } = require("../services/profileQueue");
+const { AppError } = require("../errors");
 const { recordDonation } = require("./donations");
 
 function makePublicKey(char = "A") {
@@ -68,14 +73,21 @@ function createMockResponse() {
   };
 }
 
+const STATUS_FALLBACK_CODE = { 400: "VALIDATION_ERROR", 404: "NOT_FOUND", 409: "DUPLICATE_DONATION", 413: "FILE_TOO_LARGE", 422: "SCHEMA_VALIDATION_ERROR", 429: "RATE_LIMITED" };
+
 async function invokeRecordDonation(body) {
   const req = { body };
   const res = createMockResponse();
   const next = jest.fn((err) => {
     if (err) {
-      res
-        .status(err.status || 500)
-        .json({ error: err.message || "Internal server error" });
+      if (err instanceof AppError) {
+        res.status(err.status).json(err.toJSON());
+      } else if (err.status && err.status < 500) {
+        const code = STATUS_FALLBACK_CODE[err.status] || "VALIDATION_ERROR";
+        res.status(err.status).json({ error: { code, message: err.message } });
+      } else {
+        res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Internal server error" } });
+      }
     }
   });
 
@@ -170,7 +182,6 @@ describe("POST /api/donations", () => {
       queryResult([]), // dedup check
       queryResult(), // BEGIN
       queryResult([donationRow]), // INSERT donation
-      queryResult([]), // SELECT donation_matches (empty)
       queryResult(), // UPDATE projects
       queryResult(), // COMMIT
     );
@@ -212,7 +223,7 @@ describe("POST /api/donations", () => {
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(404);
-    expect(res.body.error).toBe("Project not found");
+    expect(res.body.error).toEqual({ code: "PROJECT_NOT_FOUND", message: "Project not found" });
     expect(client.release).toHaveBeenCalledTimes(1);
   });
 
@@ -226,7 +237,7 @@ describe("POST /api/donations", () => {
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(400);
-    expect(res.body.error).toBe("Invalid Stellar public key");
+    expect(res.body.error).toEqual({ code: "INVALID_ADDRESS", message: "Invalid Stellar address" });
     expect(pool.connect).not.toHaveBeenCalled();
   });
 
@@ -240,7 +251,7 @@ describe("POST /api/donations", () => {
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(400);
-    expect(res.body.error).toBe("Invalid transaction hash");
+    expect(res.body.error).toEqual({ code: "INVALID_TX_HASH", message: "Invalid transaction hash" });
     expect(pool.connect).not.toHaveBeenCalled();
   });
 
@@ -301,7 +312,6 @@ describe("POST /api/donations", () => {
           created_at: "2026-03-29T10:00:00.000Z",
         },
       ]), // INSERT donation
-      queryResult([]), // SELECT donation_matches (empty)
       queryResult(), // UPDATE projects
       queryResult(), // COMMIT
     );
@@ -323,7 +333,7 @@ describe("POST /api/donations", () => {
 
   test("calculates badges from cumulative donations across multiple requests", async () => {
     const donorAddress = makePublicKey("F");
-    const client = createMockClient(
+    void createMockClient(
       queryResult([{ id: "project-3" }]), // SELECT project
       queryResult([]), // dedup check
       queryResult(), // BEGIN
@@ -340,7 +350,6 @@ describe("POST /api/donations", () => {
           created_at: "2026-03-29T10:00:00.000Z",
         },
       ]), // INSERT donation
-      queryResult([]), // SELECT donation_matches (empty)
       queryResult(), // UPDATE projects
       queryResult(), // COMMIT
     );
@@ -373,7 +382,7 @@ describe("POST /api/donations", () => {
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(400);
-    expect(res.body.error).toBe("Transaction not confirmed on Stellar");
+    expect(res.body.error).toEqual({ code: "TX_FAILED", message: "Transaction failed on Stellar" });
     // No DB write transaction should have been opened.
     expect(client.query).not.toHaveBeenCalledWith("BEGIN");
     expect(client.release).toHaveBeenCalledTimes(1);
@@ -395,7 +404,7 @@ describe("POST /api/donations", () => {
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(400);
-    expect(res.body.error).toBe("Transaction not found on Stellar");
+    expect(res.body.error).toEqual({ code: "TX_NOT_FOUND", message: "Transaction not found on Stellar" });
     expect(client.query).not.toHaveBeenCalledWith("BEGIN");
     expect(client.release).toHaveBeenCalledTimes(1);
   });
@@ -501,7 +510,7 @@ describe("profile upsert on first donation", () => {
       created_at: "2026-03-29T10:00:00.000Z",
     };
 
-    const client = createMockClient(
+    void createMockClient(
       queryResult([{ id: "project-p" }]),
       queryResult([]),
       queryResult(),
@@ -540,7 +549,7 @@ describe("profile upsert on first donation", () => {
       created_at: "2026-03-29T10:00:00.000Z",
     };
 
-    const client = createMockClient(
+    void createMockClient(
       queryResult([{ id: "project-q" }]),
       queryResult([]),
       queryResult(),
@@ -587,12 +596,12 @@ describe("profile upsert on first donation", () => {
       created_at: "2026-03-29T10:00:00.000Z",
     };
 
-    const client = createMockClient(
+    void createMockClient(
       queryResult([{ id: "project-r" }]),
       queryResult([]),
       queryResult(),
       queryResult([donationRow]),
-      // no donation_matches query for non-XLM
+      // no donation_matches query for non-XLM — matching is now async via matchQueue
       queryResult(), // UPDATE projects (raises_xlm += 0)
       queryResult(), // COMMIT
     );
@@ -610,3 +619,4 @@ describe("profile upsert on first donation", () => {
     expect(enqueueProfileUpdate).toHaveBeenCalledWith(donorAddress);
   });
 });
+

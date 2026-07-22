@@ -1,0 +1,11 @@
+# Fuzz Corpus Directory
+#
+# This directory stores serialized failing inputs discovered during
+# fuzz testing. When a fuzz test fails, proptest auto-saves the
+# failing case to proptest-regressions/ (parent directory).
+#
+# This directory contains manually-curated corpus entries:
+# - JSON files with serialized ContractAction sequences
+# - Replayable as deterministic regression tests in fuzz_tests.rs
+#
+# See FUZZ_FINDINGS.md for a log of all discoveries.

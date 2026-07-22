@@ -35,6 +35,7 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS ai_summary_source_hash  TEXT;
 -- signed POSTs when donation milestones are reached.
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS webhook_url    TEXT;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS webhook_secret TEXT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS verification_request_id UUID;
 
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS webhook_url    TEXT;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS webhook_secret TEXT;
@@ -44,6 +45,28 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS webhook_secret TEXT;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS latitude  DOUBLE PRECISION;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
 CREATE INDEX IF NOT EXISTS idx_projects_location ON projects (latitude, longitude);
+
+-- Path-payment donations: track source asset and conversion details for
+-- donations made via any Stellar asset converted to XLM through the DEX.
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS source_asset        TEXT;
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS conversion_path     JSONB;
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS converted_amount_xlm NUMERIC(20, 7);
+CREATE INDEX IF NOT EXISTS idx_donations_source_asset ON donations (source_asset) WHERE source_asset IS NOT NULL;
+
+-- Automated CO₂ offset-rate verification (see migration 018 and
+-- services/co2Verifier.js). Self-reported co2_per_xlm rates are compared
+-- against per-category industry benchmarks when a verification request is
+-- approved; the verdict lands here. Statuses: pending (not yet checked),
+-- verified (≤3× benchmark), review (3–10×), flagged (>10×, needs admin
+-- resolution), rejected (admin rejected the claimed rate).
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS co2_verification_status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS co2_verification_notes TEXT;
+ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_co2_verification_status_check;
+ALTER TABLE projects ADD CONSTRAINT projects_co2_verification_status_check
+  CHECK (co2_verification_status IN ('pending', 'verified', 'review', 'flagged', 'rejected'));
+CREATE INDEX IF NOT EXISTS idx_projects_co2_verification_status
+  ON projects (co2_verification_status)
+  WHERE co2_verification_status IN ('review', 'flagged');
 
 -- Full-text search: tsvector kept current by a trigger (see migration
 -- 013_project_search) so GET /api/projects can rank matches with ts_rank
@@ -174,6 +197,7 @@ CREATE TABLE IF NOT EXISTS project_ratings (
 -- donation_matches: matching offer contracts. A matcher pledges to multiply
 -- donations up to cap_xlm by multiplier (e.g. 2×). matched_xlm tracks the
 -- total matched so far; expires_at ends the offer period.
+-- status lifecycle: active → expired (time-based) | exhausted (cap reached) | cancelled (admin).
 CREATE TABLE IF NOT EXISTS donation_matches (
   id UUID PRIMARY KEY,
   project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -185,6 +209,29 @@ CREATE TABLE IF NOT EXISTS donation_matches (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Add status column to support lifecycle management (active / expired / exhausted / cancelled).
+-- The matchExpiry background service flips active pools to expired or exhausted automatically.
+ALTER TABLE donation_matches ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE donation_matches DROP CONSTRAINT IF EXISTS donation_matches_status_check;
+ALTER TABLE donation_matches ADD CONSTRAINT donation_matches_status_check
+  CHECK (status IN ('active', 'expired', 'exhausted', 'cancelled'));
+CREATE INDEX IF NOT EXISTS idx_donation_matches_status
+  ON donation_matches (status, project_id);
+
+
+-- idempotency_keys: stores response snapshots keyed by Idempotency-Key
+-- headers so safe retries of POST /api/donations replay the original
+-- response instead of creating duplicate donation records. Keys expire
+-- after 24 hours and are cleaned up by a background job.
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+  key TEXT PRIMARY KEY,
+  request_body_hash TEXT NOT NULL,
+  response_status INTEGER NOT NULL,
+  response_body JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '24 hours')
+);
+CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_keys (expires_at);
 
 -- device_tokens: push notification device registrations. token is the FCM /
 -- APNs device token; platform is 'ios' or 'android'. wallet_address links
@@ -243,3 +290,71 @@ CREATE INDEX IF NOT EXISTS verification_requests_status_idx
   ON verification_requests (status, submitted_at DESC);
 CREATE INDEX IF NOT EXISTS verification_requests_wallet_idx
   ON verification_requests (wallet_address);
+
+
+-- -- Event sourcing: donation event store + projections (migration 026) ------
+-- Mirrors backend/src/db/migrations/026_donation_events.js so the
+-- testcontainers integration suite has the same schema as production.
+
+CREATE TABLE IF NOT EXISTS donation_events (
+  id               BIGSERIAL PRIMARY KEY,
+  event_type       VARCHAR(50)  NOT NULL,
+  aggregate_id     VARCHAR(100) NOT NULL,
+  event_data       JSONB        NOT NULL,
+  soroban_ledger   INTEGER,
+  transaction_hash VARCHAR(64),
+  created_at       TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_donation_events_aggregate ON donation_events(aggregate_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_donation_events_type ON donation_events(event_type, created_at);
+
+CREATE TABLE IF NOT EXISTS projection_donor_leaderboard (
+  donor_address     VARCHAR(56) PRIMARY KEY,
+  total_donated     NUMERIC(20, 7) NOT NULL DEFAULT 0,
+  donation_count    INTEGER         NOT NULL DEFAULT 0,
+  projects_supported INTEGER        NOT NULL DEFAULT 0,
+  total_co2_offset  NUMERIC(20, 4) NOT NULL DEFAULT 0,
+  impact_score      NUMERIC(20, 4) NOT NULL DEFAULT 0,
+  last_donation_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_proj_leaderboard_total ON projection_donor_leaderboard(total_donated DESC);
+CREATE INDEX IF NOT EXISTS idx_proj_leaderboard_impact ON projection_donor_leaderboard(impact_score DESC);
+
+CREATE TABLE IF NOT EXISTS projection_project_stats (
+  project_id        VARCHAR(36)  PRIMARY KEY,
+  raised_xlm        NUMERIC(20, 7) NOT NULL DEFAULT 0,
+  donation_count    INTEGER         NOT NULL DEFAULT 0,
+  donor_count       INTEGER         NOT NULL DEFAULT 0,
+  co2_offset_kg     NUMERIC(20, 4) NOT NULL DEFAULT 0,
+  last_donation_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_proj_project_stats_raised ON projection_project_stats(raised_xlm DESC);
+
+CREATE TABLE IF NOT EXISTS projection_donor_history (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  donor_address    VARCHAR(56) NOT NULL,
+  project_id       VARCHAR(36) NOT NULL,
+  amount_xlm       NUMERIC(20, 7) NOT NULL,
+  amount           NUMERIC(20, 7) NOT NULL DEFAULT 0,
+  currency         VARCHAR(8)  NOT NULL DEFAULT 'XLM',
+  message          TEXT,
+  transaction_hash VARCHAR(64) NOT NULL,
+  co2_offset_kg    NUMERIC(20, 4) NOT NULL DEFAULT 0,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_proj_history_donor ON projection_donor_history(donor_address, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_proj_history_project ON projection_donor_history(project_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_proj_history_tx ON projection_donor_history(transaction_hash);
+
+CREATE TABLE IF NOT EXISTS projection_global_stats (
+  id               INTEGER PRIMARY KEY DEFAULT 1,
+  total_xlm_raised NUMERIC(20, 7) NOT NULL DEFAULT 0,
+  total_co2_offset_kg NUMERIC(20, 4) NOT NULL DEFAULT 0,
+  total_donations  BIGINT         NOT NULL DEFAULT 0,
+  total_donors     INTEGER        NOT NULL DEFAULT 0,
+  total_projects   INTEGER        NOT NULL DEFAULT 0,
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO projection_global_stats (id, total_xlm_raised, total_co2_offset_kg, total_donations, total_donors, total_projects, updated_at)
+VALUES (1, 0, 0, 0, 0, 0, NOW())
+ON CONFLICT (id) DO NOTHING;

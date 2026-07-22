@@ -15,12 +15,12 @@ import * as SecureStore from "expo-secure-store";
 // Stub the dynamic import inside secureStore that points at
 // `../hooks/useBiometricAuth` so we can pin authenticate behavior
 // per test without pulling in the full hook.
-jest.mock("../hooks/useBiometricAuth", () => ({
+jest.mock("../../hooks/useBiometricAuth", () => ({
   authenticate: jest.fn(),
 }));
 
-import * as biometricAuth from "../hooks/useBiometricAuth";
-import * as secureStore from "../lib/secureStore";
+import * as biometricAuth from "../../hooks/useBiometricAuth";
+import * as secureStore from "../secureStore";
 
 const mockAuthenticate = biometricAuth.authenticate as jest.MockedFunction<
   typeof biometricAuth.authenticate

@@ -18,6 +18,7 @@ import ThemeToggle from "@/components/ThemeToggle";
 
 export default function AdminLoginPage() {
   const router = useRouter();
+  const { redirect, reason } = router.query;
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -39,7 +40,11 @@ export default function AdminLoginPage() {
     setLoading(true);
     try {
       await adminLogin(username.trim(), password);
-      router.replace("/admin/verification");
+      const destination =
+        typeof redirect === "string" && redirect.length > 0
+          ? decodeURIComponent(redirect)
+          : "/admin/verification";
+      router.replace(destination);
     } catch (err: unknown) {
       const msg =
         err instanceof Error && err.message.length > 0
@@ -87,6 +92,16 @@ export default function AdminLoginPage() {
               Sign in to manage verification requests
             </p>
           </div>
+
+          {/* Session expiry banner */}
+          {reason === "expired" && (
+            <div className="flex items-start gap-2.5 p-3 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/30 mb-4">
+              <span className="text-amber-500 text-sm mt-0.5">⏳</span>
+              <p className="text-sm text-amber-800 dark:text-amber-300 font-body">
+                Your session has expired. Please log in again.
+              </p>
+            </div>
+          )}
 
           {/* Login form */}
           <form
@@ -171,3 +186,9 @@ export default function AdminLoginPage() {
     </>
   );
 }
+
+import type { GetServerSideProps } from "next";
+
+export const getServerSideProps: GetServerSideProps = async () => {
+  return { props: {} };
+};

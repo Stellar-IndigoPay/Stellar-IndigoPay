@@ -14,21 +14,15 @@ import { useRouter } from "next/router";
 import Head from "next/head";
 import AdminLayout from "@/components/admin/AdminLayout";
 import VerificationTable from "@/components/admin/VerificationTable";
+import VerificationFilters from "@/components/admin/VerificationFilters";
 import {
   adminFetch,
-  isAdminAuthenticated,
+  ensureAdminSession,
 } from "@/lib/adminAuth";
 import type { VerificationRequestResponse } from "@/lib/api";
 
-const PAGE_SIZE = 20;
-
-const STATUS_TABS: Array<{ key: string; label: string }> = [
-  { key: "", label: "All" },
-  { key: "pending", label: "Pending" },
-  { key: "in_review", label: "In Review" },
-  { key: "approved", label: "Approved" },
-  { key: "rejected", label: "Rejected" },
-];
+const DEFAULT_PAGE_SIZE = 10;
+const PAGE_SIZE_OPTIONS = [10, 25, 50];
 
 interface QueueMetrics {
   totalPending: number;
@@ -83,14 +77,17 @@ export default function AdminVerificationPage() {
   const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState("");
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [hasMore, setHasMore] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
 
   // Check auth
   useEffect(() => {
-    if (!isAdminAuthenticated()) {
-      router.replace("/admin/login");
-    }
+    ensureAdminSession().then((ok) => {
+      if (!ok) {
+        router.replace("/admin/login");
+      }
+    });
   }, [router]);
 
   // Fetch all requests (with optional status filter)
@@ -99,7 +96,7 @@ export default function AdminVerificationPage() {
     setError(null);
     try {
       const query = new URLSearchParams();
-      query.set("limit", String(PAGE_SIZE));
+      query.set("limit", String(pageSize));
       query.set("page", String(page));
       if (statusFilter) query.set("status", statusFilter);
 
@@ -115,8 +112,7 @@ export default function AdminVerificationPage() {
       const body = await res.json();
       const items = body.data || [];
       setRequests(items);
-      // If we got fewer items than page size, we've reached the end
-      setHasMore(items.length >= PAGE_SIZE);
+      setHasMore(items.length >= pageSize);
     } catch (err: unknown) {
       const msg =
         err instanceof Error
@@ -126,7 +122,7 @@ export default function AdminVerificationPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, statusFilter]);
+  }, [page, pageSize, statusFilter]);
 
   // Fetch all (unpaginated) for metrics, or use a separate metrics endpoint
   const fetchMetrics = useCallback(async () => {
@@ -181,6 +177,11 @@ export default function AdminVerificationPage() {
   // Filter tab handler
   const handleStatusFilter = (key: string) => {
     setStatusFilter(key);
+    setPage(1);
+  };
+
+  const handlePageSizeChange = (nextPageSize: number) => {
+    setPageSize(nextPageSize);
     setPage(1);
   };
 
@@ -279,34 +280,12 @@ export default function AdminVerificationPage() {
           </div>
         )}
 
-        {/* Status filter tabs */}
-        <div className="flex flex-wrap items-center gap-2 mb-6">
-          {STATUS_TABS.map((tab) => {
-            const count = statusCounts[tab.key] ?? 0;
-            const isActive = statusFilter === tab.key;
-            return (
-              <button
-                key={tab.key}
-                onClick={() => handleStatusFilter(tab.key)}
-                className={`px-4 py-2 rounded-xl text-sm font-semibold transition-all duration-150 font-body ${
-                  isActive
-                    ? "bg-gradient-to-r from-[#4F46E5] to-[#7C3AED] text-white shadow-md"
-                    : "bg-white dark:bg-[#14142D] text-[var(--text-secondary)] border border-[rgba(99,102,241,0.10)] dark:border-[rgba(129,140,248,0.14)] hover:border-[rgba(99,102,241,0.25)] dark:hover:border-[rgba(129,140,248,0.30)]"
-                }`}
-              >
-                {tab.label}
-                <span
-                  className={`ml-1.5 text-xs ${
-                    isActive
-                      ? "text-white/70"
-                      : "text-[var(--muted)]"
-                  }`}
-                >
-                  ({count})
-                </span>
-              </button>
-            );
-          })}
+        {/* Status filter pills */}
+        <div className="mb-6">
+          <VerificationFilters
+            value={statusFilter}
+            onChange={handleStatusFilter}
+          />
         </div>
 
         {/* Table */}
@@ -315,33 +294,17 @@ export default function AdminVerificationPage() {
           loading={loading}
           error={null}
           onStartReview={handleStartReview}
+          page={page}
+          pageSize={pageSize}
+          totalCount={statusCounts[statusFilter] ?? requests.length}
+          onPageChange={(nextPage) => setPage(nextPage)}
+          onPageSizeChange={handlePageSizeChange}
         />
-
-        {/* Pagination */}
-        {(page > 1 || hasMore) && (
-          <div className="flex items-center justify-between mt-6">
-            <p className="text-sm text-[var(--text-secondary)] font-body">
-              Page {page}
-            </p>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page <= 1 || loading}
-                className="px-3 py-1.5 rounded-lg text-sm font-medium border border-[rgba(99,102,241,0.10)] dark:border-[rgba(129,140,248,0.14)] text-[var(--text-secondary)] hover:bg-[rgba(99,102,241,0.04)] dark:hover:bg-[rgba(129,140,248,0.06)] disabled:opacity-40 transition-all font-body"
-              >
-                ← Previous
-              </button>
-              <button
-                onClick={() => setPage((p) => p + 1)}
-                disabled={!hasMore || loading}
-                className="px-3 py-1.5 rounded-lg text-sm font-medium border border-[rgba(99,102,241,0.10)] dark:border-[rgba(129,140,248,0.14)] text-[var(--text-secondary)] hover:bg-[rgba(99,102,241,0.04)] dark:hover:bg-[rgba(129,140,248,0.06)] disabled:opacity-40 transition-all font-body"
-              >
-                Next →
-              </button>
-            </div>
-          </div>
-        )}
       </AdminLayout>
     </>
   );
 }
+
+export const getServerSideProps = async () => {
+  return { props: {} };
+};

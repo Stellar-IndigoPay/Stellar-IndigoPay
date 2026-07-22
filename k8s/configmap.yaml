@@ -21,3 +21,11 @@ data:
   NEXT_PUBLIC_API_URL: "http://backend-svc:4000"
   NEXT_PUBLIC_CONTRACT_ID: ""
   NEXT_PUBLIC_USDC_ISSUER: ""
+  # ── Postgres failover tracking ──────────────────────────────
+  # Updated by the automated failover Job (k8s/postgres-failover-job.yaml)
+  # when the standby is promoted to primary. The backend Deployment is
+  # restarted after the patch so new pods pick up these values.
+  # DATABASE_URL in the Secret still references postgres-svc which is
+  # re-pointed by the Service selector patch.
+  POSTGRES_PRIMARY_HOST: "postgres-primary-svc.stellar-indigopay.svc.cluster.local"
+  POSTGRES_FAILOVER_AT: ""

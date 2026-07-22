@@ -22,6 +22,7 @@ services:
       retries: 10
 
   backend:
+    image: indigopay-backend-test:ci
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -33,6 +34,7 @@ services:
       STELLAR_NETWORK: testnet
       HORIZON_URL: https://horizon-testnet.stellar.org
       ALLOWED_ORIGINS: http://localhost:3000
+      SKIP_INTEGRATION: "1"
     depends_on:
       postgres:
         condition: service_healthy

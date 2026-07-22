@@ -1,6 +1,111 @@
-# Horizon Indexer Service
+# IndigoPay Indexing Services
 
-The indexer is a background service that listens for payments (both native XLM and USDC) on the Stellar network and records them as donations in the database. It is the bridge between on-chain activity and the application's leaderboard, profile badges, and donation feed.
+IndigoPay runs two complementary indexing services that together provide
+complete coverage of on-chain activity:
+
+1. **Horizon SSE Indexer** — listens for raw Stellar payment operations (XLM and USDC).
+2. **Soroban RPC Event Service** — polls contract events from the Soroban RPC for
+   contract-only activity (badge mints, governance, project registrations, USDC donations).
+
+---
+
+## Soroban RPC Event Service
+
+The Soroban event service (`sorobanEventService.js`) polls the Soroban RPC
+`getEvents` endpoint every **5 seconds** for all events emitted by the
+IndigoPay contract. It complements the Horizon SSE indexer by capturing
+contract-only events that the Horizon stream cannot see.
+
+### Events Processed
+
+| Event       | Source                | Handler Action                                      |
+| ----------- | --------------------- | --------------------------------------------------- |
+| `donated`   | `donate()` / `donate_usdc()` | Insert donation record into DB, update project + donor profile |
+| `proj_reg`  | `register_project()`  | Logged for audit                                    |
+| `nft_mint`  | Auto-mint on badge upgrade | Logged for audit                                    |
+| `pnft_mint` | Project milestone NFT | Logged for audit                                    |
+| `voted`     | `vote_verify_project()`| Logged for audit                                    |
+| `proj_ver`  | Governance resolution | Updates `projects.on_chain_verified = TRUE`         |
+| `prop_rej`  | Proposal rejection    | Logged for audit                                    |
+| `prop_veto` | Admin veto            | Logged for audit                                    |
+| `prop_new`  | Proposal creation     | Logged for audit                                    |
+| `deact_all` | Bulk deactivation     | Logged for audit                                    |
+| `co2_rate`  | CO₂ rate update       | Logged for audit                                    |
+| `prj_pause` | Project paused        | Logged for audit                                    |
+| `prj_resm`  | Project resumed       | Logged for audit                                    |
+| `usdc_set`  | USDC token configured | Logged for audit                                    |
+| `sub_creat` | Subscription created  | Logged for audit (future)                           |
+| `sub_canc`  | Subscription canceled | Logged for audit (future)                           |
+
+### Cursor Persistence
+
+- The latest event `pagingToken` is persisted to the `indexer_state` table
+  (`key = 'soroban_event_cursor'`) after every successful batch.
+- On restart, the service resumes from the last persisted cursor — no events
+  are missed during downtime.
+
+### Deduplication
+
+- An in-memory `Set<string>` tracks all pagingTokens processed in the current
+  session, pruned to a maximum of 100,000 entries.
+- The `donated` handler additionally checks the `donations.transaction_hash`
+  column to prevent double-inserting if the Horizon indexer already recorded the
+  same donation.
+
+### Dead-Letter Queue
+
+- Events that fail processing are written to the `soroban_event_dlq` table with
+  full event data, error message, and stack trace.
+- DLQ entries are not automatically retried but can be inspected and replayed
+  via the admin API.
+
+### Batch Commit
+
+- Events are fetched with `limit: 50` per RPC call.
+- The `donated` handler wraps its DB writes in a PostgreSQL transaction
+  (`BEGIN` / `COMMIT` / `ROLLBACK`).
+- Non-mutating handlers (log-only) do not require transactions.
+
+### Prometheus Metrics
+
+| Metric                                      | Type    | Labels            | Description                                   |
+| ------------------------------------------- | ------- | ----------------- | --------------------------------------------- |
+| `indigopay_soroban_events_processed_total`  | Counter | `event_type`, `outcome` | Events processed by type and outcome (success/failed/skipped) |
+| `indigopay_soroban_events_lag_ledgers`      | Gauge   | —                 | Ledger lag for event processing               |
+| `indigopay_soroban_events_running`          | Gauge   | —                 | 1 if the polling loop is running, 0 otherwise |
+| `indigopay_soroban_events_batch_duration_seconds` | Gauge | —            | Duration of the last batch processing cycle   |
+
+### Admin API
+
+| Endpoint                             | Method | Auth  | Description                                   |
+| ------------------------------------ | ------ | ----- | --------------------------------------------- |
+| `/api/v1/admin/events/status`        | GET    | Admin | Returns service status (running, cursor, etc.) |
+| `/api/v1/admin/events/rescan`        | POST   | Admin | Triggers re-scan from provided or start cursor |
+| `/api/v1/admin/events/restart`       | POST   | Admin | Stops and restarts the polling loop            |
+
+### Configuration
+
+| Variable               | Default                                | Description                             |
+| ---------------------- | -------------------------------------- | --------------------------------------- |
+| `SOROBAN_RPC_URL`      | `https://soroban-testnet.stellar.org`  | Soroban RPC endpoint                    |
+| `CONTRACT_ID`          | —                                      | IndigoPay contract address              |
+| `SOROBAN_RPC_MAX_RETRIES` | `3`                                 | Max retries per RPC call (exponential backoff) |
+| Poll interval          | 5 seconds                              | —                                       |
+| Batch size             | 50 events                              | —                                       |
+
+### Code Reference
+
+| File                                          | Purpose                                              |
+| --------------------------------------------- | ---------------------------------------------------- |
+| `backend/src/services/sorobanEventService.js` | Core service — polling, dispatch, dedup, DLQ, metrics |
+| `backend/src/routes/admin/events.js`          | Admin endpoints (status, rescan, restart)            |
+| `backend/src/db/migrations/015_indexer_state.js` | Creates `indexer_state` and `soroban_event_dlq` tables |
+| `backend/src/services/stellar.js`             | Shared `rpcServer`, `withRetry`, `rpcBreaker`        |
+| `backend/src/server.js`                       | Starts the service and registers shutdown hooks      |
+
+---
+
+## Horizon Indexer Service (Legacy header preserved)
 
 ---
 
