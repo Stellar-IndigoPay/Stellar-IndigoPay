@@ -1355,7 +1355,6 @@ impl IndigoPayContract {
 
     #[allow(clippy::too_many_arguments)]
     /// Backward-compatible public donation entrypoint.
-    #[cfg(any(feature = "donation", feature = "testutils"))]
     pub fn donate(
         env: Env,
         token: Address,
@@ -1368,7 +1367,6 @@ impl IndigoPayContract {
     }
 
     /// Donate with an explicit public-attribution preference.
-    #[cfg(any(feature = "donation", feature = "testutils"))]
     pub fn donate_with_privacy(
         env: Env,
         token: Address,
@@ -1655,7 +1653,6 @@ impl IndigoPayContract {
     /// `source_asset_code` is a short symbol identifying the source asset
     /// (e.g. "yXLM", "USDT", "BTC") for the on-chain donation record.
     /// Backward-compatible path-payment entrypoint.
-    #[cfg(any(feature = "donation", feature = "testutils"))]
     pub fn donate_asset(
         env: Env,
         donor: Address,
@@ -1676,7 +1673,6 @@ impl IndigoPayContract {
     }
 
     /// Record a path-payment donation with an attribution preference.
-    #[cfg(any(feature = "donation", feature = "testutils"))]
     pub fn donate_asset_with_privacy(
         env: Env,
         donor: Address,
