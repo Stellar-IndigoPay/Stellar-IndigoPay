@@ -1610,11 +1610,7 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
-    pub fn batch_donate(
-        env: Env,
-        token: Address,
-        donations: Vec<BatchDonation>,
-    ) {
+    pub fn batch_donate(env: Env, token: Address, donations: Vec<BatchDonation>) {
         require_not_paused(&env);
 
         for donation in donations.iter() {
