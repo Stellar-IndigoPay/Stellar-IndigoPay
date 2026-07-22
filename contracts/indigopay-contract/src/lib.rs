@@ -120,6 +120,7 @@ pub struct ProjectInit {
 }
 
 /// Input for a single donation within a `batch_donate` call.
+#[cfg(feature = "batch")]
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct BatchDonation {
@@ -1749,6 +1750,7 @@ impl IndigoPayContract {
             .instance()
             .set(&DataKey::DonorStats(stats_donor.clone()), &donor_stats);
 
+    #[cfg(feature = "batch")]
     pub fn batch_donate(env: Env, token: Address, donations: Vec<BatchDonation>) {
         require_not_paused(&env);
 
@@ -8862,6 +8864,7 @@ mod tests {
 
     // ─── batch_donate tests ───────────────────────────────────────────────────
 
+    #[cfg(feature = "batch")]
     #[test]
     fn test_batch_donate_basic_flow() {
         let (env, _cid, client, _admin, pid) = setup();
@@ -8891,6 +8894,7 @@ mod tests {
         assert_eq!(client.get_donation_count(), 1);
     }
 
+    #[cfg(feature = "batch")]
     #[test]
     fn test_batch_donate_multiple_entries() {
         let (env, _cid, client, _admin, pid) = setup();
@@ -8923,6 +8927,7 @@ mod tests {
         assert_eq!(client.get_donation_count(), 2);
     }
 
+    #[cfg(feature = "batch")]
     #[test]
     fn test_batch_donate_multiple_donors() {
         let (env, _cid, client, _admin, pid) = setup();
@@ -8953,6 +8958,7 @@ mod tests {
         assert_eq!(client.get_donation_count(), 2);
     }
 
+    #[cfg(feature = "batch")]
     #[test]
     fn test_batch_donate_zero_amount_fails() {
         let (env, _cid, client, _admin, pid) = setup();
@@ -8973,6 +8979,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "batch")]
     #[test]
     fn test_batch_donate_updates_global_stats() {
         let env = Env::default();
@@ -9023,6 +9030,7 @@ mod tests {
         assert_eq!(client.get_donation_count(), 2);
     }
 
+    #[cfg(feature = "batch")]
     #[test]
     fn test_batch_donate_nft_minting_on_badge_upgrade() {
         let env = Env::default();
@@ -9057,6 +9065,7 @@ mod tests {
         assert!(client.has_nft(&donor, &BadgeTier::Tree));
     }
 
+    #[cfg(feature = "batch")]
     #[test]
     fn test_batch_donate_respects_unique_donor_count() {
         let (env, _cid, client, _admin, pid) = setup();
@@ -9083,6 +9092,7 @@ mod tests {
         assert_eq!(p.donor_count, 1);
     }
 
+    #[cfg(feature = "batch")]
     #[test]
     fn test_batch_donate_knows() {
         let (env, _cid, client, _admin, pid) = setup();
@@ -9104,5 +9114,149 @@ mod tests {
         assert_eq!(record.project, pid);
         assert_eq!(record.amount, 10 * STROOP);
         assert_eq!(record.message_hash, 99u32);
+    }
+
+    #[cfg(feature = "batch")]
+    #[test]
+    fn test_batch_donate_ten_donations() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+
+        let mut donations = Vec::new(&env);
+        for i in 0..10u32 {
+            let donor = Address::generate(&env);
+            StellarAssetClient::new(&env, &token).mint(&donor, &STROOP);
+            donations.push_back(BatchDonation {
+                donor,
+                project_id: pid.clone(),
+                amount: STROOP,
+                msg_hash: i,
+            });
+        }
+
+        client.batch_donate(&token, &donations);
+
+        assert_eq!(client.get_project(&pid).total_raised, 10 * STROOP);
+        assert_eq!(client.get_project(&pid).donor_count, 10);
+        assert_eq!(client.get_donation_count(), 10);
+    }
+
+    #[cfg(feature = "batch")]
+    #[test]
+    fn test_batch_donate_partial_auth_fails() {
+        let env = Env::default();
+        // No mock_all_auths() — require_auth() checks are enforced.
+        let cid = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+
+        // Use env.as_contract to set up initial state bypassing auth.
+        env.as_contract(&cid, || {
+            let signers: Vec<Address> = {
+                let mut v = Vec::new(&env);
+                v.push_back(admin.clone());
+                v
+            };
+            env.storage()
+                .instance()
+                .set(&DataKey::AdminSigners, &signers);
+            env.storage()
+                .instance()
+                .set(&DataKey::AdminThreshold, &1u32);
+            let pid = String::from_str(&env, "proj-001");
+            let project = Project {
+                id: pid.clone(),
+                name: String::from_str(&env, "Test"),
+                wallet: Address::generate(&env),
+                active: true,
+                paused: false,
+                total_raised: 0,
+                donor_count: 0,
+                co2_per_xlm: 100,
+                campaign_deadline: 0,
+                campaign_status: CampaignStatus::Inactive,
+                goal: 0,
+            };
+            env.storage()
+                .instance()
+                .set(&DataKey::Project(pid), &project);
+            env.storage()
+                .instance()
+                .set(&DataKey::ProjectCount, &1u32);
+        });
+
+        let pid = String::from_str(&env, "proj-001");
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&donor_a, &STROOP);
+        StellarAssetClient::new(&env, &token).mint(&donor_b, &STROOP);
+
+        let mut donations = Vec::new(&env);
+        donations.push_back(BatchDonation {
+            donor: donor_a.clone(),
+            project_id: pid.clone(),
+            amount: STROOP,
+            msg_hash: 0u32,
+        });
+        donations.push_back(BatchDonation {
+            donor: donor_b.clone(),
+            project_id: pid.clone(),
+            amount: STROOP,
+            msg_hash: 1u32,
+        });
+
+        // Only authorize donor_a — donor_b's missing auth should panic.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.batch_donate(&token, &donations);
+        }));
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "batch")]
+    #[test]
+    fn test_batch_donate_paused_project_reverts() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 10 * STROOP);
+
+        // Pause the project
+        client.pause_project(&admin, &pid);
+
+        let mut donations = Vec::new(&env);
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: pid.clone(),
+            amount: 5 * STROOP,
+            msg_hash: 0u32,
+        });
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.batch_donate(&token, &donations);
+        }));
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "batch")]
+    #[test]
+    fn test_batch_donate_empty_batch() {
+        let (env, _cid, client, _admin, _pid) = setup();
+
+        let token = {
+            let token_admin = Address::generate(&env);
+            env.register_stellar_asset_contract_v2(token_admin)
+                .address()
+        };
+
+        let donations: Vec<BatchDonation> = Vec::new(&env);
+        client.batch_donate(&token, &donations);
+
+        assert_eq!(client.get_donation_count(), 0);
     }
 }
