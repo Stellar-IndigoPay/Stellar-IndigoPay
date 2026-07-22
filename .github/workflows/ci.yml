@@ -110,6 +110,8 @@ jobs:
         continue-on-error: true
 
       - name: Run Security Triage Script
+        env:
+          ZAP_TARGET: ${{ vars.ZAP_TARGET || 'https://example.com' }}
         run: node scripts/triage-zap.js
 
       - name: Upload ZAP Reports

@@ -6,6 +6,10 @@
 
 #[cfg(feature = "donation")]
 pub mod donation;
+#[cfg(all(test, feature = "testutils"))]
+mod fuzz_template;
+#[cfg(all(test, feature = "testutils"))]
+mod fuzz_tests;
 
 /**
  * contracts/indigopay-contract/src/lib.rs
