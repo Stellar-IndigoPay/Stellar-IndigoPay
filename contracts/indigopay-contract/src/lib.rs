@@ -1613,10 +1613,21 @@ impl IndigoPayContract {
     pub fn batch_donate(env: Env, token: Address, donations: Vec<BatchDonation>) {
         require_not_paused(&env);
 
+        let mut authorized: Vec<Address> = Vec::new(&env);
         for donation in donations.iter() {
-            donation.donor.require_auth();
             if donation.amount <= 0 {
                 panic!("Donation amount must be positive");
+            }
+            let mut found = false;
+            for a in authorized.iter() {
+                if a == donation.donor {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                donation.donor.require_auth();
+                authorized.push_back(donation.donor.clone());
             }
             process_donation(
                 &env,
