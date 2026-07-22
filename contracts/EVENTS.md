@@ -337,6 +337,18 @@ project-scoped anonymous donation totals.
 
 ## Usage Notes
 
+## 33. `update_published`
+
+**Description**: Emitted when a project admin publishes the SHA-256 hash of an
+off-chain project update. The zero-based `index` and publication ledger allow
+indexers to reconstruct the immutable update history for each project.
+
+| Event Name         | Topics                                                    | Data                                                                  | When Emitted                                |
+| ------------------ | --------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------- |
+| `update_published` | `["update_published", project_admin, project_id, index]` | `{ "content_hash": BytesN<32>, "ledger": u32, "update_type": Symbol }` | When an admin calls `publish_project_update` |
+
+---
+
 - All events follow Soroban’s standard event format: `topics: Vec<Val>`, `data: Val`.
 - `donor` and `project_id` are usually `Address` or `String` depending on implementation.
 - Events can be queried via Horizon or Soroban RPC tools.
