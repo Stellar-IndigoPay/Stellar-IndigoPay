@@ -32,7 +32,7 @@ mod fuzz {
     use crate::{EscrowContract, EscrowContractClient, JobStatus, Milestone};
     use proptest::prelude::*;
     use soroban_sdk::{
-        testutils::Address as _,
+        testutils::{Address as _, Ledger},
         token::StellarAssetClient,
         Address, Env, String as SorobanString, Vec as SorobanVec,
     };
@@ -71,18 +71,14 @@ mod fuzz {
             milestone_idx: usize,
         },
         /// Admin marks a job as disputed.
-        DisputeJob {
-            job_idx: usize,
-        },
+        DisputeJob { job_idx: usize },
         /// Admin resolves a dispute, optionally releasing remaining funds.
         ResolveDispute {
             job_idx: usize,
             approve_remaining: bool,
         },
         /// Advance the ledger by a number of sequences.
-        AdvanceLedgers {
-            delta: u32,
-        },
+        AdvanceLedgers { delta: u32 },
     }
 
     // ─── Reference Model ──────────────────────────────────────────────────────
@@ -147,7 +143,11 @@ mod fuzz {
 
         /// Try to release a milestone. Returns `Ok(())` if the operation was valid,
         /// `Err(msg)` if the operation should have been rejected by the contract.
-        fn release_milestone(&mut self, job_idx: usize, milestone_idx: usize) -> Result<(), &'static str> {
+        fn release_milestone(
+            &mut self,
+            job_idx: usize,
+            milestone_idx: usize,
+        ) -> Result<(), &'static str> {
             let job = self.jobs.get_mut(job_idx).ok_or("job not found")?;
             if job.disputed {
                 return Err("cannot release on disputed job");
@@ -155,7 +155,10 @@ mod fuzz {
             if job.resolved {
                 return Err("job already resolved");
             }
-            let m = job.milestones.get_mut(milestone_idx).ok_or("milestone not found")?;
+            let m = job
+                .milestones
+                .get_mut(milestone_idx)
+                .ok_or("milestone not found")?;
             if m.released {
                 return Err("milestone already released");
             }
@@ -170,7 +173,11 @@ mod fuzz {
         }
 
         /// Try to claim a milestone (auto-release by freelancer after expiry).
-        fn claim_milestone(&mut self, job_idx: usize, milestone_idx: usize) -> Result<(), &'static str> {
+        fn claim_milestone(
+            &mut self,
+            job_idx: usize,
+            milestone_idx: usize,
+        ) -> Result<(), &'static str> {
             let job = self.jobs.get_mut(job_idx).ok_or("job not found")?;
             if job.disputed {
                 return Err("cannot claim on disputed job");
@@ -178,7 +185,10 @@ mod fuzz {
             if job.resolved {
                 return Err("job already resolved");
             }
-            let m = job.milestones.get_mut(milestone_idx).ok_or("milestone not found")?;
+            let m = job
+                .milestones
+                .get_mut(milestone_idx)
+                .ok_or("milestone not found")?;
             if m.released {
                 return Err("milestone already released/claimed");
             }
@@ -206,7 +216,11 @@ mod fuzz {
         }
 
         /// Try to resolve a dispute.
-        fn resolve_dispute(&mut self, job_idx: usize, approve_remaining: bool) -> Result<(), &'static str> {
+        fn resolve_dispute(
+            &mut self,
+            job_idx: usize,
+            approve_remaining: bool,
+        ) -> Result<(), &'static str> {
             let job = self.jobs.get_mut(job_idx).ok_or("job not found")?;
             if !job.disputed {
                 return Err("job is not disputed");
@@ -314,7 +328,9 @@ mod fuzz {
                 pcts.push(100 - prev);
                 pcts
             })
-            .prop_filter("all percentages must be positive", |p| p.iter().all(|&x| x > 0))
+            .prop_filter("all percentages must be positive", |p| {
+                p.iter().all(|&x| x > 0)
+            })
             .boxed()
     }
 
@@ -330,20 +346,29 @@ mod fuzz {
             .prop_flat_map(|count| (milestone_percentages(count), job_amount()))
             .prop_map(|(milestones, amount)| Op::CreateJob { milestones, amount });
 
-        let release = (0..max_jobs, 0..max_milestones)
-            .prop_map(|(job_idx, milestone_idx)| Op::ReleaseMilestone { job_idx, milestone_idx });
+        let release = (0..max_jobs, 0..max_milestones).prop_map(|(job_idx, milestone_idx)| {
+            Op::ReleaseMilestone {
+                job_idx,
+                milestone_idx,
+            }
+        });
 
-        let claim = (0..max_jobs, 0..max_milestones)
-            .prop_map(|(job_idx, milestone_idx)| Op::ClaimMilestone { job_idx, milestone_idx });
+        let claim = (0..max_jobs, 0..max_milestones).prop_map(|(job_idx, milestone_idx)| {
+            Op::ClaimMilestone {
+                job_idx,
+                milestone_idx,
+            }
+        });
 
-        let dispute = (0..max_jobs)
-            .prop_map(|job_idx| Op::DisputeJob { job_idx });
+        let dispute = (0..max_jobs).prop_map(|job_idx| Op::DisputeJob { job_idx });
 
-        let resolve = (0..max_jobs, any::<bool>())
-            .prop_map(|(job_idx, approve)| Op::ResolveDispute { job_idx, approve_remaining: approve });
+        let resolve =
+            (0..max_jobs, any::<bool>()).prop_map(|(job_idx, approve)| Op::ResolveDispute {
+                job_idx,
+                approve_remaining: approve,
+            });
 
-        let advance = (1u32..=100u32)
-            .prop_map(|delta| Op::AdvanceLedgers { delta });
+        let advance = (1u32..=100u32).prop_map(|delta| Op::AdvanceLedgers { delta });
 
         prop_oneof![
             3 => create,
@@ -361,7 +386,7 @@ mod fuzz {
         let mut milestones: SorobanVec<Milestone> = SorobanVec::new(env);
         for (i, &pct) in percentages.iter().enumerate() {
             milestones.push_back(Milestone {
-                name: SorobanString::from_str(env, &format!("M{}", i)),
+                name: SorobanString::from_str(env, &std::format!("M{}", i)),
                 percentage: pct,
                 released: false,
             });
@@ -426,7 +451,7 @@ mod fuzz {
                         if total_pct != 100 { continue; }
                         if milestones.is_empty() || milestones.len() > 10 { continue; }
 
-                        let job_id_str = format!("job-{}", model.next_job_id);
+                        let job_id_str = std::format!("job-{}", model.next_job_id);
                         let s_job_id = SorobanString::from_str(&env, &job_id_str);
                         let soroban_milestones = build_milestones(&env, milestones);
 
@@ -538,7 +563,7 @@ mod fuzz {
 
                     Op::AdvanceLedgers { delta } => {
                         ledger_seq = ledger_seq.checked_add(*delta).unwrap_or(u32::MAX);
-                        env.ledger().set_sequence_number(ledger_seq);
+                        Ledger::set_sequence_number(&env.ledger(), ledger_seq);
                     }
                 }
             }
@@ -572,7 +597,7 @@ mod fuzz {
                     // If model says job is disputed, contract must show Disputed
                     if job_model.disputed {
                         prop_assert_eq!(
-                            contract_job.status, JobStatus::Disputed,
+                            contract_job.status.clone(), JobStatus::Disputed,
                             "INVARIANT 3 FAILED: job {} should be Disputed but is {:?}",
                             job_model.id, contract_job.status
                         );
@@ -596,7 +621,7 @@ mod fuzz {
                     //    with all milestones in a consistent state
                     if job_model.resolved {
                         prop_assert_eq!(
-                            contract_job.status, JobStatus::Completed,
+                            contract_job.status.clone(), JobStatus::Completed,
                             "INVARIANT 5 FAILED: resolved job {} should be Completed but is {:?}",
                             job_model.id, contract_job.status
                         );
@@ -644,4 +669,3 @@ mod fuzz {
         }
     }
 }
-
