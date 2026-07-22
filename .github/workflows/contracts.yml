@@ -37,8 +37,8 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace -- -D warnings
 
-      - name: Run tests
-        run: "cargo test --features testutils --workspace -- --skip fuzz"
+      - name: Run tests (skip duplicate fuzz run -- handled by dedicated fuzz job)
+        run: "cargo test --features testutils --workspace -- --skip fuzz::"
 
       - name: Build WASM (slim)
         run: cargo build --workspace --target wasm32v1-none --release --no-default-features
