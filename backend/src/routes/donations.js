@@ -25,6 +25,7 @@ const { enqueueImpactRecalc } = require("../services/impactQueue");
 const { enqueuePushNotification } = require("../services/pushQueue");
 const { server } = require("../services/stellar");
 const oracleService = require("../services/oracleService");
+const { generateReceiptPdf, hashReceiptContent, signReceipt } = require("../services/receiptGenerator");
 const { invalidateProjectRelatedCache } = require("../services/cacheManager");
 const donationLimiter = createRateLimiter(10, 1); // 10 requests per minute
 
@@ -252,6 +253,12 @@ async function recordDonation(req, res, next) {
     await client.query("COMMIT");
     inTransaction = false;
 
+    if (!anonymous) enqueueProfileUpdate(donorAddress).catch((err) => {
+      logger.error(
+        { event: "profile_update_enqueue_failed", err, donorAddress },
+        "Failed to enqueue profile update job",
+      );
+    });
     if (!anonymous) {
       enqueueProfileUpdate(donorAddress).catch((err) => {
         logger.error(

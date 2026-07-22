@@ -20,6 +20,8 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 When a donor passes `anonymous: true`, `donor_or_zero_address` is the Stellar
 zero-address placeholder (`GAAAAAAAA…WHF`). Amounts and project/global impact
 metrics remain public; public donor-profile and leaderboard projections exclude it.
+The contract exposes `get_anonymous_donation_count(env, project_id)` for
+project-scoped anonymous donation totals.
 
 ---
 
