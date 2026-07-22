@@ -1,507 +1,147 @@
-/**
- * lib/api.ts — Backend HTTP client
- *
- * Typed helper functions for calling the IndigoPay backend from the Next.js app.
- * Each function maps closely to a backend route and returns the unwrapped `data`
- * payload from the API response.
- */
 import axios from "axios";
-import type {
-  ClimateProject,
-  Donation,
-  DonorProfile,
-  FreelancerProfile,
-  ProjectUpdate,
-  LeaderboardEntry,
-  EscrowJob,
-  ProjectCampaign,
-} from "@/utils/types";
+import type { ClimateProject } from "@/utils/types";
 
 const api = axios.create({
   baseURL: process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000",
-  headers: { "Content-Type": "application/json" },
-  timeout: 10000,
   withCredentials: true,
-});
-
-// All API routes are served under the versioned `/api/v1` prefix (issue #204).
-// Rewrite `/api/*` request paths to `/api/v1/*` from a single place so every
-// helper below stays on the unversioned path string.
-api.interceptors.request.use((config) => {
-  if (
-    config.url &&
-    config.url.startsWith("/api/") &&
-    !config.url.startsWith("/api/v1/")
-  ) {
-    config.url = config.url.replace(/^\/api\//, "/api/v1/");
-  }
-  return config;
-});
-
-let csrfToken: string | null = null;
-
-async function refreshCsrfToken() {
-  const { data } = await api.get<{ success: boolean; csrfToken: string }>(
-    "/api/csrf-token",
-  );
-  csrfToken = data.csrfToken;
-  return csrfToken;
-}
-
-api.interceptors.request.use(async (config) => {
-  const method = config.method?.toUpperCase();
-  const isMutating =
-    method && ["POST", "PUT", "PATCH", "DELETE"].includes(method);
-
-  if (isMutating) {
-    if (!csrfToken) {
-      await refreshCsrfToken();
-    }
-
-    if (csrfToken) {
-      config.headers.set("X-CSRF-Token", csrfToken);
-    }
-  }
-
-  return config;
-});
-
-api.interceptors.response.use(
-  (response) => response,
-  async (error) => {
-    if (error.response?.status === 403 && !error.config.__csrfRetry) {
-      error.config.__csrfRetry = true;
-      csrfToken = null;
-      await refreshCsrfToken();
-      if (csrfToken) {
-        error.config.headers = {
-          ...error.config.headers,
-          "X-CSRF-Token": csrfToken,
-        };
-        return api.request(error.config);
-      }
-    }
-
-    // Admin JWT 401 interceptor — refresh once and retry before giving up.
-    // Only fires for requests that already carry an Authorization header
-    // (i.e. admin-authenticated calls), so public API calls are unaffected.
-    if (
-      error.response?.status === 401 &&
-      !error.config.__adminRetry &&
-      error.config.headers?.Authorization
-    ) {
-      error.config.__adminRetry = true;
-      try {
-        // Dynamic import to avoid circular dependency at module init time.
-        const { refreshAdminToken, markSessionExpired } = await import("./adminAuth");
-        const newToken = await refreshAdminToken();
-        if (newToken) {
-          error.config.headers.Authorization = `Bearer ${newToken}`;
-          return api.request(error.config);
-        }
-        // Refresh failed — session is gone. Mark expired so the route guard
-        // redirects with reason=expired on the next navigation.
-        markSessionExpired();
-      } catch {
-        // Refresh threw — mark expired and let the original 401 propagate.
-        try {
-          const { markSessionExpired } = await import("./adminAuth");
-          markSessionExpired();
-        } catch {
-          // Best-effort — the route guard will catch it on next navigation.
-        }
-      }
-    }
-
-    return Promise.reject(error);
+  headers: {
+    "Content-Type": "application/json",
   },
-);
+});
 
-export async function csrfFetch(input: RequestInfo, init: RequestInit = {}) {
-  const method = init.method?.toUpperCase() || "GET";
-  const needsToken = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
-
-  if (needsToken) {
-    if (!csrfToken) {
-      await refreshCsrfToken();
-    }
-
-    init.headers = {
-      ...(init.headers as Record<string, string>),
-      "Content-Type": "application/json",
-      "X-CSRF-Token": csrfToken ?? "",
-    };
-    init.credentials = "include";
-  }
-
-  return fetch(input, init);
-}
-
-// ── Projects ──────────────────────────────────────────────────────────────────
-/**
- * Fetch a list of climate projects from the backend.
- *
- * @param params - Optional server-side filters.
- * @returns A list of projects matching the query.
- * @throws If the request fails (network error, timeout, or non-2xx response).
- *
- * @example
- * const projects = await fetchProjects({ verified: true, limit: 12 });
- * console.log("projects:", projects.length);
- */
-export interface ProjectListFilters {
-  category?: string;
-  status?: string;
-  verified?: boolean;
-  search?: string;
-  location?: string;
-  co2Min?: number;
-  co2Max?: number;
-  limit?: number;
-}
-
-export async function fetchProjects(
-  params?: ProjectListFilters,
-): Promise<ClimateProject[]> {
-  const { data } = await api.get<{ success: boolean; data: ClimateProject[] }>(
-    "/api/projects",
-    { params },
-  );
-  return data.data;
-}
-
-export interface ProjectFacetValue {
-  value: string;
-  count: number;
-}
-
-export interface ProjectFacets {
-  category: ProjectFacetValue[];
-  location: ProjectFacetValue[];
-  status: ProjectFacetValue[];
-}
+// ── CSRF ──────────────────────────────────────────────────────────────────
 
 /**
- * Fetch facet counts (how many projects match each category/location/status
- * value) scoped to the given filters, for rendering counts like
- * "Reforestation (12)" next to filter options that aren't active yet.
+ * Fetch a CSRF token from the backend and return it.
+ * The backend sets an httpOnly cookie; we read the plain-text response.
  */
-export async function fetchProjectFacets(
-  params?: ProjectListFilters,
-): Promise<ProjectFacets> {
-  const { data } = await api.get<{
-    success: boolean;
-    data: ClimateProject[];
-    facets?: ProjectFacets;
-  }>("/api/projects", {
-    params: { ...params, facets: true, limit: 1 },
+export async function csrfFetch(
+  url: string,
+  options: RequestInit = {},
+): Promise<Response> {
+  const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+
+  // 1. Fetch CSRF token
+  const csrfRes = await fetch(`${baseUrl}/api/csrf-token`, {
+    credentials: "include",
   });
-  return data.facets || { category: [], location: [], status: [] };
+  const { csrfToken } = await csrfRes.json();
+
+  // 2. Perform the actual request with the CSRF token
+  return fetch(url, {
+    ...options,
+    credentials: "include",
+    headers: {
+      ...options.headers,
+      "Content-Type": "application/json",
+      "X-CSRF-Token": csrfToken,
+    },
+  });
 }
 
+// ── Projects ──────────────────────────────────────────────────────────────
+
 /**
- * Fetch a single project by its id.
- *
- * @param id - Project id.
- * @returns The project.
- * @throws If the request fails (including 404s for missing projects).
+ * Fetch a single project by its ID.
  */
-export async function fetchProject(id: string, walletAddress?: string) {
-  const params: Record<string, string> = {};
-  if (walletAddress) params.walletAddress = walletAddress;
+export async function fetchProject(id: string): Promise<ClimateProject> {
   const { data } = await api.get<{ success: boolean; data: ClimateProject }>(
     `/api/projects/${id}`,
-    { params },
   );
   return data.data;
 }
 
-export interface AISummaryResponse {
-  aiSummary: string;
-  aiSummaryGeneratedAt: string;
-  aiSummaryModel: string;
-  aiSummarySourceHash: string;
+export interface ProjectListParams {
+  page?: number;
+  limit?: number;
+  category?: string;
+  sort?: string;
+  search?: string;
+  status?: string;
+  verified?: boolean;
+}
+
+export interface ProjectListResponse {
+  projects: ClimateProject[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
 }
 
 /**
- * Trigger backend AI-summary generation for a project. Server-side this is
- * gated to the project owner (caller's `adminAddress` must equal the
- * project's wallet address), so this should only be called from the admin
- * "Refresh summary" path.
+ * Fetch a paginated list of projects.
  */
-export async function generateProjectSummary(
-  projectId: string,
-  adminAddress: string,
-): Promise<AISummaryResponse> {
-  const { data } = await api.post<{
-    success: boolean;
-    data: AISummaryResponse;
-  }>(`/api/projects/${projectId}/generate-summary`, { adminAddress });
-  return data.data;
-}
-
-export async function createProjectCampaign(
-  projectId: string,
-  payload: {
-    title: string;
-    goalXLM: string;
-    deadline: string;
-    description?: string;
-  },
-) {
-  const { data } = await api.post<{ success: boolean; data: ProjectCampaign }>(
-    `/api/projects/${projectId}/campaigns`,
-    payload,
-  );
-  return data.data;
-}
-
-// ── Matching ──────────────────────────────────────────────────────────────────
-export async function fetchProjectMatches(projectId: string) {
+export async function fetchProjects(
+  params: ProjectListParams = {},
+): Promise<ProjectListResponse> {
   const { data } = await api.get<{
     success: boolean;
-    data: Array<{
-      id: string;
-      projectId: string;
-      matcherAddress: string;
-      capXLM: string;
-      multiplier: number;
-      matchedXLM: string;
-      remainingXLM: string;
-      expiresAt: string;
-      createdAt: string;
-    }>;
-  }>(`/api/projects/${projectId}/matching`);
-  return data.data;
-}
-
-// ── Donations ─────────────────────────────────────────────────────────────────
-/**
- * Persist a completed donation in the backend after the on-chain transaction succeeds.
- *
- * @param payload - Donation details, including the on-chain transaction hash.
- * @returns The stored donation record.
- * @throws If the request fails or validation is rejected by the backend.
- *
- * @example
- * await recordDonation({
- *   projectId: "project_123",
- *   donorAddress: "G...YOUR_PUBLIC_KEY...",
- *   amountXLM: "10",
- *   currency: "XLM",
- *   message: "Keep it up!",
- *   transactionHash: "abc123deadbeef",
- * });
- */
-export async function recordDonation(payload: {
-  projectId: string;
-  donorAddress: string;
-  amountXLM?: string;
-  amount?: string;
-  currency?: string;
-  message?: string;
-  transactionHash: string;
-  sourceAsset?: string;
-  conversionPath?: Array<{ code: string; issuer: string }>;
-  convertedAmountXLM?: string;
-  idempotencyKey?: string;
-}) {
-  const headers: Record<string, string> = {};
-  if (payload.idempotencyKey) {
-    headers["Idempotency-Key"] = payload.idempotencyKey;
-  }
-  const { data } = await api.post<{ success: boolean; data: Donation }>(
-    "/api/donations",
-    payload,
-    { headers },
-  );
+    data: ProjectListResponse;
+  }>("/api/projects", { params });
   return data.data;
 }
 
 /**
- * Fetch donations for a project using cursor pagination.
- *
- * @param projectId - Project id.
- * @param limit - Maximum number of donations to return (default: 20).
- * @param cursor - Optional cursor from a previous call.
- * @returns Donations page and a cursor for the next page (or `null` when done).
- * @throws If the request fails.
+ * Fetch donations for a project.
  */
 export async function fetchProjectDonations(
   projectId: string,
-  limit = 20,
+  limit = 50,
   cursor?: string,
 ) {
-  const params: { limit: number; cursor?: string } = { limit };
+  const params: Record<string, string | number> = { limit };
   if (cursor) params.cursor = cursor;
   const { data } = await api.get<{
     success: boolean;
-    data: Donation[];
-    nextCursor: string | null;
-  }>(`/api/donations/project/${projectId}`, { params });
-  return { donations: data.data, nextCursor: data.nextCursor };
+    data: { donations: any[]; nextCursor: string | null };
+  }>(`/api/projects/${projectId}/donations`, { params });
+  return data.data;
 }
 
 /**
- * Fetch all donations made by a donor.
- *
- * @param publicKey - Donor Stellar public key.
- * @returns Donation history.
- * @throws If the request fails.
+ * Fetch matching projects for a given project.
  */
-export async function fetchDonorHistory(publicKey: string) {
-  const { data } = await api.get<{ success: boolean; data: Donation[] }>(
-    `/api/donations/donor/${publicKey}`,
+export async function fetchProjectMatches(projectId: string) {
+  const { data } = await api.get<{ success: boolean; data: any[] }>(
+    `/api/projects/${projectId}/matches`,
   );
   return data.data;
 }
 
-// ── Profiles ──────────────────────────────────────────────────────────────────
-/**
- * Fetch a donor profile by public key.
- *
- * @param publicKey - Donor Stellar public key.
- * @returns Donor profile.
- * @throws If the request fails.
- */
-export async function fetchProfile(publicKey: string) {
-  const { data } = await api.get<{ success: boolean; data: DonorProfile }>(
-    `/api/profiles/${publicKey}`,
-  );
-  return data.data;
-}
+// ── Project Updates ───────────────────────────────────────────────────────
 
-/**
- * Fetch a freelancer profile by public key.
- *
- * @param publicKey - Freelancer Stellar public key.
- * @returns Freelancer profile.
- * @throws If the request fails.
- */
-export async function fetchFreelancerProfile(publicKey: string) {
-  const { data } = await api.get<{ success: boolean; data: FreelancerProfile }>(
-    `/api/profiles/${publicKey}`,
-  );
-  return data.data;
-}
-
-/**
- * Create or update a donor profile.
- *
- * @param payload - Profile fields to upsert.
- * @returns The upserted profile.
- * @throws If the request fails or validation is rejected by the backend.
- */
-export async function upsertProfile(
-  payload: Partial<DonorProfile> & { publicKey: string },
-) {
-  const { data } = await api.post<{ success: boolean; data: DonorProfile }>(
-    "/api/profiles",
-    payload,
-  );
-  return data.data;
-}
-
-// ── Leaderboard ───────────────────────────────────────────────────────────────
-/**
- * Fetch top donors.
- *
- * @param limit - Maximum number of entries to return (default: 20).
- * @returns Leaderboard entries.
- * @throws If the request fails.
- */
-export async function fetchLeaderboard(limit = 20, period?: string) {
-  const params: Record<string, unknown> = { limit };
-  if (period) params.period = period;
-  const { data } = await api.get<{
-    success: boolean;
-    data: LeaderboardEntry[];
-  }>("/api/leaderboard", { params });
-  return data.data;
-}
-
-// ── Jobs (escrow) ───────────────────────────────────────────────────────────
-/**
- * Fetch all escrow jobs.
- *
- * @returns List of jobs.
- * @throws If the request fails.
- */
-export async function fetchJobs() {
-  const { data } = await api.get<{ success: boolean; data: EscrowJob[] }>(
-    "/api/jobs",
-  );
-  return data.data;
-}
-
-/**
- * Fetch a single escrow job by id.
- *
- * @param id - Job id.
- * @returns The job.
- * @throws If the request fails (including 404s for missing jobs).
- */
-export async function fetchJob(id: string) {
-  const { data } = await api.get<{ success: boolean; data: EscrowJob }>(
-    `/api/jobs/${id}`,
-  );
-  return data.data;
-}
-
-/**
- * Mark job completed after on-chain release_escrow succeeds (stores release tx hash).
- *
- * @param jobId - Job id.
- * @param releaseTransactionHash - Hash of the on-chain release transaction.
- * @returns Updated job record.
- * @throws If the request fails or the backend rejects the update.
- */
-export async function completeJobRelease(
-  jobId: string,
-  releaseTransactionHash: string,
-) {
-  const { data } = await api.patch<{ success: boolean; data: EscrowJob }>(
-    `/api/jobs/${jobId}/release`,
-    { releaseTransactionHash },
-  );
-  return data.data;
-}
-
-// ── Project Updates ─────────────────────────────────────────────
-/**
- * Fetch updates for a project.
- *
- * @param projectId - Project id.
- * @returns List of updates.
- * @throws If the request fails.
- */
-export async function fetchProjectUpdates(projectId: string) {
-  const { data } = await api.get<{ success: boolean; data: ProjectUpdate[] }>(
-    `/api/updates/${projectId}`,
-  );
-  return data.data;
-}
-
-export async function createProjectUpdate(payload: {
+export interface CreateUpdatePayload {
   projectId: string;
   title: string;
   body: string;
-  adminKey?: string;
-}) {
-  const { data } = await api.post<{ success: boolean; data: ProjectUpdate }>(
-    "/api/updates",
+}
+
+/**
+ * Create a new project update.
+ */
+export async function createProjectUpdate(payload: CreateUpdatePayload) {
+  const { data } = await api.post<{ success: boolean; data: any }>(
+    `/api/projects/${payload.projectId}/updates`,
     payload,
   );
   return data.data;
 }
 
-// ── Subscriptions ────────────────────────────────────────────────
+/**
+ * Fetch updates for a project.
+ */
+export async function fetchProjectUpdates(projectId: string) {
+  const { data } = await api.get<{ success: boolean; data: any[] }>(
+    `/api/projects/${projectId}/updates`,
+  );
+  return data.data;
+}
+
+// ── Subscriptions ─────────────────────────────────────────────────────────
+
 /**
  * Subscribe an email (and optionally a donor address) to a project's updates.
- *
- * @param payload - Subscription payload.
- * @returns Backend response including a success flag and message.
- * @throws If the request fails or validation is rejected by the backend.
  */
 export async function subscribeToProject(payload: {
   projectId: string;
@@ -517,10 +157,6 @@ export async function subscribeToProject(payload: {
 
 /**
  * Fetch the number of subscribers for a project.
- *
- * @param projectId - Project id.
- * @returns Subscriber count.
- * @throws If the request fails.
  */
 export async function fetchSubscriberCount(projectId: string) {
   const { data } = await api.get<{ success: boolean; count: number }>(
@@ -529,7 +165,8 @@ export async function fetchSubscriberCount(projectId: string) {
   return data.count;
 }
 
-// ── Global Stats ─────────────────────────────────────────────────
+// ── Global Stats ──────────────────────────────────────────────────────────
+
 export interface GlobalStats {
   totalXLMRaised: string;
   totalCO2OffsetKg: number;
@@ -550,9 +187,6 @@ function normalizeGlobalStats(stats: Partial<GlobalStats>): GlobalStats {
 
 /**
  * Fetch global platform statistics.
- *
- * @returns Global statistics object.
- * @throws If the request fails.
  */
 export async function fetchGlobalStats(): Promise<GlobalStats> {
   const { data } = await api.get<
@@ -566,10 +200,8 @@ export async function fetchGlobalStats(): Promise<GlobalStats> {
   return normalizeGlobalStats(data);
 }
 
-// ── Cross-Chain Attestations ────────────────────────────────────────────
-/**
- * Cross-chain donation attestation shape returned by the backend.
- */
+// ── Cross-Chain Attestations ──────────────────────────────────────────────
+
 export interface CrossChainAttestation {
   id: string;
   onChainId: number | null;
@@ -585,9 +217,6 @@ export interface CrossChainAttestation {
   verifiedAt: string | null;
 }
 
-/**
- * Attestation roll-up stats returned by GET /api/attestations.
- */
 export interface AttestationStats {
   total: number;
   pending: number;
@@ -630,7 +259,8 @@ export async function fetchAttestationStats(): Promise<AttestationStats> {
   return data.data;
 }
 
-// ── Tag Suggestions ────────────────────────────────────────────────
+// ── Tag Suggestions ───────────────────────────────────────────────────────
+
 /**
  * Fetch tag suggestions for autocomplete.
  */
@@ -651,10 +281,10 @@ export async function notifyAdmin(
   await api.post("/api/admin/notify", payload);
 }
 
-// ── Follow / Unfollow ──────────────────────────────────────────────
+// ── Follow / Unfollow ─────────────────────────────────────────────────────
+
 /**
  * Follow a project.
- * @returns Updated follow state and count.
  */
 export async function followProject(projectId: string, walletAddress: string) {
   const { data } = await api.post<{
@@ -666,7 +296,6 @@ export async function followProject(projectId: string, walletAddress: string) {
 
 /**
  * Unfollow a project.
- * @returns Updated follow state and count.
  */
 export async function unfollowProject(
   projectId: string,
@@ -679,7 +308,8 @@ export async function unfollowProject(
   return data.data;
 }
 
-// ── Admin: Project Approval ──────────────────────────────────────
+// ── Admin: Project Approval ───────────────────────────────────────────────
+
 export async function updateProjectStatus(
   projectId: string,
   status: "active" | "rejected" | "paused",
@@ -717,7 +347,8 @@ export async function confirmProjectRegistration(payload: {
   return data;
 }
 
-// ── Notifications ─────────────────────────────────────────────────
+// ── Notifications ─────────────────────────────────────────────────────────
+
 export interface UnreadNotificationCountParams {
   token: string;
   lastSeen?: string;
@@ -737,7 +368,8 @@ export async function fetchUnreadNotificationCount({
   return data.unreadCount;
 }
 
-// ── Update Likes ─────────────────────────────────────────────────
+// ── Update Likes ──────────────────────────────────────────────────────────
+
 export async function toggleUpdateLike(updateId: string, donorAddress: string) {
   const { data } = await api.post<{
     success: boolean;
@@ -759,7 +391,7 @@ export async function fetchUpdateLikes(
   return data.data;
 }
 
-// ── Project Analytics ─────────────────────────────────────────────
+// ── Project Analytics ─────────────────────────────────────────────────────
 
 export interface ProjectAnalytics {
   projectId: string;
@@ -833,12 +465,10 @@ export async function fetchProjectAnalytics(
   return data.data;
 }
 
-// ── Featured Project ─────────────────────────────────────────────
+// ── Featured Project ──────────────────────────────────────────────────────
+
 /**
  * Fetch the featured project, if one is configured by the backend.
- *
- * @returns The featured project, or `null` if none exists or the request fails.
- * @throws Never; backend errors are caught and converted to `null`.
  */
 export async function fetchFeaturedProject(): Promise<ClimateProject | null> {
   try {
@@ -851,7 +481,8 @@ export async function fetchFeaturedProject(): Promise<ClimateProject | null> {
   }
 }
 
-// ── Category Stats ───────────────────────────────────────────────
+// ── Category Stats ────────────────────────────────────────────────────────
+
 export interface CategoryStats {
   category: string;
   count: number;
@@ -864,7 +495,8 @@ export async function fetchCategoryStats(): Promise<CategoryStats[]> {
   return data.data;
 }
 
-// ── Impact Aggregation ───────────────────────────────────────────────────────
+// ── Impact Aggregation ────────────────────────────────────────────────────
+
 export interface ImpactProjectStats {
   totalDonationsXLM: string;
   donorCount: number;
@@ -959,7 +591,8 @@ export async function submitProject(
   return data.data;
 }
 
-// ── Verification Requests (/apply) ───────────────────────────────────────────
+// ── Verification Requests (/apply) ────────────────────────────────────────
+
 export interface VerificationDocument {
   name: string;
   url: string;
@@ -1051,16 +684,11 @@ export interface UploadedDocument {
 }
 
 /**
- * Uploads a file to /api/uploads. The backend stores it according to
- * STORAGE_BACKEND (local disk by default) and returns a URL that the
- * verification form stashes into `supportingDocuments[]` on submit.
+ * Uploads a file to /api/uploads.
  */
 export async function uploadSupportingDocument(
   file: File,
 ): Promise<UploadedDocument> {
-  // CSRF + multipart: axios automatically sets the right Content-Type when
-  // given a FormData body; we still need the X-CSRF-Token header, which the
-  // request interceptor already adds on POSTs.
   const form = new FormData();
   form.append("file", file);
   const { data } = await api.post<{ success: boolean; data: UploadedDocument }>(
@@ -1070,7 +698,8 @@ export async function uploadSupportingDocument(
   return data.data;
 }
 
-// ── Admin: Queue Monitoring & Actions ──────────────────────────────
+// ── Admin: Queue Monitoring & Actions ─────────────────────────────────────
+
 export interface QueueMetric {
   queue: string;
   active: number;
@@ -1126,7 +755,8 @@ export async function purgeQueue(name: string, adminKey: string): Promise<boolea
   return data.success;
 }
 
-// ── Admin: Webhook Dead-Letter Queue Management ──────────────────────────────
+// ── Admin: Webhook Dead-Letter Queue Management ───────────────────────────
+
 export interface WebhookDelivery {
   id: string;
   projectId: string;
@@ -1197,7 +827,100 @@ export async function fetchWebhookDeliveries(
   return data.data;
 }
 
-// ── Admin Analytics ────────────────────────────────────────────────
+// ── Admin: Webhook mTLS Configuration ─────────────────────────────────────
+
+/**
+ * mTLS configuration shape returned by the backend.
+ */
+export interface WebhookMTLSConfig {
+  enabled: boolean;
+  has_ca: boolean;
+  has_client_cert: boolean;
+  has_client_key: boolean;
+  cert_expires_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Fetch the current mTLS configuration for a project.
+ */
+export async function fetchWebhookMTLS(
+  projectId: string,
+  adminKey: string,
+): Promise<WebhookMTLSConfig | null> {
+  try {
+    const { data } = await api.get<{
+      success: boolean;
+      data: WebhookMTLSConfig;
+    }>(`/api/admin/webhooks/${projectId}/mtls`, {
+      headers: { "X-Admin-Key": adminKey },
+    });
+    return data.data;
+  } catch (err: unknown) {
+    if (axios.isAxiosError(err) && err.response?.status === 404) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Upload and enable mTLS configuration for a project.
+ */
+export async function uploadWebhookMTLS(
+  projectId: string,
+  adminKey: string,
+  payload: { caCert: string; clientCert: string; clientKey: string },
+): Promise<{ cert_expires_at: string }> {
+  const { data } = await api.post<{
+    success: boolean;
+    data: { cert_expires_at: string };
+  }>(
+    `/api/admin/webhooks/${projectId}/mtls`,
+    {
+      ca_cert: payload.caCert,
+      client_cert: payload.clientCert,
+      client_key: payload.clientKey,
+    },
+    { headers: { "X-Admin-Key": adminKey } },
+  );
+  return data.data;
+}
+
+/**
+ * Disable mTLS without dropping the stored certificate material.
+ */
+export async function disableWebhookMTLS(
+  projectId: string,
+  adminKey: string,
+): Promise<void> {
+  await api.post(
+    `/api/admin/webhooks/${projectId}/mtls/disable`,
+    {},
+    { headers: { "X-Admin-Key": adminKey } },
+  );
+}
+
+/**
+ * Test the mTLS connection against the project's webhook URL.
+ */
+export async function testWebhookMTLS(
+  projectId: string,
+  adminKey: string,
+): Promise<{ success: boolean; statusCode?: number; error?: string }> {
+  const { data } = await api.post<{
+    success: boolean;
+    data: { success: boolean; statusCode?: number; error?: string };
+  }>(
+    `/api/admin/webhooks/${projectId}/mtls/test`,
+    {},
+    { headers: { "X-Admin-Key": adminKey } },
+  );
+  return data.data;
+}
+
+// ── Admin Analytics ───────────────────────────────────────────────────────
 
 export interface AdminDonationTrend {
   day: string;
