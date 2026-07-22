@@ -2,6 +2,15 @@
 
 ### Features
 
+* **frontend:** refactor verification forms with React Hook Form + Zod validation (closes #262)
+  - Add `react-hook-form`, `zod`, `@hookform/resolvers` dependencies
+  - Create `frontend/lib/validation.ts` — Zod schemas with Stellar address (StrKey checksum), XLM amount (≤7 decimals), project submission, and verification request validators
+  - Create `frontend/components/FormField.tsx` — reusable `forwardRef` component supporting input, textarea, and select variants with aria-invalid, aria-describedby, hints, and role="alert" errors
+  - Refactor `frontend/pages/apply.tsx` — multi-step wizard preserved with per-step `trigger()` validation and `getValues()` for zero-rerender review display
+  - Refactor `frontend/pages/submit-project.tsx` — RHF + Zod with nested organization/co2Methodology objects via dotted `register()` paths
+  - Add `frontend/lib/__tests__/validation.test.ts` — 28 unit tests (Stellar address, XLM amount, schema validation)
+  - Move `frontend/__tests__pages/apply.test.tsx` → `frontend/__tests__/pages/apply.test.tsx` and update for RHF compatibility (7 integration tests)
+
 * **docs:** add CONTRIBUTORS.md to credit community work (GF-015, closes #64)
 
 * **backend:** implement Soroban RPC retry with exponential backoff and circuit breaker (GF-043, closes #100)

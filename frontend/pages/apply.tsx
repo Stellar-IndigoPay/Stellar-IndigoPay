@@ -8,12 +8,17 @@
  * the wizard stores their `url` returned by POST /api/uploads and sends
  * them in `supportingDocuments[]` on the final POST.
  *
+ * Uses react-hook-form for performant form state and zod for type-safe
+ * schema validation, replacing the previous manual useState per field.
+ *
  * The POST hits /api/verification-requests which the backend persists
  * to the verification_requests table and uses to email admins via
  * Resend. Backend behaviour lives in backend/src/routes/verification.js.
  */
 import { useRef, useState } from "react";
 import { useRouter } from "next/router";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
 import { useI18n } from "@/lib/i18n";
 import { PROJECT_CATEGORIES } from "@/utils/format";
 import {
@@ -21,23 +26,13 @@ import {
   uploadSupportingDocument,
   type VerificationDocument,
 } from "@/lib/api";
+import {
+  verificationRequestSchema,
+  type VerificationRequestFormData,
+} from "@/lib/validation";
+import FormField from "@/components/FormField";
 
 type Step = "org" | "project" | "impact" | "documents" | "review" | "done";
-
-interface FormData {
-  organizationName: string;
-  organizationWebsite: string;
-  organizationCountry: string;
-  contactEmail: string;
-  walletAddress: string;
-  projectName: string;
-  projectCategory: string;
-  projectLocation: string;
-  projectDescription: string;
-  co2PerXLM: string;
-  expectedAnnualTonnesCO2: string;
-  notes: string;
-}
 
 const STEPS: Step[] = [
   "org",
@@ -56,40 +51,30 @@ const STEP_LABELS: Record<Step, string> = {
   done: "Done",
 };
 
-const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ACCEPTED_DOC_TYPES =
   ".pdf,.png,.jpg,.jpeg,.webp,.gif,.doc,.docx,.xls,.xlsx,.txt,.csv,.zip";
 
-function Field({
-  label,
-  error,
-  helper,
-  children,
-}: {
-  label: string;
-  error?: string;
-  helper?: string;
-  children: React.ReactNode;
-}) {
-  // The <label> wraps *only* the input so the accessible name is just the
-  // field label text. Putting helper/error messages inside the <label>
-  // would cause screen readers + RTL's getByLabelText to include them in
-  // the label's accessible text (e.g. "apply.walletAddress *apply.walletHelper"),
-  // which would break both a11y and test label matching.
-  return (
-    <div className="flex flex-col gap-1">
-      <label className="flex flex-col gap-1 cursor-pointer">
-        <span className="label">{label}</span>
-        {children}
-      </label>
-      {helper && !error && (
-        <p className="text-xs text-[#8aaa8a] font-body">{helper}</p>
-      )}
-      {error && <p className="text-xs text-red-500 font-body">{error}</p>}
-    </div>
-  );
-}
+/**
+ * Field sets per step — used by `trigger()` to validate only the fields
+ * visible in the current step before advancing.
+ */
+const STEP_FIELDS: Record<Exclude<Step, "review" | "done">, (keyof VerificationRequestFormData)[]> = {
+  org: [
+    "organizationName",
+    "organizationWebsite",
+    "organizationCountry",
+    "contactEmail",
+    "walletAddress",
+  ],
+  project: [
+    "projectName",
+    "projectCategory",
+    "projectLocation",
+    "projectDescription",
+  ],
+  impact: ["co2PerXLM", "expectedAnnualTonnesCO2", "notes"],
+  documents: [],
+};
 
 export default function ApplyPage() {
   const router = useRouter();
@@ -100,80 +85,42 @@ export default function ApplyPage() {
   const [submitting, setSubmitting] = useState(false);
   const [serverError, setServerError] = useState("");
   const [reviewTimeline, setReviewTimeline] = useState("5–10 business days");
-  const [fieldErrors, setFieldErrors] = useState<
-    Partial<Record<keyof FormData, string>>
-  >({});
   const [documents, setDocuments] = useState<VerificationDocument[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const [form, setForm] = useState<FormData>({
-    organizationName: "",
-    organizationWebsite: "",
-    organizationCountry: "",
-    contactEmail: "",
-    walletAddress: "",
-    projectName: "",
-    projectCategory: PROJECT_CATEGORIES[0],
-    projectLocation: "",
-    projectDescription: "",
-    co2PerXLM: "",
-    expectedAnnualTonnesCO2: "",
-    notes: "",
+  const {
+    register,
+    handleSubmit,
+    trigger,
+    getValues,
+    formState: { errors },
+  } = useForm<VerificationRequestFormData>({
+    resolver: zodResolver(verificationRequestSchema),
+    defaultValues: {
+      projectCategory: PROJECT_CATEGORIES[0],
+      organizationWebsite: "",
+      organizationCountry: "",
+      projectDescription: "",
+      expectedAnnualTonnesCO2: "",
+      notes: "",
+    },
+    mode: "onTouched",
   });
 
-  const set =
-    (field: keyof FormData) =>
-    (
-      e: React.ChangeEvent<
-        HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
-      >,
-    ) => {
-      setForm((prev) => ({ ...prev, [field]: e.target.value }));
-      setFieldErrors((prev) => ({ ...prev, [field]: undefined }));
-    };
-
-  function validateStep(): boolean {
-    const errs: Partial<Record<keyof FormData, string>> = {};
-
-    if (step === "org") {
-      if (!form.organizationName.trim()) errs.organizationName = T("required");
-      if (!form.contactEmail.trim()) errs.contactEmail = T("required");
-      else if (!EMAIL_RE.test(form.contactEmail))
-        errs.contactEmail = T("invalidEmail");
-      if (!STELLAR_ADDRESS_RE.test(form.walletAddress.trim())) {
-        errs.walletAddress = T("invalidWallet");
-      }
+  async function validateAndNext() {
+    const stepFields = STEP_FIELDS[step as keyof typeof STEP_FIELDS];
+    if (!stepFields || stepFields.length === 0) {
+      // Documents step has no validated fields — just advance
+      const idx = STEPS.indexOf(step);
+      if (idx < STEPS.length - 2) setStep(STEPS[idx + 1]);
+      return;
     }
 
-    if (step === "project") {
-      if (!form.projectName.trim()) errs.projectName = T("required");
-      if (!form.projectCategory) errs.projectCategory = T("invalidCategory");
-      if (!form.projectLocation.trim()) errs.projectLocation = T("required");
-    }
+    const valid = await trigger(stepFields as any);
+    if (!valid) return;
 
-    if (step === "impact") {
-      const co2 = Number(form.co2PerXLM);
-      if (!form.co2PerXLM || !Number.isFinite(co2) || co2 < 0)
-        errs.co2PerXLM = T("invalidCO2");
-      const annual = form.expectedAnnualTonnesCO2
-        ? Number(form.expectedAnnualTonnesCO2)
-        : 0;
-      if (
-        form.expectedAnnualTonnesCO2 &&
-        (!Number.isFinite(annual) || annual < 0)
-      ) {
-        errs.expectedAnnualTonnesCO2 = T("invalidCO2");
-      }
-    }
-
-    setFieldErrors(errs);
-    return Object.keys(errs).length === 0;
-  }
-
-  function nextStep() {
-    if (!validateStep()) return;
     const idx = STEPS.indexOf(step);
     if (idx < STEPS.length - 2) setStep(STEPS[idx + 1]);
   }
@@ -217,29 +164,28 @@ export default function ApplyPage() {
     setDocuments((prev) => prev.filter((_, i) => i !== index));
   }
 
-  async function handleSubmit() {
-    if (!validateStep()) return;
+  async function onSubmit(data: VerificationRequestFormData) {
     setSubmitting(true);
     setServerError("");
     try {
       const payload = {
-        organizationName: form.organizationName.trim(),
-        organizationWebsite: form.organizationWebsite.trim() || undefined,
-        organizationCountry: form.organizationCountry.trim() || undefined,
-        contactEmail: form.contactEmail.trim(),
-        walletAddress: form.walletAddress.trim(),
-        projectName: form.projectName.trim(),
-        projectCategory: form.projectCategory,
-        projectLocation: form.projectLocation.trim(),
-        projectDescription: form.projectDescription.trim() || undefined,
-        co2PerXLM: form.co2PerXLM.trim(),
+        organizationName: data.organizationName.trim(),
+        organizationWebsite: data.organizationWebsite?.trim() || undefined,
+        organizationCountry: data.organizationCountry?.trim() || undefined,
+        contactEmail: data.contactEmail.trim(),
+        walletAddress: data.walletAddress.trim(),
+        projectName: data.projectName.trim(),
+        projectCategory: data.projectCategory,
+        projectLocation: data.projectLocation.trim(),
+        projectDescription: data.projectDescription?.trim() || undefined,
+        co2PerXLM: data.co2PerXLM.trim(),
         expectedAnnualTonnesCO2:
-          form.expectedAnnualTonnesCO2.trim() || undefined,
+          data.expectedAnnualTonnesCO2?.trim() || undefined,
         supportingDocuments: documents,
-        notes: form.notes.trim() || undefined,
+        notes: data.notes?.trim() || undefined,
       };
-      const data = await submitVerificationRequest(payload);
-      setReviewTimeline(data?.reviewTimeline ?? "5–10 business days");
+      const result = await submitVerificationRequest(payload);
+      setReviewTimeline(result?.reviewTimeline ?? "5–10 business days");
       setStep("done");
     } catch (err: any) {
       const msg =
@@ -247,8 +193,6 @@ export default function ApplyPage() {
         err?.response?.data?.message ??
         "Submission failed. Please try again.";
       setServerError(msg);
-      // Don't move back to "review" if the API still wants the form filled —
-      // surface the message so the submitter can correct and retry.
     } finally {
       setSubmitting(false);
     }
@@ -267,7 +211,7 @@ export default function ApplyPage() {
         <p className="text-[#5a7a5a] font-body mb-8">
           {T("subCopy")
             .replace("{timeline}", reviewTimeline)
-            .replace("{email}", form.contactEmail)}
+            .replace("{email}", getValues("contactEmail") ?? "")}
         </p>
         <button className="btn-primary" onClick={() => router.push("/")}>
           {T("backToHome")}
@@ -287,6 +231,7 @@ export default function ApplyPage() {
       <p className="text-[#475569] dark:text-[#94A3B8] font-body mb-8 text-sm">
         {T("pageIntro")}
       </p>
+
       {/* Step indicator */}
       <div className="flex items-center gap-2 mb-10">
         {progressSteps.map((s, i) => (
@@ -319,370 +264,349 @@ export default function ApplyPage() {
           </div>
         ))}
       </div>
-      <div className="card p-6 space-y-5">
-        {/* Step: org */}
-        {step === "org" && (
-          <>
-            <h2 className="font-display text-xl font-bold text-[#0F172A] dark:text-[#E2E8F0]">
-              {T("stepOrg")}
-            </h2>
-            <Field
-              label={`${T("orgName")} *`}
-              error={fieldErrors.organizationName}
-            >
-              <input
-                className="input-field"
-                value={form.organizationName}
-                onChange={set("organizationName")}
-                placeholder="Acme Climate Foundation"
-              />
-            </Field>
-            <Field label={T("orgWebsite")}>
-              <input
-                className="input-field"
-                value={form.organizationWebsite}
-                onChange={set("organizationWebsite")}
-                placeholder="https://acme.org"
-              />
-            </Field>
-            <Field label={T("orgCountry")}>
-              <input
-                className="input-field"
-                value={form.organizationCountry}
-                onChange={set("organizationCountry")}
-                placeholder="Kenya"
-              />
-            </Field>
-            <Field
-              label={`${T("contactEmail")} *`}
-              error={fieldErrors.contactEmail}
-            >
-              <input
-                className="input-field"
-                type="email"
-                value={form.contactEmail}
-                onChange={set("contactEmail")}
-                placeholder="hello@acme.org"
-              />
-            </Field>
-            <Field
-              label={`${T("walletAddress")} *`}
-              helper={T("walletHelper")}
-              error={fieldErrors.walletAddress}
-            >
-              <input
-                className="input-field font-mono text-sm"
-                spellCheck={false}
-                value={form.walletAddress}
-                onChange={set("walletAddress")}
-                placeholder="GABC…"
-              />
-            </Field>
-          </>
-        )}
 
-        {/* Step: project */}
-        {step === "project" && (
-          <>
-            <h2 className="font-display text-xl font-bold text-[#0F172A] dark:text-[#E2E8F0]">
-              {T("stepProject")}
-            </h2>
-            <Field
-              label={`${T("projectName")} *`}
-              error={fieldErrors.projectName}
-            >
-              <input
-                className="input-field"
-                value={form.projectName}
-                onChange={set("projectName")}
-                placeholder="Acme Solar Farm Phase 1"
+      <form
+        onSubmit={handleSubmit(onSubmit)}
+        noValidate
+      >
+        <div className="card p-6 space-y-5">
+          {/* Step: org */}
+          {step === "org" && (
+            <>
+              <h2 className="font-display text-xl font-bold text-[#0F172A] dark:text-[#E2E8F0]">
+                {T("stepOrg")}
+              </h2>
+              <FormField
+                label={T("orgName")}
+                required
+                error={errors.organizationName?.message}
+                placeholder="Acme Climate Foundation"
+                {...register("organizationName")}
               />
-            </Field>
-            <Field
-              label={`${T("projectCategory")} *`}
-              error={fieldErrors.projectCategory}
-            >
-              <select
-                className="input-field"
-                value={form.projectCategory}
-                onChange={set("projectCategory")}
+              <FormField
+                label={T("orgWebsite")}
+                error={errors.organizationWebsite?.message}
+                placeholder="https://acme.org"
+                {...register("organizationWebsite")}
+              />
+              <FormField
+                label={T("orgCountry")}
+                error={errors.organizationCountry?.message}
+                placeholder="Kenya"
+                {...register("organizationCountry")}
+              />
+              <FormField
+                label={T("contactEmail")}
+                required
+                type="email"
+                error={errors.contactEmail?.message}
+                placeholder="hello@acme.org"
+                {...register("contactEmail")}
+              />
+              <FormField
+                label={T("walletAddress")}
+                required
+                hint={T("walletHelper")}
+                error={errors.walletAddress?.message}
+                placeholder="GABC…"
+                spellCheck={false}
+                {...register("walletAddress")}
+              />
+            </>
+          )}
+
+          {/* Step: project */}
+          {step === "project" && (
+            <>
+              <h2 className="font-display text-xl font-bold text-[#0F172A] dark:text-[#E2E8F0]">
+                {T("stepProject")}
+              </h2>
+              <FormField
+                label={T("projectName")}
+                required
+                error={errors.projectName?.message}
+                placeholder="Acme Solar Farm Phase 1"
+                {...register("projectName")}
+              />
+              <FormField
+                as="select"
+                label={T("projectCategory")}
+                required
+                error={errors.projectCategory?.message}
+                {...register("projectCategory")}
               >
                 {PROJECT_CATEGORIES.map((c) => (
                   <option key={c} value={c}>
                     {c}
                   </option>
                 ))}
-              </select>
-            </Field>
-            <Field
-              label={`${T("projectLocation")} *`}
-              error={fieldErrors.projectLocation}
-            >
-              <input
-                className="input-field"
-                value={form.projectLocation}
-                onChange={set("projectLocation")}
+              </FormField>
+              <FormField
+                label={T("projectLocation")}
+                required
+                error={errors.projectLocation?.message}
                 placeholder="Nairobi, Kenya"
+                {...register("projectLocation")}
               />
-            </Field>
-            <Field label={T("projectDescription")}>
-              <textarea
-                className="input-field min-h-[100px] resize-y"
-                value={form.projectDescription}
-                onChange={set("projectDescription")}
+              <FormField
+                as="textarea"
+                label={T("projectDescription")}
+                error={errors.projectDescription?.message}
                 placeholder="Tell us about the project in a few sentences."
+                {...register("projectDescription")}
               />
-            </Field>
-          </>
-        )}
+            </>
+          )}
 
-        {/* Step: impact */}
-        {step === "impact" && (
-          <>
-            <h2 className="font-display text-xl font-bold text-[#0F172A] dark:text-[#E2E8F0]">
-              {T("stepImpact")}
-            </h2>
-            <p className="text-[#475569] dark:text-[#94A3B8] text-sm font-body">
-              We use these numbers to communicate impact to donors and on-chain.
-            </p>
-            <Field
-              label={`${T("co2PerXLM")} *`}
-              error={fieldErrors.co2PerXLM}
-              helper="e.g. 0.05 kg CO₂ per XLM."
-            >
-              <input
-                className="input-field"
-                type="number"
-                inputMode="decimal"
-                min="0"
-                step="any"
-                value={form.co2PerXLM}
-                onChange={set("co2PerXLM")}
-                placeholder="0.05"
-              />
-            </Field>
-            <Field
-              label={T("annualTonnes")}
-              error={fieldErrors.expectedAnnualTonnesCO2}
-            >
-              <input
-                className="input-field"
-                type="number"
-                inputMode="decimal"
-                min="0"
-                step="any"
-                value={form.expectedAnnualTonnesCO2}
-                onChange={set("expectedAnnualTonnesCO2")}
-                placeholder="1200"
-              />
-            </Field>
-            <Field label={T("notes")}>
-              <textarea
-                className="input-field min-h-[80px] resize-y"
-                value={form.notes}
-                onChange={set("notes")}
-                placeholder="Methodology, prior funding rounds, anything else the reviewer should see."
-              />
-            </Field>
-          </>
-        )}
-
-        {/* Step: documents */}
-        {step === "documents" && (
-          <>
-            <h2 className="font-display text-xl font-bold text-[#0F172A] dark:text-[#E2E8F0]">
-              {T("documentsTitle")}
-            </h2>
-            <p className="text-[#475569] dark:text-[#94A3B8] text-sm font-body">
-              {T("documentsHint")}
-            </p>
-            <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-body">
-              {T("storageNote")}
-            </p>
-
-            <div className="rounded-lg border border-dashed border-forest-200 p-4 flex flex-col gap-3 bg-forest-50/40">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept={ACCEPTED_DOC_TYPES}
-                onChange={handleFileSelected}
-                className="block w-full text-sm text-[#0F172A] dark:text-[#E2E8F0] file:mr-3 file:rounded-md file:border-0 file:bg-gradient-to-r file:from-[#4F46E5] file:to-[#7C3AED] file:px-4 file:py-2 file:text-white file:cursor-pointer hover:file:opacity-90"
-                aria-label={T("documentsTitle")}
-              />
-              {uploading && (
-                <p className="text-xs text-[#4F46E5] dark:text-[#818CF8] font-body">
-                  {T("uploading")}
-                </p>
-              )}
-              {uploadError && (
-                <p className="text-xs text-red-500 font-body">{uploadError}</p>
-              )}
-            </div>
-
-            {documents.length === 0 ? (
-              <p className="text-sm text-[#64748B] dark:text-[#94A3B8] font-body">
-                {T("noDocuments")}
+          {/* Step: impact */}
+          {step === "impact" && (
+            <>
+              <h2 className="font-display text-xl font-bold text-[#0F172A] dark:text-[#E2E8F0]">
+                {T("stepImpact")}
+              </h2>
+              <p className="text-[#475569] dark:text-[#94A3B8] text-sm font-body">
+                We use these numbers to communicate impact to donors and on-chain.
               </p>
-            ) : (
-              <ul className="divide-y divide-forest-100 rounded-lg border border-forest-100 overflow-hidden">
-                {documents.map((doc, i) => (
-                  <li
-                    key={`${doc.url}-${i}`}
-                    className="flex items-center gap-3 px-4 py-3 bg-white dark:bg-[#14142D]"
-                  >
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-[#0F172A] dark:text-[#E2E8F0] truncate font-body">
-                        {doc.name}
-                      </p>
-                      <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-body truncate">
-                        {doc.backend} ·{" "}
-                        {doc.size ? `${(doc.size / 1024).toFixed(1)} KB` : "—"}
-                      </p>
-                    </div>
-                    <a
-                      href={doc.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-[#4F46E5] dark:text-[#818CF8] hover:underline font-body"
+              <FormField
+                label={T("co2PerXLM")}
+                required
+                error={errors.co2PerXLM?.message}
+                hint="e.g. 0.05 kg CO₂ per XLM."
+                type="number"
+                inputMode="decimal"
+                min="0"
+                step="any"
+                placeholder="0.05"
+                {...register("co2PerXLM")}
+              />
+              <FormField
+                label={T("annualTonnes")}
+                error={errors.expectedAnnualTonnesCO2?.message}
+                type="number"
+                inputMode="decimal"
+                min="0"
+                step="any"
+                placeholder="1200"
+                {...register("expectedAnnualTonnesCO2")}
+              />
+              <FormField
+                as="textarea"
+                label={T("notes")}
+                error={errors.notes?.message}
+                placeholder="Methodology, prior funding rounds, anything else the reviewer should see."
+                {...register("notes")}
+              />
+            </>
+          )}
+
+          {/* Step: documents */}
+          {step === "documents" && (
+            <>
+              <h2 className="font-display text-xl font-bold text-[#0F172A] dark:text-[#E2E8F0]">
+                {T("documentsTitle")}
+              </h2>
+              <p className="text-[#475569] dark:text-[#94A3B8] text-sm font-body">
+                {T("documentsHint")}
+              </p>
+              <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-body">
+                {T("storageNote")}
+              </p>
+
+              <div className="rounded-lg border border-dashed border-forest-200 p-4 flex flex-col gap-3 bg-forest-50/40">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept={ACCEPTED_DOC_TYPES}
+                  onChange={handleFileSelected}
+                  className="block w-full text-sm text-[#0F172A] dark:text-[#E2E8F0] file:mr-3 file:rounded-md file:border-0 file:bg-gradient-to-r file:from-[#4F46E5] file:to-[#7C3AED] file:px-4 file:py-2 file:text-white file:cursor-pointer hover:file:opacity-90"
+                  aria-label={T("documentsTitle")}
+                />
+                {uploading && (
+                  <p className="text-xs text-[#4F46E5] dark:text-[#818CF8] font-body">
+                    {T("uploading")}
+                  </p>
+                )}
+                {uploadError && (
+                  <p className="text-xs text-red-500 font-body">{uploadError}</p>
+                )}
+              </div>
+
+              {documents.length === 0 ? (
+                <p className="text-sm text-[#64748B] dark:text-[#94A3B8] font-body">
+                  {T("noDocuments")}
+                </p>
+              ) : (
+                <ul className="divide-y divide-forest-100 rounded-lg border border-forest-100 overflow-hidden">
+                  {documents.map((doc, i) => (
+                    <li
+                      key={`${doc.url}-${i}`}
+                      className="flex items-center gap-3 px-4 py-3 bg-white dark:bg-[#14142D]"
                     >
-                      ↗
-                    </a>
-                    <button
-                      type="button"
-                      onClick={() => removeDocument(i)}
-                      className="text-xs text-red-500 hover:text-red-600 font-body"
-                    >
-                      {T("remove")}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </>
-        )}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-[#0F172A] dark:text-[#E2E8F0] truncate font-body">
+                          {doc.name}
+                        </p>
+                        <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-body truncate">
+                          {doc.backend} ·{" "}
+                          {doc.size ? `${(doc.size / 1024).toFixed(1)} KB` : "—"}
+                        </p>
+                      </div>
+                      <a
+                        href={doc.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs text-[#4F46E5] dark:text-[#818CF8] hover:underline font-body"
+                      >
+                        ↗
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => removeDocument(i)}
+                        className="text-xs text-red-500 hover:text-red-600 font-body"
+                      >
+                        {T("remove")}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
 
-        {/* Step: review */}
-        {step === "review" && (
-          <>
-            <h2 className="font-display text-xl font-bold text-[#0F172A] dark:text-[#E2E8F0]">
-              {T("stepReview")}
-            </h2>
-            <p className="text-sm text-[#475569] dark:text-[#94A3B8] font-body">
-              Quick scan before submission:
-            </p>
-            <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm font-body">
-              <div>
-                <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
-                  {T("orgName")}
-                </dt>
-                <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
-                  {form.organizationName || "—"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
-                  {T("contactEmail")}
-                </dt>
-                <dd className="text-forest-900 break-all">
-                  {form.contactEmail || "—"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
-                  {T("walletAddress")}
-                </dt>
-                <dd className="font-mono text-xs text-[#0F172A] dark:text-[#E2E8F0] break-all">
-                  {form.walletAddress || "—"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
-                  {T("projectName")}
-                </dt>
-                <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
-                  {form.projectName || "—"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
-                  {T("projectCategory")}
-                </dt>
-                <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
-                  {form.projectCategory || "—"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
-                  {T("projectLocation")}
-                </dt>
-                <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
-                  {form.projectLocation || "—"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
-                  {T("co2PerXLM")}
-                </dt>
-                <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
-                  {form.co2PerXLM || "—"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
-                  {T("annualTonnes")}
-                </dt>
-                <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
-                  {form.expectedAnnualTonnesCO2 || "—"}
-                </dd>
-              </div>
-              <div className="sm:col-span-2">
-                <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
-                  {T("documentsTitle")}
-                </dt>
-                <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
-                  {documents.length
-                    ? documents.map((d) => d.name).join(", ")
-                    : T("noDocuments")}
-                </dd>
-              </div>
-            </dl>
+          {/* Step: review */}
+          {step === "review" && (() => {
+            const reviewData = getValues();
+            return (
+            <>
+              <h2 className="font-display text-xl font-bold text-[#0F172A] dark:text-[#E2E8F0]">
+                {T("stepReview")}
+              </h2>
+              <p className="text-sm text-[#475569] dark:text-[#94A3B8] font-body">
+                Quick scan before submission:
+              </p>
+              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm font-body">
+                <div>
+                  <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
+                    {T("orgName")}
+                  </dt>
+                  <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
+                    {reviewData.organizationName || "—"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
+                    {T("contactEmail")}
+                  </dt>
+                  <dd className="text-forest-900 break-all">
+                    {reviewData.contactEmail || "—"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
+                    {T("walletAddress")}
+                  </dt>
+                  <dd className="font-mono text-xs text-[#0F172A] dark:text-[#E2E8F0] break-all">
+                    {reviewData.walletAddress || "—"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
+                    {T("projectName")}
+                  </dt>
+                  <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
+                    {reviewData.projectName || "—"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
+                    {T("projectCategory")}
+                  </dt>
+                  <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
+                    {reviewData.projectCategory || "—"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
+                    {T("projectLocation")}
+                  </dt>
+                  <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
+                    {reviewData.projectLocation || "—"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
+                    {T("co2PerXLM")}
+                  </dt>
+                  <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
+                    {reviewData.co2PerXLM || "—"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
+                    {T("annualTonnes")}
+                  </dt>
+                  <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
+                    {reviewData.expectedAnnualTonnesCO2 || "—"}
+                  </dd>
+                </div>
+                <div className="sm:col-span-2">
+                  <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
+                    {T("documentsTitle")}
+                  </dt>
+                  <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
+                    {documents.length
+                      ? documents.map((d) => d.name).join(", ")
+                      : T("noDocuments")}
+                  </dd>
+                </div>
+              </dl>
 
-            {serverError && (
-              <p className="text-sm text-red-500 font-body">{serverError}</p>
-            )}
-          </>
-        )}
-      </div>
-      {/* Navigation */}
-      <div className="flex justify-between mt-6">
-        <button
-          type="button"
-          onClick={prevStep}
-          disabled={stepIndex === 0}
-          className="btn-secondary disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          {T("common.back") || "Back"}
-        </button>
+              {serverError && (
+                <p className="text-sm text-red-500 font-body">{serverError}</p>
+              )}
+            </>
+            );
+          })()}
+        </div>
 
-        {step === "documents" ? (
-          <button type="button" onClick={nextStep} className="btn-primary">
-            {T("common.next") || "Next"}
-          </button>
-        ) : step === "review" ? (
+        {/* Navigation */}
+        <div className="flex justify-between mt-6">
           <button
             type="button"
-            onClick={handleSubmit}
-            disabled={submitting}
-            className="btn-primary disabled:opacity-60 disabled:cursor-not-allowed"
+            onClick={prevStep}
+            disabled={stepIndex === 0}
+            className="btn-secondary disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            {submitting ? T("submitting") : T("submit")}
+            {T("common.back") || "Back"}
           </button>
-        ) : (
-          <button type="button" onClick={nextStep} className="btn-primary">
-            {T("common.next") || "Next"}
-          </button>
-        )}
-      </div>
+
+          {step === "documents" ? (
+            <button
+              type="button"
+              onClick={validateAndNext}
+              className="btn-primary"
+            >
+              {T("common.next") || "Next"}
+            </button>
+          ) : step === "review" ? (
+            <button
+              type="submit"
+              disabled={submitting}
+              className="btn-primary disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {submitting ? T("submitting") : T("submit")}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={validateAndNext}
+              className="btn-primary"
+            >
+              {T("common.next") || "Next"}
+            </button>
+          )}
+        </div>
+      </form>
     </div>
   );
 }
