@@ -276,6 +276,23 @@ pub struct VestingSchedule {
     pub token: Address,
 }
 
+#[cfg(feature = "ratings")]
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectRating {
+    pub rating: u32,
+    pub comment_hash: BytesN<32>,
+    pub rated_at_ledger: u32,
+}
+
+#[cfg(feature = "ratings")]
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectRatingStats {
+    pub total_rating: u32,
+    pub rating_count: u32,
+}
+
 /// An on-chain impact certificate leaf for a single donor's contribution.
 /// The platform constructs a Merkle tree of all donor impacts for a project's
 /// reporting period and posts only the root on-chain. Individual donors can then
@@ -412,6 +429,8 @@ pub enum DataKey {
     PlatformFeeBps,
     /// Designated wallet that receives the platform fee.
     PlatformTreasury,
+    ProjectRating(String, Address),
+    ProjectRatingStats(String),
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -1346,6 +1365,107 @@ impl IndigoPayContract {
             treasury,
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    // ─── Project Ratings ─────────────────────────────────────────────────────
+
+    /// Rate a project as a verified donor.
+    ///
+    /// Stores one rating per (project_id, donor). Calling this again updates
+    /// the donor's previous rating and adjusts the aggregate average.
+    #[cfg(feature = "ratings")]
+    pub fn rate_project(
+        env: Env,
+        donor: Address,
+        project_id: String,
+        rating: u32,
+        comment_hash: BytesN<32>,
+    ) {
+        donor.require_auth();
+        require_not_paused(&env);
+        if !(1..=5).contains(&rating) {
+            panic!("Rating must be between 1 and 5");
+        }
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::HasDonated(project_id.clone(), donor.clone()))
+        {
+            panic!("Donor has not donated to project");
+        }
+
+        let rating_key = DataKey::ProjectRating(project_id.clone(), donor.clone());
+        let previous: Option<ProjectRating> = env.storage().instance().get(&rating_key);
+        let stats_key = DataKey::ProjectRatingStats(project_id.clone());
+        let mut stats: ProjectRatingStats =
+            env.storage()
+                .instance()
+                .get(&stats_key)
+                .unwrap_or(ProjectRatingStats {
+                    total_rating: 0,
+                    rating_count: 0,
+                });
+
+        if let Some(prev) = previous {
+            stats.total_rating = stats
+                .total_rating
+                .checked_sub(prev.rating)
+                .and_then(|total| total.checked_add(rating))
+                .expect("Project rating total overflow");
+        } else {
+            stats.total_rating = stats
+                .total_rating
+                .checked_add(rating)
+                .expect("Project rating total overflow");
+            stats.rating_count = stats
+                .rating_count
+                .checked_add(1)
+                .expect("Project rating count overflow");
+        }
+
+        let stored = ProjectRating {
+            rating,
+            comment_hash: comment_hash.clone(),
+            rated_at_ledger: env.ledger().sequence(),
+        };
+        env.storage().instance().set(&rating_key, &stored);
+        env.storage().instance().set(&stats_key, &stats);
+        env.events().publish(
+            (symbol_short!("rated"), donor, project_id),
+            (rating, comment_hash),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    #[cfg(feature = "ratings")]
+    pub fn get_project_avg_rating(env: Env, project_id: String) -> (u32, u32) {
+        let stats: ProjectRatingStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProjectRatingStats(project_id))
+            .unwrap_or(ProjectRatingStats {
+                total_rating: 0,
+                rating_count: 0,
+            });
+        if stats.rating_count == 0 {
+            return (0, 0);
+        }
+        (
+            stats
+                .total_rating
+                .checked_mul(100)
+                .expect("Project average rating overflow")
+                / stats.rating_count,
+            stats.rating_count,
+        )
+    }
+
+    #[cfg(feature = "ratings")]
+    pub fn get_donor_rating(env: Env, project_id: String, donor: Address) -> Option<u32> {
+        env.storage()
+            .instance()
+            .get::<DataKey, ProjectRating>(&DataKey::ProjectRating(project_id, donor))
+            .map(|rating| rating.rating)
     }
 
     // ─── Donations ────────────────────────────────────────────────────────────
@@ -5553,6 +5673,83 @@ mod tests {
         let p = client.get_project(&pid);
         assert_eq!(p.donor_count, 2);
         assert_eq!(p.total_raised, 20 * STROOP);
+    }
+
+    #[cfg(feature = "ratings")]
+    fn donate_for_rating(env: &Env, client: &IndigoPayContractClient, pid: &String) -> Address {
+        let donor = Address::generate(env);
+        let token_admin = Address::generate(env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(env, &token).mint(&donor, &(10 * STROOP));
+        client.donate(&token, &donor, pid, &(10 * STROOP), &0u32);
+        donor
+    }
+
+    #[cfg(feature = "ratings")]
+    fn comment_hash(env: &Env, marker: u8) -> BytesN<32> {
+        BytesN::from_array(env, &[marker; 32])
+    }
+
+    #[cfg(feature = "ratings")]
+    #[test]
+    fn test_rate_project_by_donor() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = donate_for_rating(&env, &client, &pid);
+
+        client.rate_project(&donor, &pid, &4u32, &comment_hash(&env, 1));
+
+        assert_eq!(client.get_donor_rating(&pid, &donor), Some(4));
+        assert_eq!(client.get_project_avg_rating(&pid), (400, 1));
+    }
+
+    #[cfg(feature = "ratings")]
+    #[test]
+    #[should_panic(expected = "Donor has not donated to project")]
+    fn test_rate_project_by_non_donor_fails() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+
+        client.rate_project(&donor, &pid, &4u32, &comment_hash(&env, 2));
+    }
+
+    #[cfg(feature = "ratings")]
+    #[test]
+    fn test_rerate_project() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = donate_for_rating(&env, &client, &pid);
+
+        client.rate_project(&donor, &pid, &4u32, &comment_hash(&env, 3));
+        client.rate_project(&donor, &pid, &5u32, &comment_hash(&env, 4));
+
+        assert_eq!(client.get_donor_rating(&pid, &donor), Some(5));
+        assert_eq!(client.get_project_avg_rating(&pid), (500, 1));
+    }
+
+    #[cfg(feature = "ratings")]
+    #[test]
+    fn test_average_rating_calculation() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor1 = donate_for_rating(&env, &client, &pid);
+        let donor2 = donate_for_rating(&env, &client, &pid);
+        let donor3 = donate_for_rating(&env, &client, &pid);
+
+        client.rate_project(&donor1, &pid, &5u32, &comment_hash(&env, 5));
+        client.rate_project(&donor2, &pid, &4u32, &comment_hash(&env, 6));
+        client.rate_project(&donor3, &pid, &3u32, &comment_hash(&env, 7));
+
+        assert_eq!(client.get_project_avg_rating(&pid), (400, 3));
+    }
+
+    #[cfg(feature = "ratings")]
+    #[test]
+    #[should_panic(expected = "Rating must be between 1 and 5")]
+    fn test_invalid_rating_value_fails() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = donate_for_rating(&env, &client, &pid);
+
+        client.rate_project(&donor, &pid, &0u32, &comment_hash(&env, 8));
     }
 
     /// `get_voter_list` returns voters in the order they voted.
