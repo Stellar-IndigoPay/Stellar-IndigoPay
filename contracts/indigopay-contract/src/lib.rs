@@ -1770,9 +1770,9 @@ impl OracleInterface for MockOracle {
 mod tests {
     extern crate std;
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
     use soroban_sdk::token::StellarAssetClient;
-    use soroban_sdk::{Address, BytesN, Env, String, Symbol, TryFromVal, Vec};
+    use soroban_sdk::{Address, BytesN, Env, String, Vec};
 
     // ─── Existing tests ───────────────────────────────────────────────────────
 

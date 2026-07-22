@@ -28,8 +28,8 @@ mod fuzz {
     };
     use proptest::prelude::*;
     use soroban_sdk::{
-        contract, contractimpl, testutils::Address as _, token::StellarAssetClient, Address, Env,
-        String as SorobanString, Symbol,
+        contract, contractimpl, testutils::Address as _, testutils::Ledger as _,
+        token::StellarAssetClient, Address, BytesN, Env, String as SorobanString, Symbol,
     };
 
     // ─── Constants ───────────────────────────────────────────────────────────
@@ -790,7 +790,7 @@ mod fuzz {
         fn prop_usdc_amount_near_max(usdc_amount in (i128::MAX / 8 + 1)..=i128::MAX) {
             let (env, client, project_id, usdc_token) = setup_usdc(100u32);
             let donor = Address::generate(&env);
-            fund_usdc(&env, &usdc_token, &donor, &usdc_amount);
+            fund_usdc(&env, &usdc_token, &donor, usdc_amount);
 
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 client.donate_usdc(&usdc_token, &donor, &project_id, &usdc_amount, &MSG_HASH);
@@ -836,7 +836,7 @@ mod fuzz {
             client.deactivate_project(&admin, &project_id);
 
             let donor = Address::generate(&env);
-            fund_usdc(&env, &usdc_token, &donor, &amount);
+            fund_usdc(&env, &usdc_token, &donor, amount);
 
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 client.donate_usdc(&usdc_token, &donor, &project_id, &amount, &MSG_HASH);
@@ -854,7 +854,7 @@ mod fuzz {
         ) {
             let (env, client, project_id, usdc_token) = setup_usdc(u32::MAX);
             let donor = Address::generate(&env);
-            fund_usdc(&env, &usdc_token, &donor, &usdc_amount);
+            fund_usdc(&env, &usdc_token, &donor, usdc_amount);
 
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 client.donate_usdc(&usdc_token, &donor, &project_id, &usdc_amount, &MSG_HASH);
@@ -875,11 +875,11 @@ mod fuzz {
             let admin = Address::generate(&env);
             client.initialize(&admin);
 
-            let mut expected_for = vec![0u32; num_projects];
-            let mut expected_against = vec![0u32; num_projects];
-            let mut project_ids = Vec::new();
+            let mut expected_for: std::vec::Vec<u32> = std::vec![0u32; num_projects];
+            let mut expected_against: std::vec::Vec<u32> = std::vec![0u32; num_projects];
+            let mut project_ids: std::vec::Vec<SorobanString> = std::vec::Vec::new();
             for idx in 0..num_projects {
-                let project_id = SorobanString::from_str(&env, &format!("gov-fuzz-{}", idx));
+                let project_id = SorobanString::from_str(&env, &std::format!("gov-fuzz-{}", idx));
                 let wallet = Address::generate(&env);
                 client.register_project(
                     &admin,
@@ -896,7 +896,7 @@ mod fuzz {
                 let donor = Address::generate(&env);
                 grant_badge(&env, &cid, &donor, 10 * STROOP);
                 let proposal_idx = donor_idx % num_projects;
-                let project_id = project_ids[proposal_idx].clone();
+                let project_id = &project_ids[proposal_idx];
                 let approve = (donor_idx + proposal_idx) % 2 == 0;
 
                 let first_vote = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -942,7 +942,7 @@ mod fuzz {
         fn fuzz_upgrade_timelock(
             proposal_ledger in 0u32..=50_000u32,
             offset in 0u32..=50_000u32,
-            cancel_first in bool,
+            cancel_first: bool,
         ) {
             let env = Env::default();
             env.mock_all_auths();
@@ -952,7 +952,7 @@ mod fuzz {
             client.initialize(&admin);
 
             env.ledger().set_sequence_number(proposal_ledger);
-            let upgrade_wasm = env.deployer().upload_contract_wasm(IndigoPayContract);
+            let upgrade_wasm = BytesN::from_array(&env, &[0u8; 32]);
             client.propose_upgrade(&admin, &upgrade_wasm);
 
             let effective_at = proposal_ledger + crate::UPGRADE_TIMELOCK_LEDGERS;
@@ -992,7 +992,7 @@ mod fuzz {
             let (env, client, project_id, usdc_token) = setup_usdc(co2_per_xlm);
             let admin = client.get_admin();
             let donor = Address::generate(&env);
-            fund_usdc(&env, &usdc_token, &donor, &100_000_000i128);
+            fund_usdc(&env, &usdc_token, &donor, 100_000_000i128);
             let oracle_addr = env.register_contract(None, PriceOracleHarness);
             env.as_contract(&oracle_addr, || {
                 env.storage().instance().set(&Symbol::new(&env, "price"), &oracle_price);

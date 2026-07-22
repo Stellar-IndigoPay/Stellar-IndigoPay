@@ -47,7 +47,7 @@ mod tests {
     #[test]
     fn test_initialize_and_get_price_default() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, SimpleOracle);
+        let contract_id = env.register(SimpleOracle, ());
         let client = SimpleOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -60,7 +60,7 @@ mod tests {
     #[should_panic(expected = "Contract already initialized")]
     fn test_initialize_idempotency() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, SimpleOracle);
+        let contract_id = env.register(SimpleOracle, ());
         let client = SimpleOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -72,7 +72,7 @@ mod tests {
     fn test_set_and_get_price() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, SimpleOracle);
+        let contract_id = env.register(SimpleOracle, ());
         let client = SimpleOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -90,7 +90,7 @@ mod tests {
     fn test_admin_authorization() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, SimpleOracle);
+        let contract_id = env.register(SimpleOracle, ());
         let client = SimpleOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);

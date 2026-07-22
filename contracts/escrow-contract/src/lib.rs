@@ -304,8 +304,8 @@ mod tests {
     use soroban_sdk::token::StellarAssetClient;
     use soroban_sdk::{Address, Env, String, Vec};
 
-    fn setup(env: &Env) -> (Address, EscrowContractClient) {
-        let cid = env.register_contract(None, EscrowContract);
+    fn setup(env: &Env) -> (Address, EscrowContractClient<'_>) {
+        let cid = env.register(EscrowContract, ());
         let client = EscrowContractClient::new(env, &cid);
         let admin = Address::generate(env);
         client.initialize(&admin);
