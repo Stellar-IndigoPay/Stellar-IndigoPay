@@ -455,6 +455,18 @@ const EMERGENCY_WITHDRAWAL_TIMELOCK: u32 = 120_960;
 // project wallet approval).
 const REFUND_COOLDOWN_LEDGERS: u32 = 17_280;
 
+/// Current storage schema version. Bump this and add a migration step in
+/// `migrate()` whenever a struct layout, DataKey variant, or stored value
+/// encoding changes in a backward-incompatible way.
+///
+/// v1: original schema (no version tracking)
+/// v2: Symbol-keyed storage version added (#379)
+const CURRENT_STORAGE_VERSION: u32 = 2;
+/// Storage key for the schema version. Uses a Symbol (not a DataKey variant)
+/// to avoid XDR codegen overhead in the slim WASM build.
+#[cfg(feature = "upgrade")]
+const STORAGE_VERSION_KEY: Symbol = symbol_short!("sv");
+
 /// Hard cap on platform fee: 500 basis points = 5%.
 #[cfg(feature = "fees")]
 const MAX_PLATFORM_FEE_BPS: u32 = 500;
@@ -641,6 +653,61 @@ fn ensure_min_ttl(env: &Env, min_ledgers: u32) {
         .extend_ttl(min_ledgers, min_ledgers);
 }
 
+// ─── Storage versioning & migration (#379) ────────────────────────────────
+
+/// Run pending storage migrations sequentially from the current version to
+/// `CURRENT_STORAGE_VERSION`. Called automatically by `execute_upgrade()` after
+/// the WASM is swapped, before any other contract function can be invoked.
+///
+/// Each migration step function (e.g., `migrate_v1_to_v2`) is responsible for
+/// transforming old storage layouts to the new schema. After each step, the
+/// `StorageVersion` key is updated so the migration is never applied twice.
+#[cfg(feature = "upgrade")]
+fn migrate(env: &Env) {
+    let current: u32 = env
+        .storage()
+        .instance()
+        .get(&STORAGE_VERSION_KEY)
+        .unwrap_or(1);
+
+    if current < 2 {
+        migrate_v1_to_v2(env);
+        env.storage().instance().set(&STORAGE_VERSION_KEY, &2u32);
+    }
+    // if current < 3 { migrate_v2_to_v3(env); ... }
+
+    // After all migrations, StorageVersion must equal CURRENT_STORAGE_VERSION.
+    // If a deployer forgot to bump CURRENT_STORAGE_VERSION after adding a
+    // migration, this assertion catches it at upgrade time.
+    let final_version: u32 = env
+        .storage()
+        .instance()
+        .get(&STORAGE_VERSION_KEY)
+        .unwrap_or(1);
+    if final_version != CURRENT_STORAGE_VERSION {
+        panic!(
+            "Migration incomplete: at version {} but target is {}",
+            final_version, CURRENT_STORAGE_VERSION
+        );
+    }
+}
+
+/// v1 → v2: No data transformation needed.
+///
+/// Storage keys and struct layouts are backward-compatible from v1 to v2.
+/// This empty migration exists to establish the migration framework pattern.
+/// When the first real schema change is introduced, replace this with actual
+/// data transformations that rename keys, restructure values, or backfill
+/// missing entries.
+#[cfg(feature = "upgrade")]
+fn migrate_v1_to_v2(_env: &Env) {
+    // Intentionally empty — v1 data is v2-compatible.
+    // Example pattern for a real migration:
+    //   let old_value = env.storage().instance().get(&OldKey);
+    //   env.storage().instance().set(&NewKey, &transformed_value);
+    //   env.storage().instance().remove(&OldKey);
+}
+
 pub fn calculate_badge(total_stroops: i128) -> BadgeTier {
     let xlm = total_stroops / STROOP;
     if xlm >= 2000 {
@@ -753,6 +820,12 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::GlobalCO2OffsetGrams, &0i128);
+        // Record the current storage schema version so post-upgrade migrations
+        // know which transformations have already been applied.
+        #[cfg(feature = "upgrade")]
+        env.storage()
+            .instance()
+            .set(&STORAGE_VERSION_KEY, &CURRENT_STORAGE_VERSION);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
@@ -3333,6 +3406,9 @@ impl IndigoPayContract {
             .instance()
             .remove(&DataKey::UpgradeEffectiveAt);
         env.events().publish((symbol_short!("upg_exec"),), pending);
+        // Run storage migrations so any schema changes in the new WASM are
+        // applied before the next contract invocation.
+        migrate(&env);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
@@ -3372,6 +3448,16 @@ impl IndigoPayContract {
     #[cfg(feature = "upgrade")]
     pub fn get_last_executed_upgrade(env: Env) -> Option<BytesN<32>> {
         env.storage().instance().get(&DataKey::LastExecutedUpgrade)
+    }
+
+    /// Read the current storage schema version. Returns 1 when the key is
+    /// absent (pre-versioning deployments are implicitly v1).
+    #[cfg(feature = "upgrade")]
+    pub fn get_storage_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&STORAGE_VERSION_KEY)
+            .unwrap_or(1)
     }
 
     // ─── Emergency withdrawal (7-day timelock) ─────────────────────────────────
@@ -4770,6 +4856,66 @@ mod tests {
             assert_eq!(global_total, amount);
             assert_eq!(global_co2, expected_co2);
         });
+    }
+
+    // ─── Storage versioning & migration tests (#379) ────────────────────────
+
+    #[cfg(feature = "upgrade")]
+    #[test]
+    fn test_storage_version_initialized() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        // After initialize(), StorageVersion must equal CURRENT_STORAGE_VERSION.
+        assert_eq!(client.get_storage_version(), CURRENT_STORAGE_VERSION);
+    }
+
+    #[cfg(feature = "upgrade")]
+    #[test]
+    fn test_migration_runs_on_upgrade() {
+        let (env, cid, client, _admin, _pid) = setup();
+
+        // After initialize(), StorageVersion must equal CURRENT_STORAGE_VERSION.
+        assert_eq!(client.get_storage_version(), CURRENT_STORAGE_VERSION);
+
+        // Simulate a same-code upgrade by re-registering the contract at the
+        // same address, then calling migrate() directly.
+        let v2_cid = env.register_contract(Some(&cid), IndigoPayContract);
+        assert_eq!(v2_cid, cid);
+
+        env.as_contract(&cid, || {
+            crate::migrate(&env);
+        });
+
+        // Version should still be CURRENT_STORAGE_VERSION after a same-code
+        // upgrade with no pending migrations.
+        assert_eq!(client.get_storage_version(), CURRENT_STORAGE_VERSION);
+    }
+
+    #[cfg(feature = "upgrade")]
+    #[test]
+    fn test_migration_idempotent() {
+        let (env, cid, client, _admin, _pid) = setup();
+
+        // Simulate upgrade by re-registering at the same address.
+        let v2_cid = env.register_contract(Some(&cid), IndigoPayContract);
+        assert_eq!(v2_cid, cid);
+
+        // Call migrate() for the first time.
+        env.as_contract(&cid, || {
+            crate::migrate(&env);
+        });
+
+        let version_after_first = client.get_storage_version();
+        assert_eq!(version_after_first, CURRENT_STORAGE_VERSION);
+
+        // Call migrate a second time: the assertion in migrate() that
+        // final_version == CURRENT_STORAGE_VERSION must still hold —
+        // no double-application of migrations.
+        env.as_contract(&cid, || {
+            crate::migrate(&env);
+        });
+
+        let version_after_second = client.get_storage_version();
+        assert_eq!(version_after_second, CURRENT_STORAGE_VERSION);
     }
 
     // ─── Governance tests ─────────────────────────────────────────────────────
