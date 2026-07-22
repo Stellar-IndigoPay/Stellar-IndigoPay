@@ -4737,7 +4737,7 @@ mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
     use soroban_sdk::token::StellarAssetClient;
-    use soroban_sdk::{Address, BytesN, Env, IntoVal, String, Symbol, Val, Vec};
+    use soroban_sdk::{xdr, Address, BytesN, Env, IntoVal, String, Symbol, TryFromVal, Val, Vec};
 
     /// Helper: create a single-element signer Vec for admin calls.
     fn signers1(env: &Env, a: &Address) -> Vec<Address> {
@@ -8778,7 +8778,7 @@ mod tests {
     #[test]
     fn test_publish_project_update_emits_event() {
         let (env, cid, client, admin, pid) = setup();
-        let before = env.events().all().len();
+        let before = env.events().all().events().len();
         client.publish_project_update(
             &admin,
             &pid,
@@ -8786,11 +8786,13 @@ mod tests {
             &Symbol::new(&env, "progress"),
         );
         let events = env.events().all();
-        assert_eq!(events.len(), before + 1);
-        let event = events.last().unwrap();
-        assert_eq!(event.0, cid);
+        assert_eq!(events.events().len(), before + 1);
+        let event = events.events().last().unwrap();
+        assert_eq!(events.filter_by_contract(&cid).events().last(), Some(event));
         let expected: Val = Symbol::new(&env, "update_published").into_val(&env);
-        assert_eq!(event.1.get(0).unwrap(), expected);
+        let expected = xdr::ScVal::try_from_val(&env, &expected).unwrap();
+        let xdr::ContractEventBody::V0(body) = &event.body;
+        assert_eq!(body.topics.first(), Some(&expected));
     }
 
     #[test]
