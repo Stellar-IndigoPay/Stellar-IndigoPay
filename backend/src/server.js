@@ -451,6 +451,7 @@ async function startServer() {
   await runMigrations();
   await startSummaryQueue(io);
   await startProfileQueue(io);
+  await startMatchQueue();
   await startWebhookQueue();
   await startPushQueue();
   await startIdempotencyCleanup();
@@ -620,6 +621,7 @@ async function startServer() {
   for (const queue of [
     "./services/summaryQueue",
     "./services/profileQueue",
+    "./services/matchQueue",
     "./services/digestQueue",
     "./services/webhookQueue",
     "./services/pushQueue",

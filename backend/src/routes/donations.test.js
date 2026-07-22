@@ -178,7 +178,6 @@ describe("POST /api/donations", () => {
       queryResult([]), // dedup check
       queryResult(), // BEGIN
       queryResult([donationRow]), // INSERT donation
-      queryResult([]), // SELECT donation_matches (empty)
       queryResult(), // UPDATE projects
       queryResult(), // COMMIT
     );
@@ -309,7 +308,6 @@ describe("POST /api/donations", () => {
           created_at: "2026-03-29T10:00:00.000Z",
         },
       ]), // INSERT donation
-      queryResult([]), // SELECT donation_matches (empty)
       queryResult(), // UPDATE projects
       queryResult(), // COMMIT
     );
@@ -348,7 +346,6 @@ describe("POST /api/donations", () => {
           created_at: "2026-03-29T10:00:00.000Z",
         },
       ]), // INSERT donation
-      queryResult([]), // SELECT donation_matches (empty)
       queryResult(), // UPDATE projects
       queryResult(), // COMMIT
     );
@@ -600,7 +597,7 @@ describe("profile upsert on first donation", () => {
       queryResult([]),
       queryResult(),
       queryResult([donationRow]),
-      // no donation_matches query for non-XLM
+      // no donation_matches query for non-XLM — matching is now async via matchQueue
       queryResult(), // UPDATE projects (raises_xlm += 0)
       queryResult(), // COMMIT
     );
