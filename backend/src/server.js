@@ -44,7 +44,12 @@ const logger = require("./logger");
 const requestLogger = require("./middleware/requestLogger");
 const requestId = require("./middleware/requestId");
 const queryRouter = require("./middleware/queryRouter");
+const {
+  apiVersionMiddleware,
+  registerApiVersionDiscoveryRoutes,
+} = require("./middleware/apiVersion");
 const metricsMiddleware = require("./middleware/metrics");
+const { refreshDbPoolMetrics } = require("./services/metrics");
 const {
   createCorsMiddleware,
   getAllowedOrigins,
@@ -54,16 +59,23 @@ const { AppError } = require("./errors");
 const { startTurretsServer } = require("./services/turrets");
 const { start: startSummaryQueue } = require("./services/summaryQueue");
 const { start: startProfileQueue } = require("./services/profileQueue");
-const {
-  start: startWebhookQueue,
+const { start: startWebhookQueue,
   stop: stopWebhookQueue,
 } = require("./services/webhookQueue");
 const { start: startPushQueue } = require("./services/pushQueue");
+const { start: startImpactQueue } = require("./services/impactQueue");
 const { start: startIdempotencyCleanup } = require("./services/idempotencyCleanup");
+const { start: startBlacklistCleanup } = require("./services/blacklistCleanup");
+const { startCO2VerificationCron, stopCO2VerificationCron } = require("./services/co2Verifier");
 const { startIndexer } = require("./services/indexerService");
 const { startReconciler, stopReconciler } = require("./services/indexerReconciler");
 const { startDLQWorker, stopDLQWorker } = require("./services/indexerDLQWorker");
+const { stop: stopSorobanEvents } = require("./services/sorobanEventService");
 const lifecycle = require("./services/lifecycle");
+const guardianService = require("./services/guardian");
+const recurringKeeper = require("./services/recurringKeeper");
+
+
 
 Sentry.init({
   dsn: process.env.SENTRY_DSN || "",
@@ -104,8 +116,14 @@ app.use("/", require("./routes/metrics"));
 
 // Health and readiness: liveness 200 if alive, readiness 200 only when every
 // required downstream is reachable. Both fail-fast during graceful shutdown.
+//
+// /health/ready is mounted at a separate path (before helmet/CSRF) so the
+// CI/CD secret-rotation workflow can call it without authentication. It uses
+// the same readiness handler as /api/readyz — both validate every external
+// dependency (Postgres, Redis, Horizon, Soroban RPC).
 app.use("/api/health", require("./routes/health"));
 app.use("/api/readyz", require("./routes/readiness"));
+app.use("/health/ready", require("./routes/readiness"));
 
 // Security headers and body parsing.
 app.use(
@@ -132,6 +150,15 @@ const csrfProtection = csurf({
   },
   ignoreMethods: ["GET", "HEAD", "OPTIONS"],
 });
+// Endpoints whose only credential is the refresh cookie. SameSite=Strict keeps
+// that cookie off every cross-site request, so a CSRF token would cost the
+// admin client a round-trip without closing an attack path. Listed per mount
+// because this router answers on both /api and /api/v1.
+const COOKIE_AUTH_PATHS = ["/admin/refresh", "/admin/logout"].flatMap((path) => [
+  `/api${path}`,
+  `/api/v1${path}`,
+]);
+
 app.use((req, res, next) => {
   // Push-notification endpoints accept cross-origin POSTs from device tokens
   // (mobile apps don't have a CSRF session), so CSRF is skipped there.
@@ -143,6 +170,9 @@ app.use((req, res, next) => {
     req.path.startsWith("/api/notifications") ||
     req.path.startsWith("/api/v1/notifications")
   ) {
+    return next();
+  }
+  if (COOKIE_AUTH_PATHS.includes(req.path)) {
     return next();
   }
   return csrfProtection(req, res, next);
@@ -169,6 +199,11 @@ app.use(redisRateLimiter);
 
 // Per-request HTTP metrics (BEFORE routes so it captures the full request).
 app.use(metricsMiddleware);
+
+// API version negotiation (header/path/query) + deprecation/sunset signaling.
+app.use("/api", apiVersionMiddleware);
+app.use("/api/v1", apiVersionMiddleware);
+registerApiVersionDiscoveryRoutes(app);
 
 // ── Swagger UI (development only) ───────────────────────────────────────────
 if (process.env.NODE_ENV !== "production") {
@@ -215,6 +250,18 @@ try {
   );
 }
 
+// Admin projection-engine management (event-sourcing rebuild endpoints).
+try {
+  const adminProjectionsRouter = require("./routes/admin/projections");
+  app.use("/api/admin/projections", adminProjectionsRouter);
+  app.use("/api/v1/admin/projections", adminProjectionsRouter);
+} catch (err) {
+  logger.error(
+    { event: "route_load_failed", route: "admin/projections", err: err.message },
+    "Failed to load admin projections route module",
+  );
+}
+
 // ── Application routes ──────────────────────────────────────────────────────
 // Each route file is mounted under both /api and /api/v1 so that the v1
 // versioned path and the legacy unversioned path stay in lockstep.
@@ -234,6 +281,8 @@ const routeMounts = [
   "notifications",
   "verification",
   "oracle",
+  "map",
+  "matches",
 ];
 
 for (const name of routeMounts) {
@@ -263,6 +312,21 @@ try {
   logger.error(
     { event: "route_load_failed", route: "analytics", err: err.message },
     "Failed to load analytics route module",
+  );
+}
+
+// Cross-chain donation attestation bridge (issue #125). The route file
+// exports an Express router that handles reads, writes, proof minting,
+// verification, and admin revoke. It is mounted under both the legacy
+// unversioned and the /v1 paths so existing callers keep working.
+try {
+  const attestationsRouter = require("./routes/attestations");
+  app.use("/api/attestations", attestationsRouter);
+  app.use("/api/v1/attestations", attestationsRouter);
+} catch (err) {
+  logger.error(
+    { event: "route_load_failed", route: "attestations", err: err.message },
+    "Failed to load attestations route module",
   );
 }
 
@@ -390,6 +454,60 @@ async function startServer() {
   await startWebhookQueue();
   await startPushQueue();
   await startIdempotencyCleanup();
+  await startBlacklistCleanup();
+  await startCO2VerificationCron();
+
+  // Match expiry: deactivates pools that have expired (time-based) or been
+  // exhausted (cap reached). Runs every 15 minutes.
+  try {
+    const matchExpiry = require("./services/matchExpiry");
+    matchExpiry.start();
+    lifecycle.onShutdown(async () => {
+      try { matchExpiry.stop(); } catch { /* ignore */ }
+    });
+    logger.info({ event: "match_expiry_scheduled" }, "Match expiry service scheduled");
+  } catch (err) {
+    logger.error(
+      { event: "match_expiry_startup_error", err: err.message },
+      "Match expiry service could not be started",
+    );
+  }
+
+  // Retention worker: a dedicated pg-boss instance schedules the config-driven
+  // data-retention policies. Kept separate from the request queues so a
+  // retention failure can never interfere with donation/delivery processing.
+  try {
+    const PgBoss = require("pg-boss");
+    const { registerRetentionWorker } = require("./services/retentionWorker");
+    const retentionBoss = new PgBoss(
+      process.env.DATABASE_URL ||
+        "postgres://postgres:postgres@localhost:5432/indigopay",
+    );
+    retentionBoss.on("error", (err) =>
+      logger.error(
+        { event: "retention_boss_error", err: err.message },
+        "retention pg-boss error",
+      ),
+    );
+    await retentionBoss.start();
+    await registerRetentionWorker(retentionBoss);
+    lifecycle.onShutdown(async () => {
+      try {
+        await retentionBoss.stop();
+      } catch {
+        // ignore
+      }
+    });
+    logger.info(
+      { event: "retention_worker_started" },
+      "Retention worker scheduled",
+    );
+  } catch (err) {
+    logger.error(
+      { event: "retention_startup_error", err: err.message },
+      "Retention worker could not be started",
+    );
+  }
 
   // digestQueue is optional in some deployments
   try {
@@ -420,6 +538,26 @@ async function startServer() {
     );
   }
 
+  try {
+    guardianService.start();
+    logger.info({ event: "guardian_scheduler_started" }, "Guardian service scheduler started");
+  } catch (err) {
+    logger.error(
+      { event: "guardian_startup_error", err: err.message },
+      "Guardian service failed to start",
+    );
+  }
+
+  try {
+    recurringKeeper.start();
+    logger.info({ event: "recurring_keeper_started" }, "Recurring keeper service started");
+  } catch (err) {
+    logger.error(
+      { event: "recurring_keeper_startup_error", err: err.message },
+      "Recurring keeper service failed to start",
+    );
+  }
+
   // The Stellar Horizon stream in the indexer holds the event loop open.
   // Register a shutdown hook so the stream is closed cleanly on SIGTERM.
   lifecycle.onShutdown(async () => {
@@ -435,6 +573,16 @@ async function startServer() {
     } catch {
       // ignore
     }
+    try {
+      if (typeof guardianService.stop === "function") guardianService.stop();
+    } catch {
+      // ignore
+    }
+    try {
+      if (typeof recurringKeeper.stop === "function") await recurringKeeper.stop();
+    } catch {
+      // ignore
+    }
   });
 
   lifecycle.onShutdown(async () => {
@@ -445,12 +593,24 @@ async function startServer() {
     await stopDLQWorker();
   });
 
-  // Soroban event service: stop the polling loop and persist the cursor.
+  // Soroban event service: start the polling loop.
+  try {
+    const sorobanEvents = require("./services/sorobanEventService");
+    sorobanEvents.start(io);
+  } catch (err) {
+    logger.error(
+      { event: "soroban_events_startup_error", err: err.message },
+      "Soroban event service failed to start",
+    );
+  }
+
+  // Soroban event service: stop the polling loop and persist the cursor on shutdown.
   lifecycle.onShutdown(async () => {
     try {
-      await stopSorobanEvents();
+      const sorobanEvents = require("./services/sorobanEventService");
+      if (typeof sorobanEvents.stop === "function") await sorobanEvents.stop();
     } catch {
-      // Service may already be stopped; swallow.
+      // Service may already be stopped or not loaded; swallow.
     }
   });
 
@@ -464,6 +624,8 @@ async function startServer() {
     "./services/webhookQueue",
     "./services/pushQueue",
     "./services/idempotencyCleanup",
+    "./services/blacklistCleanup",
+    "./services/co2Verifier",
   ]) {
     lifecycle.onShutdown(async () => {
       try {
@@ -474,6 +636,15 @@ async function startServer() {
       }
     });
   }
+
+  // CO2 verification cron: stop the pg-boss instance gracefully.
+  lifecycle.onShutdown(async () => {
+    try {
+      if (typeof stopCO2VerificationCron === "function") await stopCO2VerificationCron();
+    } catch {
+      // Module may not be loaded; swallow.
+    }
+  });
 
   // Socket.IO: stop accepting new connections, wait for in-flight, then close.
   lifecycle.onShutdown(async () => {
@@ -511,6 +682,15 @@ async function startServer() {
     } catch {
       // ignore
     }
+  });
+
+  const pool = require("./db/pool");
+  const metricsTimer = setInterval(
+    () => refreshDbPoolMetrics(pool._writerPool),
+    15000,
+  );
+  lifecycle.onShutdown(() => {
+    clearInterval(metricsTimer);
   });
 
   server.listen(PORT, () => {

@@ -2,26 +2,74 @@
 const express = require("express");
 const router = express.Router();
 const pool = require("../db/pool");
-const { signToken, adminRequired } = require("../middleware/auth");
+const logger = require("../logger");
+const {
+  generateAccessToken,
+  issueRefreshToken,
+  findRefreshToken,
+  revokeRefreshFamily,
+  rotateRefreshToken,
+  listActiveSessions,
+  blacklistAccessToken,
+  adminRequired,
+  ACCESS_TOKEN_EXPIRY_SECONDS,
+  REFRESH_TOKEN_EXPIRY_MS,
+} = require("../middleware/auth");
 const { createRateLimiter } = require("../middleware/rateLimiter");
 const { sendAppError } = require("../errors");
 const { buildAuditFilters } = require("./admin/audit-export");
+const { enqueueDigest } = require("../services/digestQueue");
 
 const loginLimiter = createRateLimiter(10, 15);
 
-const TOKEN_EXPIRY = "1h";
-const REFRESH_EXPIRY = "24h";
+const REFRESH_COOKIE = "refresh_token";
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Scoped to /api rather than /api/admin: this router is mounted under both
+// /api/admin and /api/v1/admin, and a narrower path would leave the versioned
+// mount without a cookie.
+function refreshCookieOptions() {
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    path: "/api",
+  };
+}
+
+function setRefreshCookie(res, token) {
+  res.cookie(REFRESH_COOKIE, token, {
+    ...refreshCookieOptions(),
+    maxAge: REFRESH_TOKEN_EXPIRY_MS,
+  });
+}
+
+function clearRefreshCookie(res) {
+  res.clearCookie(REFRESH_COOKIE, refreshCookieOptions());
+}
+
+function accessTokenPayload(adminId) {
+  return {
+    success: true,
+    data: {
+      token: generateAccessToken(adminId),
+      expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
+    },
+  };
+}
 
 /**
- * Authenticate an administrator and issue session tokens.
+ * Authenticate an administrator and open a session.
  *
  * @route POST /api/admin/login
  * @param {import('express').Request} req - Express request with admin credentials.
  * @param {import('express').Response} res - Express response object.
- * @returns {void} Sends the token payload or an auth error.
+ * @param {import('express').NextFunction} next - Express error middleware.
+ * @returns {Promise<void>} Sends the access token and sets the refresh cookie.
  * @throws {Error} If the admin credentials are invalid or the server is not configured.
  */
-router.post("/login", loginLimiter, (req, res) => {
+router.post("/login", loginLimiter, async (req, res, next) => {
   const { username, password } = req.body || {};
   const adminUser = process.env.ADMIN_USERNAME || "admin";
   const adminPass = process.env.ADMIN_PASSWORD;
@@ -36,48 +84,177 @@ router.post("/login", loginLimiter, (req, res) => {
     return sendAppError(res, "UNAUTHORIZED", { reason: "Invalid credentials" });
   }
 
-  const token = signToken({ role: "admin", sub: username }, TOKEN_EXPIRY);
-  const refreshToken = signToken(
-    { role: "admin", sub: username, type: "refresh" },
-    REFRESH_EXPIRY,
-  );
-  return res.json({
-    success: true,
-    data: { token, refreshToken, expiresIn: 3600 },
-  });
+  try {
+    const { token } = await issueRefreshToken(username);
+    setRefreshCookie(res, token);
+    return res.json(accessTokenPayload(username));
+  } catch (e) {
+    next(e);
+  }
 });
 
 /**
- * Refresh an administrator access token using a refresh token.
+ * Rotate the refresh cookie and issue a fresh access token.
  *
  * @route POST /api/admin/refresh
- * @param {import('express').Request} req - Express request carrying the refresh token.
+ * @param {import('express').Request} req - Express request carrying the refresh cookie.
  * @param {import('express').Response} res - Express response object.
- * @returns {void} Sends a new access token or an auth error.
- * @throws {Error} If the refresh token is missing or invalid.
+ * @param {import('express').NextFunction} next - Express error middleware.
+ * @returns {Promise<void>} Sends a new access token or an auth error.
+ * @throws {Error} If the refresh token is missing, expired, or replayed.
  */
-router.post("/refresh", (req, res) => {
-  const { refreshToken } = req.body || {};
-  if (!refreshToken) {
-    return sendAppError(res, "VALIDATION_ERROR", { field: "refreshToken" });
+router.post("/refresh", async (req, res, next) => {
+  const presented = req.cookies?.refresh_token;
+  if (!presented) {
+    return sendAppError(res, "UNAUTHORIZED", {
+      reason: "Missing refresh token",
+    });
   }
 
   try {
-    const decoded = require("../middleware/auth").verifyToken(refreshToken);
-    if (decoded.type !== "refresh") {
-      return sendAppError(res, "UNAUTHORIZED", {
-        reason: "Invalid refresh token",
+    const result = await rotateRefreshToken(presented);
+
+    if (result.outcome === "reused") {
+      logger.warn(
+        {
+          event: "token_reuse_detected",
+          family: result.family,
+          adminId: result.adminId,
+        },
+        "Refresh token replayed; every session in the family was revoked",
+      );
+      clearRefreshCookie(res);
+      return sendAppError(res, "TOKEN_REVOKED", {
+        reason: "Token reuse detected — all sessions revoked",
       });
     }
-    const token = signToken({ role: "admin", sub: decoded.sub }, TOKEN_EXPIRY);
+
+    if (result.outcome === "invalid") {
+      clearRefreshCookie(res);
+      return sendAppError(res, "UNAUTHORIZED", {
+        reason: "Invalid or expired refresh token",
+      });
+    }
+
+    setRefreshCookie(res, result.token);
+    return res.json(accessTokenPayload(result.adminId));
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * End the current admin session.
+ *
+ * @route POST /api/admin/logout
+ * @param {import('express').Request} req - Express request with the session cookie and bearer token.
+ * @param {import('express').Response} res - Express response object.
+ * @param {import('express').NextFunction} next - Express error middleware.
+ * @returns {Promise<void>} Always reports success once the session is torn down.
+ * @throws {Error} If revoking the session fails.
+ */
+router.post("/logout", async (req, res, next) => {
+  try {
+    const presented = req.cookies?.refresh_token;
+    if (presented) {
+      const row = await findRefreshToken(presented);
+      // The whole family goes, not just the presented link: logging out of a
+      // session that could still be rotated forward is not logging out.
+      if (row) await revokeRefreshFamily(row.family, row.admin_id);
+    }
+
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith("Bearer ")) {
+      await blacklistAccessToken(authHeader.slice(7));
+    }
+
+    clearRefreshCookie(res);
+    return res.json({ success: true });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * List the authenticated admin's active sessions.
+ *
+ * @route GET /api/admin/sessions
+ * @param {import('express').Request} req - Express request with the authenticated admin context.
+ * @param {import('express').Response} res - Express response object.
+ * @param {import('express').NextFunction} next - Express error middleware.
+ * @returns {Promise<void>} Sends one entry per active session, flagging the current one.
+ * @throws {Error} If the session lookup fails.
+ */
+router.get("/sessions", adminRequired, async (req, res, next) => {
+  try {
+    const sessions = await listActiveSessions(req.admin.sub);
+
+    const presented = req.cookies?.refresh_token;
+    const currentFamily = presented
+      ? ((await findRefreshToken(presented))?.family ?? null)
+      : null;
+
     res.json({
       success: true,
-      data: { token, expiresIn: 3600 },
+      data: sessions.map((session) => ({
+        ...session,
+        current: session.id === currentFamily,
+      })),
     });
-  } catch {
-    return sendAppError(res, "UNAUTHORIZED", {
-      reason: "Invalid or expired refresh token",
-    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * Revoke one of the authenticated admin's sessions.
+ *
+ * @route POST /api/admin/sessions/:id/revoke
+ * @param {import('express').Request} req - Express request with the session id to revoke.
+ * @param {import('express').Response} res - Express response object.
+ * @param {import('express').NextFunction} next - Express error middleware.
+ * @returns {Promise<void>} Sends success, or an error when no active session matches.
+ * @throws {Error} If the revocation query fails.
+ */
+router.post("/sessions/:id/revoke", adminRequired, async (req, res, next) => {
+  const { id } = req.params;
+  if (!UUID_PATTERN.test(id)) {
+    return sendAppError(res, "VALIDATION_ERROR", { field: "id" });
+  }
+
+  try {
+    const revoked = await revokeRefreshFamily(id, req.admin.sub);
+    if (revoked === 0) {
+      return sendAppError(res, "NOT_FOUND", {
+        reason: "No active session with that id",
+      });
+    }
+    res.json({ success: true });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post("/digest/trigger", adminRequired, async (req, res, next) => {
+  try {
+    const { type } = req.body || {};
+    const allowedTypes = new Set(["daily", "weekly"]);
+
+    if (type !== undefined && !allowedTypes.has(type)) {
+      return sendAppError(res, "VALIDATION_ERROR", {
+        field: "type",
+        detail: "type must be either daily or weekly",
+      });
+    }
+
+    const requestedTypes = type ? [type] : ["daily", "weekly"];
+    for (const digestType of requestedTypes) {
+      await enqueueDigest(digestType);
+    }
+
+    res.json({ success: true, data: { triggered: requestedTypes } });
+  } catch (e) {
+    next(e);
   }
 });
 
@@ -177,8 +354,13 @@ router.use("/audit-log", require("./admin/audit-export"));
 router.use("/audit-log", require("./admin/audit-stats"));
 
 router.use("/queues", require("./admin/queues"));
+router.use("/co2", require("./admin/co2"));
 router.use("/documents", require("./admin/documents"));
 router.use("/webhooks", require("./admin/webhooks"));
 router.use("/indexer", require("./admin/indexer"));
+router.use("/secret-rotations", require("./admin/secretRotations"));
+router.use("/metrics", require("./admin/metrics"));
+router.use("/failover-metric", require("./admin/failoverMetric"));
+router.use("/matches", require("./admin/matches"));
 
 module.exports = router;

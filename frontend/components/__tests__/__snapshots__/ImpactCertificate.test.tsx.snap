@@ -1,4 +1,4 @@
-// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+// Jest Snapshot v1, https://goo.gl/fbAQLP
 
 exports[`ImpactCertificate matches snapshot 1`] = `
 <div>
@@ -55,8 +55,7 @@ exports[`ImpactCertificate matches snapshot 1`] = `
         <p
           class="text-xs text-[#64748B] dark:text-[#94A3B8] mt-2 font-body"
         >
-          Donor Address: 
-          GABCDEFGHI...KLMNOPQRST
+          Donor Address: GABCDEFGHI...KLMNOPQRST
         </p>
       </div>
       <div

@@ -85,7 +85,11 @@ router.get("/status", adminRequired, async (req, res) => {
     res.json({
       success: true,
       data: {
-        indexer: indexerStatus,
+        indexer: {
+          ...indexerStatus,
+          lagLedgers: indexerStatus.lagLedgers ?? indexerStatus.lag_ledgers,
+          status: indexerStatus.lagLedgers > 50 ? "degraded" : indexerStatus.isRunning ? "ok" : "degraded",
+        },
         cursor: {
           lastProcessedLedger: cursorState.last_processed_ledger,
           backfillInProgress: cursorState.backfill_in_progress,

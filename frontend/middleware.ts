@@ -30,11 +30,23 @@ function buildCsp(nonce: string, isWidget: boolean): string {
       : []),
   ].join(" ");
 
+  // next dev's Fast Refresh runtime (react-refresh-utils) bootstraps modules
+  // via eval() for HMR; production bundles never eval(). Without this, the
+  // dev server's own client runtime throws a CSP EvalError before React can
+  // hydrate anything, breaking every page in local development.
+  const scriptSrc = [
+    "'self'",
+    `'nonce-${nonce}'`,
+    "'strict-dynamic'",
+    "'unsafe-inline'",
+    ...(process.env.NODE_ENV === "development" ? ["'unsafe-eval'"] : []),
+  ].join(" ");
+
   const directives = [
     "default-src 'self'",
     // nonce tags the Next.js script injection; strict-dynamic propagates trust to bundles
     // it loads; unsafe-inline is a no-op in CSP3 but keeps CSP2 browsers working.
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' 'unsafe-inline'`,
+    `script-src ${scriptSrc}`,
     // unpkg serves the Leaflet CSS stylesheet.
     `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com ${UNPKG}`,
     "font-src 'self' https://fonts.gstatic.com",
@@ -46,7 +58,18 @@ function buildCsp(nonce: string, isWidget: boolean): string {
     "base-uri 'self'",
     "form-action 'self'",
     isWidget ? "frame-ancestors *" : "frame-ancestors 'none'",
-    "upgrade-insecure-requests",
+    // Reporting endpoint for CSP violations
+    "report-uri /api/csp-report",
+    // Meaningless (and actively harmful) against a plain-HTTP local dev
+    // server: it forces every subresource request to upgrade to HTTPS, and
+    // WebKit (unlike Chromium/Firefox, which special-case localhost as
+    // already trustworthy) applies that literally — every _next/static
+    // script request gets rewritten to https://localhost:PORT, which has no
+    // TLS listener, so the whole bundle fails a TLS handshake and the app
+    // never hydrates.
+    ...(process.env.NODE_ENV === "development"
+      ? []
+      : ["upgrade-insecure-requests"]),
   ];
 
   return directives.join("; ");

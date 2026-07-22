@@ -12,6 +12,10 @@ export function useWallet() {
   useEffect(() => {
     SecureStore.getItemAsync(WALLET_KEY)
       .then((stored) => setPublicKey(stored))
+      .catch((err) => {
+        console.error("Error loading public key:", err);
+        setError("Failed to load wallet session.");
+      })
       .finally(() => setLoading(false));
   }, []);
 
@@ -26,14 +30,26 @@ export function useWallet() {
       return false;
     }
 
-    await SecureStore.setItemAsync(WALLET_KEY, trimmed);
-    setPublicKey(trimmed);
-    return true;
+    try {
+      await SecureStore.setItemAsync(WALLET_KEY, trimmed);
+      setPublicKey(trimmed);
+      return true;
+    } catch (err) {
+      console.error("Error saving public key:", err);
+      setError("Failed to connect wallet.");
+      return false;
+    }
   }, []);
 
   const disconnect = useCallback(async () => {
-    await SecureStore.deleteItemAsync(WALLET_KEY);
-    setPublicKey(null);
+    try {
+      await SecureStore.deleteItemAsync(WALLET_KEY);
+    } catch (err) {
+      console.error("Error deleting public key:", err);
+      setError("Failed to disconnect wallet.");
+    } finally {
+      setPublicKey(null);
+    }
   }, []);
 
   return { publicKey, loading, error, connect, disconnect };

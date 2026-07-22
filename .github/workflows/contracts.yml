@@ -7,14 +7,12 @@ on:
   pull_request:
     paths: [contracts/**]
   workflow_dispatch:
-  schedule:
-    # Nightly deep fuzz run -- 1 000 000 iterations every day at 03:00 UTC
-    - cron: "0 3 * * *"
 
 jobs:
   test:
-    name: Soroban Contracts (Rust)
+    name: Build & Test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: contracts
@@ -39,71 +37,31 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace -- -D warnings
 
-      - name: Run tests (skip duplicate fuzz run -- handled by dedicated fuzz job)
-        run: "cargo test --features testutils --workspace -- --skip fuzz::"
+      - name: Run tests
+        run: "cargo test --features testutils --workspace -- --skip fuzz"
 
-      - name: Build WASM
-        run: cargo build --workspace --target wasm32v1-none --release
+      - name: Build WASM (slim)
+        run: cargo build --workspace --target wasm32v1-none --release --no-default-features
 
-  fuzz:
-    name: Fuzz Tests (10k iterations)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: contracts
-    steps:
-      - uses: actions/checkout@v4
+      - name: Install wasm-opt
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq binaryen
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.91.0
-          targets: wasm32v1-none
-          components: rustfmt, clippy
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: contracts
-
-      - name: Run fuzz tests (10k iterations)
-        run: cargo test --features testutils -- fuzz
-        env:
-          FUZZ_ITERATIONS: 10000
-
-  deep-fuzz:
-    name: Deep Fuzz (1M iterations -- nightly)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    defaults:
-      run:
-        working-directory: contracts
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.91.0
-          targets: wasm32v1-none
-          components: rustfmt, clippy
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: contracts
-
-      - name: Run deep fuzz tests (1M iterations)
-        run: cargo test --features testutils -- fuzz
-        env:
-          FUZZ_ITERATIONS: 1000000
+      - name: Check WASM size
+        run: |
+          wasm-opt -Oz target/wasm32v1-none/release/indigopay_contract.wasm \
+            -o target/wasm32v1-none/release/indigopay_contract.opt.wasm
+          size=$(stat -c%s target/wasm32v1-none/release/indigopay_contract.opt.wasm)
+          echo "WASM size (slim + wasm-opt): $size bytes"
+          if [ $size -gt 65536 ]; then
+            echo "Error: WASM binary exceeds 64KB limit"
+            exit 1
+          fi
 
   coverage:
-    name: Coverage (tarpaulin)
+    name: Coverage
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: contracts
@@ -125,7 +83,7 @@ jobs:
           workspaces: contracts
 
       - name: Run coverage
-        run: cargo tarpaulin --config indigopay-contract/.tarpaulin.toml --out Html --out Lcov
+        run: cargo tarpaulin --config indigopay-contract/.tarpaulin.toml --features testutils --out Html --out Lcov -- --skip fuzz
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4

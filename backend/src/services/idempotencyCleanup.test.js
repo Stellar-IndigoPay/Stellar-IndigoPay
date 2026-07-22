@@ -131,7 +131,7 @@ describe("idempotencyCleanup", () => {
       expect(pool.query).toHaveBeenCalledTimes(1);
       const [sql] = pool.query.mock.calls[0];
       expect(sql).toContain("DELETE FROM idempotency_keys");
-      expect(sql).toContain("created_at < NOW() - INTERVAL '24 hours'");
+      expect(sql).toContain("expires_at < NOW()");
     });
 
     test("logs when expired rows are purged", async () => {

@@ -5,6 +5,7 @@
  * and CSV/JSON export. Requires admin authentication via publicKey.
  */
 import { useState, useEffect, useCallback } from "react";
+import { useWallet } from "@/lib/WalletProvider";
 import {
   ResponsiveContainer,
   LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid,
@@ -33,12 +34,8 @@ const RANGES: Record<string, { label: string; days: number }> = {
   all: { label: "All time", days: 0 },
 };
 
-interface Props {
-  publicKey: string | null;
-  onConnect: (pk: string) => void;
-}
-
-export default function AdminAnalyticsPage({ publicKey, onConnect }: Props) {
+export default function AdminAnalyticsPage() {
+  const { publicKey, connect: onConnect } = useWallet();
   const [range, setRange] = useState("90d");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -338,3 +335,7 @@ export default function AdminAnalyticsPage({ publicKey, onConnect }: Props) {
     </div>
   );
 }
+
+export const getServerSideProps = async () => {
+  return { props: {} };
+};

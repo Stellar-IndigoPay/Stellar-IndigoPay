@@ -57,7 +57,27 @@ export default function ToastNotification({
   if (sorted.length === 0) return null;
 
   return (
-    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] w-[min(92vw,420px)] space-y-2 pointer-events-none">
+    <div
+      className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] w-[min(92vw,420px)] space-y-2 pointer-events-none"
+      role="region"
+      aria-label="Notifications"
+    >
+      {/* Visually hidden aggregate live region so screen readers announce
+          a summary for the newest toast. We key the <p> on the newest toast
+          id so the live region’s content actually changes for each new
+          notification — a stable string would not re-announce. */}
+      <p
+        key={sorted[0]?.id ?? "empty"}
+        className="sr-only"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {sorted.length > 0
+          ? `Notification: ${sorted[0].title}${
+              sorted[0].description ? ` — ${sorted[0].description}` : ""
+            }`
+          : ""}
+      </p>
       {sorted.map((t) => {
         const isExiting = exiting.has(t.id);
         return (
@@ -68,6 +88,7 @@ export default function ToastNotification({
                 ? "opacity-0 translate-y-2"
                 : "opacity-100 translate-y-0"
             }`}
+            role="status"
           >
             <div className="flex items-start gap-3">
               <div className="w-9 h-9 rounded-xl bg-[rgba(99,102,241,0.06)] dark:bg-[rgba(129,140,248,0.08)] border border-[rgba(99,102,241,0.10)] dark:border-[rgba(129,140,248,0.12)] flex items-center justify-center text-lg flex-shrink-0">

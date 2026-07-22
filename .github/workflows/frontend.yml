@@ -5,10 +5,250 @@ on:
     branches: [main, develop]
   pull_request:
 
+# Pin every devDependency additively here so floating semver never lands a
+# different jest-axe on a system where we cannot pin via overrides.
+# Comments by hand: nexus of jest+axe versions that play together.
+# See frontend/scripts/axe-scan.README.md for context.
+
 jobs:
+  frontend-lint:
+    name: Frontend Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        # --legacy-peer-deps tolerates jest-axe@8 asserting peer jest@^29
+        # while we actually use jest@^30. Pinning the exact version in
+        # package.json + overrides keeps CI deterministic.
+        run: npm ci --legacy-peer-deps
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+  frontend-typecheck:
+    name: Frontend TypeScript
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --legacy-peer-deps
+      - name: TypeScript type-check
+        working-directory: frontend
+        run: npm run type-check
+
+  frontend-tests-smoke:
+    name: Frontend jest smoke (jest-axe resolves)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --legacy-peer-deps
+      - name: Verify jest-axe + axe-core resolve
+        working-directory: frontend
+        run: npm run test:smoke:install
+      - name: Run Tabs + MonthlyGivingSetup jest smoke
+        working-directory: frontend
+        run: npm run test:smoke
+
+  frontend-tests:
+    name: Frontend Unit + Accessibility Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [frontend-tests-smoke]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --legacy-peer-deps
+      - name: Run jest (unit + a11y)
+        working-directory: frontend
+        run: npm test -- --ci --colors=false
+
+  frontend-e2e:
+    name: Frontend End-to-End Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+  working-directory: frontend
+  run: npm ci --legacy-peer-deps
+- name: Install json-server for mock API
+  run: npm install -g json-server
+- name: Start mock API server
+  working-directory: frontend
+  run: npx json-server --watch tests/e2e/fixtures/db.json --port 4000 &
+  env:
+    NODE_ENV: test
+- name: Cache Playwright browsers
+  uses: actions/cache@v4
+  id: playwright-cache
+  with:
+    path: ~/.cache/ms-playwright
+    key: ${{ runner.os }}-playwright-${{ hashFiles('frontend/package-lock.json') }}
+    restore-keys: |
+      ${{ runner.os }}-playwright-
+      - name: Install Playwright browsers (with dependencies)
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Install Playwright system dependencies (if cached)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+        working-directory: frontend
+      - name: Build frontend for E2E
+        working-directory: frontend
+        run: npm run build
+        env:
+          NEXT_PUBLIC_STELLAR_NETWORK: testnet
+          NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
+          NEXT_PUBLIC_API_URL: http://localhost:4000
+      - name: Run E2E tests
+        working-directory: frontend
+        run: npx playwright test
+        env:
+          NEXT_PUBLIC_STELLAR_NETWORK: testnet
+          NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
+          NEXT_PUBLIC_API_URL: http://localhost:4000
+      - name: Upload Playwright traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: frontend/test-results/
+
   frontend-build:
     name: Frontend Build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [frontend-lint, frontend-typecheck, frontend-tests, frontend-e2e]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --legacy-peer-deps
+
+      - name: Build frontend
+        working-directory: frontend
+        run: ANALYZE=false npm run build
+        env:
+          NEXT_PUBLIC_STELLAR_NETWORK: testnet
+          NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
+          NEXT_PUBLIC_API_URL: http://localhost:4000
+
+      - name: Bundle analysis (ANALYZE=true)
+        working-directory: frontend
+        run: ANALYZE=true npm run build
+        env:
+          NEXT_PUBLIC_STELLAR_NETWORK: testnet
+          NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
+          NEXT_PUBLIC_API_URL: http://localhost:4000
+
+      - name: Check bundle size budget
+        working-directory: frontend
+        run: |
+          echo "Checking first-load JS bundle sizes…"
+          # Check route-specific page chunks only (exclude framework bundles like
+          # _app, _document, and _error which contain shared runtime code).
+          # Uses globstar (**) for recursive matching of nested route directories.
+          MAX_SIZE=256000
+          EXCEEDED=0
+          shopt -s nullglob globstar
+          for chunk in .next/static/chunks/pages/**/*.js; do
+            NAME=$(basename "$chunk")
+            # Skip framework/app bundles — not individual routes
+            case "$NAME" in
+              _app-*.js|_document-*.js|_error-*.js) continue ;;
+            esac
+            SIZE=$(stat -c%s "$chunk" 2>/dev/null || echo 0)
+            if [ "$SIZE" -gt "$MAX_SIZE" ]; then
+              echo "::warning file=$chunk::Route chunk $NAME is $SIZE bytes (exceeds ${MAX_SIZE} byte budget)"
+              EXCEEDED=$((EXCEEDED + 1))
+            fi
+          done
+          if [ "$EXCEEDED" -gt 0 ]; then
+            echo "::error title=Bundle size budget exceeded::${EXCEEDED} route chunk(s) exceed the 250KB first-load JS budget"
+            exit 1
+          fi
+          echo "All route chunks within 250KB budget."
+
+  storybook:
+    name: Storybook Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --legacy-peer-deps
+
+      - name: Build Storybook
+        working-directory: frontend
+        run: npm run build-storybook
+
+  e2e:
+    name: Playwright E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout code
@@ -23,12 +263,36 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm ci
+        # --legacy-peer-deps tolerates jest-axe@8 asserting peer jest@^29
+        # while we actually use jest@^30. Pinning the exact version in
+        # package.json + overrides keeps CI deterministic.
+        run: npm ci --legacy-peer-deps
 
-      - name: Build frontend
+      - name: Install Playwright browsers
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Build frontend for E2E
         working-directory: frontend
         run: npm run build
         env:
           NEXT_PUBLIC_STELLAR_NETWORK: testnet
           NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
           NEXT_PUBLIC_API_URL: http://localhost:4000
+      - name: Run Playwright tests
+        working-directory: frontend
+        # Visual regression snapshots are OS/font-render dependent — skip in CI,
+        # run locally where the baseline images were generated.
+        run: npm run test:e2e -- --reporter=html,list --grep-invert "Visual regression"
+        env:
+          NEXT_PUBLIC_STELLAR_NETWORK: testnet
+          NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
+          NEXT_PUBLIC_API_URL: http://localhost:4000
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 14

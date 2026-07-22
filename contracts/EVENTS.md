@@ -83,9 +83,249 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 
 **Description**: Emitted once when the contract is initialized.
 
-| Event Name             | Topics                     | Data                   | When Emitted                  |
-| ---------------------- | -------------------------- | ---------------------- | ----------------------------- |
-| `contract_initialized` | `["contract_initialized"]` | `{ "admin": Address }` | On contract deployment / init |
+| Event Name             | Topics                     | Data                                                | When Emitted                  |
+| ---------------------- | -------------------------- | --------------------------------------------------- | ----------------------------- |
+| `contract_initialized` | `["contract_initialized"]` | `{ "admins": Vec<Address>, "threshold": u32 }`      | On contract deployment / init |
+
+---
+
+## 9. `rate_lim`
+
+**Description**: Emitted when the admin updates the per-donor per-project donation rate limit.
+
+| Event Name | Topics        | Data                                      | When Emitted                          |
+| ---------- | ------------- | ----------------------------------------- | ------------------------------------- |
+| `rate_lim` | `["rate_lim"]` | `{ "max_donations": u32, "window_ledgers": u32 }` | When admin calls `set_donation_rate_limit` |
+
+---
+
+## 10. `admin_add`
+
+**Description**: Emitted when a new admin address is added to the multi-sig set.
+
+| Event Name  | Topics           | Data                   | When Emitted                  |
+| ----------- | ---------------- | ---------------------- | ----------------------------- |
+| `admin_add` | `["admin_add"]` | `{ "admin": Address }` | When M-of-N admins call `add_admin` |
+
+---
+
+## 11. `admin_rmv`
+
+**Description**: Emitted when an admin address is removed from the multi-sig set.
+
+| Event Name  | Topics           | Data                   | When Emitted                    |
+| ----------- | ---------------- | ---------------------- | ------------------------------- |
+| `admin_rmv` | `["admin_rmv"]` | `{ "admin": Address }` | When M-of-N admins call `remove_admin` |
+
+---
+
+## 12. `thresh_up`
+
+**Description**: Emitted when the multi-sig threshold is changed.
+
+| Event Name  | Topics           | Data                          | When Emitted                      |
+| ----------- | ---------------- | ----------------------------- | --------------------------------- |
+| `thresh_up` | `["thresh_up"]` | `{ "threshold": u32 }`        | When M-of-N admins call `update_threshold` |
+
+---
+
+## 13. `ew_init`
+
+**Description**: Emitted when an admin initiates a 7-day timelocked emergency withdrawal.
+
+| Event Name | Topics                                | Data                                                               | When Emitted                                  |
+| ---------- | ------------------------------------- | ------------------------------------------------------------------ | --------------------------------------------- |
+| `ew_init`  | `["ew_init", admin, project_id]`     | `{ "new_wallet": Address, "amount": i128, "token": Address, "executable_at": u32 }` | When admin calls `initiate_emergency_withdrawal` |
+
+---
+
+## 14. `ew_exec`
+
+**Description**: Emitted when an emergency withdrawal is executed after the 7-day timelock.
+
+| Event Name | Topics                            | Data                                                   | When Emitted                                |
+| ---------- | --------------------------------- | ------------------------------------------------------ | ------------------------------------------- |
+| `ew_exec`  | `["ew_exec", project_id]`        | `{ "new_wallet": Address, "amount": i128, "token": Address }` | After timelock, funds transferred to new wallet |
+
+---
+
+## 15. `ew_cncl`
+
+**Description**: Emitted when an admin cancels a pending emergency withdrawal.
+
+| Event Name | Topics                              | Data | When Emitted                                |
+| ---------- | ----------------------------------- | ---- | ------------------------------------------- |
+| `ew_cncl`  | `["ew_cncl", admin, project_id]`   | `()` | When admin calls `cancel_emergency_withdrawal` |
+
+---
+
+## 16. `rfnd_rq`
+
+**Description**: Emitted when a donor requests a refund within the 24-hour cooldown window.
+
+| Event Name  | Topics                              | Data                                                            | When Emitted                          |
+| ----------- | ----------------------------------- | --------------------------------------------------------------- | ------------------------------------- |
+| `rfnd_rq`   | `["rfnd_rq", refund_id, donor]`    | `(project_id: String, amount: i128, donation_record_index: u32)` | When donor calls `request_refund` |
+
+---
+
+## 17. `rfnd_ap`
+
+**Description**: Emitted when an admin + project wallet approve a refund. The token transfer happens atomically.
+
+| Event Name  | Topics                              | Data                                                    | When Emitted                          |
+| ----------- | ----------------------------------- | ------------------------------------------------------- | ------------------------------------- |
+| `rfnd_ap`   | `["rfnd_ap", refund_id, admin]`    | `(project_id: String, amount: i128, donor: Address)`    | When admin calls `approve_refund`     |
+
+---
+
+## 18. `rfnd_rj`
+
+**Description**: Emitted when an admin rejects a refund request. The donation stands; no counters are adjusted.
+
+| Event Name  | Topics                              | Data                                        | When Emitted                          |
+| ----------- | ----------------------------------- | ------------------------------------------- | ------------------------------------- |
+| `rfnd_rj`   | `["rfnd_rj", refund_id, admin]`    | `(project_id: String, donor: Address)`       | When admin calls `reject_refund`      |
+
+---
+
+## Escrow Contract Events
+
+## 19. `job_creat`
+
+**Description**: Emitted when a client creates and funds an escrow job.
+
+| Event Name  | Topics                     | Data                                           | When Emitted                     |
+| ----------- | -------------------------- | ---------------------------------------------- | -------------------------------- |
+| `job_creat` | `["job_creat", client]`    | `(job_id: String, freelancer: Address, amount: i128)` | When client calls `create_job` |
+
+---
+
+## 20. `ms_rel`
+
+**Description**: Emitted when a client releases funds for a specific milestone.
+
+| Event Name | Topics                  | Data                                                        | When Emitted                            |
+| ---------- | ----------------------- | ----------------------------------------------------------- | --------------------------------------- |
+| `ms_rel`   | `["ms_rel", client]`    | `(job_id: String, milestone_index: u32, release_amount: i128)` | When client calls `release_milestone`   |
+
+---
+
+## 21. `ms_claim`
+
+**Description**: Emitted when a freelancer claims a released milestone after the release period.
+
+| Event Name | Topics                     | Data                                                        | When Emitted                            |
+| ---------- | -------------------------- | ----------------------------------------------------------- | --------------------------------------- |
+| `ms_claim` | `["ms_claim", freelancer]` | `(job_id: String, milestone_index: u32, release_amount: i128)` | When freelancer calls `claim_milestone` |
+
+---
+
+## 22. `ms_disp`
+
+**Description**: Emitted when an admin disputes a single milestone on a job.
+
+| Event Name | Topics                 | Data                                      | When Emitted                            |
+| ---------- | ---------------------- | ----------------------------------------- | --------------------------------------- |
+| `ms_disp`  | `["ms_disp", admin]`   | `(job_id: String, milestone_index: u32)`  | When admin calls `dispute_milestone`    |
+
+---
+
+## 23. `ms_reslv`
+
+**Description**: Emitted when an admin resolves a single milestone dispute.
+
+| Event Name | Topics                 | Data                                                           | When Emitted                                   |
+| ---------- | ---------------------- | -------------------------------------------------------------- | ---------------------------------------------- |
+| `ms_reslv` | `["ms_reslv", admin]`  | `(job_id: String, milestone_index: u32, approve: bool)`       | When admin calls `resolve_milestone_dispute`   |
+
+---
+
+## 24. `job_refnd`
+
+**Description**: Emitted when a client claims an auto-refund for an expired job with no claimed milestones.
+
+| Event Name  | Topics                     | Data                                    | When Emitted                             |
+| ----------- | -------------------------- | --------------------------------------- | ---------------------------------------- |
+| `job_refnd` | `["job_refnd", client]`    | `(job_id: String, refund_amount: i128)` | When client calls `refund_expired_job`   |
+
+---
+
+## 25. `job_disp` (deprecated)
+
+**Description**: Emitted when an admin disputes an entire job.
+
+| Event Name | Topics                 | Data               | When Emitted                        |
+| ---------- | ---------------------- | ------------------ | ----------------------------------- |
+| `job_disp` | `["job_disp", admin]`  | `job_id: String`   | When admin calls `dispute_job`      |
+
+---
+
+## 26. `job_reslv` (deprecated)
+
+**Description**: Emitted when an admin resolves an entire job dispute.
+
+| Event Name  | Topics                 | Data                                        | When Emitted                        |
+| ----------- | ---------------------- | ------------------------------------------- | ----------------------------------- |
+| `job_reslv` | `["job_reslv", admin]` | `(job_id: String, approve_remaining: bool)` | When admin calls `resolve_dispute`  |
+
+---
+
+## 27. `rec_cr` (Recurring Created)
+
+**Description**: Emitted when a donor registers a new recurring donation schedule.
+
+| Event Name | Topics                           | Data                                                                                                    | When Emitted                              |
+| ---------- | -------------------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| `rec_cr`   | `["rec_cr", donor, project_id]`  | `(recurring_id: u32, amount: i128, currency: Symbol, interval_ledgers: u32, keeper_incentive: i128, msg_hash: u32)` | When a donor registers a recurring schedule |
+
+---
+
+## 28. `rec_can` (Recurring Cancelled)
+
+**Description**: Emitted when a donor cancels an active recurring donation schedule.
+
+| Event Name | Topics                 | Data                 | When Emitted                                |
+| ---------- | ---------------------- | -------------------- | ------------------------------------------- |
+| `rec_can`  | `["rec_can", donor]`   | `(recurring_id: u32)` | When a donor cancels a recurring schedule   |
+
+---
+
+## 29. `rec_exec` (Recurring Executed)
+
+**Description**: Emitted when a keeper successfully executes a matured recurring donation schedule.
+
+| Event Name | Topics                      | Data                                                                           | When Emitted                                  |
+| ---------- | --------------------------- | ------------------------------------------------------------------------------ | --------------------------------------------- |
+| `rec_exec` | `["rec_exec", keeper, donor]`| `(recurring_id: u32, amount: i128, currency: Symbol, project_id: String)`      | When a keeper executes a recurring donation   |
+
+## 30. `vest_crt` (Vesting Created)
+
+**Description**: Emitted when a donor creates a time-locked vesting donation schedule.
+
+| Event Name | Topics                           | Data                                                                                                    | When Emitted                   |
+| ---------- | -------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| `vest_crt` | `["vest_crt", donor, project_id]` | `(schedule_id: u32, total_amount: i128, amount_per_installment: i128, installment_count: u32, interval_ledgers: u32, msg_hash: u32)` | When donor calls `donate_vested` |
+
+---
+
+## 31. `vest_clm` (Vesting Claimed)
+
+**Description**: Emitted when a vested installment is claimed by anyone after the interval elapses.
+
+| Event Name | Topics                    | Data                                                     | When Emitted                          |
+| ---------- | ------------------------- | -------------------------------------------------------- | ------------------------------------- |
+| `vest_clm` | `["vest_clm", project_id]` | `(schedule_id: u32, amount: i128, remaining: u32)`       | When `claim_vested_installment` fires |
+
+---
+
+## 32. `vest_can` (Vesting Cancelled)
+
+**Description**: Emitted when a donor cancels a vesting schedule and receives back the unvested amount.
+
+| Event Name | Topics                            | Data                                      | When Emitted                    |
+| ---------- | --------------------------------- | ----------------------------------------- | ------------------------------- |
+| `vest_can` | `["vest_can", donor, project_id]` | `(schedule_id: u32, unvested_amount: i128)` | When donor calls `cancel_vesting` |
 
 ---
 
@@ -96,4 +336,11 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 - Events can be queried via Horizon or Soroban RPC tools.
 - Frontend / backend should listen to these for real-time updates, notifications, and leaderboard.
 
-**Last Updated**: June 30, 2026
+**Last Updated**: July 19, 2026
+
+---
+
+## Coordination Note for #277 (Matching Pool)
+
+`DataKey::ProjectContractBalance(String, Address)` is the **canonical per-project per-token balance ledger** for all contract-held funds. Any deposit/matching-pool logic (including #277) **must** increment this key on deposit and decrement it on withdrawal. Do not introduce a parallel balance concept — the compound key already supports multi-token per project. See `SECURITY.md` for the full rationale.
+

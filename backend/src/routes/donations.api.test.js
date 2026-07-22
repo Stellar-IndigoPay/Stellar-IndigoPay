@@ -6,8 +6,9 @@ jest.mock("../db/pool", () => ({
 }));
 
 jest.mock("../services/redis", () => ({
-  get: jest.fn(),
-  set: jest.fn(),
+  get: jest.fn().mockResolvedValue(null),
+  set: jest.fn().mockResolvedValue(undefined),
+  deletePattern: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock("../services/stellar", () => ({
@@ -91,9 +92,10 @@ describe("GET /api/projects", () => {
   let app;
 
   beforeEach(() => {
-    app = buildApp();
-    redis.get.mockResolvedValue(null);
     jest.clearAllMocks();
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue(undefined);
+    app = buildApp();
   });
 
   test("filters by category", async () => {
@@ -159,9 +161,10 @@ describe("GET /api/projects/:id", () => {
   let app;
 
   beforeEach(() => {
-    app = buildApp();
-    redis.get.mockResolvedValue(null);
     jest.clearAllMocks();
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue(undefined);
+    app = buildApp();
   });
 
   test("returns a single project", async () => {
@@ -295,3 +298,55 @@ describe("GET /api/donations/:id", () => {
     expect(res.body.error.code).toBe("VALIDATION_ERROR");
   });
 });
+
+describe("GET /api/donations/recurring/:donorAddress", () => {
+  let app;
+
+  beforeEach(() => {
+    app = buildApp();
+    jest.clearAllMocks();
+  });
+
+  test("returns recurring donations list for a valid donor address", async () => {
+    const donor = makePublicKey("B");
+    pool.query.mockResolvedValue({
+      rows: [
+        {
+          id: "rec-uuid-1",
+          donor_address: donor,
+          recurring_id: 0,
+          project_id: "proj-1",
+          project_name: "Amazon Reforestation",
+          project_wallet: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+          amount: "10.0000000",
+          currency: "XLM",
+          interval_seconds: 500,
+          next_execution_at: new Date("2026-07-19T18:00:00.000Z"),
+          keeper_incentive: "0.5000000",
+          active: true,
+          created_at: new Date("2026-07-19T17:00:00.000Z"),
+          updated_at: new Date("2026-07-19T17:00:00.000Z"),
+        },
+      ],
+    });
+
+    const res = await request(app)
+      .get(`/api/donations/recurring/${donor}`)
+      .expect(200);
+
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.length).toBe(1);
+    expect(res.body.data[0].amount).toBe(10);
+    expect(res.body.data[0].projectName).toBe("Amazon Reforestation");
+    expect(res.body.data[0].active).toBe(true);
+  });
+
+  test("returns 400 for invalid donor address", async () => {
+    const res = await request(app)
+      .get("/api/donations/recurring/invalid-address")
+      .expect(400);
+
+    expect(res.body.error).toBe("Validation failed");
+  });
+});
+

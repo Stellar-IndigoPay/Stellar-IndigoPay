@@ -15,6 +15,7 @@
 "use strict";
 
 const client = require("prom-client");
+const logger = require("../logger");
 
 const registry = new client.Registry();
 
@@ -73,6 +74,31 @@ const dbPoolWaitingCount = new client.Gauge({
   registers: [registry],
 });
 
+const dbPoolMax = new client.Gauge({
+  name: "db_pool_max",
+  help: "Maximum number of connections allowed in the Postgres connection pool (may change with adaptive sizing).",
+  registers: [registry],
+});
+
+const dbPoolUtilizationRatio = new client.Gauge({
+  name: "db_pool_utilization_ratio",
+  help: "Ratio of total connections to max connections in the Postgres pool.",
+  registers: [registry],
+});
+
+const dbSlowQueriesTotal = new client.Counter({
+  name: "db_slow_queries_total",
+  help: "Total number of slow database queries, labelled by operation.",
+  labelNames: ["operation"],
+  registers: [registry],
+});
+
+const dbConnectionErrorsTotal = new client.Counter({
+  name: "db_connection_errors_total",
+  help: "Total number of Postgres connection errors.",
+  registers: [registry],
+});
+
 const dbQueryDurationSeconds = new client.Histogram({
   name: "db_query_duration_seconds",
   help: "Postgres query duration in seconds, labelled by operation and success.",
@@ -85,6 +111,26 @@ const cacheOperationsTotal = new client.Counter({
   name: "cache_operations_total",
   help: "Cache operations, labelled by cache (memory|redis), op (get|set|delete), and result (hit|miss|error|ok).",
   labelNames: ["cache", "op", "result"],
+  registers: [registry],
+});
+
+const cacheHits = new client.Counter({
+  name: "indigopay_cache_hits_total",
+  help: "Total number of Redis cache hits, labelled by route.",
+  labelNames: ["route"],
+  registers: [registry],
+});
+
+const cacheMisses = new client.Counter({
+  name: "indigopay_cache_misses_total",
+  help: "Total number of Redis cache misses (computed fresh), labelled by route.",
+  labelNames: ["route"],
+  registers: [registry],
+});
+
+const cacheCoalesced = new client.Counter({
+  name: "indigopay_cache_coalesced_total",
+  help: "Total number of requests served via request coalescing (single-flight).",
   registers: [registry],
 });
 
@@ -101,6 +147,32 @@ const indexerLagSeconds = new client.Gauge({
   registers: [registry],
 });
 
+const indigopayIndexerLagLedgers = new client.Gauge({
+  name: "indigopay_indexer_lag_ledgers",
+  help: "Number of ledgers the indexer is behind the latest Horizon ledger.",
+  registers: [registry],
+});
+
+const indigopayIndexerAutoBackfillsTotal = new client.Counter({
+  name: "indigopay_indexer_auto_backfills_total",
+  help: "Total number of autonomous micro-backfills triggered by lag detection.",
+  labelNames: ["outcome"],
+  registers: [registry],
+});
+
+const indigopayIndexerStreamReconnectsTotal = new client.Counter({
+  name: "indigopay_indexer_stream_reconnects_total",
+  help: "Total number of SSE stream reconnections.",
+  registers: [registry],
+});
+
+const indexerOperationsSkippedTotal = new client.Counter({
+  name: "indexer_operations_skipped_total",
+  help: "Total number of operations skipped by the indexer.",
+  labelNames: ["reason"],
+  registers: [registry],
+});
+
 const indexerRunning = new client.Gauge({
   name: "indexer_running",
   help: "1 if the indexer polling loop is running, 0 otherwise.",
@@ -108,6 +180,13 @@ const indexerRunning = new client.Gauge({
 });
 
 
+
+const secretRotationLastTimestamp = new client.Gauge({
+  name: "secret_rotation_last_timestamp",
+  help: "Unix timestamp of the most recent secret rotation, labelled by status (completed|failed|rolled_back|in_progress).",
+  labelNames: ["status"],
+  registers: [registry],
+});
 
 const readinessCheckFailedTotal = new client.Counter({
   name: "readiness_check_failed_total",
@@ -209,6 +288,83 @@ const queueLatency = new client.Gauge({
   registers: [registry],
 });
 
+// ── Event-sourcing projection engine metrics ───────────────────────────────
+
+const projectionEventsProcessedTotal = new client.Counter({
+  name: "indigopay_projection_events_processed_total",
+  help: "Total number of events processed by the projection engine, labelled by projection and outcome (success|error).",
+  labelNames: ["projection", "outcome"],
+  registers: [registry],
+});
+
+const projectionLagEvents = new client.Gauge({
+  name: "indigopay_projection_lag_events",
+  help: "Number of events in the event store not yet processed by projections.",
+  registers: [registry],
+});
+
+const projectionRebuildDurationSeconds = new client.Histogram({
+  name: "indigopay_projection_rebuild_duration_seconds",
+  help: "Duration of a full projection rebuild (replay of the entire event store), labelled by outcome.",
+  labelNames: ["outcome"],
+  buckets: [0.5, 1, 2.5, 5, 10, 20, 30, 60, 120],
+  registers: [registry],
+});
+
+const projectionRebuildLastEvents = new client.Gauge({
+  name: "indigopay_projection_rebuild_last_events",
+  help: "Number of events replayed during the most recent projection rebuild.",
+  registers: [registry],
+});
+
+const projectionRebuildInProgress = new client.Gauge({
+  name: "indigopay_projection_rebuild_in_progress",
+  help: "1 while a projection rebuild is running, 0 otherwise.",
+  registers: [registry],
+});
+
+// ── Push notification provider metrics ──────────────────────────────────────
+
+const pushSentTotal = new client.Counter({
+  name: "indigopay_push_sent_total",
+  help: "Total push notifications sent, labelled by provider and outcome.",
+  labelNames: ["provider", "outcome"], // provider: apns|fcm|expo  outcome: delivered|failed|fallback|unregistered
+  registers: [registry],
+});
+
+const pushLatencySeconds = new client.Histogram({
+  name: "indigopay_push_latency_seconds",
+  help: "Push notification send latency in seconds, labelled by provider.",
+  labelNames: ["provider"],
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  registers: [registry],
+});
+
+// ── Postgres failover metrics ─────────────────────────────────────────────
+
+const postgresFailoverTotal = new client.Counter({
+  name: "indigopay_postgres_failover_total",
+  help: "Total number of Postgres failover events, labelled by outcome.",
+  labelNames: ["outcome"], // initiated, succeeded, failed
+  registers: [registry],
+});
+
+// ── Recurring donation scheduler metrics ────────────────────────────────────
+
+const recurringExecutionsTotal = new client.Counter({
+  name: "indigopay_recurring_executions_total",
+  help: "Total recurring donation execution attempts, labelled by status.",
+  labelNames: ["status"], // success, failed
+  registers: [registry],
+});
+
+const recurringPending = new client.Gauge({
+  name: "indigopay_recurring_pending",
+  help: "Number of active recurring donation schedules pending execution.",
+  registers: [registry],
+});
+
+
 /**
  * Normalise an Express req.route.path / req.path to a low-cardinality
  * route label. We fall back to the literal path when no route is
@@ -229,16 +385,96 @@ function normaliseRoute(req) {
   return "unknown";
 }
 
+// ── Adaptive pool sizing ──────────────────────────────────────────────────
+
+const PG_MAX_HARD_CAP = parseInt(process.env.PG_MAX_HARD_CAP || "50", 10);
+let adaptivePoolCheckCount = 0;
+
 /**
  * Update the DB-pool gauges from the live `pg.Pool`. Cheap to call —
  * node_pg exposes `totalCount` / `idleCount` / `waitingCount` directly.
+ *
+ * Also implements adaptive pool sizing: if the pool has been saturated
+ * (all connections busy with queued waiters) for 4 consecutive checks
+ * (60 s at the default 15 s interval), increase max by 25 % up to
+ * PG_MAX_HARD_CAP.
  */
 function refreshDbPoolMetrics(pool) {
   if (!pool) return;
   try {
-    dbPoolTotalCount.set(pool.totalCount ?? 0);
-    dbPoolIdleCount.set(pool.idleCount ?? 0);
-    dbPoolWaitingCount.set(pool.waitingCount ?? 0);
+    const totalCount = pool.totalCount ?? 0;
+    const idleCount = pool.idleCount ?? 0;
+    const waitingCount = pool.waitingCount ?? 0;
+    const max = pool.max || pool.options?.max || 1;
+
+    dbPoolTotalCount.set(totalCount);
+    dbPoolIdleCount.set(idleCount);
+    dbPoolWaitingCount.set(waitingCount);
+    dbPoolMax.set(max);
+
+    const utilizationRatio = max > 0 ? totalCount / max : 0;
+    dbPoolUtilizationRatio.set(utilizationRatio);
+
+    // ── Adaptive pool sizing ──────────────────────────────────────────
+    if (totalCount >= max && waitingCount > 0 && max < PG_MAX_HARD_CAP) {
+      adaptivePoolCheckCount++;
+      if (adaptivePoolCheckCount >= 4) {
+        // 4 × ≈15 s interval = 60 s of sustained saturation
+        const newMax = Math.min(Math.ceil(max * 1.25), PG_MAX_HARD_CAP);
+        logger.info(
+          { event: "adaptive_pool_sizing", oldMax: max, newMax, waitingCount },
+          `Adaptive pool sizing: increasing pool max from ${max} to ${newMax}`,
+        );
+        if (pool.options) {
+          pool.options.max = newMax;
+        } else {
+          pool.max = newMax;
+        }
+        dbPoolMax.set(newMax);
+        adaptivePoolCheckCount = 0;
+      }
+    } else {
+      adaptivePoolCheckCount = 0;
+    }
+
+    if (waitingCount > 0) {
+      logger.warn(
+        {
+          event: "db_pool_contention",
+          waitingCount,
+          totalCount,
+          idleCount,
+          max,
+        },
+        `DB pool contention: ${waitingCount} queries waiting`,
+      );
+    }
+
+    if (waitingCount > 5) {
+      logger.error(
+        {
+          event: "db_pool_high_contention",
+          waitingCount,
+          totalCount,
+          idleCount,
+          max,
+        },
+        `DB pool high contention: ${waitingCount} queries waiting`,
+      );
+      readinessCheckFailedTotal.inc({ reason: "db_pool_contention" });
+    }
+
+    if (utilizationRatio >= 0.9) {
+      logger.warn(
+        {
+          event: "db_pool_high_utilization",
+          utilizationRatio,
+          totalCount,
+          max,
+        },
+        `DB pool utilization at ${(utilizationRatio * 100).toFixed(1)}%`,
+      );
+    }
   } catch {
     // Pool may be in a transitional state; swallow.
   }
@@ -262,36 +498,72 @@ async function refreshQueueMetrics() {
   }
 }
 
+/**
+ * Update the secret-rotation Prometheus gauge after a rotation is recorded.
+ * Called from the admin secretRotations route once the DB insert succeeds.
+ *
+ * @param {string} status — one of completed|failed|rolled_back|in_progress
+ */
+function updateSecretRotationMetrics(status) {
+  try {
+    secretRotationLastTimestamp.set({ status }, Date.now() / 1000);
+  } catch {
+    // Gauge may not be registered in test environments; swallow.
+  }
+}
+
+const metrics = {
+  httpRequestsTotal,
+  httpRequestDurationSeconds,
+  httpRequestsInFlight,
+  dbPoolTotalCount,
+  dbPoolIdleCount,
+  dbPoolWaitingCount,
+  dbPoolMax,
+  dbPoolUtilizationRatio,
+  dbSlowQueriesTotal,
+  dbConnectionErrorsTotal,
+  dbQueryDurationSeconds,
+  cacheOperationsTotal,
+  cacheHits,
+  cacheMisses,
+  cacheCoalesced,
+  queueJobsTotal,
+  indexerLagSeconds,
+  indexerRunning,
+  secretRotationLastTimestamp,
+  readinessCheckFailedTotal,
+  webhookDeliveriesTotal,
+  webhookAttemptsTotal,
+  webhookAttemptDurationSeconds,
+  aiSummaryTokensTotal,
+  aiSummaryCostUsdTotal,
+  aiSummaryLatencySeconds,
+  aiSummaryOutcomesTotal,
+  queueDepth,
+  queueActive,
+  queueWaiting,
+  queueFailed,
+  queueCompleted,
+  queueLatency,
+  pushSentTotal,
+  pushLatencySeconds,
+  postgresFailoverTotal,
+  projectionEventsProcessedTotal,
+  projectionLagEvents,
+  projectionRebuildDurationSeconds,
+  projectionRebuildLastEvents,
+  projectionRebuildInProgress,
+};
+
 module.exports = {
   registry,
+  metrics,
+  cacheHits,
+  cacheMisses,
+  cacheCoalesced,
   normaliseRoute,
   refreshDbPoolMetrics,
   refreshQueueMetrics,
-  metrics: {
-    httpRequestsTotal,
-    httpRequestDurationSeconds,
-    httpRequestsInFlight,
-    dbPoolTotalCount,
-    dbPoolIdleCount,
-    dbPoolWaitingCount,
-    dbQueryDurationSeconds,
-    cacheOperationsTotal,
-    queueJobsTotal,
-    indexerLagSeconds,
-    indexerRunning,
-    readinessCheckFailedTotal,
-    webhookDeliveriesTotal,
-    webhookAttemptsTotal,
-    webhookAttemptDurationSeconds,
-    aiSummaryTokensTotal,
-    aiSummaryCostUsdTotal,
-    aiSummaryLatencySeconds,
-    aiSummaryOutcomesTotal,
-    queueDepth,
-    queueActive,
-    queueWaiting,
-    queueFailed,
-    queueCompleted,
-    queueLatency,
-  },
+  updateSecretRotationMetrics,
 };

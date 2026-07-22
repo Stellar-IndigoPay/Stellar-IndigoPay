@@ -66,7 +66,16 @@ describe("pushService", () => {
         data: { type: "donation_receipt" },
       });
 
-      expect(tickets).toEqual([{ status: "ok", id: "ticket-1" }]);
+      expect(tickets).toEqual([
+        {
+          success: true,
+          outcome: "delivered",
+          provider: "expo",
+          providerMessageId: "ticket-1",
+          error: undefined,
+          unregistered: undefined,
+        },
+      ]);
       expect(mockSendPushNotificationsAsync).toHaveBeenCalledWith([
         {
           to: "ExponentPushToken[abc]",
@@ -89,6 +98,8 @@ describe("pushService", () => {
         "sent",
         "ticket-1",
         null,
+        null,
+        "expo",
       ]);
     });
 
@@ -109,7 +120,16 @@ describe("pushService", () => {
         data: { type: "donation_receipt" },
       });
 
-      expect(tickets).toEqual([]);
+      expect(tickets).toEqual([
+        {
+          success: false,
+          outcome: "failed",
+          provider: "expo",
+          providerMessageId: undefined,
+          error: "Invalid Expo push token",
+          unregistered: undefined,
+        },
+      ]);
       expect(mockSendPushNotificationsAsync).not.toHaveBeenCalled();
     });
 
@@ -147,6 +167,8 @@ describe("pushService", () => {
         "failed",
         null,
         "DeviceNotRegistered",
+        null,
+        "expo",
       ]);
     });
 
@@ -168,7 +190,14 @@ describe("pushService", () => {
         data: { type: "donation_receipt" },
       });
 
-      expect(tickets).toEqual([]);
+      expect(tickets).toEqual([
+        {
+          success: false,
+          outcome: "failed",
+          provider: "expo",
+          error: "Expo API unavailable",
+        },
+      ]);
       const insertCall = pool.query.mock.calls[3];
       expect(insertCall[1][6]).toBe("failed");
       expect(insertCall[1][8]).toBe("Expo API unavailable");
@@ -242,7 +271,16 @@ describe("pushService", () => {
         update: { id: "update-1", title: "We planted 500 trees!" },
       });
 
-      expect(tickets).toEqual([{ status: "ok", id: "ticket-anon" }]);
+      expect(tickets).toEqual([
+        {
+          success: true,
+          outcome: "delivered",
+          provider: "expo",
+          providerMessageId: "ticket-anon",
+          error: undefined,
+          unregistered: undefined,
+        },
+      ]);
       // Only 2 queries total: followers + delivery record (no preference check for anon follows)
       expect(pool.query).toHaveBeenCalledTimes(2);
     });
@@ -278,10 +316,9 @@ describe("pushService", () => {
         .mockResolvedValueOnce({ rows: [] }) // pref check follower2: opted in
         .mockResolvedValueOnce({ rows: [] }); // delivery insert
 
-      mockSendPushNotificationsAsync.mockResolvedValueOnce([
-        { status: "ok", id: "ticket-g1" },
-        { status: "ok", id: "ticket-g2" },
-      ]);
+      mockSendPushNotificationsAsync
+        .mockResolvedValueOnce([{ status: "ok", id: "ticket-g1" }])
+        .mockResolvedValueOnce([{ status: "ok", id: "ticket-g2" }]);
 
       const tickets = await pushService.sendGovernanceProposalNotifications({
         proposalId: "prop-42",
@@ -291,10 +328,24 @@ describe("pushService", () => {
       });
 
       expect(tickets).toEqual([
-        { status: "ok", id: "ticket-g1" },
-        { status: "ok", id: "ticket-g2" },
+        {
+          success: true,
+          outcome: "delivered",
+          provider: "expo",
+          providerMessageId: "ticket-g1",
+          error: undefined,
+          unregistered: undefined,
+        },
+        {
+          success: true,
+          outcome: "delivered",
+          provider: "expo",
+          providerMessageId: "ticket-g2",
+          error: undefined,
+          unregistered: undefined,
+        },
       ]);
-      expect(mockSendPushNotificationsAsync).toHaveBeenCalledTimes(1);
+      expect(mockSendPushNotificationsAsync).toHaveBeenCalledTimes(2);
     });
 
     test("skips followers who opted out of governance_proposal type", async () => {
@@ -365,7 +416,16 @@ describe("pushService", () => {
         recurringId: "rec-99",
       });
 
-      expect(tickets).toEqual([{ status: "ok", id: "ticket-reminder" }]);
+      expect(tickets).toEqual([
+        {
+          success: true,
+          outcome: "delivered",
+          provider: "expo",
+          providerMessageId: "ticket-reminder",
+          error: undefined,
+          unregistered: undefined,
+        },
+      ]);
 
       const sentMessage = mockSendPushNotificationsAsync.mock.calls[0][0][0];
       expect(sentMessage.title).toContain("Reminder");
