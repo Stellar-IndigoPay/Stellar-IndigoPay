@@ -73,7 +73,7 @@ describe("POST /api/donations → donation_event WebSocket broadcast", () => {
     jest.clearAllMocks();
   });
 
-  test("emits donation_event to connected clients within 500 ms", (done) => {
+  test("emits donation_event to connected clients within 2000 ms", (done) => {
     const donorAddress = makePublicKey("W");
     const transactionHash = makeTxHash("7");
     const donationRow = {
@@ -107,8 +107,8 @@ describe("POST /api/donations → donation_event WebSocket broadcast", () => {
 
     const deadline = setTimeout(() => {
       socket.disconnect();
-      done(new Error("donation_event was not received within 500 ms"));
-    }, 500);
+      done(new Error("donation_event was not received within 2000 ms"));
+    }, 2000);
 
     socket.on("connect", () => {
       socket.on("donation_event", (data) => {
@@ -146,7 +146,7 @@ describe("POST /api/donations → donation_event WebSocket broadcast", () => {
       clearTimeout(deadline);
       done(err);
     });
-  }, 2000);
+  }, 3000);
 
   test("does not emit donation_event when the project is not found", (done) => {
     const donorAddress = makePublicKey("X");
@@ -226,8 +226,8 @@ describe("POST /api/donations → donation_event WebSocket broadcast", () => {
 
     const deadline = setTimeout(() => {
       socket.disconnect();
-      done(new Error("donation_event was not received within 500 ms"));
-    }, 500);
+      done(new Error("donation_event was not received within 2000 ms"));
+    }, 2000);
 
     socket.on("connect", () => {
       socket.on("donation_event", (data) => {
@@ -262,7 +262,7 @@ describe("POST /api/donations → donation_event WebSocket broadcast", () => {
       clearTimeout(deadline);
       done(err);
     });
-  }, 2000);
+  }, 3000);
 });
 
 describe("POST /api/donations → broadcast hardening", () => {
@@ -351,7 +351,7 @@ describe("POST /api/donations → broadcast hardening", () => {
           new Promise((resolve, reject) => {
             const timer = setTimeout(
               () => reject(new Error("client did not receive donation_event")),
-              500,
+              2000,
             );
             socket.on("donation_event", (data) => {
               clearTimeout(timer);

@@ -21,8 +21,10 @@ const {
 const { mapDonationRow } = require("../services/store");
 const { invalidateCache } = require("../middleware/cache");
 const { enqueueProfileUpdate } = require("../services/profileQueue");
+const { enqueueImpactRecalc } = require("../services/impactQueue");
 const { enqueuePushNotification } = require("../services/pushQueue");
 const { server } = require("../services/stellar");
+const { invalidateProjectRelatedCache } = require("../services/cacheManager");
 const donationLimiter = createRateLimiter(10, 1); // 10 requests per minute
 
 // Local EventEmitter used by both the POST /api/donations handler and the
@@ -244,6 +246,14 @@ async function recordDonation(req, res, next) {
       );
     });
 
+    enqueueImpactRecalc({
+      donationId: recordedDonation.id,
+      projectId,
+      donorAddress,
+      amountXLM: parsedAmount,
+    }).catch((err) => {
+      logger.error({ event: "impact_enqueue_failed", err: err.message, donorAddress, projectId }, "Failed to enqueue impact recalculation job");
+    });
     enqueuePushNotification({
       type: "donation_receipt",
       payload: {
@@ -282,6 +292,8 @@ async function recordDonation(req, res, next) {
         timestamp: new Date().toISOString(),
       });
     }
+
+    await invalidateProjectRelatedCache(projectId);
 
     const mappedDonation = mapDonationRow(donationResult.rows[0]);
     donationEvents.emit("new_donation", mappedDonation);
@@ -340,14 +352,15 @@ router.get("/stream", (req, res) => {
 router.get("/project/:projectId/messages", async (req, res, next) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 10, 50);
+    // Read from the donor_history projection (materialised donation stream).
     const result = await pool.query(
       `SELECT *
-       FROM donations
-       WHERE project_id = $1
-         AND message IS NOT NULL
-         AND length(trim(message)) > 0
-       ORDER BY amount DESC, created_at DESC
-       LIMIT $2`,
+        FROM projection_donor_history
+        WHERE project_id = $1
+          AND message IS NOT NULL
+          AND length(trim(message)) > 0
+        ORDER BY amount_xlm DESC, created_at DESC
+        LIMIT $2`,
       [req.params.projectId, limit],
     );
     res.json({ success: true, data: result.rows.map(mapDonationRow) });
@@ -374,13 +387,15 @@ router.get("/project/:projectId", async (req, res, next) => {
       ? [req.params.projectId, req.query.cursor, limit + 1]
       : [req.params.projectId, limit + 1];
 
+    // Read from the donor_history projection (materialised donation stream).
+    const table = "projection_donor_history";
     const query = hasCursor
-      ? `SELECT * FROM donations
+      ? `SELECT * FROM ${table}
          WHERE project_id = $1
            AND created_at < $2::timestamptz
          ORDER BY created_at DESC
          LIMIT $3`
-      : `SELECT * FROM donations
+      : `SELECT * FROM ${table}
          WHERE project_id = $1
          ORDER BY created_at DESC
          LIMIT $2`;
@@ -413,10 +428,11 @@ router.get(
   validate(z.object({ publicKey: stellarAddress }), "params"),
   async (req, res, next) => {
     try {
+      // Read from the donor_history projection (materialised donation stream).
       const result = await pool.query(
-        `SELECT * FROM donations
-       WHERE donor_address = $1
-       ORDER BY created_at DESC`,
+        `SELECT * FROM projection_donor_history
+        WHERE donor_address = $1
+        ORDER BY created_at DESC`,
         [req.params.publicKey],
       );
       res.json({ success: true, data: result.rows.map(mapDonationRow) });

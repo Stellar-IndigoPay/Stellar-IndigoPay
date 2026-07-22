@@ -63,6 +63,7 @@ const { start: startWebhookQueue,
   stop: stopWebhookQueue,
 } = require("./services/webhookQueue");
 const { start: startPushQueue } = require("./services/pushQueue");
+const { start: startImpactQueue } = require("./services/impactQueue");
 const { start: startIdempotencyCleanup } = require("./services/idempotencyCleanup");
 const { start: startRecurringDonationWorker } = require("./services/recurringDonationWorker");
 const { start: startBlacklistCleanup } = require("./services/blacklistCleanup");
@@ -247,6 +248,18 @@ try {
   logger.error(
     { event: "route_load_failed", route: "admin/analytics", err: err.message },
     "Failed to load admin analytics route module",
+  );
+}
+
+// Admin projection-engine management (event-sourcing rebuild endpoints).
+try {
+  const adminProjectionsRouter = require("./routes/admin/projections");
+  app.use("/api/admin/projections", adminProjectionsRouter);
+  app.use("/api/v1/admin/projections", adminProjectionsRouter);
+} catch (err) {
+  logger.error(
+    { event: "route_load_failed", route: "admin/projections", err: err.message },
+    "Failed to load admin projections route module",
   );
 }
 
