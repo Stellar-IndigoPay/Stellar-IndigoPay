@@ -124,6 +124,21 @@ function StatCard({
 function DonationRow({ donation }: { donation: Donation }) {
   const amount = donation.amount ?? donation.amountXLM ?? "0";
   const currency = donation.currency ?? "XLM";
+  const [downloading, setDownloading] = useState(false);
+
+  const downloadReceipt = async () => {
+    setDownloading(true);
+    try {
+      const response = await fetch(`/api/donations/${donation.id}/receipt`);
+      if (!response.ok) throw new Error("Receipt unavailable");
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `indigopay-receipt-${donation.id}.pdf`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } finally { setDownloading(false); }
+  };
 
   return (
     <div className="flex items-center justify-between py-3 border-b border-[rgba(34,114,57,0.07)] last:border-0 gap-3">
@@ -146,6 +161,10 @@ function DonationRow({ donation }: { donation: Donation }) {
         <span className="text-[10px] text-[#5a7a5a] dark:text-[#8aaa8a]">
           {formatDate(donation.createdAt)}
         </span>
+        <button type="button" onClick={downloadReceipt} disabled={downloading}
+          className="text-[10px] text-[#227239] underline disabled:opacity-50">
+          {downloading ? "Preparing receipt…" : donation.receiptGeneratedAt ? "Download receipt" : "Download tax receipt"}
+        </button>
       </div>
     </div>
   );

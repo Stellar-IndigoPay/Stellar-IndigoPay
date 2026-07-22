@@ -18,6 +18,8 @@
 
 ### Features
 
+* **contracts/backend:** add opt-in anonymous donations and signed, cached tax receipt PDFs with locked XLM/USD values
+
 * **frontend:** complete 100% i18n coverage across all locale dictionaries, pluralization, and locale-aware formatting (closes #264, #262)
   - Extract all hardcoded strings into `en.json`, `fr.json`, `es.json` with 300+ keys and full key parity
   - Enhance `useI18n()` hook in `frontend/lib/i18n.tsx` with `tPlural()` pluralization, string interpolation (`{{param}}`), and English fallback
@@ -250,6 +252,10 @@
 - update mobile app theme with indigo palette ([d6da922](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/commit/d6da92249ea6ea07a1ee07e4e896ca9577da5a8d)), closes [#227239](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/issues/227239) [#5a7a5a](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/issues/5a7a5a) [#4F46E5](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/issues/4F46E5) [#818CF8](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/issues/818CF8) [#0A0A1A](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/issues/0A0A1A) [#FAFAFE](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/issues/FAFAFE)
 
 # Changelog
+
+## Unreleased
+
+- Added SEP-0007 deep-link support for mobile donations via `web+stellar:pay` URIs, including confirmation, biometric auth, callback handling, and scan-history logging.
 
 All notable changes to this project will be documented in this file.
 

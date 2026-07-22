@@ -187,7 +187,7 @@ export default function DonationFeed({
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
               <span className="font-semibold text-[#0F172A] dark:text-[#E2E8F0] text-sm font-body">
-                {shortenAddress(d.donorAddress, 5)}
+                {d.donorAddress ? shortenAddress(d.donorAddress, 5) : "Anonymous"}
               </span>
               <span className="font-mono font-bold text-[#4F46E5] dark:text-[#818CF8] text-sm">
                 {d.currency === "USDC"
