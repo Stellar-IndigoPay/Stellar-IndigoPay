@@ -8691,7 +8691,7 @@ mod tests {
 
         client.batch_donate(&token, &donations);
 
-        assert!(client.has_nft(&donor, &BadgeTier::Seedling));
+        assert!(client.has_nft(&donor, &BadgeTier::Tree));
     }
 
     #[test]
