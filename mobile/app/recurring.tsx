@@ -102,7 +102,7 @@ export default function RecurringScreen() {
     setLoading(false);
   }, []);
 
-  useFocusEffect(refresh);
+  useFocusEffect(useCallback(() => { refresh(); }, [refresh]));
 
   const handleCancel = async (id: string) => {
     await cancelRecurringDonation(id);

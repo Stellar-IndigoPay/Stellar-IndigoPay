@@ -1,17 +1,16 @@
 /**
  * pages/projects/[id].tsx — Single project detail + donate
  */
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/router";
+import Image from "next/image";
 import type { GetServerSideProps } from "next";
 import PageMeta from "@/components/PageMeta";
 import Link from "next/link";
 import DonateForm from "@/components/DonateForm";
 import DonationFeed from "@/components/DonationFeed";
-import ProjectProgressBar, {
-  ProjectProgressBarSkeleton,
-} from "@/components/ProjectProgressBar";
-import { SkeletonBox, SkeletonAvatar } from "@/components/Skeleton";
+import ProjectProgressBar from "@/components/ProjectProgressBar";
+import ProjectDetailSkeleton from "@/components/ProjectDetailSkeleton";
 import ToastNotification, {
   type ToastItem,
 } from "@/components/ToastNotification";
@@ -43,6 +42,7 @@ import {
   CATEGORY_ICONS,
   copyToClipboard,
   shortenAddress,
+  formatDate,
 } from "@/utils/format";
 import {
   accountUrl,
@@ -56,6 +56,7 @@ import type {
   ProjectCampaign,
   ProjectUpdate,
 } from "@/utils/types";
+import { trackEvent } from "@/lib/analytics";
 import { useWishlist } from "@/hooks/useWishlist";
 import { QueryErrorFallback } from "@/components/QueryErrorFallback";
 
@@ -154,6 +155,18 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
       .finally(() => setLoading(false));
   }, [id, publicKey]);
 
+  // Filter matches to only show active, non-expired, and non-exhausted pools
+  const activeMatches = useMemo(
+    () =>
+      matches.filter(
+        (m: any) =>
+          m.status === "active" &&
+          new Date(m.expiresAt) > new Date() &&
+          parseFloat(m.remainingXLM) > 0,
+      ),
+    [matches],
+  );
+
   const handleRetryLoad = () => {
     if (isRetrying || !id) return;
     setRetryCount((c) => c + 1);
@@ -180,15 +193,23 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
   };
 
   useEffect(() => {
+    if (!loading && project) {
+      trackEvent("project_detail_viewed", {
+        projectId: project.id,
+        category: project.category,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- identity stable
+  }, [loading, project?.id, project?.category]);
+
+  useEffect(() => {
     if (!project) return;
     setDiscussionLoading(true);
     fetchProjectDiscussion(project.walletAddress, 50)
       .then(setDiscussion)
       .catch(() => setDiscussion([]))
       .finally(() => setDiscussionLoading(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- project object
-    // identity changes at the same frequency as walletAddress; including
-    // project in the deps array would cause spurious refetches.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- identity stable
   }, [project?.walletAddress]);
 
   useEffect(() => {
@@ -768,7 +789,7 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
 
   if (loading || !project)
     return (
-      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10 animate-pulse pointer-events-none">
+      <>
         <PageMeta
           title={ogTitle}
           description={ogDescription}
@@ -776,46 +797,8 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
           ogImage={ogImage}
           jsonLd={projectJsonLd || undefined}
         />
-        <SkeletonBox className="h-6 rounded w-1/4 mb-6" palette="forest" />
-        <div className="card space-y-4">
-          <div className="flex items-start gap-4 mb-5">
-            <SkeletonAvatar size="lg" palette="forest" />
-            <div className="flex-1 space-y-3">
-              <div className="flex gap-2">
-                <SkeletonBox
-                  className="h-6 rounded-full w-20"
-                  palette="forest"
-                />
-                <SkeletonBox
-                  className="h-6 rounded-full w-16"
-                  palette="forest"
-                />
-              </div>
-              <SkeletonBox className="h-8 rounded w-2/3" palette="forest" />
-              <SkeletonBox className="h-4 rounded w-1/3" palette="forest" />
-            </div>
-          </div>
-          <ProjectProgressBarSkeleton palette="forest" />
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="stat-card text-center space-y-2">
-                <SkeletonBox
-                  className="h-6 rounded w-8 mx-auto"
-                  palette="forest"
-                />
-                <SkeletonBox
-                  className="h-5 rounded w-16 mx-auto"
-                  palette="forest"
-                />
-                <SkeletonBox
-                  className="h-3 rounded w-12 mx-auto"
-                  palette="forest"
-                />
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
+        <ProjectDetailSkeleton />
+      </>
     );
 
   const pct = progressPercent(project.raisedXLM, project.goalXLM);
@@ -883,6 +866,20 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
         ← Back to Projects
       </Link>
 
+      {/* Hero image — priority-loaded for LCP optimization */}
+      {project.imageUrl && (
+        <div className="relative w-full h-64 sm:h-80 md:h-96 rounded-2xl overflow-hidden mb-6">
+          <Image
+            src={project.imageUrl}
+            alt={project.name}
+            fill
+            priority
+            sizes="100vw"
+            className="object-cover"
+          />
+        </div>
+      )}
+
       {/* Celebration Banner */}
       {isComplete && (
         <div className="celebration-banner mb-6 bg-gradient-to-r from-emerald-500 via-green-500 to-teal-500 text-white rounded-2xl p-8 text-center shadow-2xl border-4 border-white relative overflow-hidden">
@@ -948,24 +945,38 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
         </div>
       )}
 
-      {matches.length > 0 && (
+      {activeMatches.length > 0 && (
         <div className="card mb-6 border-green-200 bg-gradient-to-r from-green-50 to-emerald-50">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <p className="text-xs uppercase tracking-widest font-bold text-green-700 font-body mb-1">
-                Donation Matching Active
-              </p>
-              <h2 className="font-display text-xl font-semibold text-green-900">
-                Your donation will be matched up to {matches[0].multiplier}x!
-              </h2>
-              <p className="text-sm text-green-800 font-body mt-2">
-                Remaining capacity: {formatXLM(matches[0].remainingXLM)}
-              </p>
-            </div>
-            <p className="text-xs px-3 py-1 rounded-full bg-green-100 border border-green-200 text-green-800 font-body">
-              {new Date(matches[0].expiresAt).toLocaleDateString()}
-            </p>
-          </div>
+          <p className="text-xs uppercase tracking-widest font-bold text-green-700 font-body mb-3">
+            Donation Matching Active
+          </p>
+          {activeMatches.map((m: any) => {
+            const cap = parseFloat(m.capXLM);
+            const matched = parseFloat(m.matchedXLM);
+            const pct = cap > 0 ? Math.min((matched / cap) * 100, 100) : 0;
+            return (
+              <div key={m.id} className="mb-3 last:mb-0">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-sm font-semibold text-green-900 font-body">
+                    Donations matched {m.multiplier}× up to{" "}
+                    {formatXLM(m.capXLM)}
+                  </span>
+                  <span className="text-xs text-green-700 font-body">
+                    {formatXLM(m.remainingXLM)} remaining
+                  </span>
+                </div>
+                <div className="w-full h-2 bg-green-100 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-green-500 rounded-full transition-all"
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                <p className="text-xs text-green-600 font-body mt-1">
+                  Expires {formatDate(m.expiresAt)}
+                </p>
+              </div>
+            );
+          })}
         </div>
       )}
 

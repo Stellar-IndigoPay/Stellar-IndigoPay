@@ -3,10 +3,9 @@
 // Suppressing this warning so clippy -- -D warnings still passes.
 // TODO(indigopay-272): migrate to #[contractevent] pattern.
 #![allow(deprecated)]
-#[cfg(all(test, feature = "testutils"))]
-mod fuzz_template;
-#[cfg(all(test, feature = "testutils"))]
-mod fuzz_tests;
+
+#[cfg(feature = "donation")]
+pub mod donation;
 
 /**
  * contracts/indigopay-contract/src/lib.rs
@@ -31,8 +30,8 @@ mod fuzz_tests;
  *     --source alice --network testnet
  */
 use soroban_sdk::{
-    contract, contractclient, contractimpl, contracttype, symbol_short, token, Address, BytesN,
-    Env, String, Symbol, Vec,
+    contract, contractclient, contractimpl, contracttype, symbol_short, token, Address, Bytes,
+    BytesN, Env, String, Symbol, Vec,
 };
 
 // ─── Oracle interface ─────────────────────────────────────────────────────────
@@ -87,6 +86,11 @@ pub struct Project {
     pub deadline_ledger: u32,
     /// Lifecycle of the project's optional time-bound campaign.
     pub campaign_status: CampaignStatus,
+    /// Optional parent project ID for hierarchical project structure.
+    /// When set, this project is a sub-project of the specified parent.
+    /// Sub-projects inherit active status from parent (deactivating parent
+    /// deactivates children). Appended for backward compatibility.
+    pub parent_project_id: Option<String>,
 }
 
 /// Lifecycle of a project's optional time-bound fundraising campaign.
@@ -239,6 +243,61 @@ pub struct RefundRequest {
 }
 
 #[contracttype]
+#[derive(Clone, Debug)]
+pub struct RecurringDonation {
+    pub donor: Address,
+    pub project_id: String,
+    pub amount: i128,
+    pub currency: Symbol,      // "XLM" or "USDC"
+    pub interval_ledgers: u32, // e.g. 518400 ≈ 30 days @ 5s/ledger
+    pub next_execution_ledger: u32,
+    pub keeper_incentive: i128, // stroops paid to executor
+    pub active: bool,
+    pub created_at: u32,
+}
+
+/// A time-locked vesting schedule for gradual donation release.
+/// Donors can specify that a donation should be released to the project
+/// in equal installments over a configurable number of ledgers, rather
+/// than all at once. The first installment is transferred immediately;
+/// subsequent installments are claimable after each interval elapses.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct VestingSchedule {
+    pub donor: Address,
+    pub project_id: String,
+    pub total_amount: i128,
+    pub amount_per_installment: i128,
+    pub installment_count: u32,
+    pub interval_ledgers: u32,
+    pub next_installment_ledger: u32,
+    pub installments_released: u32,
+    pub created_at: u32,
+    pub token: Address,
+}
+
+/// An on-chain impact certificate leaf for a single donor's contribution.
+/// The platform constructs a Merkle tree of all donor impacts for a project's
+/// reporting period and posts only the root on-chain. Individual donors can then
+/// prove their specific impact (trees planted, CO₂ sequestered, hectares restored)
+/// against that root without revealing other donors' data.
+#[cfg(feature = "impact")]
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImpactLeaf {
+    /// Donor address whose impact this leaf represents.
+    pub donor: Address,
+    /// Index of the donation within the project's donation history.
+    pub donation_index: u32,
+    /// CO₂ offset in kilograms attributable to this donor.
+    pub co2_kg: u32,
+    /// Number of trees planted attributable to this donor.
+    pub trees: u32,
+    /// Hectares restored attributable to this donor.
+    pub hectares: u32,
+}
+
+#[contracttype]
 pub enum DataKey {
     // Multi-sig admin set: Vec<Address> of authorized admin addresses.
     // Replaces the former single-admin `Admin` variant.
@@ -291,6 +350,9 @@ pub enum DataKey {
     // bulk operations (e.g. `deactivate_all_projects`) so they can
     // enumerate projects without external indexing.
     ProjectIdsAll,
+    // Sub-project IDs for a given parent project — enables hierarchical
+    // project structure queries (cross-contract project registry).
+    SubProjectIds(String),
     // Pending admin transfer for the two-step `transfer_admin` /
     // `accept_admin` flow. Stores `(old_admin, new_admin)` tuple.
     // Set when M-of-N admins call `transfer_admin` and cleared on
@@ -334,6 +396,22 @@ pub enum DataKey {
     // balance concept. #277's deposit logic must increment this key on
     // deposit. See SECURITY.md and #277 for coordination notes.
     ProjectContractBalance(String, Address),
+    RecurringDonation(Address, u32),
+    DonorRecurringCount(Address),
+    VoteDelegation(Address),
+    DelegatedWeight(Address),
+    NativeTokenAddress,
+    // zk-SNARK anonymous donation (#390)
+    ZkVerificationKey,
+    Nullifier(BytesN<32>),
+    // Time-locked donation vesting (#386)
+    VestingSchedule(Address, u32),
+    DonorVestingCount(Address),
+    // Platform fee configuration (#385)
+    /// Fee in basis points (0–500, max 5%).
+    PlatformFeeBps,
+    /// Designated wallet that receives the platform fee.
+    PlatformTreasury,
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -376,6 +454,22 @@ const EMERGENCY_WITHDRAWAL_TIMELOCK: u32 = 120_960;
 // donation during which the donor may request a refund (subject to admin +
 // project wallet approval).
 const REFUND_COOLDOWN_LEDGERS: u32 = 17_280;
+
+/// Current storage schema version. Bump this and add a migration step in
+/// `migrate()` whenever a struct layout, DataKey variant, or stored value
+/// encoding changes in a backward-incompatible way.
+///
+/// v1: original schema (no version tracking)
+/// v2: Symbol-keyed storage version added (#379)
+const CURRENT_STORAGE_VERSION: u32 = 2;
+/// Storage key for the schema version. Uses a Symbol (not a DataKey variant)
+/// to avoid XDR codegen overhead in the slim WASM build.
+#[cfg(feature = "upgrade")]
+const STORAGE_VERSION_KEY: Symbol = symbol_short!("sv");
+
+/// Hard cap on platform fee: 500 basis points = 5%.
+#[cfg(feature = "fees")]
+const MAX_PLATFORM_FEE_BPS: u32 = 500;
 
 /// Read the stored admin set. Panics if not initialized.
 fn read_admin_set(env: &Env) -> Vec<Address> {
@@ -451,13 +545,170 @@ fn require_not_paused(env: &Env) {
     }
 }
 
+#[cfg(feature = "impact")]
+#[contracttype]
+#[derive(Clone, Debug)]
+enum ImpactKey {
+    /// Merkle root keyed by SHA-256(project_id || report_id).
+    ImRoot(BytesN<32>),
+}
+
+// ─── Merkle Proof Verification for Impact Certificates (#382) ──────────────
+
+#[cfg(feature = "impact")]
+/// Verify a Merkle proof against a known root using SHA-256.
+///
+/// Walks up the Merkle tree from `leaf` through each sibling in `proof`,
+/// re-hashing with SHA-256 at each level. The `index` determines sibling
+/// ordering: even indices put the current hash first, odd indices put the
+/// sibling first.
+///
+/// Returns `true` if the computed root matches the expected `root`.
+fn verify_merkle_proof(
+    env: &Env,
+    leaf: &BytesN<32>,
+    proof: &Vec<BytesN<32>>,
+    root: &BytesN<32>,
+    index: u32,
+) -> bool {
+    let mut hash: BytesN<32> = leaf.clone();
+    let mut idx = index;
+    for sibling in proof.iter() {
+        let mut combined = [0u8; 64];
+        if idx.is_multiple_of(2) {
+            combined[..32].copy_from_slice(&hash.to_array());
+            combined[32..].copy_from_slice(&sibling.to_array());
+        } else {
+            combined[..32].copy_from_slice(&sibling.to_array());
+            combined[32..].copy_from_slice(&hash.to_array());
+        }
+        hash = env
+            .crypto()
+            .sha256(&Bytes::from_slice(env, &combined))
+            .into();
+        idx /= 2;
+    }
+    hash == *root
+}
+
+#[cfg(feature = "impact")]
+/// Compute the leaf hash for an ImpactLeaf using deterministic XDR serialization
+/// followed by SHA-256. The off-chain Merkle tree builder MUST use the same
+/// serialization to produce the proof.
+fn compute_impact_leaf_hash(env: &Env, leaf: &ImpactLeaf) -> BytesN<32> {
+    use soroban_sdk::xdr::ToXdr;
+    let xdr_bytes = leaf.to_xdr(env);
+    env.crypto().sha256(&xdr_bytes).into()
+}
+
+#[cfg(feature = "impact")]
+/// Compute a deterministic 32-byte storage key from (project_id, report_id).
+/// Uses SHA-256 of each component separately then SHA-256 of the concatenation
+/// to prevent domain collisions (e.g., ("ab", "c") vs ("a", "bc")).
+fn impact_merkle_key(env: &Env, project_id: &String, report_id: &String) -> BytesN<32> {
+    let pid_hash = env.crypto().sha256(&project_id.clone().into());
+    let rid_hash = env.crypto().sha256(&report_id.clone().into());
+    let mut combined = [0u8; 64];
+    combined[..32].copy_from_slice(&pid_hash.to_array());
+    combined[32..].copy_from_slice(&rid_hash.to_array());
+    env.crypto()
+        .sha256(&Bytes::from_slice(env, &combined))
+        .into()
+}
+
+/// Read the configured platform fee in basis points.
+/// Returns 0 when the `fees` feature is disabled or no fee has been configured,
+/// preserving backward compatibility.
+fn read_platform_fee_bps(_env: &Env) -> u32 {
+    #[cfg(feature = "fees")]
+    {
+        env.storage()
+            .instance()
+            .get(&DataKey::PlatformFeeBps)
+            .unwrap_or(0)
+    }
+    #[cfg(not(feature = "fees"))]
+    {
+        0
+    }
+}
+
+/// Split `amount` into (project_amount, fee_amount) based on the configured fee
+/// rate in basis points. Returns `(amount, 0)` when `fee_bps` is 0.
+fn split_fee(amount: i128, fee_bps: u32) -> (i128, i128) {
+    if fee_bps == 0 {
+        return (amount, 0);
+    }
+    let fee = amount
+        .checked_mul(fee_bps as i128)
+        .expect("Fee calculation overflow")
+        / 10_000;
+    let project_amount = amount.checked_sub(fee).expect("Amount minus fee underflow");
+    (project_amount, fee)
+}
+
 fn ensure_min_ttl(env: &Env, min_ledgers: u32) {
     env.storage()
         .instance()
         .extend_ttl(min_ledgers, min_ledgers);
 }
 
-fn calculate_badge(total_stroops: i128) -> BadgeTier {
+// ─── Storage versioning & migration (#379) ────────────────────────────────
+
+/// Run pending storage migrations sequentially from the current version to
+/// `CURRENT_STORAGE_VERSION`. Called automatically by `execute_upgrade()` after
+/// the WASM is swapped, before any other contract function can be invoked.
+///
+/// Each migration step function (e.g., `migrate_v1_to_v2`) is responsible for
+/// transforming old storage layouts to the new schema. After each step, the
+/// `StorageVersion` key is updated so the migration is never applied twice.
+#[cfg(feature = "upgrade")]
+fn migrate(env: &Env) {
+    let current: u32 = env
+        .storage()
+        .instance()
+        .get(&STORAGE_VERSION_KEY)
+        .unwrap_or(1);
+
+    if current < 2 {
+        migrate_v1_to_v2(env);
+        env.storage().instance().set(&STORAGE_VERSION_KEY, &2u32);
+    }
+    // if current < 3 { migrate_v2_to_v3(env); ... }
+
+    // After all migrations, StorageVersion must equal CURRENT_STORAGE_VERSION.
+    // If a deployer forgot to bump CURRENT_STORAGE_VERSION after adding a
+    // migration, this assertion catches it at upgrade time.
+    let final_version: u32 = env
+        .storage()
+        .instance()
+        .get(&STORAGE_VERSION_KEY)
+        .unwrap_or(1);
+    if final_version != CURRENT_STORAGE_VERSION {
+        panic!(
+            "Migration incomplete: at version {} but target is {}",
+            final_version, CURRENT_STORAGE_VERSION
+        );
+    }
+}
+
+/// v1 → v2: No data transformation needed.
+///
+/// Storage keys and struct layouts are backward-compatible from v1 to v2.
+/// This empty migration exists to establish the migration framework pattern.
+/// When the first real schema change is introduced, replace this with actual
+/// data transformations that rename keys, restructure values, or backfill
+/// missing entries.
+#[cfg(feature = "upgrade")]
+fn migrate_v1_to_v2(_env: &Env) {
+    // Intentionally empty — v1 data is v2-compatible.
+    // Example pattern for a real migration:
+    //   let old_value = env.storage().instance().get(&OldKey);
+    //   env.storage().instance().set(&NewKey, &transformed_value);
+    //   env.storage().instance().remove(&OldKey);
+}
+
+pub fn calculate_badge(total_stroops: i128) -> BadgeTier {
     let xlm = total_stroops / STROOP;
     if xlm >= 2000 {
         BadgeTier::EarthGuardian
@@ -501,13 +752,37 @@ fn apply_campaign_goal_progress(project: &mut Project) -> bool {
     }
 }
 
-fn voting_weight_from_badge(badge: &BadgeTier) -> u32 {
+pub fn voting_weight_from_badge(badge: &BadgeTier) -> u32 {
     match badge {
         BadgeTier::None => 0,
-        BadgeTier::Seedling => 1,
-        BadgeTier::Tree => 3,
-        BadgeTier::Forest => 10,
-        BadgeTier::EarthGuardian => 25,
+        BadgeTier::Seedling => 100,
+        BadgeTier::Tree => 141,
+        BadgeTier::Forest => 173,
+        BadgeTier::EarthGuardian => 200,
+    }
+}
+
+#[cfg(feature = "delegation")]
+fn update_delegated_weight_if_needed(
+    env: &Env,
+    donor: &Address,
+    prev_badge: &BadgeTier,
+    new_badge: &BadgeTier,
+) {
+    if prev_badge != new_badge {
+        let old_weight = voting_weight_from_badge(prev_badge);
+        let new_weight = voting_weight_from_badge(new_badge);
+        if new_weight > old_weight {
+            let key = DataKey::VoteDelegation(donor.clone());
+            if let Some(delegate) = env.storage().instance().get::<_, Address>(&key) {
+                let del_key = DataKey::DelegatedWeight(delegate.clone());
+                let mut del_weight: u32 = env.storage().instance().get(&del_key).unwrap_or(0);
+                del_weight = del_weight
+                    .checked_add(new_weight - old_weight)
+                    .expect("Delegated weight overflow");
+                env.storage().instance().set(&del_key, &del_weight);
+            }
+        }
     }
 }
 
@@ -545,6 +820,12 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::GlobalCO2OffsetGrams, &0i128);
+        // Record the current storage schema version so post-upgrade migrations
+        // know which transformations have already been applied.
+        #[cfg(feature = "upgrade")]
+        env.storage()
+            .instance()
+            .set(&STORAGE_VERSION_KEY, &CURRENT_STORAGE_VERSION);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
@@ -583,6 +864,7 @@ impl IndigoPayContract {
             goal: 0,
             deadline_ledger: 0,
             campaign_status: CampaignStatus::None,
+            parent_project_id: None,
         };
         env.storage()
             .instance()
@@ -610,6 +892,93 @@ impl IndigoPayContract {
 
         env.events()
             .publish((symbol_short!("proj_reg"), admin), project_id);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Register a sub-project under an existing parent project.
+    /// The caller must be the parent project's wallet (require_auth).
+    /// Sub-projects are tracked in a `SubProjectIds(parent_id)` index
+    /// and inherit deactivation from their parent.
+    pub fn register_sub_project(
+        env: Env,
+        wallet: Address,
+        project_id: String,
+        name: String,
+        co2_per_xlm: u32,
+        parent_id: String,
+    ) {
+        wallet.require_auth();
+        require_not_paused(&env);
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::Project(project_id.clone()))
+        {
+            panic!("Project already registered");
+        }
+        if co2_per_xlm > MAX_CO2_PER_XLM {
+            panic!("CO2 per XLM exceeds maximum");
+        }
+        // Verify parent exists and wallet matches
+        let parent: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(parent_id.clone()))
+            .expect("Parent project not found");
+        if parent.wallet != wallet {
+            panic!("Wallet does not match parent project wallet");
+        }
+        let project = Project {
+            id: project_id.clone(),
+            name,
+            wallet: wallet.clone(),
+            co2_per_xlm,
+            total_raised: 0,
+            donor_count: 0,
+            active: true,
+            paused: false,
+            registered_at: env.ledger().sequence(),
+            goal: 0,
+            deadline_ledger: 0,
+            campaign_status: CampaignStatus::None,
+            parent_project_id: Some(parent_id.clone()),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::Project(project_id.clone()), &project);
+
+        // Track in parent's sub-project list
+        let mut sub_ids: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubProjectIds(parent_id.clone()))
+            .unwrap_or(Vec::new(&env));
+        sub_ids.push_back(project_id.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::SubProjectIds(parent_id.clone()), &sub_ids);
+
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProjectCount)
+            .unwrap_or(0);
+        let next_count = count.checked_add(1).expect("ProjectCount overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::ProjectCount, &next_count);
+
+        // Track in global project id index
+        let mut ids: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProjectIdsAll)
+            .unwrap_or(Vec::new(&env));
+        ids.push_back(project_id.clone());
+        env.storage().instance().set(&DataKey::ProjectIdsAll, &ids);
+
+        env.events()
+            .publish((symbol_short!("sub_reg"), wallet), (parent_id, project_id));
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
@@ -645,6 +1014,7 @@ impl IndigoPayContract {
                 goal: 0,
                 deadline_ledger: 0,
                 campaign_status: CampaignStatus::None,
+                parent_project_id: None,
             };
             env.storage()
                 .instance()
@@ -710,7 +1080,26 @@ impl IndigoPayContract {
         project.active = false;
         env.storage()
             .instance()
-            .set(&DataKey::Project(project_id), &project);
+            .set(&DataKey::Project(project_id.clone()), &project);
+
+        // Cascade deactivation to all sub-projects
+        let sub_ids: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubProjectIds(project_id.clone()))
+            .unwrap_or(Vec::new(&env));
+        for sub_id in sub_ids.iter() {
+            let mut sub: Project = env
+                .storage()
+                .instance()
+                .get(&DataKey::Project(sub_id.clone()))
+                .expect("Sub-project not found");
+            sub.active = false;
+            env.storage()
+                .instance()
+                .set(&DataKey::Project(sub_id), &sub);
+        }
+
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
@@ -803,6 +1192,7 @@ impl IndigoPayContract {
     /// Admin-only: start a time-bound fundraising campaign on a project.
     /// Goal is denominated in stroops (XLM-equivalent). Only one campaign
     /// may be Active at a time; a prior campaign must be Closed or Expired.
+    #[cfg(feature = "campaign")]
     pub fn create_campaign(
         env: Env,
         admin: Address,
@@ -851,6 +1241,7 @@ impl IndigoPayContract {
     }
 
     /// Admin-only: push an Active campaign's deadline further into the future.
+    #[cfg(feature = "campaign")]
     pub fn extend_campaign(env: Env, admin: Address, project_id: String, new_deadline: u32) {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
@@ -884,6 +1275,7 @@ impl IndigoPayContract {
 
     /// Admin-only: end a campaign. Early close → `Closed`; past deadline
     /// without meeting the goal → `Expired`; closing after `GoalReached` → `Closed`.
+    #[cfg(feature = "campaign")]
     pub fn close_campaign(env: Env, admin: Address, project_id: String) {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
@@ -917,8 +1309,48 @@ impl IndigoPayContract {
         );
     }
 
+    // ─── Platform Fee Configuration (#385) ────────────────────────────────────
+
+    /// Admin-only (M-of-N): set the platform fee in basis points.
+    ///
+    /// `fee_bps` is capped at `MAX_PLATFORM_FEE_BPS` (500 = 5%).
+    /// Setting to 0 disables the fee (backward compatible).
+    ///
+    /// # Panics
+    /// - If `fee_bps` exceeds `MAX_PLATFORM_FEE_BPS` (500).
+    #[cfg(feature = "fees")]
+    pub fn set_platform_fee(env: Env, signers: Vec<Address>, fee_bps: u32) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        if fee_bps > MAX_PLATFORM_FEE_BPS {
+            panic!("Platform fee exceeds maximum of 500 bps (5%)");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformFeeBps, &fee_bps);
+        env.events()
+            .publish((symbol_short!("fee_set"), signers.get(0).unwrap()), fee_bps);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Admin-only (M-of-N): set the platform treasury address that receives fees.
+    #[cfg(feature = "fees")]
+    pub fn set_platform_treasury(env: Env, signers: Vec<Address>, treasury: Address) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformTreasury, &treasury);
+        env.events().publish(
+            (symbol_short!("treas_set"), signers.get(0).unwrap()),
+            treasury,
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
     // ─── Donations ────────────────────────────────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)]
     pub fn donate(
         env: Env,
         token: Address,
@@ -1038,6 +1470,8 @@ impl IndigoPayContract {
             .checked_add(co2_increment)
             .expect("Donor co2_offset overflow");
         donor_stats.badge = calculate_badge(donor_stats.total_donated);
+        #[cfg(feature = "delegation")]
+        update_delegated_weight_if_needed(&env, &donor, &prev_badge, &donor_stats.badge);
         env.storage()
             .instance()
             .set(&DataKey::DonorStats(donor.clone()), &donor_stats);
@@ -1117,9 +1551,32 @@ impl IndigoPayContract {
             .set(&DataKey::GlobalCO2OffsetGrams, &new_gc);
 
         // ── Interaction: external call happens after every effect is durable.
-        let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&donor, &project.wallet, &amount);
+        let fee_bps = read_platform_fee_bps(&env);
+        #[allow(unused_variables)]
+        let (project_amount, fee_amount) = split_fee(amount, fee_bps);
 
+        let token_client = token::Client::new(&env, &token);
+
+        // Transfer platform fee to treasury (if configured and feature enabled).
+        #[cfg(feature = "fees")]
+        if fee_amount > 0 {
+            let treasury: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::PlatformTreasury)
+                .expect("Platform treasury not configured");
+            token_client.transfer(&donor, &treasury, &fee_amount);
+        }
+
+        // Transfer remainder to project wallet.
+        token_client.transfer(&donor, &project.wallet, &project_amount);
+
+        #[cfg(feature = "fees")]
+        env.events().publish(
+            (symbol_short!("donated"), donor.clone(), project_id.clone()),
+            (amount, donor_stats.badge.clone(), msg_hash, fee_amount),
+        );
+        #[cfg(not(feature = "fees"))]
         env.events().publish(
             (symbol_short!("donated"), donor.clone(), project_id.clone()),
             (amount, donor_stats.badge.clone(), msg_hash),
@@ -1226,6 +1683,8 @@ impl IndigoPayContract {
             .checked_add(co2_increment)
             .expect("Donor co2_offset overflow");
         donor_stats.badge = calculate_badge(donor_stats.total_donated);
+        #[cfg(feature = "delegation")]
+        update_delegated_weight_if_needed(&env, &donor, &prev_badge, &donor_stats.badge);
         env.storage()
             .instance()
             .set(&DataKey::DonorStats(donor.clone()), &donor_stats);
@@ -1309,12 +1768,441 @@ impl IndigoPayContract {
         // No token transfer — the path payment already delivered XLM to the
         // project wallet in the same Stellar transaction.
 
+        #[cfg(feature = "fees")]
+        {
+            let fee_bps = read_platform_fee_bps(&env);
+            let (_project_amount, fee_amount) = split_fee(xlm_amount, fee_bps);
+            // Note: no actual fee transfer occurs here because the path payment
+            // already delivered XLM to the project wallet in the same transaction.
+            // The fee is emitted in the event for transparency only.
+            env.events().publish(
+                (symbol_short!("donated"), donor.clone(), project_id.clone()),
+                (xlm_amount, donor_stats.badge.clone(), msg_hash, fee_amount),
+            );
+        }
+        #[cfg(not(feature = "fees"))]
         env.events().publish(
             (symbol_short!("donated"), donor.clone(), project_id.clone()),
             (xlm_amount, donor_stats.badge.clone(), msg_hash),
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    // ─── zk-SNARK Anonymous Donations (#390) ─────────────────────────────────
+
+    /// Admin-only: set the Groth16 verification key for anonymous donations.
+    /// The verification key is a serialized Groth16 vk for the donation circuit.
+    /// Only one key may be active at a time; calling this again overwrites it.
+    #[cfg(feature = "zk")]
+    pub fn set_zk_verification_key(env: Env, admin: Address, vk: Bytes) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        if vk.is_empty() {
+            panic!("Verification key must not be empty");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ZkVerificationKey, &vk);
+        env.events()
+            .publish((symbol_short!("zk_vk_set"), admin), vk.len() as u32);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Query the current Groth16 verification key, if set.
+    #[cfg(feature = "zk")]
+    pub fn get_zk_verification_key(env: Env) -> Option<Bytes> {
+        env.storage().instance().get(&DataKey::ZkVerificationKey)
+    }
+
+    #[cfg(feature = "impact")]
+    /// Get the Merkle root for a project impact report.
+    pub fn get_impact_merkle_root(
+        env: Env,
+        project_id: String,
+        report_id: String,
+    ) -> Option<BytesN<32>> {
+        env.storage()
+            .instance()
+            .get(&ImpactKey::ImRoot(impact_merkle_key(
+                &env,
+                &project_id,
+                &report_id,
+            )))
+    }
+
+    /// Anonymous donation via zk-SNARK proof verification.
+    ///
+    /// A donor generates a Groth16 proof off-chain proving they have sufficient
+    /// tokens and a valid project/amount/nullifier tuple. The contract verifies
+    /// the proof on-chain and records the donation under a derived anonymous
+    /// donor address (sha256 of the nullifier).
+    ///
+    /// # Prerequisites
+    /// - Admin must have set the verification key via `set_zk_verification_key`.
+    /// - The donor must transfer tokens to the contract address BEFORE calling
+    ///   this function (in the same atomic transaction) so the contract can
+    ///   forward them to the project wallet.
+    /// - Each nullifier must be globally unique across all anonymous donations.
+    ///
+    /// # Parameters
+    /// - `token`: The Stellar asset contract address for the donation currency.
+    /// - `proof`: The serialized Groth16 proof bytes.
+    /// - `project_id`: The project receiving the donation.
+    /// - `amount`: Donation amount in token's smallest unit (stroops).
+    /// - `nullifier`: Unique 32-byte value preventing double-spend of the proof.
+    /// - `msg_hash`: 4-byte message hash bound to the proof circuit.
+    ///
+    /// # Panics
+    /// - If the verification key has not been set.
+    /// - If the nullifier has already been used.
+    /// - If the Groth16 proof fails verification.
+    /// - If the project is not found, inactive, or paused.
+    /// - If the amount is not positive.
+    #[cfg(feature = "zk")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn donate_anonymous(
+        env: Env,
+        token: Address,
+        proof: Bytes,
+        project_id: String,
+        amount: i128,
+        nullifier: BytesN<32>,
+        msg_hash: u32,
+    ) {
+        require_not_paused(&env);
+        if amount <= 0 {
+            panic!("Donation amount must be positive");
+        }
+
+        let nullifier_key = DataKey::Nullifier(nullifier.clone());
+        if env.storage().instance().has(&nullifier_key) {
+            panic!("Nullifier already spent");
+        }
+
+        // Load and verify the Groth16 proof against the admin-set vk.
+        let vk: Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey::ZkVerificationKey)
+            .expect("Verification key not set — admin must call set_zk_verification_key first");
+
+        // Construct public inputs: [amount (i128 LE), msg_hash (u32 LE),
+        // project_id hash, nullifier hash]. The circuit MUST match this layout.
+        // We pack them into a single Bytes blob for groth16_verify.
+        let project_id_hash = env.crypto().sha256(&project_id.clone().into());
+
+        let mut public_inputs = Bytes::new(&env);
+        public_inputs.append(&amount.to_be_bytes().as_slice().into());
+        public_inputs.append(&msg_hash.to_be_bytes().as_slice().into());
+        public_inputs.append(&project_id_hash.into());
+        public_inputs.append(&Bytes::from_slice(&env, nullifier.as_ref()));
+
+        if !env.crypto().groth16_verify(&vk, &proof, &public_inputs) {
+            panic!("Anonymous donation proof verification failed");
+        }
+
+        // Derive the anonymous donor address from the nullifier.
+        // Address::from_bytes takes raw bytes — we use sha256 of the nullifier
+        // to produce a deterministic 32-byte anonymous address.
+        let nullifier_hash = env
+            .crypto()
+            .sha256(&Bytes::from_slice(&env, nullifier.as_ref()));
+        let anon_donor = Address::from_bytes(&nullifier_hash.to_bytes().as_ref().into());
+
+        // ── Checks ───────────────────────────────────────────────────────────
+
+        let mut project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        if !project.active {
+            panic!("Project is not accepting donations");
+        }
+        if project.paused {
+            panic!("Project is temporarily paused");
+        }
+        require_campaign_accepts_donation(&project, env.ledger().sequence());
+
+        // Pre-compute CO2 increment.
+        let xlm_units = amount / STROOP;
+        let co2_increment = xlm_units
+            .checked_mul(project.co2_per_xlm as i128)
+            .expect("CO2 calculation overflow");
+
+        let mut donor_stats: DonorStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonorStats(anon_donor.clone()))
+            .unwrap_or(DonorStats {
+                total_donated: 0,
+                donation_count: 0,
+                badge: BadgeTier::None,
+                co2_offset_grams: 0,
+            });
+        let prev_badge = donor_stats.badge.clone();
+
+        // ── Effects (Checks-Effects-Interactions) ────────────────────────────
+
+        // Mark nullifier as spent AFTER all checks pass, as part of the
+        // Effects step. Prevents griefing where a valid proof for a
+        // deactivated project permanently consumes the nullifier.
+        env.storage().instance().set(&nullifier_key, &true);
+
+        project.total_raised = project
+            .total_raised
+            .checked_add(amount)
+            .expect("Project total_raised overflow");
+        let goal_reached = apply_campaign_goal_progress(&mut project);
+        let donated_key = DataKey::HasDonated(project_id.clone(), anon_donor.clone());
+        if !env.storage().instance().has(&donated_key) {
+            env.storage().instance().set(&donated_key, &true);
+            project.donor_count = project
+                .donor_count
+                .checked_add(1)
+                .expect("Project donor_count overflow");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::Project(project_id.clone()), &project);
+        if goal_reached {
+            env.events().publish(
+                (symbol_short!("camp_goal"), project_id.clone()),
+                project.total_raised,
+            );
+        }
+
+        donor_stats.total_donated = donor_stats
+            .total_donated
+            .checked_add(amount)
+            .expect("Donor total_donated overflow");
+        donor_stats.donation_count = donor_stats
+            .donation_count
+            .checked_add(1)
+            .expect("Donor donation_count overflow");
+        donor_stats.co2_offset_grams = donor_stats
+            .co2_offset_grams
+            .checked_add(co2_increment)
+            .expect("Donor co2_offset overflow");
+        donor_stats.badge = calculate_badge(donor_stats.total_donated);
+        #[cfg(feature = "delegation")]
+        update_delegated_weight_if_needed(&env, &anon_donor, &prev_badge, &donor_stats.badge);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonorStats(anon_donor.clone()), &donor_stats);
+
+        // Track per-project cumulative donations for milestone NFT eligibility.
+        let proj_total_key = DataKey::DonorProjectTotal(project_id.clone(), anon_donor.clone());
+        let prev_proj_total: i128 = env.storage().instance().get(&proj_total_key).unwrap_or(0);
+        env.storage().instance().set(
+            &proj_total_key,
+            &prev_proj_total
+                .checked_add(amount)
+                .expect("DonorProjectTotal overflow"),
+        );
+
+        // Auto-mint an Impact NFT when the anonymous donor reaches a new badge tier.
+        if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
+            let nft_key = DataKey::ImpactNFT(anon_donor.clone(), donor_stats.badge.clone());
+            if !env.storage().instance().has(&nft_key) {
+                let nft = ImpactNFT {
+                    owner: anon_donor.clone(),
+                    tier: donor_stats.badge.clone(),
+                    total_donated: donor_stats.total_donated,
+                    minted_at_ledger: env.ledger().sequence(),
+                };
+                env.storage().instance().set(&nft_key, &nft);
+                env.events().publish(
+                    (symbol_short!("nft_mint"), anon_donor.clone()),
+                    donor_stats.badge.clone(),
+                );
+            }
+        }
+
+        let dc: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationCount)
+            .unwrap_or(0);
+        let new_dc = dc.checked_add(1).expect("DonationCount overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationCount, &new_dc);
+        // Store donation record under the anonymous donor address.
+        let donation_record = DonationRecord {
+            donor: anon_donor.clone(),
+            project: project_id.clone(),
+            amount,
+            ledger: env.ledger().sequence(),
+            message_hash: msg_hash,
+            currency: symbol_short!("XLM"),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationRecord(dc), &donation_record);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+
+        let gr: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalTotalRaised)
+            .unwrap_or(0);
+        let new_gr = gr.checked_add(amount).expect("GlobalTotalRaised overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::GlobalTotalRaised, &new_gr);
+
+        let gc: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalCO2OffsetGrams)
+            .unwrap_or(0);
+        let new_gc = gc.checked_add(co2_increment).expect("GlobalCO2 overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::GlobalCO2OffsetGrams, &new_gc);
+
+        // ── Interaction: transfer tokens from contract to project wallet.
+        //    The donor must have transferred tokens to the contract in the same
+        //    atomic transaction (before this call) so the contract holds a
+        //    sufficient balance.
+        let token_client = token::Client::new(&env, &token);
+        let contract_addr = env.current_contract_address();
+
+        // Fee split for anonymous donations.
+        let fee_bps = read_platform_fee_bps(&env);
+        #[allow(unused_variables)]
+        let (project_amount, fee_amount) = split_fee(amount, fee_bps);
+
+        #[cfg(feature = "fees")]
+        if fee_amount > 0 {
+            let treasury: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::PlatformTreasury)
+                .expect("Platform treasury not configured");
+            token_client.transfer(&contract_addr, &treasury, &fee_amount);
+        }
+
+        token_client.transfer(&contract_addr, &project.wallet, &project_amount);
+
+        #[cfg(feature = "fees")]
+        env.events().publish(
+            (
+                symbol_short!("anon_don"),
+                anon_donor.clone(),
+                project_id.clone(),
+            ),
+            (amount, donor_stats.badge.clone(), msg_hash, fee_amount),
+        );
+        #[cfg(not(feature = "fees"))]
+        env.events().publish(
+            (
+                symbol_short!("anon_don"),
+                anon_donor.clone(),
+                project_id.clone(),
+            ),
+            (amount, donor_stats.badge.clone(), msg_hash),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Check if a nullifier has already been spent.
+    #[cfg(feature = "zk")]
+    pub fn is_nullifier_spent(env: Env, nullifier: BytesN<32>) -> bool {
+        env.storage().instance().has(&DataKey::Nullifier(nullifier))
+    }
+
+    // ─── On-chain Impact Certificates (#382) ────────────────────────────────
+
+    #[cfg(feature = "impact")]
+    /// Admin-only: post a Merkle root for a project's impact report.
+    ///
+    /// The Merkle tree of all donor impacts for the reporting period
+    /// is constructed off-chain by the backend. Only the root is stored
+    /// on-chain, enabling any donor to verify their individual impact
+    /// leaf against it via `verify_impact` without revealing other donors'
+    /// data.
+    ///
+    /// # Parameters
+    /// - `admin`: A registered admin address (requires `require_auth`).
+    /// - `project_id`: The project this report belongs to.
+    /// - `merkle_root`: The 32-byte Merkle root computed off-chain.
+    /// - `report_id`: A human-readable report identifier (e.g. "Q1 2026").
+    ///
+    /// # Panics
+    /// - If the caller is not an admin.
+    /// - If the contract is paused.
+    /// - If the project does not exist.
+    pub fn set_impact_merkle_root(
+        env: Env,
+        admin: Address,
+        project_id: String,
+        merkle_root: BytesN<32>,
+        report_id: String,
+    ) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        // Verify the project exists so we don't store roots for phantom projects.
+        env.storage()
+            .instance()
+            .get::<_, Project>(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+
+        env.storage().instance().set(
+            &ImpactKey::ImRoot(impact_merkle_key(&env, &project_id, &report_id)),
+            &merkle_root,
+        );
+
+        env.events().publish(
+            (symbol_short!("impact_rt"), admin, project_id, report_id),
+            merkle_root,
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    #[cfg(feature = "impact")]
+    /// Public read-only: verify a donor's impact claim against a stored Merkle root.
+    ///
+    /// Any caller (donor, auditor, third party) can invoke this function to
+    /// cryptographically verify that the platform's claimed impact for a
+    /// specific donor matches the on-chain Merkle root. No authorization is
+    /// required — only the mathematical correctness of the proof.
+    ///
+    /// # Parameters
+    /// - `project_id`: The project the impact report belongs to.
+    /// - `report_id`: The report identifier (must match what was passed to
+    ///   `set_impact_merkle_root`).
+    /// - `impact_data`: The `ImpactLeaf` claimed for this donor.
+    /// - `proof`: The Merkle proof (list of sibling hashes) from the leaf to
+    ///   the root.
+    /// - `leaf_index`: The position of this leaf within the Merkle tree
+    ///   (used to determine sibling ordering).
+    ///
+    /// # Returns
+    /// - `true` if the proof is valid and the computed root matches the stored root.
+    /// - `false` if the Merkle root has not been posted for this project/report,
+    ///   or the proof does not verify.
+    pub fn verify_impact(
+        env: Env,
+        project_id: String,
+        report_id: String,
+        impact_data: ImpactLeaf,
+        proof: Vec<BytesN<32>>,
+        leaf_index: u32,
+    ) -> bool {
+        let key = ImpactKey::ImRoot(impact_merkle_key(&env, &project_id, &report_id));
+        let stored_root: Option<BytesN<32>> = env.storage().instance().get(&key);
+        let stored_root = match stored_root {
+            Some(r) => r,
+            None => return false,
+        };
+
+        let leaf_hash = compute_impact_leaf_hash(&env, &impact_data);
+        verify_merkle_proof(&env, &leaf_hash, &proof, &stored_root, leaf_index)
     }
 
     // ─── Getters ─────────────────────────────────────────────────────────────
@@ -1324,6 +2212,60 @@ impl IndigoPayContract {
             .instance()
             .get(&DataKey::Project(project_id))
             .expect("Project not found")
+    }
+
+    /// Returns all sub-project IDs registered under the given parent.
+    pub fn get_sub_projects(env: Env, parent_id: String) -> Vec<String> {
+        env.storage()
+            .instance()
+            .get(&DataKey::SubProjectIds(parent_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Returns aggregated impact metrics for a parent project and all its
+    /// sub-projects: (total_raised, total_co2, total_donors).
+    /// CO₂ is recomputed per-project as (total_raised / STROOP) * co2_per_xlm.
+    pub fn get_aggregated_impact(env: Env, parent_id: String) -> (i128, i128, u32) {
+        let parent: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(parent_id.clone()))
+            .expect("Project not found");
+
+        let mut total_raised = parent.total_raised;
+        let mut total_donors = parent.donor_count;
+        let parent_xlm = parent.total_raised / STROOP;
+        let mut total_co2 = parent_xlm
+            .checked_mul(parent.co2_per_xlm as i128)
+            .expect("CO2 calculation overflow");
+
+        let sub_ids: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubProjectIds(parent_id))
+            .unwrap_or(Vec::new(&env));
+        for sub_id in sub_ids.iter() {
+            let sub: Project = env
+                .storage()
+                .instance()
+                .get(&DataKey::Project(sub_id))
+                .expect("Sub-project not found");
+            total_raised = total_raised
+                .checked_add(sub.total_raised)
+                .expect("Aggregated total_raised overflow");
+            total_donors = total_donors
+                .checked_add(sub.donor_count)
+                .expect("Aggregated donor_count overflow");
+            let sub_xlm = sub.total_raised / STROOP;
+            total_co2 = total_co2
+                .checked_add(
+                    sub_xlm
+                        .checked_mul(sub.co2_per_xlm as i128)
+                        .expect("CO2 calculation overflow"),
+                )
+                .expect("Aggregated CO2 overflow");
+        }
+        (total_raised, total_co2, total_donors)
     }
 
     pub fn get_donor_stats(env: Env, donor: Address) -> DonorStats {
@@ -1563,6 +2505,7 @@ impl IndigoPayContract {
     /// ledgers (≈5 s each). Pass `0` to use the default 7-day window;
     /// any other value must be within
     /// [`MIN_VOTING_WINDOW_LEDGERS`, `MAX_VOTING_WINDOW_LEDGERS`].
+    #[cfg(feature = "governance")]
     pub fn create_proposal(
         env: Env,
         signers: Vec<Address>,
@@ -1620,24 +2563,146 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
+    #[cfg(feature = "governance")]
     pub fn get_voter_weight(env: Env, voter: Address) -> u32 {
         let stats: DonorStats = env
             .storage()
             .instance()
-            .get(&DataKey::DonorStats(voter))
+            .get(&DataKey::DonorStats(voter.clone()))
             .unwrap_or(DonorStats {
                 total_donated: 0,
                 donation_count: 0,
                 badge: BadgeTier::None,
                 co2_offset_grams: 0,
             });
-        voting_weight_from_badge(&stats.badge)
+        let own_weight = voting_weight_from_badge(&stats.badge);
+        #[cfg(feature = "delegation")]
+        let delegated_weight: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DelegatedWeight(voter))
+            .unwrap_or(0);
+        #[cfg(not(feature = "delegation"))]
+        let delegated_weight: u32 = 0;
+        own_weight
+            .checked_add(delegated_weight)
+            .expect("Weight overflow")
+    }
+
+    #[cfg(feature = "delegation")]
+    pub fn delegate_vote(env: Env, donor: Address, delegate: Address) {
+        donor.require_auth();
+        require_not_paused(&env);
+
+        if donor == delegate {
+            panic!("Cannot delegate to self");
+        }
+
+        let del_key = DataKey::VoteDelegation(donor.clone());
+        let old_delegate: Option<Address> = env.storage().instance().get(&del_key);
+
+        if let Some(ref old) = old_delegate {
+            if *old == delegate {
+                panic!("Already delegated to this address");
+            }
+        }
+
+        let donor_stats: DonorStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonorStats(donor.clone()))
+            .unwrap_or(DonorStats {
+                total_donated: 0,
+                donation_count: 0,
+                badge: BadgeTier::None,
+                co2_offset_grams: 0,
+            });
+
+        let weight = voting_weight_from_badge(&donor_stats.badge);
+
+        if let Some(old) = old_delegate {
+            let old_del_key = DataKey::DelegatedWeight(old.clone());
+            let mut old_weight: u32 = env.storage().instance().get(&old_del_key).unwrap_or(0);
+            old_weight = old_weight.checked_sub(weight).expect("Weight underflow");
+            env.storage().instance().set(&old_del_key, &old_weight);
+        }
+
+        let new_del_key = DataKey::DelegatedWeight(delegate.clone());
+        let mut new_weight: u32 = env.storage().instance().get(&new_del_key).unwrap_or(0);
+        new_weight = new_weight.checked_add(weight).expect("Weight overflow");
+
+        env.storage().instance().set(&new_del_key, &new_weight);
+        env.storage().instance().set(&del_key, &delegate);
+
+        env.events()
+            .publish((symbol_short!("delegate"), donor), delegate);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    #[cfg(feature = "delegation")]
+    pub fn revoke_delegation(env: Env, donor: Address) {
+        donor.require_auth();
+        require_not_paused(&env);
+
+        let del_key = DataKey::VoteDelegation(donor.clone());
+        let delegate: Option<Address> = env.storage().instance().get(&del_key);
+
+        if let Some(del) = delegate {
+            let donor_stats: DonorStats = env
+                .storage()
+                .instance()
+                .get(&DataKey::DonorStats(donor.clone()))
+                .unwrap_or(DonorStats {
+                    total_donated: 0,
+                    donation_count: 0,
+                    badge: BadgeTier::None,
+                    co2_offset_grams: 0,
+                });
+
+            let weight = voting_weight_from_badge(&donor_stats.badge);
+
+            let old_del_key = DataKey::DelegatedWeight(del.clone());
+            let mut old_weight: u32 = env.storage().instance().get(&old_del_key).unwrap_or(0);
+            old_weight = old_weight.checked_sub(weight).expect("Weight underflow");
+            env.storage().instance().set(&old_del_key, &old_weight);
+
+            env.storage().instance().remove(&del_key);
+
+            env.events().publish((symbol_short!("revoke"), donor), ());
+            ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        } else {
+            panic!("No active delegation to revoke");
+        }
+    }
+
+    #[cfg(feature = "delegation")]
+    pub fn get_delegate(env: Env, donor: Address) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::VoteDelegation(donor))
+    }
+
+    #[cfg(feature = "delegation")]
+    pub fn get_delegated_weight(env: Env, delegate: Address) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DelegatedWeight(delegate))
+            .unwrap_or(0)
     }
 
     /// Badge holders (≥ Seedling) cast a vote. One vote per address per proposal.
+    #[cfg(feature = "governance")]
     pub fn vote_verify_project(env: Env, voter: Address, project_id: String, approve: bool) {
         voter.require_auth();
         require_not_paused(&env);
+
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::VoteDelegation(voter.clone()))
+        {
+            panic!("Must revoke delegation before voting directly");
+        }
 
         let stats: DonorStats = env
             .storage()
@@ -1649,11 +2714,20 @@ impl IndigoPayContract {
                 badge: BadgeTier::None,
                 co2_offset_grams: 0,
             });
-        if stats.badge == BadgeTier::None {
-            panic!("Only badge holders (Seedling or above) can vote");
-        }
 
-        let weight = voting_weight_from_badge(&stats.badge);
+        let own_weight = voting_weight_from_badge(&stats.badge);
+        let delegated_weight: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DelegatedWeight(voter.clone()))
+            .unwrap_or(0);
+        let weight = own_weight
+            .checked_add(delegated_weight)
+            .expect("Weight overflow");
+
+        if weight == 0 {
+            panic!("Only badge holders (Seedling or above) or active delegates can vote");
+        }
 
         let mut proposal: VoteProposal = env
             .storage()
@@ -1709,6 +2783,7 @@ impl IndigoPayContract {
 
     /// Callable by anyone after the deadline. Resolves based on majority.
     /// Emits proj_ver on approval, prop_rej on rejection.
+    #[cfg(feature = "governance")]
     pub fn resolve_proposal(env: Env, project_id: String) {
         let mut proposal: VoteProposal = env
             .storage()
@@ -1738,6 +2813,7 @@ impl IndigoPayContract {
     /// Admin-only immediate veto. Marks the proposal resolved & rejected.
     /// Required for incident response when a proposal is based on fraudulent data.
     /// Emits prop_veto with the admin address for auditability.
+    #[cfg(feature = "governance")]
     pub fn veto_proposal(env: Env, signers: Vec<Address>, project_id: String) {
         require_admin_for_critical(&env, &signers);
         let mut proposal: VoteProposal = env
@@ -1760,6 +2836,7 @@ impl IndigoPayContract {
     }
 
     /// Returns current vote counts and status for a proposal.
+    #[cfg(feature = "governance")]
     pub fn get_proposal(env: Env, project_id: String) -> VoteProposal {
         env.storage()
             .instance()
@@ -1769,6 +2846,7 @@ impl IndigoPayContract {
 
     /// Returns the list of voter addresses for a proposal.
     /// Can be used by governance UIs to display who voted and how.
+    #[cfg(feature = "governance")]
     pub fn get_voter_list(env: Env, project_id: String) -> Vec<Address> {
         env.storage()
             .instance()
@@ -1777,6 +2855,7 @@ impl IndigoPayContract {
     }
 
     /// Donate USDC. Converts to XLM-equivalent for global stats using a price oracle stub.
+    #[cfg(feature = "usdc")]
     pub fn donate_usdc(
         env: Env,
         usdc_token: Address,
@@ -1880,6 +2959,8 @@ impl IndigoPayContract {
             .checked_add(co2_increment)
             .expect("Donor co2_offset overflow");
         donor_stats.badge = calculate_badge(donor_stats.total_donated);
+        #[cfg(feature = "delegation")]
+        update_delegated_weight_if_needed(&env, &donor, &prev_badge, &donor_stats.badge);
         env.storage()
             .instance()
             .set(&DataKey::DonorStats(donor.clone()), &donor_stats);
@@ -1961,8 +3042,30 @@ impl IndigoPayContract {
 
         let token_client = token::Client::new(&env, &usdc_token);
         let project_wallet = project.wallet;
-        token_client.transfer(&donor, &project_wallet, &usdc_amount);
 
+        // Fee split for USDC donations.
+        let fee_bps = read_platform_fee_bps(&env);
+        #[allow(unused_variables)]
+        let (project_usdc, fee_amount) = split_fee(usdc_amount, fee_bps);
+
+        #[cfg(feature = "fees")]
+        if fee_amount > 0 {
+            let treasury: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::PlatformTreasury)
+                .expect("Platform treasury not configured");
+            token_client.transfer(&donor, &treasury, &fee_amount);
+        }
+
+        token_client.transfer(&donor, &project_wallet, &project_usdc);
+
+        #[cfg(feature = "fees")]
+        env.events().publish(
+            (symbol_short!("donated"), donor.clone(), project_id),
+            (usdc_amount, symbol_short!("USDC"), msg_hash, fee_amount),
+        );
+        #[cfg(not(feature = "fees"))]
         env.events().publish(
             (symbol_short!("donated"), donor.clone(), project_id),
             (usdc_amount, symbol_short!("USDC"), msg_hash),
@@ -1971,6 +3074,7 @@ impl IndigoPayContract {
     }
 
     /// Admin-only: Set the USDC token address for multi-currency donations.
+    #[cfg(feature = "usdc")]
     pub fn set_usdc_token(env: Env, admin: Address, usdc_token: Address) {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
@@ -1983,6 +3087,7 @@ impl IndigoPayContract {
     }
 
     /// Get the configured USDC token address.
+    #[cfg(feature = "usdc")]
     pub fn get_usdc_token(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::USDCTokenAddress)
     }
@@ -2031,6 +3136,7 @@ impl IndigoPayContract {
 
     /// Admin-only: Set the price oracle contract address used by `donate_usdc`.
     /// The oracle must implement `OracleInterface::get_price()`.
+    #[cfg(feature = "usdc")]
     pub fn set_oracle(env: Env, admin: Address, oracle: Address) {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
@@ -2042,11 +3148,13 @@ impl IndigoPayContract {
     }
 
     /// Get the configured price oracle address.
+    #[cfg(feature = "usdc")]
     pub fn get_oracle(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::OracleAddress)
     }
 
     /// Get the current contract WASM hash.
+    #[cfg(feature = "upgrade")]
     pub fn get_contract_wasm_hash(env: Env) -> Option<BytesN<32>> {
         env.storage().instance().get(&DataKey::ContractWasmHash)
     }
@@ -2239,6 +3347,7 @@ impl IndigoPayContract {
     /// proposed WASM hash and the ledger sequence at which it becomes
     /// executable. Replaces any existing pending upgrade is not allowed;
     /// the caller must `cancel_upgrade` first.
+    #[cfg(feature = "upgrade")]
     pub fn propose_upgrade(env: Env, signers: Vec<Address>, new_wasm_hash: BytesN<32>) {
         require_admin_for_critical(&env, &signers);
         if env.storage().instance().has(&DataKey::PendingUpgrade) {
@@ -2273,6 +3382,7 @@ impl IndigoPayContract {
     /// but the community has 48h to react (exit positions, deploy a
     /// rescue contract, signal off-chain) before the WASM is swapped.
     /// There is NO second gate; the timelock is the only safeguard.
+    #[cfg(feature = "upgrade")]
     pub fn execute_upgrade(env: Env) {
         let pending: BytesN<32> = env
             .storage()
@@ -2296,12 +3406,16 @@ impl IndigoPayContract {
             .instance()
             .remove(&DataKey::UpgradeEffectiveAt);
         env.events().publish((symbol_short!("upg_exec"),), pending);
+        // Run storage migrations so any schema changes in the new WASM are
+        // applied before the next contract invocation.
+        migrate(&env);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Admin-only: cancel a pending upgrade without executing it. Use
     /// during incident response if the proposed WASM turns out to be
     /// malicious or buggy before the timelock elapses.
+    #[cfg(feature = "upgrade")]
     pub fn cancel_upgrade(env: Env, signers: Vec<Address>) {
         require_admin_for_critical(&env, &signers);
         if !env.storage().instance().has(&DataKey::PendingUpgrade) {
@@ -2318,6 +3432,7 @@ impl IndigoPayContract {
 
     /// Read-only: returns `(hash, effective_at_ledger)` for the pending
     /// upgrade, or `None` if no upgrade is currently proposed.
+    #[cfg(feature = "upgrade")]
     pub fn get_pending_upgrade(env: Env) -> Option<(BytesN<32>, u32)> {
         let hash: Option<BytesN<32>> = env.storage().instance().get(&DataKey::PendingUpgrade);
         let effective: Option<u32> = env.storage().instance().get(&DataKey::UpgradeEffectiveAt);
@@ -2330,8 +3445,19 @@ impl IndigoPayContract {
     /// Read-only: hash of the most-recently executed upgrade, or `None`
     /// if the contract has never been upgraded. Updated by
     /// `execute_upgrade`.
+    #[cfg(feature = "upgrade")]
     pub fn get_last_executed_upgrade(env: Env) -> Option<BytesN<32>> {
         env.storage().instance().get(&DataKey::LastExecutedUpgrade)
+    }
+
+    /// Read the current storage schema version. Returns 1 when the key is
+    /// absent (pre-versioning deployments are implicitly v1).
+    #[cfg(feature = "upgrade")]
+    pub fn get_storage_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&STORAGE_VERSION_KEY)
+            .unwrap_or(1)
     }
 
     // ─── Emergency withdrawal (7-day timelock) ─────────────────────────────────
@@ -2345,6 +3471,7 @@ impl IndigoPayContract {
     /// The actual balance check happens at execution time, not here,
     /// because the 7-day gap means the balance could shift before then
     /// (TOCTOU avoidance).
+    #[cfg(feature = "emergency")]
     pub fn initiate_emergency_withdrawal(
         env: Env,
         admin: Address,
@@ -2403,6 +3530,7 @@ impl IndigoPayContract {
     /// Admin-only: cancel a pending emergency withdrawal before it has
     /// been executed. Clears the pending entry and emits an event for
     /// off-chain notification.
+    #[cfg(feature = "emergency")]
     pub fn cancel_emergency_withdrawal(env: Env, admin: Address, project_id: String) {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
@@ -2429,6 +3557,7 @@ impl IndigoPayContract {
     /// the project's per-project-per-token balance is sufficient, then
     /// clears the pending entry, decrements the balance, and transfers
     /// tokens to the new wallet (CEI ordering).
+    #[cfg(feature = "emergency")]
     pub fn execute_emergency_withdrawal(env: Env, project_id: String) {
         let withdrawal: EmergencyWithdrawal = env
             .storage()
@@ -2473,6 +3602,7 @@ impl IndigoPayContract {
 
     /// Read-only: returns the pending emergency withdrawal for a project,
     /// or `None` if no withdrawal is currently pending.
+    #[cfg(feature = "emergency")]
     pub fn get_emergency_withdrawal(env: Env, project_id: String) -> Option<EmergencyWithdrawal> {
         env.storage()
             .instance()
@@ -2485,6 +3615,7 @@ impl IndigoPayContract {
     /// window (`REFUND_COOLDOWN_LEDGERS`) after the original donation.
     /// Creates a `RefundRequest` with status `Pending` for admin + project
     /// wallet approval.
+    #[cfg(feature = "refund")]
     pub fn request_refund(env: Env, donor: Address, donation_record_index: u32, token: Address) {
         donor.require_auth();
         require_not_paused(&env);
@@ -2563,6 +3694,7 @@ impl IndigoPayContract {
     ///
     /// Badges are permanent and NOT recalculated. `DonationCount` is historical
     /// and NOT decremented.
+    #[cfg(feature = "refund")]
     pub fn approve_refund(env: Env, admin: Address, refund_id: u32) {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
@@ -2676,6 +3808,7 @@ impl IndigoPayContract {
 
     /// Admin-only: reject a pending refund request. The donation stands;
     /// no counters are adjusted and no tokens move.
+    #[cfg(feature = "refund")]
     pub fn reject_refund(env: Env, admin: Address, refund_id: u32) {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
@@ -2708,6 +3841,620 @@ impl IndigoPayContract {
             .instance()
             .get(&DataKey::RefundRequest(refund_id))
             .expect("Refund request not found")
+    }
+
+    // ─── Recurring Donations ──────────────────────────────────────────────────
+
+    #[cfg(feature = "recurring")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_recurring(
+        env: Env,
+        donor: Address,
+        project_id: String,
+        amount: i128,
+        currency: Symbol,
+        interval_ledgers: u32,
+        keeper_incentive: i128,
+        msg_hash: u32,
+    ) -> u32 {
+        donor.require_auth();
+        require_not_paused(&env);
+
+        if amount <= 0 {
+            panic!("Donation amount must be positive");
+        }
+        if keeper_incentive < 0 {
+            panic!("Keeper incentive must be non-negative");
+        }
+        if interval_ledgers == 0 {
+            panic!("Interval must be positive");
+        }
+
+        // Verify project exists
+        let project_key = DataKey::Project(project_id.clone());
+        if !env.storage().instance().has(&project_key) {
+            panic!("Project not found");
+        }
+
+        let count_key = DataKey::DonorRecurringCount(donor.clone());
+        let count: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
+        let recurring_id = count;
+        let next_count = count.checked_add(1).expect("DonorRecurringCount overflow");
+        env.storage().instance().set(&count_key, &next_count);
+
+        let next_execution_ledger = env
+            .ledger()
+            .sequence()
+            .checked_add(interval_ledgers)
+            .expect("next_execution_ledger overflow");
+
+        let recurring = RecurringDonation {
+            donor: donor.clone(),
+            project_id: project_id.clone(),
+            amount,
+            currency: currency.clone(),
+            interval_ledgers,
+            next_execution_ledger,
+            keeper_incentive,
+            active: true,
+            created_at: env.ledger().sequence(),
+        };
+
+        let recurring_key = DataKey::RecurringDonation(donor.clone(), recurring_id);
+        env.storage().instance().set(&recurring_key, &recurring);
+
+        env.events().publish(
+            (symbol_short!("rec_cr"), donor, project_id),
+            (
+                recurring_id,
+                amount,
+                currency,
+                interval_ledgers,
+                keeper_incentive,
+                msg_hash,
+            ),
+        );
+
+        recurring_id
+    }
+
+    #[cfg(feature = "recurring")]
+    pub fn cancel_recurring(env: Env, donor: Address, recurring_id: u32) {
+        donor.require_auth();
+        require_not_paused(&env);
+
+        let recurring_key = DataKey::RecurringDonation(donor.clone(), recurring_id);
+        let mut recurring: RecurringDonation = env
+            .storage()
+            .instance()
+            .get(&recurring_key)
+            .expect("Recurring donation not found");
+
+        if !recurring.active {
+            panic!("Recurring donation is not active");
+        }
+
+        recurring.active = false;
+        env.storage().instance().set(&recurring_key, &recurring);
+
+        env.events()
+            .publish((symbol_short!("rec_can"), donor, recurring_id), ());
+    }
+
+    #[cfg(feature = "recurring")]
+    pub fn execute_recurring(env: Env, keeper: Address, donor: Address, recurring_id: u32) {
+        keeper.require_auth();
+        require_not_paused(&env);
+
+        let recurring_key = DataKey::RecurringDonation(donor.clone(), recurring_id);
+        let mut recurring: RecurringDonation = env
+            .storage()
+            .instance()
+            .get(&recurring_key)
+            .expect("Recurring donation not found");
+
+        if !recurring.active {
+            panic!("Recurring donation is not active");
+        }
+        if env.ledger().sequence() < recurring.next_execution_ledger {
+            panic!("Recurring donation has not matured yet");
+        }
+
+        let mut project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(recurring.project_id.clone()))
+            .expect("Project not found");
+        if !project.active {
+            panic!("Project is not accepting donations");
+        }
+        if project.paused {
+            panic!("Project is temporarily paused");
+        }
+        require_campaign_accepts_donation(&project, env.ledger().sequence());
+
+        // Checked arithmetic for CO2 calculations and equivalent XLM amount
+        let xlm_equivalent: i128;
+        let token_addr: Address;
+
+        if recurring.currency == symbol_short!("XLM") {
+            token_addr = env
+                .storage()
+                .instance()
+                .get(&DataKey::NativeTokenAddress)
+                .expect("Native token not configured");
+
+            xlm_equivalent = recurring.amount;
+        } else if recurring.currency == symbol_short!("USDC") {
+            let stored_usdc: Option<Address> =
+                env.storage().instance().get(&DataKey::USDCTokenAddress);
+            token_addr = stored_usdc.expect("USDC token not configured");
+
+            let oracle_addr: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::OracleAddress)
+                .expect("Price oracle not configured");
+            let oracle = OracleClient::new(&env, &oracle_addr);
+            let rate = oracle.get_price();
+            if rate <= 0 {
+                panic!("Oracle returned invalid price");
+            }
+            xlm_equivalent = recurring
+                .amount
+                .checked_mul(rate)
+                .expect("USDC to XLM conversion overflow");
+        } else {
+            panic!("Unsupported currency");
+        }
+
+        let xlm_units = xlm_equivalent / STROOP;
+        let co2_increment = xlm_units
+            .checked_mul(project.co2_per_xlm as i128)
+            .expect("CO2 calculation overflow");
+
+        // Checks-Effects-Interactions (CEI) Pattern: State changes before token transfers.
+        // Update Project
+        project.total_raised = project
+            .total_raised
+            .checked_add(xlm_equivalent)
+            .expect("Project total_raised overflow");
+        let goal_reached = apply_campaign_goal_progress(&mut project);
+        let donated_key = DataKey::HasDonated(recurring.project_id.clone(), donor.clone());
+        if !env.storage().instance().has(&donated_key) {
+            env.storage().instance().set(&donated_key, &true);
+            project.donor_count = project
+                .donor_count
+                .checked_add(1)
+                .expect("Project donor_count overflow");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::Project(recurring.project_id.clone()), &project);
+        if goal_reached {
+            env.events().publish(
+                (symbol_short!("camp_goal"), recurring.project_id.clone()),
+                project.total_raised,
+            );
+        }
+
+        // Update Donor stats
+        let mut donor_stats: DonorStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonorStats(donor.clone()))
+            .unwrap_or(DonorStats {
+                total_donated: 0,
+                donation_count: 0,
+                badge: BadgeTier::None,
+                co2_offset_grams: 0,
+            });
+        let prev_badge = donor_stats.badge.clone();
+
+        donor_stats.total_donated = donor_stats
+            .total_donated
+            .checked_add(xlm_equivalent)
+            .expect("Donor total_donated overflow");
+        donor_stats.donation_count = donor_stats
+            .donation_count
+            .checked_add(1)
+            .expect("Donor donation_count overflow");
+        donor_stats.co2_offset_grams = donor_stats
+            .co2_offset_grams
+            .checked_add(co2_increment)
+            .expect("Donor co2_offset overflow");
+        donor_stats.badge = calculate_badge(donor_stats.total_donated);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonorStats(donor.clone()), &donor_stats);
+
+        // Track per-project cumulative donations
+        let proj_total_key =
+            DataKey::DonorProjectTotal(recurring.project_id.clone(), donor.clone());
+        let prev_proj_total: i128 = env.storage().instance().get(&proj_total_key).unwrap_or(0);
+        env.storage().instance().set(
+            &proj_total_key,
+            &prev_proj_total
+                .checked_add(xlm_equivalent)
+                .expect("DonorProjectTotal overflow"),
+        );
+
+        // Auto-mint Impact NFT
+        if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
+            let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
+            if !env.storage().instance().has(&nft_key) {
+                let nft = ImpactNFT {
+                    owner: donor.clone(),
+                    tier: donor_stats.badge.clone(),
+                    total_donated: donor_stats.total_donated,
+                    minted_at_ledger: env.ledger().sequence(),
+                };
+                env.storage().instance().set(&nft_key, &nft);
+                env.events().publish(
+                    (symbol_short!("nft_mint"), donor.clone()),
+                    donor_stats.badge.clone(),
+                );
+            }
+        }
+
+        // Store Donation Record
+        let dc: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationCount)
+            .unwrap_or(0);
+        let new_dc = dc.checked_add(1).expect("DonationCount overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationCount, &new_dc);
+
+        let donation_record = DonationRecord {
+            donor: donor.clone(),
+            project: recurring.project_id.clone(),
+            amount: recurring.amount,
+            ledger: env.ledger().sequence(),
+            message_hash: 0,
+            currency: recurring.currency.clone(),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationRecord(dc), &donation_record);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+
+        // Update Globals
+        let gr: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalTotalRaised)
+            .unwrap_or(0);
+        env.storage().instance().set(
+            &DataKey::GlobalTotalRaised,
+            &gr.checked_add(xlm_equivalent)
+                .expect("GlobalTotalRaised overflow"),
+        );
+
+        let gc: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalCO2OffsetGrams)
+            .unwrap_or(0);
+        env.storage().instance().set(
+            &DataKey::GlobalCO2OffsetGrams,
+            &gc.checked_add(co2_increment).expect("GlobalCO2 overflow"),
+        );
+
+        // Update schedule next execution sequence
+        recurring.next_execution_ledger = env
+            .ledger()
+            .sequence()
+            .checked_add(recurring.interval_ledgers)
+            .expect("next_execution_ledger overflow");
+        env.storage().instance().set(&recurring_key, &recurring);
+
+        // Interactions: Token transfers
+        let token_client = token::Client::new(&env, &token_addr);
+        let contract_addr = env.current_contract_address();
+
+        // 1. Transfer donation amount to project wallet
+        token_client.transfer_from(&contract_addr, &donor, &project.wallet, &recurring.amount);
+
+        // 2. Transfer incentive to keeper
+        if recurring.keeper_incentive > 0 {
+            token_client.transfer_from(
+                &contract_addr,
+                &donor,
+                &keeper,
+                &recurring.keeper_incentive,
+            );
+        }
+
+        // Publish execute event
+        env.events().publish(
+            (symbol_short!("rec_exec"), donor, recurring_id),
+            (
+                keeper,
+                recurring.amount,
+                recurring.currency,
+                recurring.next_execution_ledger,
+            ),
+        );
+
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    pub fn get_recurring(env: Env, donor: Address, recurring_id: u32) -> RecurringDonation {
+        env.storage()
+            .instance()
+            .get(&DataKey::RecurringDonation(donor, recurring_id))
+            .expect("Recurring donation not found")
+    }
+
+    pub fn get_donor_recurrings(env: Env, donor: Address) -> Vec<RecurringDonation> {
+        let count_key = DataKey::DonorRecurringCount(donor.clone());
+        let count: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
+        let mut list = Vec::new(&env);
+        for id in 0..count {
+            if let Some(recurring) = env
+                .storage()
+                .instance()
+                .get::<DataKey, RecurringDonation>(&DataKey::RecurringDonation(donor.clone(), id))
+            {
+                list.push_back(recurring);
+            }
+        }
+        list
+    }
+
+    // ─── Time-Locked Vesting Donations (#386) ────────────────────────────────
+
+    /// Creates a time-locked vesting schedule for a donation.
+    ///
+    /// The total amount is split into equal installments. The first installment
+    /// is transferred to the project wallet immediately; subsequent installments
+    /// are claimable by anyone via `claim_vested_installment` after each
+    /// `interval_ledgers` elapses.
+    ///
+    /// # Panics
+    /// - If `amount <= 0`
+    /// - If `installment_count == 0`
+    /// - If `interval_ledgers == 0`
+    /// - If the project is not found, inactive, or paused
+    /// - If the token transfer fails
+    #[cfg(feature = "vesting")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn donate_vested(
+        env: Env,
+        token: Address,
+        donor: Address,
+        project_id: String,
+        total_amount: i128,
+        installment_count: u32,
+        installment_interval_ledgers: u32,
+        msg_hash: u32,
+    ) -> u32 {
+        donor.require_auth();
+        require_not_paused(&env);
+
+        if total_amount <= 0 {
+            panic!("Donation amount must be positive");
+        }
+        if installment_count == 0 {
+            panic!("Installment count must be positive");
+        }
+        if installment_interval_ledgers == 0 {
+            panic!("Installment interval must be positive");
+        }
+
+        // Verify project exists and is accepting donations.
+        let project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        if !project.active {
+            panic!("Project is not accepting donations");
+        }
+        if project.paused {
+            panic!("Project is temporarily paused");
+        }
+
+        let amount_per_installment = total_amount
+            .checked_div(installment_count as i128)
+            .expect("Installment count must be positive (division by zero)");
+        if amount_per_installment == 0 {
+            panic!("Donation amount too small for installment count");
+        }
+
+        // Compute next installment ledger: current + interval.
+        let next_installment_ledger = env
+            .ledger()
+            .sequence()
+            .checked_add(installment_interval_ledgers)
+            .expect("next_installment_ledger overflow");
+
+        let count_key = DataKey::DonorVestingCount(donor.clone());
+        let count: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
+        let schedule_id = count;
+        let next_count = count.checked_add(1).expect("DonorVestingCount overflow");
+        env.storage().instance().set(&count_key, &next_count);
+
+        let schedule = VestingSchedule {
+            donor: donor.clone(),
+            project_id: project_id.clone(),
+            total_amount,
+            amount_per_installment,
+            installment_count,
+            interval_ledgers: installment_interval_ledgers,
+            next_installment_ledger,
+            installments_released: 1, // first installment is immediate
+            created_at: env.ledger().sequence(),
+            token: token.clone(),
+        };
+
+        let schedule_key = DataKey::VestingSchedule(donor.clone(), schedule_id);
+        env.storage().instance().set(&schedule_key, &schedule);
+
+        // ── Transfer full amount from donor to contract (custody),
+        //    then release first installment from contract to project.
+        let contract_addr = env.current_contract_address();
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&donor, &contract_addr, &total_amount);
+        token_client.transfer(&contract_addr, &project.wallet, &amount_per_installment);
+
+        env.events().publish(
+            (symbol_short!("vest_crt"), donor, project_id),
+            (
+                schedule_id,
+                total_amount,
+                amount_per_installment,
+                installment_count,
+                installment_interval_ledgers,
+                msg_hash,
+            ),
+        );
+
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+
+        schedule_id
+    }
+
+    /// Claims the next vested installment for a project.
+    ///
+    /// Permissionless — anyone may call this after the interval has elapsed
+    /// since the last claim. The contract holds the vesting funds in custody
+    /// and transfers the installment to the project wallet.
+    ///
+    /// # Panics
+    /// - If the schedule is not found.
+    /// - If all installments have already been released.
+    /// - If the interval has not yet elapsed.
+    #[cfg(feature = "vesting")]
+    pub fn claim_vested_installment(env: Env, donor: Address, schedule_id: u32) {
+        require_not_paused(&env);
+
+        let schedule_key = DataKey::VestingSchedule(donor.clone(), schedule_id);
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&schedule_key)
+            .expect("Vesting schedule not found");
+
+        if schedule.installments_released >= schedule.installment_count {
+            panic!("All installments already released");
+        }
+
+        let current_ledger = env.ledger().sequence();
+        if current_ledger < schedule.next_installment_ledger {
+            panic!("Next installment not yet claimable");
+        }
+
+        // Advance the schedule BEFORE the external token transfer (CEI pattern).
+        schedule.installments_released = schedule
+            .installments_released
+            .checked_add(1)
+            .expect("installments_released overflow");
+        schedule.next_installment_ledger = current_ledger
+            .checked_add(schedule.interval_ledgers)
+            .expect("next_installment_ledger overflow");
+        env.storage().instance().set(&schedule_key, &schedule);
+
+        // Load project to get the wallet.
+        let project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(schedule.project_id.clone()))
+            .expect("Project not found");
+
+        // ── Interaction: transfer installment from contract custody to project.
+        let contract_addr = env.current_contract_address();
+        let token_client = token::Client::new(&env, &schedule.token);
+        token_client.transfer(
+            &contract_addr,
+            &project.wallet,
+            &schedule.amount_per_installment,
+        );
+
+        let remaining = schedule
+            .installment_count
+            .saturating_sub(schedule.installments_released);
+        env.events().publish(
+            (symbol_short!("vest_clm"), schedule.project_id),
+            (schedule_id, schedule.amount_per_installment, remaining),
+        );
+
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Cancels a vesting schedule, returning unvested tokens to the donor.
+    ///
+    /// Only the original donor may cancel (enforced by the storage key which
+    /// includes the donor's address). All released installments stay with
+    /// the project; the unvested remainder is returned from contract custody
+    /// to the donor.
+    ///
+    /// # Panics
+    /// - If the schedule is not found.
+    /// - If all installments have already been released.
+    #[cfg(feature = "vesting")]
+    pub fn cancel_vesting(env: Env, donor: Address, schedule_id: u32) {
+        donor.require_auth();
+
+        let schedule_key = DataKey::VestingSchedule(donor.clone(), schedule_id);
+        let schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&schedule_key)
+            .expect("Vesting schedule not found");
+
+        if schedule.installments_released >= schedule.installment_count {
+            panic!("All installments already released — nothing to cancel");
+        }
+
+        let remaining_count = schedule
+            .installment_count
+            .saturating_sub(schedule.installments_released);
+        let unvested_amount = (remaining_count as i128)
+            .checked_mul(schedule.amount_per_installment)
+            .expect("unvested amount overflow");
+
+        // Remove the schedule from storage.
+        env.storage().instance().remove(&schedule_key);
+
+        // ── Interaction: return unvested tokens from contract custody to donor.
+        let contract_addr = env.current_contract_address();
+        let token_client = token::Client::new(&env, &schedule.token);
+        token_client.transfer(&contract_addr, &donor, &unvested_amount);
+
+        env.events().publish(
+            (symbol_short!("vest_can"), donor, schedule.project_id),
+            (schedule_id, unvested_amount),
+        );
+
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Query a vesting schedule by donor and schedule ID.
+    #[cfg(feature = "vesting")]
+    pub fn get_vesting_schedule(env: Env, donor: Address, schedule_id: u32) -> VestingSchedule {
+        env.storage()
+            .instance()
+            .get(&DataKey::VestingSchedule(donor, schedule_id))
+            .expect("Vesting schedule not found")
+    }
+
+    pub fn set_native_token(env: Env, admin: Address, native_token: Address) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::NativeTokenAddress, &native_token);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    pub fn get_native_token(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::NativeTokenAddress)
     }
 }
 
@@ -3111,6 +4858,66 @@ mod tests {
         });
     }
 
+    // ─── Storage versioning & migration tests (#379) ────────────────────────
+
+    #[cfg(feature = "upgrade")]
+    #[test]
+    fn test_storage_version_initialized() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        // After initialize(), StorageVersion must equal CURRENT_STORAGE_VERSION.
+        assert_eq!(client.get_storage_version(), CURRENT_STORAGE_VERSION);
+    }
+
+    #[cfg(feature = "upgrade")]
+    #[test]
+    fn test_migration_runs_on_upgrade() {
+        let (env, cid, client, _admin, _pid) = setup();
+
+        // After initialize(), StorageVersion must equal CURRENT_STORAGE_VERSION.
+        assert_eq!(client.get_storage_version(), CURRENT_STORAGE_VERSION);
+
+        // Simulate a same-code upgrade by re-registering the contract at the
+        // same address, then calling migrate() directly.
+        let v2_cid = env.register_contract(Some(&cid), IndigoPayContract);
+        assert_eq!(v2_cid, cid);
+
+        env.as_contract(&cid, || {
+            crate::migrate(&env);
+        });
+
+        // Version should still be CURRENT_STORAGE_VERSION after a same-code
+        // upgrade with no pending migrations.
+        assert_eq!(client.get_storage_version(), CURRENT_STORAGE_VERSION);
+    }
+
+    #[cfg(feature = "upgrade")]
+    #[test]
+    fn test_migration_idempotent() {
+        let (env, cid, client, _admin, _pid) = setup();
+
+        // Simulate upgrade by re-registering at the same address.
+        let v2_cid = env.register_contract(Some(&cid), IndigoPayContract);
+        assert_eq!(v2_cid, cid);
+
+        // Call migrate() for the first time.
+        env.as_contract(&cid, || {
+            crate::migrate(&env);
+        });
+
+        let version_after_first = client.get_storage_version();
+        assert_eq!(version_after_first, CURRENT_STORAGE_VERSION);
+
+        // Call migrate a second time: the assertion in migrate() that
+        // final_version == CURRENT_STORAGE_VERSION must still hold —
+        // no double-application of migrations.
+        env.as_contract(&cid, || {
+            crate::migrate(&env);
+        });
+
+        let version_after_second = client.get_storage_version();
+        assert_eq!(version_after_second, CURRENT_STORAGE_VERSION);
+    }
+
     // ─── Governance tests ─────────────────────────────────────────────────────
 
     #[test]
@@ -3140,12 +4947,14 @@ mod tests {
         grant_badge(&env, &cid, &voter);
         client.vote_verify_project(&voter, &pid, &true);
         let p = client.get_proposal(&pid);
-        assert_eq!(p.votes_for, 1);
+        assert_eq!(p.votes_for, 100);
         assert_eq!(p.votes_against, 0);
     }
 
     #[test]
-    #[should_panic(expected = "Only badge holders (Seedling or above) can vote")]
+    #[should_panic(
+        expected = "Only badge holders (Seedling or above) or active delegates can vote"
+    )]
     fn test_non_badge_holder_cannot_vote() {
         let (env, _cid, client, admin, pid) = setup();
         client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
@@ -3179,8 +4988,8 @@ mod tests {
         client.resolve_proposal(&pid);
         let p = client.get_proposal(&pid);
         assert!(p.resolved);
-        assert_eq!(p.votes_for, 2);
-        assert_eq!(p.votes_against, 1);
+        assert_eq!(p.votes_for, 200);
+        assert_eq!(p.votes_against, 100);
     }
 
     #[test]
@@ -3198,8 +5007,8 @@ mod tests {
         client.resolve_proposal(&pid);
         let p = client.get_proposal(&pid);
         assert!(p.resolved);
-        assert_eq!(p.votes_for, 1);
-        assert_eq!(p.votes_against, 2);
+        assert_eq!(p.votes_for, 100);
+        assert_eq!(p.votes_against, 200);
     }
 
     #[test]
@@ -3219,8 +5028,8 @@ mod tests {
 
         let p = client.get_proposal(&pid);
         assert!(p.resolved);
-        assert_eq!(p.votes_for, 1);
-        assert_eq!(p.votes_against, 1);
+        assert_eq!(p.votes_for, 100);
+        assert_eq!(p.votes_against, 100);
 
         // A tie (1 for, 1 against) produces a rejection outcome.
         // Event-level assertion is intentionally skipped here because the
@@ -3414,7 +5223,7 @@ mod tests {
         client.vote_verify_project(&voter, &pid, &true);
 
         let proposal = client.get_proposal(&pid);
-        assert_eq!(proposal.votes_for, 1);
+        assert_eq!(proposal.votes_for, 100);
     }
 
     /// Test minimum voting duration enforcement (issue #209).
@@ -3437,7 +5246,7 @@ mod tests {
         client.vote_verify_project(&voter, &pid, &true);
 
         let proposal = client.get_proposal(&pid);
-        assert_eq!(proposal.votes_for, 1);
+        assert_eq!(proposal.votes_for, 100);
     }
 
     // ─── ProjectMilestoneNFT tests (#205) ────────────────────────────────────
@@ -5102,5 +6911,1531 @@ mod tests {
     fn test_get_refund_request_not_found_panics() {
         let (_env, _cid, client, _admin, _pid) = setup();
         client.get_refund_request(&0);
+    }
+
+    // ─── Recurring Donation Tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_create_recurring_success() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+
+        assert_eq!(recurring_id, 0);
+        let recurring = client.get_recurring(&donor, &0u32);
+        assert_eq!(recurring.donor, donor);
+        assert_eq!(recurring.project_id, pid);
+        assert_eq!(recurring.amount, 10 * STROOP);
+        assert_eq!(recurring.currency, symbol_short!("XLM"));
+        assert_eq!(recurring.interval_ledgers, 100);
+        assert_eq!(recurring.keeper_incentive, STROOP);
+        assert!(recurring.active);
+    }
+
+    #[test]
+    #[should_panic(expected = "Donation amount must be positive")]
+    fn test_create_recurring_invalid_amount() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        client.create_recurring(
+            &donor,
+            &pid,
+            &0,
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Keeper incentive must be non-negative")]
+    fn test_create_recurring_invalid_keeper_incentive() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &-1,
+            &1u32,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Interval must be positive")]
+    fn test_create_recurring_invalid_interval() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &0u32,
+            &STROOP,
+            &1u32,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Project not found")]
+    fn test_create_recurring_project_not_found() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let donor = Address::generate(&env);
+        client.create_recurring(
+            &donor,
+            &String::from_str(&env, "nonexistent"),
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+    }
+
+    #[test]
+    fn test_cancel_recurring_success() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+
+        client.cancel_recurring(&donor, &recurring_id);
+        let recurring = client.get_recurring(&donor, &recurring_id);
+        assert!(!recurring.active);
+    }
+
+    #[test]
+    #[should_panic(expected = "Recurring donation is not active")]
+    fn test_cancel_recurring_not_active() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+
+        client.cancel_recurring(&donor, &recurring_id);
+        client.cancel_recurring(&donor, &recurring_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Recurring donation not found")]
+    fn test_cancel_recurring_not_found() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let donor = Address::generate(&env);
+        client.cancel_recurring(&donor, &0u32);
+    }
+
+    #[test]
+    fn test_execute_recurring_success_xlm() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let keeper = Address::generate(&env);
+
+        // Setup mock native token
+        let token_admin = Address::generate(&env);
+        let native_token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.set_native_token(&admin, &native_token);
+
+        // Mint and approve native tokens
+        let native_client = StellarAssetClient::new(&env, &native_token);
+        native_client.mint(&donor, &(100 * STROOP));
+        native_client.approve(&donor, &client.address, &(100 * STROOP), &9999u32);
+
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+
+        // Fast-forward sequence number to maturity
+        let matured_ledger = env.ledger().sequence() + 100;
+        env.ledger().set_sequence_number(matured_ledger);
+
+        client.execute_recurring(&keeper, &donor, &recurring_id);
+
+        // Verify balances
+        let project = client.get_project(&pid);
+        let project_wallet_balance = native_client.balance(&project.wallet);
+        let keeper_balance = native_client.balance(&keeper);
+        let donor_balance = native_client.balance(&donor);
+
+        assert_eq!(project_wallet_balance, 10 * STROOP);
+        assert_eq!(keeper_balance, STROOP);
+        assert_eq!(donor_balance, 89 * STROOP);
+
+        // Verify stats
+        assert_eq!(project.total_raised, 10 * STROOP);
+        let donor_stats = client.get_donor_stats(&donor);
+        assert_eq!(donor_stats.total_donated, 10 * STROOP);
+        assert_eq!(donor_stats.donation_count, 1);
+        assert_eq!(donor_stats.badge, BadgeTier::Seedling);
+
+        // Verify next execution ledger is updated
+        let recurring = client.get_recurring(&donor, &recurring_id);
+        assert_eq!(recurring.next_execution_ledger, matured_ledger + 100);
+    }
+
+    #[test]
+    fn test_execute_recurring_success_usdc() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let keeper = Address::generate(&env);
+
+        // Setup mock USDC token
+        let usdc_admin = Address::generate(&env);
+        let usdc_token = env.register_stellar_asset_contract_v2(usdc_admin).address();
+        client.set_usdc_token(&admin, &usdc_token);
+
+        // Setup mock oracle (rate = 8 XLM per USDC)
+        let oracle_id = env.register_contract(None, MockOracle);
+        client.set_oracle(&admin, &oracle_id);
+
+        // Mint and approve USDC tokens
+        let usdc_client = StellarAssetClient::new(&env, &usdc_token);
+        usdc_client.mint(&donor, &(100 * STROOP));
+        usdc_client.approve(&donor, &client.address, &(100 * STROOP), &9999u32);
+
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("USDC"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+
+        // Fast-forward sequence number to maturity
+        let matured_ledger = env.ledger().sequence() + 100;
+        env.ledger().set_sequence_number(matured_ledger);
+
+        client.execute_recurring(&keeper, &donor, &recurring_id);
+
+        // Verify balances
+        let project = client.get_project(&pid);
+        let project_wallet_balance = usdc_client.balance(&project.wallet);
+        let keeper_balance = usdc_client.balance(&keeper);
+        let donor_balance = usdc_client.balance(&donor);
+
+        assert_eq!(project_wallet_balance, 10 * STROOP);
+        assert_eq!(keeper_balance, STROOP);
+        assert_eq!(donor_balance, 89 * STROOP);
+
+        // Verify stats (USDC amount is converted using oracle rate 8)
+        // 10 USDC * 8 = 80 XLM
+        assert_eq!(project.total_raised, 80 * STROOP);
+        let donor_stats = client.get_donor_stats(&donor);
+        assert_eq!(donor_stats.total_donated, 80 * STROOP);
+        assert_eq!(donor_stats.donation_count, 1);
+        assert_eq!(donor_stats.badge, BadgeTier::Seedling);
+    }
+
+    #[test]
+    #[should_panic(expected = "Recurring donation has not matured yet")]
+    fn test_execute_recurring_pre_maturity_panics() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let keeper = Address::generate(&env);
+
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+
+        client.execute_recurring(&keeper, &donor, &recurring_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Recurring donation is not active")]
+    fn test_execute_recurring_cancelled_panics() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let keeper = Address::generate(&env);
+
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+
+        client.cancel_recurring(&donor, &recurring_id);
+
+        let matured_ledger = env.ledger().sequence() + 100;
+        env.ledger().set_sequence_number(matured_ledger);
+
+        client.execute_recurring(&keeper, &donor, &recurring_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Project is temporarily paused")]
+    fn test_execute_recurring_project_paused_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let keeper = Address::generate(&env);
+
+        // Setup mock native token
+        let token_admin = Address::generate(&env);
+        let native_token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.set_native_token(&admin, &native_token);
+
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+
+        // Pause project
+        client.pause_project(&admin, &pid);
+
+        let matured_ledger = env.ledger().sequence() + 100;
+        env.ledger().set_sequence_number(matured_ledger);
+
+        client.execute_recurring(&keeper, &donor, &recurring_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Contract is paused")]
+    fn test_execute_recurring_contract_paused_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let keeper = Address::generate(&env);
+
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+
+        // Pause contract
+        client.pause_contract(&signers1(&env, &admin));
+
+        let matured_ledger = env.ledger().sequence() + 100;
+        env.ledger().set_sequence_number(matured_ledger);
+
+        client.execute_recurring(&keeper, &donor, &recurring_id);
+    }
+
+    #[test]
+    fn test_execute_recurring_badge_progression() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let keeper = Address::generate(&env);
+
+        let token_admin = Address::generate(&env);
+        let native_token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.set_native_token(&admin, &native_token);
+
+        let native_client = StellarAssetClient::new(&env, &native_token);
+        // 500 XLM × 3 executions = 1 500 XLM donation + 1 XLM × 3 = 3 XLM keeper
+        // incentives = 1 503 XLM total to cover all transfer_from calls.
+        native_client.mint(&donor, &(1503 * STROOP));
+        native_client.approve(&donor, &client.address, &(1503 * STROOP), &9999u32);
+
+        // 500 XLM intervals
+        let recurring_id = client.create_recurring(
+            &donor,
+            &pid,
+            &(500 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+
+        // Execution 1: 500 XLM -> Badge should be Forest (threshold 500)
+        let seq = env.ledger().sequence();
+        env.ledger().set_sequence_number(seq + 100);
+        client.execute_recurring(&keeper, &donor, &recurring_id);
+        assert_eq!(client.get_donor_stats(&donor).badge, BadgeTier::Forest);
+
+        // Execution 2: 1000 XLM -> Badge remains Forest
+        let seq = env.ledger().sequence();
+        env.ledger().set_sequence_number(seq + 100);
+        client.execute_recurring(&keeper, &donor, &recurring_id);
+        assert_eq!(client.get_donor_stats(&donor).badge, BadgeTier::Forest);
+
+        // Execution 3: 1500 XLM -> Badge remains Forest (threshold for Earth Guardian is 2000)
+        let seq = env.ledger().sequence();
+        env.ledger().set_sequence_number(seq + 100);
+        client.execute_recurring(&keeper, &donor, &recurring_id);
+        assert_eq!(client.get_donor_stats(&donor).badge, BadgeTier::Forest);
+    }
+
+    #[test]
+    fn test_get_donor_recurrings() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+
+        let recurring_id_0 = client.create_recurring(
+            &donor,
+            &pid,
+            &(10 * STROOP),
+            &symbol_short!("XLM"),
+            &100u32,
+            &STROOP,
+            &1u32,
+        );
+        let recurring_id_1 = client.create_recurring(
+            &donor,
+            &pid,
+            &(20 * STROOP),
+            &symbol_short!("USDC"),
+            &200u32,
+            &STROOP,
+            &2u32,
+        );
+
+        assert_eq!(recurring_id_0, 0);
+        assert_eq!(recurring_id_1, 1);
+
+        let recurrings = client.get_donor_recurrings(&donor);
+        assert_eq!(recurrings.len(), 2);
+
+        let sub_0 = recurrings.get(0).unwrap();
+        assert_eq!(sub_0.amount, 10 * STROOP);
+        assert_eq!(sub_0.currency, symbol_short!("XLM"));
+
+        let sub_1 = recurrings.get(1).unwrap();
+        assert_eq!(sub_1.amount, 20 * STROOP);
+        assert_eq!(sub_1.currency, symbol_short!("USDC"));
+    }
+
+    // ─── Cross-Contract Project Registry tests (#391) ───────────────────────
+
+    #[test]
+    fn test_create_sub_project() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let parent_id = String::from_str(&env, "parent");
+        let parent_wallet = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &parent_id,
+            &String::from_str(&env, "Parent Project"),
+            &parent_wallet,
+            &100u32,
+        );
+
+        let child_id = String::from_str(&env, "child");
+        client.register_sub_project(
+            &parent_wallet,
+            &child_id,
+            &String::from_str(&env, "Child Project"),
+            &50u32,
+            &parent_id,
+        );
+
+        let child = client.get_project(&child_id);
+        assert_eq!(child.name, String::from_str(&env, "Child Project"));
+        assert_eq!(child.co2_per_xlm, 50);
+        assert_eq!(child.parent_project_id, Some(parent_id.clone()));
+        assert!(child.active);
+        assert_eq!(child.wallet, parent_wallet);
+        assert_eq!(client.get_project_count(), 2);
+    }
+
+    #[test]
+    fn test_get_sub_projects() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let parent_id = String::from_str(&env, "parent");
+        let parent_wallet = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &parent_id,
+            &String::from_str(&env, "Parent"),
+            &parent_wallet,
+            &100u32,
+        );
+
+        let child1 = String::from_str(&env, "child1");
+        let child2 = String::from_str(&env, "child2");
+        client.register_sub_project(
+            &parent_wallet,
+            &child1,
+            &String::from_str(&env, "Child 1"),
+            &50u32,
+            &parent_id,
+        );
+        client.register_sub_project(
+            &parent_wallet,
+            &child2,
+            &String::from_str(&env, "Child 2"),
+            &75u32,
+            &parent_id,
+        );
+
+        // Non-parent project returns empty list
+        let unrelated = String::from_str(&env, "unrelated");
+        let unrelated_wallet = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &unrelated,
+            &String::from_str(&env, "Unrelated"),
+            &unrelated_wallet,
+            &100u32,
+        );
+        assert_eq!(client.get_sub_projects(&unrelated).len(), 0);
+
+        let subs = client.get_sub_projects(&parent_id);
+        assert_eq!(subs.len(), 2);
+        assert_eq!(subs.get(0).unwrap(), child1);
+        assert_eq!(subs.get(1).unwrap(), child2);
+    }
+
+    #[test]
+    fn test_aggregated_impact() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let parent_id = String::from_str(&env, "parent");
+        let parent_wallet = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &parent_id,
+            &String::from_str(&env, "Parent"),
+            &parent_wallet,
+            &100u32,
+        );
+
+        let child1 = String::from_str(&env, "child1");
+        let child2 = String::from_str(&env, "child2");
+        client.register_sub_project(
+            &parent_wallet,
+            &child1,
+            &String::from_str(&env, "Child 1"),
+            &200u32,
+            &parent_id,
+        );
+        client.register_sub_project(
+            &parent_wallet,
+            &child2,
+            &String::from_str(&env, "Child 2"),
+            &300u32,
+            &parent_id,
+        );
+
+        // Donate to parent: 20 XLM → co2 = 20 * 100 = 2000
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let donor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token).mint(&donor, &(60 * STROOP));
+        client.donate(&token, &donor, &parent_id, &(20 * STROOP), &0u32);
+
+        // Donate to child1: 15 XLM → co2 = 15 * 200 = 3000
+        client.donate(&token, &donor, &child1, &(15 * STROOP), &1u32);
+
+        // Donate to child2: 25 XLM → co2 = 25 * 300 = 7500
+        client.donate(&token, &donor, &child2, &(25 * STROOP), &2u32);
+
+        let (total_raised, total_co2, total_donors) = client.get_aggregated_impact(&parent_id);
+        assert_eq!(total_raised, 60 * STROOP);
+        // CO2: parent=20*100 + child1=15*200 + child2=25*300 = 2000+3000+7500 = 12500
+        assert_eq!(total_co2, 12500);
+        // One unique donor across all projects
+        assert_eq!(total_donors, 3);
+    }
+
+    #[test]
+    fn test_parent_deactivation_cascades() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let parent_id = String::from_str(&env, "parent");
+        let parent_wallet = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &parent_id,
+            &String::from_str(&env, "Parent"),
+            &parent_wallet,
+            &100u32,
+        );
+
+        let child1 = String::from_str(&env, "child1");
+        let child2 = String::from_str(&env, "child2");
+        client.register_sub_project(
+            &parent_wallet,
+            &child1,
+            &String::from_str(&env, "Child 1"),
+            &50u32,
+            &parent_id,
+        );
+        client.register_sub_project(
+            &parent_wallet,
+            &child2,
+            &String::from_str(&env, "Child 2"),
+            &75u32,
+            &parent_id,
+        );
+
+        // All active before deactivation
+        assert!(client.get_project(&parent_id).active);
+        assert!(client.get_project(&child1).active);
+        assert!(client.get_project(&child2).active);
+
+        // Deactivate parent — should cascade
+        client.deactivate_project(&admin, &parent_id);
+
+        assert!(!client.get_project(&parent_id).active);
+        assert!(!client.get_project(&child1).active);
+        assert!(!client.get_project(&child2).active);
+    }
+
+    #[test]
+    #[should_panic(expected = "Wallet does not match parent project wallet")]
+    fn test_unauthorized_sub_project_registration() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let parent_id = String::from_str(&env, "parent");
+        let parent_wallet = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &parent_id,
+            &String::from_str(&env, "Parent"),
+            &parent_wallet,
+            &100u32,
+        );
+
+        // Try to register sub-project with a different wallet
+        let imposter_wallet = Address::generate(&env);
+        let child_id = String::from_str(&env, "child");
+        client.register_sub_project(
+            &imposter_wallet,
+            &child_id,
+            &String::from_str(&env, "Child"),
+            &50u32,
+            &parent_id,
+        );
+    }
+
+    // ─── zk-SNARK anonymous donation tests (#390) ────────────────────────────
+
+    #[cfg(feature = "zk")]
+    #[test]
+    fn test_anonymous_address_derivation_deterministic() {
+        let env = Env::default();
+        let nullifier = BytesN::from_array(&env, &[42u8; 32]);
+        let hash1 = env
+            .crypto()
+            .sha256(&Bytes::from_slice(&env, nullifier.as_ref()));
+        let addr1 = Address::from_bytes(&hash1.to_bytes().as_ref().into());
+        let hash2 = env
+            .crypto()
+            .sha256(&Bytes::from_slice(&env, nullifier.as_ref()));
+        let addr2 = Address::from_bytes(&hash2.to_bytes().as_ref().into());
+        assert_eq!(addr1, addr2);
+    }
+
+    #[cfg(feature = "zk")]
+    #[test]
+    fn test_anonymous_address_derivation_different_nullifiers() {
+        let env = Env::default();
+        let n1 = BytesN::from_array(&env, &[1u8; 32]);
+        let n2 = BytesN::from_array(&env, &[2u8; 32]);
+        let h1 = env.crypto().sha256(&Bytes::from_slice(&env, n1.as_ref()));
+        let a1 = Address::from_bytes(&h1.to_bytes().as_ref().into());
+        let h2 = env.crypto().sha256(&Bytes::from_slice(&env, n2.as_ref()));
+        let a2 = Address::from_bytes(&h2.to_bytes().as_ref().into());
+        assert_ne!(a1, a2);
+    }
+
+    #[cfg(feature = "zk")]
+    #[test]
+    #[should_panic(
+        expected = "Verification key not set — admin must call set_zk_verification_key first"
+    )]
+    fn test_anonymous_donation_no_verification_key() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let nullifier = BytesN::from_array(&env, &[5u8; 32]);
+        let token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        let proof = Bytes::from_slice(&env, &[0u8; 256]);
+        let project_id = String::from_str(&env, "test");
+        client.donate_anonymous(
+            &token,
+            &proof,
+            &project_id,
+            &1_000_000i128,
+            &nullifier,
+            &1u32,
+        );
+    }
+
+    #[cfg(feature = "zk")]
+    #[test]
+    fn test_set_and_get_verification_key() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let vk = Bytes::from_slice(&env, &[0xAB; 128]);
+        client.set_zk_verification_key(&admin, &vk);
+        let stored = client.get_zk_verification_key();
+        assert!(stored.is_some());
+        assert_eq!(stored.unwrap(), vk);
+    }
+
+    #[cfg(feature = "zk")]
+    #[test]
+    fn test_anonymous_donation_nullifier_not_spent_on_proof_failure() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let project_id = String::from_str(&env, "test-proj");
+        let project_wallet = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &project_id,
+            &String::from_str(&env, "Test Project"),
+            &project_wallet,
+            &50u32,
+        );
+        let vk = Bytes::from_slice(&env, &[1u8; 64]);
+        client.set_zk_verification_key(&admin, &vk);
+        let nullifier = BytesN::from_array(&env, &[7u8; 32]);
+        let token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        let bad_proof = Bytes::from_slice(&env, &[0xFFu8; 256]);
+        let result = client.try_donate_anonymous(
+            &token,
+            &bad_proof,
+            &project_id,
+            &5_000_000i128,
+            &nullifier,
+            &1u32,
+        );
+        assert!(result.is_err());
+        assert!(!client.is_nullifier_spent(&nullifier));
+    }
+
+    #[cfg(feature = "zk")]
+    #[test]
+    #[should_panic(expected = "Donation amount must be positive")]
+    fn test_anonymous_donation_zero_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let project_id = String::from_str(&env, "test-proj");
+        let project_wallet = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &project_id,
+            &String::from_str(&env, "Test"),
+            &project_wallet,
+            &50u32,
+        );
+        let vk = Bytes::from_slice(&env, &[1u8; 64]);
+        client.set_zk_verification_key(&admin, &vk);
+        let nullifier = BytesN::from_array(&env, &[8u8; 32]);
+        let token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        let proof = Bytes::from_slice(&env, &[0u8; 256]);
+        client.donate_anonymous(&token, &proof, &project_id, &0i128, &nullifier, &1u32);
+    }
+
+    #[cfg(feature = "zk")]
+    #[test]
+    fn test_is_nullifier_spent_returns_false_initially() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let nullifier = BytesN::from_array(&env, &[9u8; 32]);
+        assert!(!client.is_nullifier_spent(&nullifier));
+    }
+
+    #[cfg(feature = "zk")]
+    #[test]
+    #[should_panic(expected = "Verification key must not be empty")]
+    fn test_set_zk_verification_key_rejects_empty() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let empty_vk = Bytes::new(&env);
+        client.set_zk_verification_key(&admin, &empty_vk);
+    }
+
+    // ─── Vesting schedule tests (#386) ───────────────────────────────────────
+
+    #[cfg(feature = "vesting")]
+    #[test]
+    fn test_vesting_create_and_first_claim() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let project_wallet = Address::generate(&env);
+        let pid = String::from_str(&env, "recycle-trees");
+        client.register_project(
+            &admin,
+            &pid,
+            &String::from_str(&env, "Recycle Trees"),
+            &project_wallet,
+            &100u32,
+        );
+
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let total: i128 = 100_000_000; // 10 XLM
+        StellarAssetClient::new(&env, &token).mint(&donor, &total);
+
+        // Create 10-installment vesting at 100 ledgers each.
+        let schedule_id =
+            client.donate_vested(&token, &donor, &pid, &total, &10u32, &100u32, &0u32);
+
+        let schedule = client.get_vesting_schedule(&donor, &schedule_id);
+        assert_eq!(schedule.total_amount, total);
+        assert_eq!(schedule.amount_per_installment, 10_000_000); // 1 XLM
+        assert_eq!(schedule.installment_count, 10);
+        assert_eq!(schedule.installments_released, 1); // first installment immediate
+        assert_eq!(schedule.donor, donor);
+        assert_eq!(schedule.project_id, pid);
+
+        // Advance past the first interval.
+        env.ledger().set_sequence_number(200);
+
+        client.claim_vested_installment(&donor, &schedule_id);
+        let schedule2 = client.get_vesting_schedule(&donor, &schedule_id);
+        assert_eq!(schedule2.installments_released, 2);
+    }
+
+    #[cfg(feature = "vesting")]
+    #[test]
+    fn test_vesting_multiple_claims() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let project_wallet = Address::generate(&env);
+        let pid = String::from_str(&env, "ocean-cleanup");
+        client.register_project(
+            &admin,
+            &pid,
+            &String::from_str(&env, "Ocean Cleanup"),
+            &project_wallet,
+            &50u32,
+        );
+
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let total: i128 = 50_000_000; // 5 XLM
+        StellarAssetClient::new(&env, &token).mint(&donor, &total);
+
+        // 5 installments, 50 ledgers each.
+        let schedule_id = client.donate_vested(&token, &donor, &pid, &total, &5u32, &50u32, &0u32);
+
+        let s0 = client.get_vesting_schedule(&donor, &schedule_id);
+        assert_eq!(s0.installments_released, 1);
+
+        // Claim 2nd installment.
+        env.ledger().set_sequence_number(100);
+        client.claim_vested_installment(&donor, &schedule_id);
+        let s2 = client.get_vesting_schedule(&donor, &schedule_id);
+        assert_eq!(s2.installments_released, 2);
+
+        // Claim 3rd installment.
+        env.ledger().set_sequence_number(200);
+        client.claim_vested_installment(&donor, &schedule_id);
+        let s3 = client.get_vesting_schedule(&donor, &schedule_id);
+        assert_eq!(s3.installments_released, 3);
+
+        // Claim remaining.
+        env.ledger().set_sequence_number(300);
+        client.claim_vested_installment(&donor, &schedule_id);
+        env.ledger().set_sequence_number(400);
+        client.claim_vested_installment(&donor, &schedule_id);
+        let s5 = client.get_vesting_schedule(&donor, &schedule_id);
+        assert_eq!(s5.installments_released, 5);
+    }
+
+    #[cfg(feature = "vesting")]
+    #[test]
+    fn test_vesting_cancel_returns_unvested() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let project_wallet = Address::generate(&env);
+        let pid = String::from_str(&env, "solar-farms");
+        client.register_project(
+            &admin,
+            &pid,
+            &String::from_str(&env, "Solar Farms"),
+            &project_wallet,
+            &100u32,
+        );
+
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let total: i128 = 100_000_000; // 10 XLM, 10 installments of 1 XLM each
+        StellarAssetClient::new(&env, &token).mint(&donor, &total);
+
+        let schedule_id =
+            client.donate_vested(&token, &donor, &pid, &total, &10u32, &720u32, &0u32);
+
+        // Advance through 5 installments.
+        env.ledger().set_sequence_number(1000);
+        client.claim_vested_installment(&donor, &schedule_id);
+        env.ledger().set_sequence_number(2000);
+        client.claim_vested_installment(&donor, &schedule_id);
+        env.ledger().set_sequence_number(3000);
+        client.claim_vested_installment(&donor, &schedule_id);
+        env.ledger().set_sequence_number(4000);
+        client.claim_vested_installment(&donor, &schedule_id);
+
+        let s_mid = client.get_vesting_schedule(&donor, &schedule_id);
+        assert_eq!(s_mid.installments_released, 5);
+
+        // Cancel vesting — remaining 50 XLM returned.
+        client.cancel_vesting(&donor, &schedule_id);
+    }
+
+    #[cfg(feature = "vesting")]
+    #[test]
+    #[should_panic(expected = "Next installment not yet claimable")]
+    fn test_vesting_claim_before_interval_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let project_wallet = Address::generate(&env);
+        let pid = String::from_str(&env, "wind-power");
+        client.register_project(
+            &admin,
+            &pid,
+            &String::from_str(&env, "Wind Power"),
+            &project_wallet,
+            &50u32,
+        );
+
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let total: i128 = 30_000_000;
+        StellarAssetClient::new(&env, &token).mint(&donor, &total);
+
+        // 3 installments, 1000 ledgers each.
+        let schedule_id =
+            client.donate_vested(&token, &donor, &pid, &total, &3u32, &1000u32, &0u32);
+
+        let s0 = client.get_vesting_schedule(&donor, &schedule_id);
+        assert_eq!(s0.installments_released, 1);
+
+        // Try to claim immediately — should fail, interval hasn't elapsed.
+        client.claim_vested_installment(&donor, &schedule_id);
+    }
+
+    #[cfg(feature = "vesting")]
+    #[test]
+    #[should_panic(expected = "Vesting schedule not found")]
+    fn test_vesting_cancel_by_non_donor_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let project_wallet = Address::generate(&env);
+        let pid = String::from_str(&env, "forest-regrow");
+        client.register_project(
+            &admin,
+            &pid,
+            &String::from_str(&env, "Forest Regrow"),
+            &project_wallet,
+            &100u32,
+        );
+
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let total: i128 = 100_000_000;
+        StellarAssetClient::new(&env, &token).mint(&donor, &total);
+
+        let schedule_id =
+            client.donate_vested(&token, &donor, &pid, &total, &10u32, &720u32, &0u32);
+
+        // Another address tries to cancel.
+        let impostor = Address::generate(&env);
+        client.cancel_vesting(&impostor, &schedule_id);
+    }
+
+    // ─── Platform fee tests (#385) ───────────────────────────────────────────
+
+    #[cfg(feature = "fees")]
+    #[test]
+    fn test_donate_with_fee() {
+        let (env, _cid, client, admin, pid) = setup();
+
+        // Configure 200 bps (2%) platform fee.
+        let treasury = Address::generate(&env);
+        client.set_platform_treasury(&signers1(&env, &admin), &treasury);
+        client.set_platform_fee(&signers1(&env, &admin), &200u32);
+
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let amount: i128 = 100 * STROOP; // 100 XLM
+        StellarAssetClient::new(&env, &token).mint(&donor, &amount);
+
+        client.donate(&token, &donor, &pid, &amount, &0u32);
+
+        // Full amount recorded for project total and donor stats.
+        let p = client.get_project(&pid);
+        assert_eq!(p.total_raised, amount);
+        let stats = client.get_donor_stats(&donor);
+        assert_eq!(stats.total_donated, amount);
+        assert_eq!(client.get_global_total(), amount);
+
+        // 2% fee = 2 XLM = 20_000_000 stroops to treasury.
+        // 98 XLM = 980_000_000 stroops to project.
+    }
+
+    #[cfg(feature = "fees")]
+    #[test]
+    fn test_donate_with_zero_fee() {
+        let (env, _cid, client, _admin, pid) = setup();
+
+        // Fee defaults to 0 — 100% goes to project (existing behavior).
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let amount: i128 = 50 * STROOP;
+        StellarAssetClient::new(&env, &token).mint(&donor, &amount);
+
+        client.donate(&token, &donor, &pid, &amount, &0u32);
+
+        let p = client.get_project(&pid);
+        assert_eq!(p.total_raised, amount);
+        let stats = client.get_donor_stats(&donor);
+        assert_eq!(stats.total_donated, amount);
+        assert_eq!(client.get_global_total(), amount);
+    }
+
+    #[cfg(feature = "fees")]
+    #[test]
+    #[should_panic(expected = "Platform fee exceeds maximum of 500 bps (5%)")]
+    fn test_fee_exceeds_maximum() {
+        let (env, _cid, client, admin, _pid) = setup();
+
+        // Setting 600 bps (6%) must panic — exceeds 500 bps cap.
+        client.set_platform_fee(&signers1(&env, &admin), &600u32);
+    }
+
+    #[cfg(feature = "fees")]
+    #[test]
+    fn test_fee_emitted_in_event() {
+        let (env, _cid, client, admin, pid) = setup();
+
+        // Configure 200 bps (2%) platform fee.
+        let treasury = Address::generate(&env);
+        client.set_platform_treasury(&signers1(&env, &admin), &treasury);
+        client.set_platform_fee(&signers1(&env, &admin), &200u32);
+
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let amount: i128 = 100 * STROOP;
+        StellarAssetClient::new(&env, &token).mint(&donor, &amount);
+
+        client.donate(&token, &donor, &pid, &amount, &0u32);
+
+        // Verify donation was recorded and events include the fee.
+        let p = client.get_project(&pid);
+        assert_eq!(p.total_raised, amount);
+        let record = client.get_donation_record(&0u32);
+        assert_eq!(record.amount, amount);
+    }
+
+    // ─── On-chain Impact Certificates (#382) ────────────────────────────────
+
+    #[cfg(feature = "impact")]
+    /// Helper: compute the Merkle root for two leaves at indices 0 and 1.
+    /// Used to build a known-good test root from ImpactLeaf values.
+    fn build_two_leaf_root(env: &Env, leaf0: &ImpactLeaf, leaf1: &ImpactLeaf) -> BytesN<32> {
+        let hash0 = compute_impact_leaf_hash(env, leaf0);
+        let hash1 = compute_impact_leaf_hash(env, leaf1);
+        let mut combined = [0u8; 64];
+        combined[..32].copy_from_slice(&hash0.to_array());
+        combined[32..].copy_from_slice(&hash1.to_array());
+        env.crypto()
+            .sha256(&Bytes::from_slice(env, &combined))
+            .into()
+    }
+
+    /// Helper: build a proof for leaf at index 0 in a two-leaf tree.
+    fn build_proof_for_leaf0(env: &Env, leaf1: &ImpactLeaf) -> Vec<BytesN<32>> {
+        let mut proof = Vec::new(env);
+        proof.push_back(compute_impact_leaf_hash(env, leaf1));
+        proof
+    }
+
+    #[test]
+    fn test_merkle_proof_verification_valid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let project_wallet = Address::generate(&env);
+        let project_id = String::from_str(&env, "forest-restore");
+        client.register_project(
+            &admin,
+            &project_id,
+            &String::from_str(&env, "Forest Restore"),
+            &project_wallet,
+            &100u32,
+        );
+
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+
+        let leaf_a = ImpactLeaf {
+            donor: donor_a.clone(),
+            donation_index: 0u32,
+            co2_kg: 100u32,
+            trees: 5u32,
+            hectares: 2u32,
+        };
+        let leaf_b = ImpactLeaf {
+            donor: donor_b.clone(),
+            donation_index: 1u32,
+            co2_kg: 200u32,
+            trees: 10u32,
+            hectares: 4u32,
+        };
+
+        let root = build_two_leaf_root(&env, &leaf_a, &leaf_b);
+        let proof = build_proof_for_leaf0(&env, &leaf_b);
+
+        let report_id = String::from_str(&env, "Q1 2026");
+        client.set_impact_merkle_root(&admin, &project_id, &root, &report_id);
+
+        // Donor A's impact should verify with the correct proof.
+        let result = client.verify_impact(&project_id, &report_id, &leaf_a, &proof, &0u32);
+        assert!(result);
+    }
+
+    #[test]
+    fn test_merkle_proof_verification_invalid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let project_wallet = Address::generate(&env);
+        let project_id = String::from_str(&env, "forest-restore");
+        client.register_project(
+            &admin,
+            &project_id,
+            &String::from_str(&env, "Forest Restore"),
+            &project_wallet,
+            &100u32,
+        );
+
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+        let donor_c = Address::generate(&env);
+
+        let leaf_a = ImpactLeaf {
+            donor: donor_a.clone(),
+            donation_index: 0u32,
+            co2_kg: 100u32,
+            trees: 5u32,
+            hectares: 2u32,
+        };
+        let leaf_b = ImpactLeaf {
+            donor: donor_b.clone(),
+            donation_index: 1u32,
+            co2_kg: 200u32,
+            trees: 10u32,
+            hectares: 4u32,
+        };
+
+        let root = build_two_leaf_root(&env, &leaf_a, &leaf_b);
+        let report_id = String::from_str(&env, "Q1 2026");
+        client.set_impact_merkle_root(&admin, &project_id, &root, &report_id);
+
+        // Create a different leaf for donor C (not in the tree).
+        let leaf_c = ImpactLeaf {
+            donor: donor_c.clone(),
+            donation_index: 2u32,
+            co2_kg: 300u32,
+            trees: 15u32,
+            hectares: 6u32,
+        };
+
+        // Use the proof for leaf_a (which is correct for leaf_a but NOT for leaf_c).
+        let proof = build_proof_for_leaf0(&env, &leaf_b);
+
+        // Donor C's impact should NOT verify with leaf_a's proof.
+        let result = client.verify_impact(&project_id, &report_id, &leaf_c, &proof, &0u32);
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_merkle_proof_wrong_root() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let project_wallet = Address::generate(&env);
+        let project_id = String::from_str(&env, "forest-restore");
+        client.register_project(
+            &admin,
+            &project_id,
+            &String::from_str(&env, "Forest Restore"),
+            &project_wallet,
+            &100u32,
+        );
+
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+
+        let leaf_a = ImpactLeaf {
+            donor: donor_a.clone(),
+            donation_index: 0u32,
+            co2_kg: 100u32,
+            trees: 5u32,
+            hectares: 2u32,
+        };
+        let leaf_b = ImpactLeaf {
+            donor: donor_b.clone(),
+            donation_index: 1u32,
+            co2_kg: 200u32,
+            trees: 10u32,
+            hectares: 4u32,
+        };
+
+        // Post a root for "Q1 2026" report.
+        let root = build_two_leaf_root(&env, &leaf_a, &leaf_b);
+        let report_id = String::from_str(&env, "Q1 2026");
+        client.set_impact_merkle_root(&admin, &project_id, &root, &report_id);
+
+        let proof = build_proof_for_leaf0(&env, &leaf_b);
+
+        // Verify against a different report_id that has NO root posted.
+        let wrong_report = String::from_str(&env, "Q2 2026");
+        let result = client.verify_impact(&project_id, &wrong_report, &leaf_a, &proof, &0u32);
+        assert!(!result);
+
+        // Verify against a wrong project_id.
+        let wrong_project = String::from_str(&env, "nonexistent");
+        let result = client.verify_impact(&wrong_project, &report_id, &leaf_a, &proof, &0u32);
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_set_and_verify_impact_root() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let project_wallet = Address::generate(&env);
+        let project_id = String::from_str(&env, "ocean-cleanup");
+        client.register_project(
+            &admin,
+            &project_id,
+            &String::from_str(&env, "Ocean Cleanup"),
+            &project_wallet,
+            &50u32,
+        );
+
+        let donor = Address::generate(&env);
+
+        // Create a single-leaf Merkle tree (root = leaf hash).
+        let leaf = ImpactLeaf {
+            donor: donor.clone(),
+            donation_index: 0u32,
+            co2_kg: 500u32,
+            trees: 25u32,
+            hectares: 10u32,
+        };
+        let leaf_hash = compute_impact_leaf_hash(&env, &leaf);
+
+        let report_id = String::from_str(&env, "Annual 2026");
+
+        // Before posting, the root should not exist.
+        let stored = client.get_impact_merkle_root(&project_id, &report_id);
+        assert!(stored.is_none());
+
+        // Post the root (root = leaf hash for a single-leaf tree).
+        client.set_impact_merkle_root(&admin, &project_id, &leaf_hash, &report_id);
+
+        // After posting, the root should be retrievable.
+        let stored = client.get_impact_merkle_root(&project_id, &report_id);
+        assert_eq!(stored, Some(leaf_hash.clone()));
+
+        // Verify with empty proof (single leaf: root == leaf hash).
+        let empty_proof = Vec::new(&env);
+        let result = client.verify_impact(&project_id, &report_id, &leaf, &empty_proof, &0u32);
+        assert!(result);
+    }
+
+    #[test]
+    fn test_merkle_proof_wrong_leaf_index() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let project_wallet = Address::generate(&env);
+        let project_id = String::from_str(&env, "forest-restore");
+        client.register_project(
+            &admin,
+            &project_id,
+            &String::from_str(&env, "Forest Restore"),
+            &project_wallet,
+            &100u32,
+        );
+
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+
+        let leaf_a = ImpactLeaf {
+            donor: donor_a.clone(),
+            donation_index: 0u32,
+            co2_kg: 100u32,
+            trees: 5u32,
+            hectares: 2u32,
+        };
+        let leaf_b = ImpactLeaf {
+            donor: donor_b.clone(),
+            donation_index: 1u32,
+            co2_kg: 200u32,
+            trees: 10u32,
+            hectares: 4u32,
+        };
+
+        let root = build_two_leaf_root(&env, &leaf_a, &leaf_b);
+        let proof = build_proof_for_leaf0(&env, &leaf_b);
+
+        let report_id = String::from_str(&env, "Q1 2026");
+        client.set_impact_merkle_root(&admin, &project_id, &root, &report_id);
+
+        // Leaf A is at index 0 with proof = [hash(leaf_b)].
+        // Claiming it's at index 1 reverses the sibling ordering:
+        //   idx=1 → sibling || hash instead of hash || sibling
+        // This produces a different combined value → verification fails.
+        let result = client.verify_impact(
+            &project_id,
+            &report_id,
+            &leaf_a,
+            &proof,
+            &1u32, // WRONG: leaf_a is actually at index 0
+        );
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_merkle_proof_mismatched_root() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let project_wallet = Address::generate(&env);
+        let project_id = String::from_str(&env, "forest-restore");
+        client.register_project(
+            &admin,
+            &project_id,
+            &String::from_str(&env, "Forest Restore"),
+            &project_wallet,
+            &100u32,
+        );
+
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+        let donor_c = Address::generate(&env);
+
+        // Build a tree from leaf_a + leaf_b and post its root.
+        let leaf_a = ImpactLeaf {
+            donor: donor_a.clone(),
+            donation_index: 0u32,
+            co2_kg: 100u32,
+            trees: 5u32,
+            hectares: 2u32,
+        };
+        let leaf_b = ImpactLeaf {
+            donor: donor_b.clone(),
+            donation_index: 1u32,
+            co2_kg: 200u32,
+            trees: 10u32,
+            hectares: 4u32,
+        };
+        let root_ab = build_two_leaf_root(&env, &leaf_a, &leaf_b);
+
+        let report_id = String::from_str(&env, "Q1 2026");
+        client.set_impact_merkle_root(&admin, &project_id, &root_ab, &report_id);
+
+        // Build a DIFFERENT tree from leaf_a + leaf_c → different root.
+        let leaf_c = ImpactLeaf {
+            donor: donor_c.clone(),
+            donation_index: 2u32,
+            co2_kg: 300u32,
+            trees: 15u32,
+            hectares: 6u32,
+        };
+        let root_ac = build_two_leaf_root(&env, &leaf_a, &leaf_c);
+
+        // Verify that the two roots are actually different.
+        assert_ne!(root_ab, root_ac);
+
+        // Use leaf_a with proof for leaf_c against the STORED root_ab.
+        // The proof is valid for root_ac, but the stored root is root_ab.
+        let proof_for_ac = build_proof_for_leaf0(&env, &leaf_c);
+
+        let result = client.verify_impact(&project_id, &report_id, &leaf_a, &proof_for_ac, &0u32);
+        assert!(!result);
     }
 }

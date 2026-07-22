@@ -9,6 +9,7 @@ jobs:
   backend:
     name: Backend (Node.js)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: backend
@@ -76,12 +77,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: "npm"
+      - name: Ensure npm uses POSIX shell on Linux
+        run: |
+          npm config delete script-shell || true
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
 
       - name: Validate OpenAPI spec with Spectral (built-in OAS rules)
         run: npx @stoplight/spectral-cli@6.14.3 lint docs/api/openapi.yaml --ruleset .spectral.yaml
-
-      - name: Install dependencies for custom validation
-        run: npm ci
 
       - name: Validate project-specific conventions (429, descriptions, summaries)
         run: node scripts/validate-openapi.js

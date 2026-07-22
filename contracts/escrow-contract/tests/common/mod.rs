@@ -50,6 +50,7 @@ pub fn create_simple_job(
         name: SorobanString::from_str(env, "Full Delivery"),
         percentage: 100,
         released: false,
+        disputed: false,
     });
     client.create_job(
         client_addr,
@@ -74,16 +75,19 @@ pub fn three_milestones(env: &Env) -> Vec<Milestone> {
         name: SorobanString::from_str(env, "Design"),
         percentage: 50,
         released: false,
+        disputed: false,
     });
     milestones.push_back(Milestone {
         name: SorobanString::from_str(env, "Development"),
         percentage: 30,
         released: false,
+        disputed: false,
     });
     milestones.push_back(Milestone {
         name: SorobanString::from_str(env, "Testing"),
         percentage: 20,
         released: false,
+        disputed: false,
     });
     milestones
 }

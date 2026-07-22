@@ -61,24 +61,133 @@ export interface ProjectListParams {
   verified?: boolean;
 }
 
-export interface ProjectListResponse {
-  projects: ClimateProject[];
-  total: number;
-  page: number;
-  pageSize: number;
-  totalPages: number;
+// ── Matching ──────────────────────────────────────────────────────────────────
+export async function fetchProjectMatches(projectId: string) {
+  const { data } = await api.get<{
+    success: boolean;
+    data: Array<{
+      id: string;
+      projectId: string;
+      matcherAddress: string;
+      capXLM: string;
+      multiplier: number;
+      matchedXLM: string;
+      remainingXLM: string;
+      expiresAt: string;
+      createdAt: string;
+      status?: string;
+    }>;
+  }>(`/api/projects/${projectId}/matching`);
+  return data.data;
 }
 
+export interface MatchStats {
+  matchId: string;
+  projectId: string;
+  matcherAddress: string;
+  capXLM: number;
+  matchedXLM: number;
+  status: string;
+  matchTransactions: number;
+  totalMatchedXLM: string;
+  donorsReached: number;
+  avgMatchXLM: string;
+}
+
+export async function fetchMatchStats(matchId: string): Promise<MatchStats> {
+  const { data } = await api.get<{ success: boolean; data: MatchStats }>(
+    `/api/matches/${matchId}/stats`
+  );
+  return data.data;
+}
+
+export interface AdminMatchPool {
+  id: string;
+  projectId: string;
+  projectName?: string;
+  matcherAddress: string;
+  capXLM: number;
+  multiplier: number;
+  matchedXLM: number;
+  remainingXLM: string;
+  progressPct: number;
+  expiresAt: string;
+  status: string;
+  createdAt: string;
+}
+
+export async function createAdminMatch(payload: {
+  projectId: string;
+  matcherAddress: string;
+  capXLM: number;
+  multiplier: number;
+  expiresAt: string;
+}): Promise<AdminMatchPool> {
+  const { data } = await api.post<{ success: boolean; data: AdminMatchPool }>(
+    "/api/admin/matches",
+    payload
+  );
+  return data.data;
+}
+
+export async function listAdminMatches(params?: {
+  projectId?: string;
+  status?: string;
+}): Promise<AdminMatchPool[]> {
+  const { data } = await api.get<{ success: boolean; data: AdminMatchPool[] }>(
+    "/api/admin/matches",
+    { params }
+  );
+  return data.data;
+}
+
+export async function updateAdminMatch(
+  matchId: string,
+  payload: {
+    capXLM?: number;
+    multiplier?: number;
+    expiresAt?: string;
+    status?: string;
+  }
+): Promise<AdminMatchPool> {
+  const { data } = await api.patch<{ success: boolean; data: AdminMatchPool }>(
+    `/api/admin/matches/${matchId}`,
+    payload
+  );
+  return data.data;
+}
+
+export async function deleteAdminMatch(matchId: string): Promise<AdminMatchPool> {
+  const { data } = await api.delete<{ success: boolean; data: AdminMatchPool }>(
+    `/api/admin/matches/${matchId}`
+  );
+  return data.data;
+}
+
+// ── Donations ─────────────────────────────────────────────────────────────────
 /**
  * Fetch a paginated list of projects.
  */
-export async function fetchProjects(
-  params: ProjectListParams = {},
-): Promise<ProjectListResponse> {
-  const { data } = await api.get<{
-    success: boolean;
-    data: ProjectListResponse;
-  }>("/api/projects", { params });
+export async function recordDonation(payload: {
+  projectId: string;
+  donorAddress: string;
+  amountXLM?: string;
+  amount?: string;
+  currency?: "XLM" | "USDC";
+  message?: string;
+  transactionHash: string;
+  idempotencyKey?: string;
+}) {
+  const { idempotencyKey, ...body } = payload;
+  const headers: Record<string, string> = {};
+  if (idempotencyKey) {
+    headers["Idempotency-Key"] = idempotencyKey;
+  }
+  const { data } = await api.post<{ success: boolean; data: Donation }>(
+    "/api/donations",
+    body,
+    { headers },
+  );
   return data.data;
 }
 
@@ -755,8 +864,181 @@ export async function purgeQueue(name: string, adminKey: string): Promise<boolea
   return data.success;
 }
 
-// ── Admin: Webhook Dead-Letter Queue Management ───────────────────────────
+// ── Admin: Analytics Dashboard ──────────────────────────────────────
 
+export interface AdminDonationTrend {
+  day: string;
+  donationCount: number;
+  totalXLM: string;
+  uniqueDonors: number;
+  avgDonationXLM: string;
+}
+
+export interface AdminProjectPerformance {
+  id: string;
+  name: string;
+  category: string;
+  location: string;
+  raisedXLM: string;
+  donorCount: number;
+  goalXLM: string;
+  co2OffsetKg: number;
+  status: string;
+  verified: boolean;
+  progressPct: number;
+  totalDonations: number;
+  lastDonationAt: string | null;
+  createdAt: string | null;
+}
+
+export interface AdminGeographicImpact {
+  country: string;
+  projectCount: number;
+  totalXLM: string;
+  donorCount: number;
+  totalCO2Kg: number;
+}
+
+export interface AdminDonorRetention {
+  cohortMonth: string;
+  cohortSize: number;
+  activityMonth: string;
+  activeDonors: number;
+  retentionPct: number;
+}
+
+export interface AdminCategoryBreakdown {
+  category: string;
+  donationCount: number;
+  totalXLM: string;
+  donorCount: number;
+}
+
+export interface AdminGrowthData {
+  summary: {
+    totalProjects: number;
+    totalDonations: number;
+    totalDonors: number;
+    totalXLM: string;
+    activeDonors30d: number;
+    totalXLM30d: string;
+  };
+  monthlyGrowth: Array<{
+    month: string;
+    donations: number;
+    totalXLM: string;
+    donors: number;
+  }>;
+}
+
+export async function fetchAdminDonationTrends(
+  adminKey: string,
+  dateRange?: { from?: string; to?: string },
+): Promise<AdminDonationTrend[]> {
+  const { data } = await api.get<{ success: boolean; data: AdminDonationTrend[] }>(
+    "/api/admin/analytics/trends",
+    {
+      params: dateRange,
+      headers: { "X-Admin-Key": adminKey },
+    },
+  );
+  return data.data;
+}
+
+export async function fetchAdminProjectPerformance(
+  adminKey: string,
+): Promise<AdminProjectPerformance[]> {
+  const { data } = await api.get<{
+    success: boolean;
+    data: AdminProjectPerformance[];
+  }>("/api/admin/analytics/projects", {
+    headers: { "X-Admin-Key": adminKey },
+  });
+  return data.data;
+}
+
+export async function fetchAdminGeographicImpact(
+  adminKey: string,
+): Promise<AdminGeographicImpact[]> {
+  const { data } = await api.get<{
+    success: boolean;
+    data: AdminGeographicImpact[];
+  }>("/api/admin/analytics/geographic", {
+    headers: { "X-Admin-Key": adminKey },
+  });
+  return data.data;
+}
+
+export async function fetchAdminDonorRetention(
+  adminKey: string,
+): Promise<AdminDonorRetention[]> {
+  const { data } = await api.get<{
+    success: boolean;
+    data: AdminDonorRetention[];
+  }>("/api/admin/analytics/retention", {
+    headers: { "X-Admin-Key": adminKey },
+  });
+  return data.data;
+}
+
+export async function fetchAdminCategoryBreakdown(
+  adminKey: string,
+  dateRange?: { from?: string; to?: string },
+): Promise<AdminCategoryBreakdown[]> {
+  const { data } = await api.get<{
+    success: boolean;
+    data: AdminCategoryBreakdown[];
+  }>("/api/admin/analytics/categories", {
+    params: dateRange,
+    headers: { "X-Admin-Key": adminKey },
+  });
+  return data.data;
+}
+
+export async function fetchAdminPlatformGrowth(
+  adminKey: string,
+): Promise<AdminGrowthData> {
+  const { data } = await api.get<{ success: boolean; data: AdminGrowthData }>(
+    "/api/admin/analytics/growth",
+    {
+      headers: { "X-Admin-Key": adminKey },
+    },
+  );
+  return data.data;
+}
+
+export async function exportAdminAnalytics(
+  adminKey: string,
+  view: string,
+  format: "csv" | "json",
+  dateRange?: { from?: string; to?: string },
+): Promise<void> {
+  const params: Record<string, string> = { view, type: format };
+  if (dateRange?.from) params.from = dateRange.from;
+  if (dateRange?.to) params.to = dateRange.to;
+
+  const { data } = await api.get<Blob>(
+    "/api/admin/analytics/export",
+    {
+      params,
+      headers: { "X-Admin-Key": adminKey },
+      responseType: "blob",
+    },
+  );
+
+  const ext = format === "csv" ? "csv" : "json";
+  const blob = new Blob([data], {
+    type: format === "csv" ? "text/csv" : "application/json",
+  });
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${view}.${ext}`;
+  a.click();
+  window.URL.revokeObjectURL(url);
+}
+
+// ── Admin: Webhook Dead-Letter Queue Management ──────────────────────────────
 export interface WebhookDelivery {
   id: string;
   projectId: string;
@@ -825,242 +1107,4 @@ export async function fetchWebhookDeliveries(
     },
   );
   return data.data;
-}
-
-// ── Admin: Webhook mTLS Configuration ─────────────────────────────────────
-
-/**
- * mTLS configuration shape returned by the backend.
- */
-export interface WebhookMTLSConfig {
-  enabled: boolean;
-  has_ca: boolean;
-  has_client_cert: boolean;
-  has_client_key: boolean;
-  cert_expires_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-/**
- * Fetch the current mTLS configuration for a project.
- */
-export async function fetchWebhookMTLS(
-  projectId: string,
-  adminKey: string,
-): Promise<WebhookMTLSConfig | null> {
-  try {
-    const { data } = await api.get<{
-      success: boolean;
-      data: WebhookMTLSConfig;
-    }>(`/api/admin/webhooks/${projectId}/mtls`, {
-      headers: { "X-Admin-Key": adminKey },
-    });
-    return data.data;
-  } catch (err: unknown) {
-    if (axios.isAxiosError(err) && err.response?.status === 404) {
-      return null;
-    }
-    throw err;
-  }
-}
-
-/**
- * Upload and enable mTLS configuration for a project.
- */
-export async function uploadWebhookMTLS(
-  projectId: string,
-  adminKey: string,
-  payload: { caCert: string; clientCert: string; clientKey: string },
-): Promise<{ cert_expires_at: string }> {
-  const { data } = await api.post<{
-    success: boolean;
-    data: { cert_expires_at: string };
-  }>(
-    `/api/admin/webhooks/${projectId}/mtls`,
-    {
-      ca_cert: payload.caCert,
-      client_cert: payload.clientCert,
-      client_key: payload.clientKey,
-    },
-    { headers: { "X-Admin-Key": adminKey } },
-  );
-  return data.data;
-}
-
-/**
- * Disable mTLS without dropping the stored certificate material.
- */
-export async function disableWebhookMTLS(
-  projectId: string,
-  adminKey: string,
-): Promise<void> {
-  await api.post(
-    `/api/admin/webhooks/${projectId}/mtls/disable`,
-    {},
-    { headers: { "X-Admin-Key": adminKey } },
-  );
-}
-
-/**
- * Test the mTLS connection against the project's webhook URL.
- */
-export async function testWebhookMTLS(
-  projectId: string,
-  adminKey: string,
-): Promise<{ success: boolean; statusCode?: number; error?: string }> {
-  const { data } = await api.post<{
-    success: boolean;
-    data: { success: boolean; statusCode?: number; error?: string };
-  }>(
-    `/api/admin/webhooks/${projectId}/mtls/test`,
-    {},
-    { headers: { "X-Admin-Key": adminKey } },
-  );
-  return data.data;
-}
-
-// ── Admin Analytics ───────────────────────────────────────────────────────
-
-export interface AdminDonationTrend {
-  day: string;
-  donationCount: number;
-  totalXLM: string;
-  uniqueDonors: number;
-  avgDonationXLM: string;
-}
-
-export interface AdminProjectPerformance {
-  id: string;
-  name: string;
-  category: string;
-  location: string;
-  raisedXLM: string;
-  donorCount: number;
-  goalXLM: string;
-  co2OffsetKg: number;
-  status: string;
-  verified: boolean;
-  progressPct: number;
-  totalDonations: number;
-  lastDonationAt: string | null;
-  createdAt: string | null;
-}
-
-export interface AdminGeographicImpact {
-  country: string;
-  projectCount: number;
-  totalXLM: string;
-  donorCount: number;
-  totalCO2Kg: number;
-}
-
-export interface AdminDonorRetention {
-  cohortMonth: string;
-  cohortSize: number;
-  activityMonth: string;
-  activeDonors: number;
-  retentionPct: number;
-}
-
-export interface AdminCategoryBreakdown {
-  category: string;
-  donationCount: number;
-  totalXLM: string;
-  donorCount: number;
-}
-
-export interface AdminGrowthData {
-  summary: {
-    totalProjects: number;
-    totalDonations: number;
-    totalDonors: number;
-    totalXLM: string;
-    activeDonors30d: number;
-    totalXLM30d: string;
-  };
-  monthlyGrowth: Array<{
-    month: string;
-    donations: number;
-    totalXLM: string;
-    donors: number;
-  }>;
-}
-
-async function fetchAdminAnalytics<T>(
-  endpoint: string,
-  adminKey: string,
-  params?: Record<string, string>,
-): Promise<T> {
-  const { data } = await api.get<{ success: boolean; data: T }>(
-    `/api/admin/analytics/${endpoint}`,
-    {
-      params,
-      headers: { "X-Admin-Key": adminKey },
-    },
-  );
-  return data.data;
-}
-
-export async function fetchAdminDonationTrends(
-  adminKey: string,
-  range?: { from?: string; to?: string },
-): Promise<AdminDonationTrend[]> {
-  return fetchAdminAnalytics<AdminDonationTrend[]>("trends", adminKey, range as Record<string, string>);
-}
-
-export async function fetchAdminProjectPerformance(
-  adminKey: string,
-): Promise<AdminProjectPerformance[]> {
-  return fetchAdminAnalytics<AdminProjectPerformance[]>("projects", adminKey);
-}
-
-export async function fetchAdminGeographicImpact(
-  adminKey: string,
-): Promise<AdminGeographicImpact[]> {
-  return fetchAdminAnalytics<AdminGeographicImpact[]>("geographic", adminKey);
-}
-
-export async function fetchAdminDonorRetention(
-  adminKey: string,
-): Promise<AdminDonorRetention[]> {
-  return fetchAdminAnalytics<AdminDonorRetention[]>("retention", adminKey);
-}
-
-export async function fetchAdminCategoryBreakdown(
-  adminKey: string,
-  range?: { from?: string; to?: string },
-): Promise<AdminCategoryBreakdown[]> {
-  return fetchAdminAnalytics<AdminCategoryBreakdown[]>("categories", adminKey, range as Record<string, string>);
-}
-
-export async function fetchAdminPlatformGrowth(
-  adminKey: string,
-): Promise<AdminGrowthData> {
-  return fetchAdminAnalytics<AdminGrowthData>("growth", adminKey);
-}
-
-export async function exportAdminAnalytics(
-  adminKey: string,
-  view: string,
-  format: "csv" | "json",
-  range?: { from?: string; to?: string },
-): Promise<void> {
-  const params = new URLSearchParams({ view, type: format });
-  if (range?.from) params.set("from", range.from);
-  if (range?.to) params.set("to", range.to);
-
-  const resp = await fetch(
-    `${api.defaults.baseURL}/api/v1/admin/analytics/export?${params.toString()}`,
-    { headers: { "X-Admin-Key": adminKey } },
-  );
-  if (!resp.ok) throw new Error(`Export failed: ${resp.status}`);
-
-  const blob = await resp.blob();
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `${view}.${format}`;
-  a.click();
-  URL.revokeObjectURL(url);
 }

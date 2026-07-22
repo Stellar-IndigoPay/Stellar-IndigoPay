@@ -1,19 +1,14 @@
 /**
  * components/LeaderboardTable.tsx
  */
-import { fetchLeaderboard } from "@/lib/api";
-import {
-  formatXLM,
-  formatUSDEquivalent,
-  shortenAddress,
-  badgeEmoji,
-} from "@/utils/format";
+import { formatXLM, formatUSDEquivalent, shortenAddress, badgeEmoji } from "@/utils/format";
 import { accountUrl } from "@/lib/stellar";
 import { useXlmPrice } from "@/lib/priceContext";
 import type { LeaderboardEntry } from "@/utils/types";
 import { SkeletonList } from "./Skeleton";
-import { useAsyncData } from "@/hooks/useAsyncData";
+import { useLeaderboard } from "@/hooks/queries";
 import { QueryErrorFallback } from "@/components/QueryErrorFallback";
+import { useI18n } from "@/lib/i18n";
 
 const AVATAR_COLORS = [
   "#4F46E5",
@@ -80,22 +75,21 @@ export default function LeaderboardTable({
     isError,
     error,
     refetch,
-    isRetrying,
-    retryCount,
-  } = useAsyncData<LeaderboardEntry[]>(() => fetchLeaderboard(limit, period), {
-    deps: [limit, period],
-  });
+    isRefetching,
+  } = useLeaderboard(limit, period);
+
+  const { t } = useI18n();
 
   if (isLoading) return <LeaderboardTableSkeleton />;
 
-  if (isError || isRetrying)
+  if (isError || isRefetching)
     return (
       <QueryErrorFallback
         error={error}
-        onRetry={refetch}
-        isRetrying={isRetrying}
-        retryCount={retryCount}
-        title="Couldn't load the leaderboard"
+        onRetry={() => refetch()}
+        isRetrying={isRefetching}
+        retryCount={0}
+        title={t("leaderboard.failedToLoad")}
       />
     );
 
@@ -106,7 +100,7 @@ export default function LeaderboardTable({
       <div className="text-center py-12">
         <p className="text-3xl mb-3">🌱</p>
         <p className="text-[#475569] dark:text-[#94A3B8] font-body">
-          No donors yet — be the first!
+          {t("leaderboard.noDonors")}
         </p>
       </div>
     );

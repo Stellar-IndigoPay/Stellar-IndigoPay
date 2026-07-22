@@ -1,15 +1,22 @@
 /**
  * pages/leaderboard.tsx — Top donors ranked by total XLM given
  */
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/router";
 import LeaderboardTable from "@/components/LeaderboardTable";
+import LeaderboardSkeleton from "@/components/LeaderboardSkeleton";
 import Link from "next/link";
 import PageMeta from "@/components/PageMeta";
+import { trackEvent } from "@/lib/analytics";
+import { useI18n } from "@/lib/i18n";
 
 type Period = "all" | "month" | "year";
 
 export default function LeaderboardPage() {
+  const { t } = useI18n();
+  useEffect(() => {
+    trackEvent("leaderboard_viewed");
+  }, []);
   const router = useRouter();
   const period = (router.query.period as Period) || "all";
 
@@ -21,38 +28,44 @@ export default function LeaderboardPage() {
 
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || "https://stellar-indigopay.app";
   const canonicalUrl = `${appUrl}${router.asPath.split("?")[0]}`;
+
+  if (!router.isReady) {
+    return (
+      <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10 animate-fade-in">
+        <LeaderboardSkeleton />
+      </div>
+    );
+  }
   const leaderboardJsonLd = {
     "@context": "https://schema.org",
     "@type": "WebPage",
-    name: "Top Climate Donors | Stellar IndigoPay",
+    name: `${t("leaderboard.title")} | Stellar IndigoPay`,
     url: canonicalUrl,
-    description:
-      "See the leading climate donors and their impact badges on Stellar IndigoPay.",
+    description: t("leaderboard.subtitle"),
   };
 
   return (
     <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10 animate-fade-in">
       <PageMeta
-        title="Top Climate Donors | Stellar IndigoPay"
-        description="See the leading climate donors and their impact badges on Stellar IndigoPay."
+        title={`${t("leaderboard.title")} | Stellar IndigoPay`}
+        description={t("leaderboard.subtitle")}
         canonicalUrl={canonicalUrl}
         jsonLd={leaderboardJsonLd}
       />
       <div className="text-center mb-10">
         <div className="text-5xl mb-4">🏆</div>
         <h1 className="font-display text-3xl sm:text-4xl font-bold text-[#0F172A] dark:text-[#E2E8F0] mb-3">
-          Top Climate Donors
+          {t("leaderboard.title")}
         </h1>
         <p className="text-[#475569] dark:text-[#94A3B8] max-w-xl mx-auto font-body leading-relaxed">
-          Celebrating the community members who are driving the most impact.
-          Every XLM donated is recorded permanently on the Stellar blockchain.
+          {t("leaderboard.subtitle")}
         </p>
       </div>
 
       {/* Badge legend */}
       <div className="card mb-8 bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)] border-[rgba(99,102,241,0.10)] dark:border-[rgba(129,140,248,0.12)]">
         <p className="font-display font-semibold text-[#0F172A] dark:text-[#E2E8F0] mb-3 text-center">
-          Impact Badge Tiers
+          {t("certificate.badgeTier")}
         </p>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
           {[
@@ -80,9 +93,9 @@ export default function LeaderboardPage() {
       {/* Period tabs */}
       <div className="mb-8 flex gap-2 justify-center">
         {[
-          { key: "month", label: "This Month" },
-          { key: "year", label: "This Year" },
-          { key: "all", label: "All Time" },
+          { key: "month", label: t("leaderboard.thisMonth") },
+          { key: "year", label: t("leaderboard.thisYear") },
+          { key: "all", label: t("leaderboard.allTime") },
         ].map((p) => (
           <button
             key={p.key}
@@ -106,7 +119,7 @@ export default function LeaderboardPage() {
           Want to see your name here?
         </p>
         <Link href="/projects" className="btn-primary">
-          🌱 Start Donating
+          🌱 {t("project.donate")}
         </Link>
         <div className="mt-4">
           <Link
