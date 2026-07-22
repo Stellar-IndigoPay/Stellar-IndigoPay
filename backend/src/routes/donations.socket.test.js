@@ -8,6 +8,10 @@ jest.mock("../services/stellar", () => ({
   server: { getTransaction: jest.fn().mockResolvedValue({ successful: true }) },
 }));
 
+jest.mock("../services/matchQueue", () => ({
+  enqueueMatchDonation: jest.fn().mockResolvedValue(undefined),
+}));
+
 const http = require("http");
 const express = require("express");
 const { Server: SocketServer } = require("socket.io");
@@ -93,7 +97,6 @@ describe("POST /api/donations → donation_event WebSocket broadcast", () => {
       queryResult([]), // dedup check
       queryResult(), // BEGIN
       queryResult([donationRow]), // INSERT donation
-      queryResult([]), // SELECT donation_matches (empty)
       queryResult(), // UPDATE projects
       queryResult([]), // SELECT * FROM profiles (new donor)
       queryResult([{ count: "1" }]), // SELECT COUNT(DISTINCT project_id)
@@ -316,7 +319,6 @@ describe("POST /api/donations → broadcast hardening", () => {
       queryResult([]), // dedup check (none)
       queryResult(), // BEGIN
       queryResult([donationRow]), // INSERT donation
-      queryResult([]), // SELECT donation_matches (none)
       queryResult(), // UPDATE projects
       queryResult([]), // SELECT profile (new donor)
       queryResult([{ count: "1" }]), // COUNT(DISTINCT project_id)
@@ -534,16 +536,17 @@ describe("POST /api/donations → broadcast hardening", () => {
     }
   }, 3000);
 
-  test("emits a single primary event even when matching offers add donation rows", async () => {
+  test("emits only one event per donation (matching is now async via matchQueue)", async () => {
     const donorAddress = makePublicKey("K");
-    const matcherAddress = makePublicKey("M");
     const transactionHash = makeTxHash("f");
+    // Matching is handled asynchronously by matchQueue, so recordDonation
+    // no longer queries donation_matches or inserts match donations inline.
+    // Only 6 queries remain: SELECT project, dedup, BEGIN, INSERT, UPDATE, COMMIT.
     createMockClient(
       queryResult([{ id: "project-match" }]), // SELECT project
       queryResult([]), // dedup check
       queryResult(), // BEGIN
       queryResult([
-        // INSERT primary donation
         {
           id: "match-primary",
           project_id: "project-match",
@@ -555,23 +558,8 @@ describe("POST /api/donations → broadcast hardening", () => {
           transaction_hash: transactionHash,
           created_at: new Date().toISOString(),
         },
-      ]),
-      queryResult([
-        // active matching offer
-        {
-          id: "offer-1",
-          matcher_address: matcherAddress,
-          cap_xlm: "100",
-          matched_xlm: "0",
-          multiplier: 2,
-        },
-      ]),
-      queryResult(), // INSERT match donation
-      queryResult(), // UPDATE donation_matches
+      ]), // INSERT donation
       queryResult(), // UPDATE projects
-      queryResult([]), // SELECT profile
-      queryResult([{ count: "1" }]), // COUNT(DISTINCT project_id)
-      queryResult(), // INSERT profile
       queryResult(), // COMMIT
     );
 

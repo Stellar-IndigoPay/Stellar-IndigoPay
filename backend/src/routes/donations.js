@@ -239,6 +239,8 @@ async function recordDonation(req, res, next) {
     await client.query("COMMIT");
     inTransaction = false;
 
+    // Fire-and-forget: enqueue profile update + donation matching.
+    // Neither failure should roll back the donation itself.
     enqueueProfileUpdate(donorAddress).catch((err) => {
       logger.error(
         { event: "profile_update_enqueue_failed", err, donorAddress },
