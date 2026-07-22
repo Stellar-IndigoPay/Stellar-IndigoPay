@@ -9,7 +9,7 @@ jest.mock("../services/stellar", () => ({
 }));
 
 jest.mock("../services/matchQueue", () => ({
-  enqueueDonationMatching: jest.fn().mockResolvedValue("job-id"),
+  enqueueMatchDonation: jest.fn().mockResolvedValue(undefined),
 }));
 
 const http = require("http");
@@ -528,15 +528,17 @@ describe("POST /api/donations → broadcast hardening", () => {
     }
   }, 3000);
 
-  test("emits a single primary event when donation is recorded (matching is now async)", async () => {
+  test("emits only one event per donation (matching is now async via matchQueue)", async () => {
     const donorAddress = makePublicKey("K");
     const transactionHash = makeTxHash("f");
+    // Matching is handled asynchronously by matchQueue, so recordDonation
+    // no longer queries donation_matches or inserts match donations inline.
+    // Only 6 queries remain: SELECT project, dedup, BEGIN, INSERT, UPDATE, COMMIT.
     createMockClient(
       queryResult([{ id: "project-match" }]), // SELECT project
       queryResult([]), // dedup check
       queryResult(), // BEGIN
       queryResult([
-        // INSERT primary donation
         {
           id: "match-primary",
           project_id: "project-match",
@@ -548,7 +550,7 @@ describe("POST /api/donations → broadcast hardening", () => {
           transaction_hash: transactionHash,
           created_at: new Date().toISOString(),
         },
-      ]),
+      ]), // INSERT donation
       queryResult(), // UPDATE projects
       queryResult(), // COMMIT
     );

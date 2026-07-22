@@ -597,7 +597,7 @@ describe("profile upsert on first donation", () => {
       queryResult([]),
       queryResult(),
       queryResult([donationRow]),
-      // no donation_matches query for non-XLM
+      // no donation_matches query for non-XLM — matching is now async via matchQueue
       queryResult(), // UPDATE projects (raises_xlm += 0)
       queryResult(), // COMMIT
     );
