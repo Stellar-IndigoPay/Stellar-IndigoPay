@@ -373,6 +373,16 @@ and advances `next_execution`. Shortened from `sub_executed`.
 
 ---
 
+## 33. `batch_don` (Batch Donation)
+
+**Description**: Emitted after a successful atomic batch donation via `batch_donate`. One event per batch invocation, plus individual `donated` events for each project in the batch.
+
+| Event Name   | Topics                  | Data                                          | When Emitted                          |
+| ------------ | ----------------------- | --------------------------------------------- | ------------------------------------- |
+| `batch_don`  | `["batch_don", batch_id]` | `(count: u32, total_amount: i128)`            | After all donations in batch succeed  |
+
+---
+
 ## Coordination Note for #277 (Matching Pool)
 
 `DataKey::ProjectContractBalance(String, Address)` is the **canonical per-project per-token balance ledger** for all contract-held funds. Any deposit/matching-pool logic (including #277) **must** increment this key on deposit and decrement it on withdrawal. Do not introduce a parallel balance concept — the compound key already supports multi-token per project. See `SECURITY.md` for the full rationale.

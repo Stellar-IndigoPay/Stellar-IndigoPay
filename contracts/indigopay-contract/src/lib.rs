@@ -430,6 +430,8 @@ pub enum DataKey {
     PlatformTreasury,
     /// Quadratic voting: credits spent by a voter on a project proposal.
     VoteCredits(String, Address),
+    /// Counter for batch donations (for batch-level event indexing).
+    BatchDonationCount,
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -442,6 +444,10 @@ const VOTING_WINDOW_LEDGERS: u32 = 120_960;
 
 const DEFAULT_DONATION_RATE_LIMIT_MAX: u32 = 10;
 const DEFAULT_DONATION_RATE_LIMIT_WINDOW: u32 = 720;
+
+/// Maximum number of individual donations allowed in a single `batch_donate`
+/// invocation.  Caps gas consumption and prevents unbounded iteration.
+const MAX_BATCH_SIZE: u32 = 20;
 
 // Bounds on caller-supplied voting durations. Floor (~1 hour) keeps the
 // window long enough to be observed; ceiling (~30 days) bounds storage TTL
@@ -1691,14 +1697,27 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
+    /// Atomic batch donation: split a single token across multiple projects.
+    ///
+    /// All donations in the batch succeed or all revert.  Pre-validates every
+    /// donation (project active, amount positive, rate limits, batch size)
+    /// before any state is mutated, giving a clear error on the first
+    /// violation.  Emits one `batch_don` event plus individual `donated`
+    /// events per project.
     pub fn batch_donate(env: Env, token: Address, donations: Vec<BatchDonation>) {
         require_not_paused(&env);
 
+        let count = donations.len();
+        if count == 0 {
+            panic!("Batch must contain at least one donation");
+        }
+        if count > MAX_BATCH_SIZE {
+            panic!("Batch size exceeds maximum of {}", MAX_BATCH_SIZE);
+        }
+
+        // ── Phase 1: Authenticate all unique donors ──────────────────────
         let mut authorized: Vec<Address> = Vec::new(&env);
         for donation in donations.iter() {
-            if donation.amount <= 0 {
-                panic!("Donation amount must be positive");
-            }
             let mut found = false;
             for a in authorized.iter() {
                 if a == donation.donor {
@@ -1710,6 +1729,71 @@ impl IndigoPayContract {
                 donation.donor.require_auth();
                 authorized.push_back(donation.donor.clone());
             }
+        }
+
+        // ── Phase 2: Pre-validate ALL donations before any state changes ─
+        //    This ensures atomicity — if any donation is invalid, no state
+        //    has been modified and the entire transaction reverts.
+        let current_ledger = env.ledger().sequence();
+        let max_rate: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationRateLimitMax)
+            .unwrap_or(DEFAULT_DONATION_RATE_LIMIT_MAX);
+        let window_ledgers: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationRateLimitWindow)
+            .unwrap_or(DEFAULT_DONATION_RATE_LIMIT_WINDOW);
+
+        for donation in donations.iter() {
+            if donation.amount <= 0 {
+                panic!("Donation amount must be positive");
+            }
+
+            let project: Project = env
+                .storage()
+                .instance()
+                .get(&DataKey::Project(donation.project_id.clone()))
+                .expect("Project not found");
+            if !project.active {
+                panic!("Project is not accepting donations");
+            }
+            if project.paused {
+                panic!("Project is temporarily paused");
+            }
+            require_campaign_accepts_donation(&project, current_ledger);
+
+            // Rate-limit check: count how many times this (donor, project)
+            // pair appears in the batch and add to the current window count.
+            let rate_key =
+                DataKey::DonorRateLimit(donation.donor.clone(), donation.project_id.clone());
+            let window: RateLimitWindow =
+                env.storage()
+                    .instance()
+                    .get(&rate_key)
+                    .unwrap_or(RateLimitWindow {
+                        window_start: current_ledger,
+                        count: 0,
+                    });
+            let mut effective_count = window.count;
+            if current_ledger - window.window_start >= window_ledgers {
+                effective_count = 0;
+            }
+            // Count occurrences of this (donor, project) pair in the batch
+            let mut pair_count: u32 = 0;
+            for d in donations.iter() {
+                if d.donor == donation.donor && d.project_id == donation.project_id {
+                    pair_count += 1;
+                }
+            }
+            if effective_count + pair_count > max_rate {
+                panic!("Donation rate limit exceeded");
+            }
+        }
+
+        // ── Phase 3: Execute each donation (state writes + token transfer) ─
+        for donation in donations.iter() {
             process_donation(
                 &env,
                 &token,
@@ -1720,6 +1804,29 @@ impl IndigoPayContract {
                 false,
             );
         }
+
+        // ── Phase 4: Emit batch-level event ──────────────────────────────
+        let batch_id: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::BatchDonationCount)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::BatchDonationCount, &batch_id.checked_add(1).expect("BatchDonationCount overflow"));
+
+        // Compute total amount across all donations in the batch.
+        let mut total_amount: i128 = 0;
+        for donation in donations.iter() {
+            total_amount = total_amount
+                .checked_add(donation.amount)
+                .expect("Batch total_amount overflow");
+        }
+
+        env.events().publish(
+            (symbol_short!("batch_don"), batch_id),
+            (count, total_amount),
+        );
 
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
@@ -9077,5 +9184,223 @@ mod tests {
         assert_eq!(record.project, pid);
         assert_eq!(record.amount, 10 * STROOP);
         assert_eq!(record.message_hash, 99u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "Batch must contain at least one donation")]
+    fn test_donate_batch_empty_reverts() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let token = Address::generate(&env);
+        let donations = Vec::new(&env);
+        client.batch_donate(&token, &donations);
+    }
+
+    #[test]
+    #[should_panic(expected = "Batch size exceeds maximum of")]
+    fn test_donate_batch_size_limit() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 25 * STROOP);
+
+        let mut donations = Vec::new(&env);
+        for i in 0..21u32 {
+            donations.push_back(BatchDonation {
+                donor: donor.clone(),
+                project_id: pid.clone(),
+                amount: STROOP,
+                msg_hash: i,
+            });
+        }
+        client.batch_donate(&token, &donations);
+    }
+
+    #[test]
+    #[should_panic(expected = "Project not found")]
+    fn test_donate_batch_invalid_project_reverts_all() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 20 * STROOP);
+        let bad_pid = String::from_str(&env, "nonexistent");
+
+        let mut donations = Vec::new(&env);
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: pid.clone(),
+            amount: 5 * STROOP,
+            msg_hash: 0u32,
+        });
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: bad_pid,
+            amount: 5 * STROOP,
+            msg_hash: 1u32,
+        });
+
+        // The entire batch should revert — first donation's state changes
+        // are also rolled back.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.batch_donate(&token, &donations);
+        }));
+        assert!(result.is_err());
+        // Verify no state changed: global total should be 0.
+        assert_eq!(client.get_global_total(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Project is temporarily paused")]
+    fn test_donate_batch_paused_project_reverts_all() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 20 * STROOP);
+
+        // Pause the project.
+        client.pause_project(&admin, &pid);
+
+        let mut donations = Vec::new(&env);
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: pid.clone(),
+            amount: 10 * STROOP,
+            msg_hash: 0u32,
+        });
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.batch_donate(&token, &donations);
+        }));
+        assert!(result.is_err());
+        assert_eq!(client.get_global_total(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Donation rate limit exceeded")]
+    fn test_donate_batch_rate_limit_reverts_all() {
+        let (env, _cid, client, admin, pid) = setup();
+        // Set rate limit to 2 donations per window.
+        client.set_donation_rate_limit(&admin, &2, &100);
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 5 * STROOP);
+
+        // Batch has 3 donations to the same project — exceeds rate limit of 2.
+        let mut donations = Vec::new(&env);
+        for i in 0..3u32 {
+            donations.push_back(BatchDonation {
+                donor: donor.clone(),
+                project_id: pid.clone(),
+                amount: STROOP,
+                msg_hash: i,
+            });
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.batch_donate(&token, &donations);
+        }));
+        assert!(result.is_err());
+        assert_eq!(client.get_global_total(), 0);
+    }
+
+    #[test]
+    fn test_donate_batch_token_transfer_sum() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 30 * STROOP);
+
+        let mut donations = Vec::new(&env);
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: pid.clone(),
+            amount: 10 * STROOP,
+            msg_hash: 0u32,
+        });
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: pid.clone(),
+            amount: 20 * STROOP,
+            msg_hash: 1u32,
+        });
+
+        client.batch_donate(&token, &donations);
+
+        // Verify the sum is correct.
+        assert_eq!(client.get_global_total(), 30 * STROOP);
+        let p = client.get_project(&pid);
+        assert_eq!(p.total_raised, 30 * STROOP);
+        // Verify individual donation records.
+        let r0 = client.get_donation_record(&0u32);
+        assert_eq!(r0.amount, 10 * STROOP);
+        let r1 = client.get_donation_record(&1u32);
+        assert_eq!(r1.amount, 20 * STROOP);
+    }
+
+    #[test]
+    fn test_donate_batch_multi_project_atomic() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let pid1 = String::from_str(&env, "proj-a");
+        let pid2 = String::from_str(&env, "proj-b");
+        let pid3 = String::from_str(&env, "proj-c");
+        client.register_project(
+            &admin,
+            &pid1,
+            &String::from_str(&env, "Project A"),
+            &Address::generate(&env),
+            &50u32,
+        );
+        client.register_project(
+            &admin,
+            &pid2,
+            &String::from_str(&env, "Project B"),
+            &Address::generate(&env),
+            &100u32,
+        );
+        client.register_project(
+            &admin,
+            &pid3,
+            &String::from_str(&env, "Project C"),
+            &Address::generate(&env),
+            &25u32,
+        );
+
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 60 * STROOP);
+
+        let mut donations = Vec::new(&env);
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: pid1.clone(),
+            amount: 10 * STROOP,
+            msg_hash: 0u32,
+        });
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: pid2.clone(),
+            amount: 30 * STROOP,
+            msg_hash: 1u32,
+        });
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: pid3.clone(),
+            amount: 20 * STROOP,
+            msg_hash: 2u32,
+        });
+
+        client.batch_donate(&token, &donations);
+
+        // Verify each project received the correct amount.
+        let p1 = client.get_project(&pid1);
+        assert_eq!(p1.total_raised, 10 * STROOP);
+        let p2 = client.get_project(&pid2);
+        assert_eq!(p2.total_raised, 30 * STROOP);
+        let p3 = client.get_project(&pid3);
+        assert_eq!(p3.total_raised, 20 * STROOP);
+
+        // Verify global totals.
+        assert_eq!(client.get_global_total(), 60 * STROOP);
+        assert_eq!(client.get_global_co2(), (10 * 50) + (30 * 100) + (20 * 25));
+        assert_eq!(client.get_donation_count(), 3);
     }
 }

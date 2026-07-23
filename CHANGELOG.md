@@ -18,6 +18,16 @@
 
 ### Features
 
+* **contracts:** add atomic batch donation with pre-validation and batch-level events (closes #467)
+  + New `BatchDonation` input type and `batch_donate(env, token, donations)` entry point
+  + Pre-validates all donations (project active, amount positive, rate limits, batch size) before any state changes
+  + Enforces `MAX_BATCH_SIZE = 20` limit per batch invocation
+  + Single Soroban invocation amortizes gas across multiple project donations
+  + Emits `batch_don` event plus individual `donated` events per project
+  + Full atomicity: entire batch reverts if any validation fails
+  + Comprehensive unit tests: size limit, invalid project rollback, rate limit rollback, token transfer sum, multi-project atomicity
+  + Property-based fuzz tests: `prop_batch_sum_conservation`, `prop_batch_atomicity`
+
 * **contracts/backend:** add opt-in anonymous donations and signed, cached tax receipt PDFs with locked XLM/USD values
 
 * **frontend:** complete 100% i18n coverage across all locale dictionaries, pluralization, and locale-aware formatting (closes #264, #262)

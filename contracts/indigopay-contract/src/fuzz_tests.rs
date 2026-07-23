@@ -13,7 +13,7 @@
 mod fuzz {
     extern crate std;
 
-    use crate::{DataKey, IndigoPayContract, IndigoPayContractClient, MockOracle, Project};
+    use crate::{BatchDonation, DataKey, IndigoPayContract, IndigoPayContractClient, MockOracle, Project};
     use proptest::prelude::*;
     use soroban_sdk::{
         testutils::Address as _, token::StellarAssetClient, Address, Env, String as SorobanString,
@@ -341,6 +341,115 @@ mod fuzz {
             let donor_stats = client.get_donor_stats(&donor);
             prop_assert!(donor_stats.co2_offset_grams > 0, "CO₂ offset should be non-zero at max rate");
             prop_assert_eq!(donor_stats.donation_count, 1);
+        }
+
+        // ── Batch donation fuzz cases ───────────────────────────────────────
+
+        /// A batch of random donations must conservatively sum: the global
+        /// total raised must equal the sum of all individual amounts.
+        #[test]
+        fn prop_batch_sum_conservation(
+            a in 1i128..=MAX_DONATION / 4,
+            b in 1i128..=MAX_DONATION / 4,
+            c in 1i128..=MAX_DONATION / 4,
+        ) {
+            let (env, _contract_id, client, _wallet, project_id, token) = setup();
+            let donor = Address::generate(&env);
+            let total = a.checked_add(b).and_then(|v| v.checked_add(c)).unwrap_or(MAX_DONATION);
+            mint_tokens(&env, &token, &donor, total);
+
+            let mut donations = soroban_sdk::Vec::new(&env);
+            donations.push_back(BatchDonation {
+                donor: donor.clone(),
+                project_id: project_id.clone(),
+                amount: a,
+                msg_hash: MSG_HASH,
+            });
+            donations.push_back(BatchDonation {
+                donor: donor.clone(),
+                project_id: project_id.clone(),
+                amount: b,
+                msg_hash: MSG_HASH,
+            });
+            donations.push_back(BatchDonation {
+                donor: donor.clone(),
+                project_id: project_id.clone(),
+                amount: c,
+                msg_hash: MSG_HASH,
+            });
+
+            client.batch_donate(&token, &donations);
+
+            let expected = a.checked_add(b).and_then(|v| v.checked_add(c)).unwrap();
+            let global_total = client.get_global_total();
+            prop_assert_eq!(global_total, expected,
+                "global_total {} != sum {}", global_total, expected);
+
+            let project = client.get_project(&project_id);
+            prop_assert_eq!(project.total_raised, expected,
+                "project.total_raised {} != sum {}", project.total_raised, expected);
+
+            // All counters must be non-negative
+            prop_assert!(global_total >= 0, "global_total went negative");
+            prop_assert!(client.get_global_co2() >= 0, "global_co2 went negative");
+        }
+
+        /// After a successful batch, all project stats must be updated
+        /// atomically — either all donations land or none do.
+        #[test]
+        fn prop_batch_atomicity(
+            a in 1i128..=MAX_DONATION / 4,
+            b in 1i128..=MAX_DONATION / 4,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let cid = env.register_contract(None, IndigoPayContract);
+            let client = IndigoPayContractClient::new(&env, &cid);
+            let admin = Address::generate(&env);
+            client.initialize(&soroban_sdk::vec![&env, admin.clone()], &1u32);
+
+            let pid1 = SorobanString::from_str(&env, "fuzz-a");
+            let pid2 = SorobanString::from_str(&env, "fuzz-b");
+            client.register_project(&admin, &pid1, &SorobanString::from_str(&env, "A"), &Address::generate(&env), &100u32);
+            client.register_project(&admin, &pid2, &SorobanString::from_str(&env, "B"), &Address::generate(&env), &100u32);
+
+            let donor = Address::generate(&env);
+            let total = a.checked_add(b).unwrap_or(MAX_DONATION);
+
+            let token_admin = Address::generate(&env);
+            let batch_token = env
+                .register_stellar_asset_contract_v2(token_admin)
+                .address();
+            mint_tokens(&env, &batch_token, &donor, total);
+
+            let mut donations = soroban_sdk::Vec::new(&env);
+            donations.push_back(BatchDonation {
+                donor: donor.clone(),
+                project_id: pid1.clone(),
+                amount: a,
+                msg_hash: MSG_HASH,
+            });
+            donations.push_back(BatchDonation {
+                donor: donor.clone(),
+                project_id: pid2.clone(),
+                amount: b,
+                msg_hash: MSG_HASH,
+            });
+
+            client.batch_donate(&batch_token, &donations);
+
+            let p1 = client.get_project(&pid1);
+            let p2 = client.get_project(&pid2);
+
+            // Both projects must have received their amounts
+            prop_assert_eq!(p1.total_raised, a,
+                "project A total_raised {} != a {}", p1.total_raised, a);
+            prop_assert_eq!(p2.total_raised, b,
+                "project B total_raised {} != b {}", p2.total_raised, b);
+
+            // Global total must equal sum
+            let global_total = client.get_global_total();
+            prop_assert_eq!(global_total, a.checked_add(b).unwrap());
         }
     }
 }
