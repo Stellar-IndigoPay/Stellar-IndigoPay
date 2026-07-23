@@ -892,9 +892,10 @@ fn process_donation(
         .total_raised
         .checked_add(amount)
         .expect("Project total_raised overflow");
-    let goal_reached = apply_campaign_goal_progress(&mut project);
-    let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
-    if !env.storage().instance().has(&donated_key) {
+        let goal_reached = apply_campaign_goal_progress(&mut project);
+        let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
+        let asset_is_new_donor = !env.storage().instance().has(&donated_key);
+        if !env.storage().instance().has(&donated_key) {
         env.storage().instance().set(&donated_key, &true);
         project.donor_count = project
             .donor_count
@@ -1051,13 +1052,25 @@ fn process_donation(
     );
 
     // ── Anomaly detection: check rules AFTER external transfer completes.
-    check_anomaly_rules(env, project_id, donor, amount);
+    //    Capture new-donor status BEFORE HasDonated is written (done earlier
+    //    in the Effects phase) so NewDonorRate can detect first-time donors.
+    let is_new_donor = !env
+        .storage()
+        .instance()
+        .has(&DataKey::HasDonated(project_id.clone(), donor.clone()));
+    check_anomaly_rules(env, project_id, donor, amount, is_new_donor);
 }
 
 /// Evaluate every anomaly rule for `project_id`. If any rule is violated the
 /// project is auto-paused and an `anomaly_detected` event is emitted.
 /// Empty rules vector = no detection (backward compatible).
-fn check_anomaly_rules(env: &Env, project_id: &String, donor: &Address, amount: i128) {
+fn check_anomaly_rules(
+    env: &Env,
+    project_id: &String,
+    donor: &Address,
+    amount: i128,
+    is_new_donor: bool,
+) {
     let rules_key = DataKey::AnomalyRules(project_id.clone());
     let rules: Vec<AnomalyRule> = env
         .storage()
@@ -1097,9 +1110,6 @@ fn check_anomaly_rules(env: &Env, project_id: &String, donor: &Address, amount: 
             window.volume = 0;
             window.new_donor_count = 0;
         }
-
-        let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
-        let is_new_donor = !env.storage().instance().has(&donated_key);
 
         window.count = window.count.checked_add(1).unwrap_or(u32::MAX);
         window.volume = window
@@ -1692,7 +1702,7 @@ impl IndigoPayContract {
             .set(&DataKey::AnomalyRules(project_id.clone()), &rules);
 
         env.events().publish(
-            (symbol_short!("anm_rule"), admin),
+            (symbol_short!("anm_rule"), signers.get(0).unwrap()),
             (project_id, rules.len()),
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
@@ -2242,6 +2252,9 @@ impl IndigoPayContract {
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+
+        // ── Anomaly detection
+        check_anomaly_rules(env, &project_id, &donor, xlm_amount, asset_is_new_donor);
     }
 
     // ─── zk-SNARK Anonymous Donations (#390) ─────────────────────────────────
@@ -2411,6 +2424,7 @@ impl IndigoPayContract {
             .expect("Project total_raised overflow");
         let goal_reached = apply_campaign_goal_progress(&mut project);
         let donated_key = DataKey::HasDonated(project_id.clone(), anon_donor.clone());
+        let anon_is_new_donor = !env.storage().instance().has(&donated_key);
         if !env.storage().instance().has(&donated_key) {
             env.storage().instance().set(&donated_key, &true);
             project.donor_count = project
@@ -2563,6 +2577,9 @@ impl IndigoPayContract {
             (amount, donor_stats.badge.clone(), msg_hash),
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+
+        // ── Anomaly detection (uses the derived anon_donor address)
+        check_anomaly_rules(env, &project_id, &anon_donor, amount, anon_is_new_donor);
     }
 
     /// Check if a nullifier has already been spent.
@@ -3588,6 +3605,9 @@ impl IndigoPayContract {
 
         token_client.transfer(&donor, &project_wallet, &project_usdc);
 
+        // Save project_id before events consume it
+        let usdc_project_id = project_id.clone();
+
         #[cfg(feature = "fees")]
         env.events().publish(
             (symbol_short!("donated"), donor.clone(), project_id),
@@ -3610,6 +3630,9 @@ impl IndigoPayContract {
             (usdc_amount, symbol_short!("USDC"), msg_hash),
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+
+        // ── Anomaly detection
+        check_anomaly_rules(env, &usdc_project_id, &donor, xlm_equivalent, usdc_is_new_donor);
     }
 
     /// Admin-only: Set the USDC token address for multi-currency donations.
@@ -4560,6 +4583,7 @@ impl IndigoPayContract {
             .expect("Project total_raised overflow");
         let goal_reached = apply_campaign_goal_progress(&mut project);
         let donated_key = DataKey::HasDonated(recurring.project_id.clone(), donor.clone());
+        let recurring_is_new_donor = !env.storage().instance().has(&donated_key);
         if !env.storage().instance().has(&donated_key) {
             env.storage().instance().set(&donated_key, &true);
             project.donor_count = project
@@ -4711,6 +4735,7 @@ impl IndigoPayContract {
         }
 
         // Publish execute event
+        let rec_donor = donor.clone();
         env.events().publish(
             (symbol_short!("rec_exec"), donor, recurring_id),
             (
@@ -4722,6 +4747,9 @@ impl IndigoPayContract {
         );
 
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+
+        // ── Anomaly detection
+        check_anomaly_rules(env, &recurring.project_id, &rec_donor, xlm_equivalent, recurring_is_new_donor);
     }
 
     pub fn get_recurring(env: Env, donor: Address, recurring_id: u32) -> RecurringDonation {
@@ -9345,7 +9373,7 @@ mod tests {
         let donor = Address::generate(&env);
         let token = mint_xlm(&env, &donor, 100 * STROOP);
 
-        client.donate(&token, &donor, &pid, &(50 * STROOP), &0u32, &false);
+        client.donate_with_privacy(&token, &donor, &pid, &(50 * STROOP), &0u32, &false);
 
         let p = client.get_project(&pid);
         assert!(!p.paused);
@@ -9369,7 +9397,7 @@ mod tests {
         client.set_anomaly_rules(&signers1(&env, &admin), &pid, &rules);
 
         // Donate 50 — below threshold
-        client.donate(&token, &donor, &pid, &(50 * STROOP), &0u32, &false);
+        client.donate_with_privacy(&token, &donor, &pid, &(50 * STROOP), &0u32, &false);
         let p = client.get_project(&pid);
         assert!(!p.paused);
     }
@@ -9390,7 +9418,7 @@ mod tests {
         client.set_anomaly_rules(&signers1(&env, &admin), &pid, &rules);
 
         // Donate 150 — above threshold
-        client.donate(&token, &donor, &pid, &(150 * STROOP), &0u32, &false);
+        client.donate_with_privacy(&token, &donor, &pid, &(150 * STROOP), &0u32, &false);
         let p = client.get_project(&pid);
         assert!(p.paused);
     }
@@ -9411,8 +9439,8 @@ mod tests {
         client.set_anomaly_rules(&signers1(&env, &admin), &pid, &rules);
 
         // Make 2 donations (each 1 stroop) — below threshold
-        client.donate(&token, &donor, &pid, &1, &0u32, &false);
-        client.donate(&token, &donor, &pid, &1, &0u32, &false);
+        client.donate_with_privacy(&token, &donor, &pid, &1, &0u32, &false);
+        client.donate_with_privacy(&token, &donor, &pid, &1, &0u32, &false);
         let p = client.get_project(&pid);
         assert!(!p.paused);
     }
@@ -9432,9 +9460,9 @@ mod tests {
         });
         client.set_anomaly_rules(&signers1(&env, &admin), &pid, &rules);
 
-        client.donate(&token, &donor, &pid, &1, &0u32, &false);
-        client.donate(&token, &donor, &pid, &1, &0u32, &false);
-        client.donate(&token, &donor, &pid, &1, &0u32, &false);
+        client.donate_with_privacy(&token, &donor, &pid, &1, &0u32, &false);
+        client.donate_with_privacy(&token, &donor, &pid, &1, &0u32, &false);
+        client.donate_with_privacy(&token, &donor, &pid, &1, &0u32, &false);
         let p = client.get_project(&pid);
         assert!(p.paused);
     }
@@ -9453,7 +9481,7 @@ mod tests {
         });
         client.set_anomaly_rules(&signers1(&env, &admin), &pid, &rules);
 
-        client.donate(&token, &donor, &pid, &(100 * STROOP), &0u32, &false);
+        client.donate_with_privacy(&token, &donor, &pid, &(100 * STROOP), &0u32, &false);
         let p = client.get_project(&pid);
         assert!(p.paused);
 
@@ -9470,7 +9498,7 @@ mod tests {
         let token = mint_xlm(&env, &donor, 100 * STROOP);
 
         // No rules → no pause
-        client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32, &false);
+        client.donate_with_privacy(&token, &donor, &pid, &(10 * STROOP), &0u32, &false);
         let p = client.get_project(&pid);
         assert!(!p.paused);
 
@@ -9494,10 +9522,10 @@ mod tests {
         });
         client.set_anomaly_rules(&signers1(&env, &admin), &pid, &rules);
 
-        client.donate(&token, &donor, &pid, &(100 * STROOP), &0u32, &false);
+        client.donate_with_privacy(&token, &donor, &pid, &(100 * STROOP), &0u32, &false);
 
         // Second donation should panic because project is paused
-        let result = client.try_donate(&token, &donor, &pid, &(1 * STROOP), &0u32, &false);
+        let result = client.try_donate_with_privacy(&token, &donor, &pid, &(1 * STROOP), &0u32, &false);
         assert!(result.is_err());
     }
 }

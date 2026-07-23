@@ -376,7 +376,7 @@ mod fuzz {
 
             // Donate each amount — project must never be paused.
             for amt in amounts {
-                client.donate(&token, &donor, &project_id, &amt, &MSG_HASH, &false);
+                client.donate_with_privacy(&token, &donor, &project_id, &amt, &MSG_HASH, &false);
                 let p = client.get_project(&project_id);
                 prop_assert!(!p.paused, "project was falsely paused at amount {amt}");
             }
