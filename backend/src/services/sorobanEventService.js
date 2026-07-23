@@ -1028,10 +1028,13 @@ async function pollEvents() {
         continue;
       }
 
-      const eventType = extractEventType(evt);
-      const handler = HANDLERS[eventType] || handleOtherEvent; // eslint-disable-line security/detect-object-injection
-
+      let eventType = "unknown";
       try {
+        if (!evt.topic || !Array.isArray(evt.topic) || evt.topic.length === 0) {
+          throw new Error("Malformed event: missing or empty topic array");
+        }
+        eventType = extractEventType(evt);
+        const handler = HANDLERS[eventType] || handleOtherEvent; // eslint-disable-line security/detect-object-injection
         const topics = extractTopics(evt);
         const value = extractValue(evt);
         await handler(evt, topics, value);

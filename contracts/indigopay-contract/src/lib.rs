@@ -81,6 +81,7 @@ pub struct Project {
     /// backward-compatible with any Project value that was already on
     /// chain before this field existed. Per UPGRADE.md, new fields must
     /// be appended or live behind a new storage version.
+    #[cfg(not(feature = "v1"))]
     pub paused: bool,
     /// Fundraising goal in stroops for the active time-bound campaign.
     /// `0` when `campaign_status` is `None`.
@@ -865,6 +866,7 @@ impl IndigoPayContract {
             total_raised: 0,
             donor_count: 0,
             active: true,
+            #[cfg(not(feature = "v1"))]
             paused: false,
             registered_at: env.ledger().sequence(),
             goal: 0,
@@ -1015,6 +1017,7 @@ impl IndigoPayContract {
                 total_raised: 0,
                 donor_count: 0,
                 active: true,
+                #[cfg(not(feature = "v1"))]
                 paused: false,
                 registered_at: env.ledger().sequence(),
                 goal: 0,
@@ -1154,16 +1157,31 @@ impl IndigoPayContract {
         if !project.active {
             panic!("Cannot pause a deactivated project");
         }
-        if project.paused {
-            panic!("Project is already paused");
+        #[cfg(not(feature = "v1"))]
+        {
+            admin.require_auth();
+            require_admin(&env, &admin);
+            // pause_project is intentionally NOT paused-gated so the admin can
+            // still manage individual projects during a contract-wide pause.
+            let mut project: Project = env
+                .storage()
+                .instance()
+                .get(&DataKey::Project(project_id.clone()))
+                .expect("Project not found");
+            if !project.active {
+                panic!("Cannot pause a deactivated project");
+            }
+            if project.paused {
+                panic!("Project is already paused");
+            }
+            project.paused = true;
+            env.storage()
+                .instance()
+                .set(&DataKey::Project(project_id.clone()), &project);
+            env.events()
+                .publish((symbol_short!("prj_pause"), admin), project_id);
+            ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
         }
-        project.paused = true;
-        env.storage()
-            .instance()
-            .set(&DataKey::Project(project_id.clone()), &project);
-        env.events()
-            .publish((symbol_short!("prj_pause"), admin), project_id);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Admin-only: lift a temporary pause on a project. Mirrors
@@ -1181,16 +1199,30 @@ impl IndigoPayContract {
         if !project.active {
             panic!("Cannot resume a deactivated project");
         }
-        if !project.paused {
-            panic!("Project is not paused");
+        #[cfg(not(feature = "v1"))]
+        {
+            admin.require_auth();
+            require_admin(&env, &admin);
+            // resume_project is intentionally NOT paused-gated.
+            let mut project: Project = env
+                .storage()
+                .instance()
+                .get(&DataKey::Project(project_id.clone()))
+                .expect("Project not found");
+            if !project.active {
+                panic!("Cannot resume a deactivated project");
+            }
+            if !project.paused {
+                panic!("Project is not paused");
+            }
+            project.paused = false;
+            env.storage()
+                .instance()
+                .set(&DataKey::Project(project_id.clone()), &project);
+            env.events()
+                .publish((symbol_short!("prj_resm"), admin), project_id);
+            ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
         }
-        project.paused = false;
-        env.storage()
-            .instance()
-            .set(&DataKey::Project(project_id.clone()), &project);
-        env.events()
-            .publish((symbol_short!("prj_resm"), admin), project_id);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     // ─── Time-bound campaigns ─────────────────────────────────────────────────
@@ -1429,6 +1461,7 @@ impl IndigoPayContract {
         if !project.active {
             panic!("Project is not accepting donations");
         }
+        #[cfg(not(feature = "v1"))]
         if project.paused {
             panic!("Project is temporarily paused");
         }
@@ -1703,6 +1736,7 @@ impl IndigoPayContract {
         if !project.active {
             panic!("Project is not accepting donations");
         }
+        #[cfg(not(feature = "v1"))]
         if project.paused {
             panic!("Project is temporarily paused");
         }
@@ -3044,6 +3078,7 @@ impl IndigoPayContract {
         if !project.active {
             panic!("Project is not accepting donations");
         }
+        #[cfg(not(feature = "v1"))]
         if project.paused {
             panic!("Project is temporarily paused");
         }
