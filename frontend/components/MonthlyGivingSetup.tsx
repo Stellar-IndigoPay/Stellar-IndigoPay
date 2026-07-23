@@ -7,7 +7,6 @@ import {
   type OnChainSubscription,
 } from "@/lib/monthlyGiving";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
-import { formatXLM } from "@/utils/format";
 import { formatXLM, timeAgo } from "@/utils/format";
 import type { MonthlySubscription } from "@/utils/types";
 
@@ -43,24 +42,6 @@ export default function MonthlyGivingSetup({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
-
-  // Trap focus while the dialog is open and Esc closes it (WCAG 2.4.3).
-  // The containerRef MUST be attached to the dialog wrapper so the hook's
-  // focusable-element query targets the actual modal subtree.
-  const dialogRef = useFocusTrap<HTMLDivElement>({
-    active: true,
-    onEscape: onClose,
-    initialFocusRef: closeButtonRef,
-  });
-
-  // Prevent body scroll while the dialog is open.
-  useEffect(() => {
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
-  }, []);
 
   // Trap focus while the dialog is open and Esc closes it (WCAG 2.4.3).
   // The containerRef MUST be attached to the dialog wrapper so the hook's
@@ -203,32 +184,6 @@ export default function MonthlyGivingSetup({
             >
               {busy ? "Cancelling\u2026" : "Cancel monthly giving"}
             </button>
-        <div className="grid sm:grid-cols-2 gap-4">
-          <div>
-            <label htmlFor="amount-xlm" className="label">
-              Amount (XLM)
-            </label>
-            <input
-              id="amount-xlm"
-              type="number"
-              min="1"
-              step="1"
-              value={amountXLM}
-              onChange={(e) => setAmountXLM(e.target.value)}
-              className="input-field"
-            />
-          </div>
-          <div>
-            <label htmlFor="start-date" className="label">
-              Start Date
-            </label>
-            <input
-              id="start-date"
-              type="date"
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              className="input-field"
-            />
           </div>
         ) : (
           <>
@@ -252,14 +207,6 @@ export default function MonthlyGivingSetup({
                 {error}
               </p>
             )}
-        {error && (
-          <p
-            className="mt-3 text-sm text-red-600 font-body"
-            role="alert"
-          >
-            {error}
-          </p>
-        )}
 
             <button
               type="button"

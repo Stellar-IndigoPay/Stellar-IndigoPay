@@ -1,329 +1,317 @@
 /**
- * lib/__tests__/monthlyGiving.test.ts
+ * lib/monthlyGiving.ts — On-chain recurring donation subscriptions (#81).
  *
- * Covers the on-chain recurring donation subscription helpers (#81):
+ * Thin client for the Soroban contract's subscription entry points:
  * reading a single subscription, enumerating due subscriptions for a
- * donor, and the create/cancel sign-and-submit flows.
+ * donor across the whole subscription list, and the create/cancel
+ * sign-and-submit flows via the connected wallet.
  */
-const mockLoadAccount = jest.fn();
-const mockSimulateTransaction = jest.fn();
-const mockGetLatestLedger = jest.fn();
-const mockSubmitSorobanTransaction = jest.fn();
-
-jest.mock("@/lib/stellar", () => ({
-  server: { loadAccount: (...args: any[]) => mockLoadAccount(...args) },
-  rpcServer: {
-    simulateTransaction: (...args: any[]) => mockSimulateTransaction(...args),
-    getLatestLedger: (...args: any[]) => mockGetLatestLedger(...args),
-  },
-  NETWORK_PASSPHRASE: "Test SDF Network ; September 2015",
-  CONTRACT_ID: "CCONTRACTIDFAKE",
-  submitSorobanTransaction: (...args: any[]) =>
-    mockSubmitSorobanTransaction(...args),
-}));
-
-const mockSignTransactionWithWallet = jest.fn();
-jest.mock("@/lib/wallet", () => ({
-  signTransactionWithWallet: (...args: any[]) =>
-    mockSignTransactionWithWallet(...args),
-}));
-
-// Lightweight stand-ins for the pieces of @stellar/stellar-sdk this module
-// uses. `nativeToScVal` / `scValToNative` are identity functions, so tests
-// hand back plain JS values as the "decoded" simulation result instead of
-// constructing real XDR.
-jest.mock("@stellar/stellar-sdk", () => ({
-  Contract: jest.fn().mockImplementation((id: string) => ({
-    call: jest.fn((method: string, ...args: any[]) => ({
-      __contractId: id,
-      method,
-      args,
-    })),
-  })),
-  Address: jest.fn().mockImplementation((pubkey: string) => ({
-    toScVal: () => ({ __address: pubkey }),
-  })),
-  Account: jest.fn().mockImplementation((id: string, seq: string) => ({
-    id,
-    seq,
-  })),
-  TransactionBuilder: jest.fn().mockImplementation(() => ({
-    addOperation: jest.fn().mockReturnThis(),
-    setTimeout: jest.fn().mockReturnThis(),
-    build: jest.fn().mockReturnValue({ toXDR: () => "UNSIGNED_XDR" }),
-  })),
-  nativeToScVal: jest.fn((val: any) => val),
-  scValToNative: jest.fn((val: any) => val),
-  rpc: {
-    Api: { isSimulationSuccess: jest.fn() },
-    assembleTransaction: jest.fn(),
-  },
-}));
-
-import { rpc, Contract } from "@stellar/stellar-sdk";
 import {
-  getMonthlySubscription,
-  getDueMonthlySubscriptionsForDonor,
-  createMonthlySubscription,
-  cancelMonthlySubscription,
-  MIN_SUBSCRIPTION_INTERVAL_LEDGERS,
-} from "@/lib/monthlyGiving";
+  Account,
+  Contract,
+  TransactionBuilder,
+  nativeToScVal,
+  scValToNative,
+  rpc,
+} from "@stellar/stellar-sdk";
+import {
+  server,
+  rpcServer,
+  NETWORK_PASSPHRASE,
+  CONTRACT_ID,
+  submitSorobanTransaction,
+} from "@/lib/stellar";
+import { signTransactionWithWallet } from "@/lib/wallet";
 
-const DONOR = "GDONORAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
-const OTHER_DONOR = "GOTHERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
-const PROJECT_ID = "proj-001";
+/** ~1 day at 5s/ledger — the contract's minimum allowed subscription interval. */
+export const MIN_SUBSCRIPTION_INTERVAL_LEDGERS = 17280;
 
-function rawSubscription(overrides: Record<string, unknown> = {}) {
+/** Stroops per whole XLM (7 decimal places). */
+const STROOPS_PER_XLM = BigInt(10_000_000);
+
+export interface OnChainSubscription {
+  donor: string;
+  projectId: string;
+  amountXLM: string;
+  intervalLedgers: number;
+  nextExecutionLedger: number;
+  active: boolean;
+  createdAtLedger: number;
+}
+
+export interface CreateMonthlySubscriptionParams {
+  donor: string;
+  projectId: string;
+  amountXLM: string;
+  intervalLedgers?: number;
+}
+
+export interface CreateMonthlySubscriptionResult {
+  subscription: OnChainSubscription | null;
+  error: string | null;
+}
+
+export interface CancelMonthlySubscriptionResult {
+  success: boolean;
+  error: string | null;
+}
+
+function formatStroopsToXLM(stroops: bigint): string {
+  const whole = stroops / STROOPS_PER_XLM;
+  const frac = stroops % STROOPS_PER_XLM;
+  return `${whole}.${frac.toString().padStart(7, "0")}`;
+}
+
+/** Maps a raw on-chain subscription record to our camelCase shape. */
+function decodeSubscription(raw: any): OnChainSubscription {
+  const amountStroops =
+    typeof raw.amount === "bigint" ? raw.amount : BigInt(raw.amount);
   return {
-    donor: DONOR,
-    project_id: PROJECT_ID,
-    amount: 250_000_000n,
-    interval_ledgers: MIN_SUBSCRIPTION_INTERVAL_LEDGERS,
-    next_execution: 100,
-    active: true,
-    created_at: 50,
-    ...overrides,
+    donor: raw.donor,
+    projectId: raw.project_id,
+    amountXLM: formatStroopsToXLM(amountStroops),
+    intervalLedgers: Number(raw.interval_ledgers),
+    nextExecutionLedger: Number(raw.next_execution),
+    active: Boolean(raw.active),
+    createdAtLedger: Number(raw.created_at),
   };
 }
 
-beforeEach(() => {
-  jest.clearAllMocks();
-});
+/**
+ * Maps a Soroban simulation failure's raw host-error text to a friendly,
+ * user-facing message. Shared by create/cancel since each only ever
+ * triggers the branch relevant to its own contract entry point.
+ */
+function friendlySimulationError(rawError: string | undefined): string {
+  const msg = rawError ?? "";
+  if (/already exists/i.test(msg)) {
+    return "You already have an active subscription for this project.";
+  }
+  if (/not found/i.test(msg)) {
+    return "No subscription was found for this project.";
+  }
+  return "Something went wrong while contacting the network. Please try again.";
+}
 
-describe("getMonthlySubscription", () => {
-  it("returns the decoded subscription on success", async () => {
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(true);
-    mockSimulateTransaction.mockResolvedValue({
-      result: { retval: rawSubscription() },
-    });
+/**
+ * Simulates a read-only contract call. `sourceAccountId` only needs to be
+ * a syntactically valid account — simulation doesn't require it to be
+ * funded or to match any real signer.
+ */
+async function simulateReadCall(
+  sourceAccountId: string,
+  method: string,
+  args: unknown[],
+) {
+  const account = new Account(sourceAccountId, "0");
+  const contract = new Contract(CONTRACT_ID);
+  const op = contract.call(method, ...args.map((a) => nativeToScVal(a)));
+  const tx = new TransactionBuilder(account, {
+    fee: "100",
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(op)
+    .setTimeout(30)
+    .build();
+  return rpcServer.simulateTransaction(tx);
+}
 
-    const sub = await getMonthlySubscription(DONOR, PROJECT_ID);
+/** Reads a single donor+project subscription, or null if none exists. */
+export async function getMonthlySubscription(
+  donor: string,
+  projectId: string,
+): Promise<OnChainSubscription | null> {
+  try {
+    const sim = await simulateReadCall(donor, "get_subscription", [
+      donor,
+      projectId,
+    ]);
+    if (!rpc.Api.isSimulationSuccess(sim)) return null;
+    const raw = scValToNative((sim as any).result.retval);
+    if (!raw) return null;
+    return decodeSubscription(raw);
+  } catch {
+    return null;
+  }
+}
 
-    expect(sub).not.toBeNull();
-    expect(sub?.donor).toBe(DONOR);
-    expect(sub?.projectId).toBe(PROJECT_ID);
-    expect(sub?.amountXLM).toBe("25.0000000");
-    expect(sub?.active).toBe(true);
-  });
-
-  it("returns null when the subscription doesn't exist", async () => {
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(false);
-    mockSimulateTransaction.mockResolvedValue({
-      error: "HostError: Subscription not found",
-    });
-
-    const sub = await getMonthlySubscription(DONOR, PROJECT_ID);
-    expect(sub).toBeNull();
-  });
-});
-
-describe("getDueMonthlySubscriptionsForDonor", () => {
-  it("returns only this donor's active, due subscriptions", async () => {
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(true);
-    mockGetLatestLedger.mockResolvedValue({ sequence: 150 });
-    mockSimulateTransaction
-      // get_subscription_count -> 3
-      .mockResolvedValueOnce({ result: { retval: 3 } })
-      // index 0: this donor, due
-      .mockResolvedValueOnce({
-        result: { retval: rawSubscription({ next_execution: 100 }) },
-      })
-      // index 1: a different donor entirely
-      .mockResolvedValueOnce({
-        result: { retval: rawSubscription({ donor: OTHER_DONOR }) },
-      })
-      // index 2: this donor, but not due yet
-      .mockResolvedValueOnce({
-        result: {
-          retval: rawSubscription({
-            project_id: "proj-002",
-            next_execution: 999,
-          }),
-        },
-      });
-
-    const due = await getDueMonthlySubscriptionsForDonor(DONOR);
-
-    expect(due).toHaveLength(1);
-    expect(due[0].projectId).toBe(PROJECT_ID);
-  });
-
-  it("skips an index whose read fails and keeps checking the rest", async () => {
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(true);
-    mockGetLatestLedger.mockResolvedValue({ sequence: 150 });
-    mockSimulateTransaction
-      .mockResolvedValueOnce({ result: { retval: 2 } })
-      .mockRejectedValueOnce(new Error("rpc timeout"))
-      .mockResolvedValueOnce({ result: { retval: rawSubscription() } });
-
-    const due = await getDueMonthlySubscriptionsForDonor(DONOR);
-    expect(due).toHaveLength(1);
-  });
-});
-
-describe("createMonthlySubscription", () => {
-  it("signs, submits, and returns the created subscription", async () => {
-    mockLoadAccount.mockResolvedValue({ accountId: () => DONOR });
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(true);
-    (rpc.assembleTransaction as jest.Mock).mockReturnValue({
-      build: () => ({ toXDR: () => "PREPARED_XDR" }),
-    });
-    mockSimulateTransaction
-      .mockResolvedValueOnce({ result: { retval: null } }) // create_subscription simulate
-      .mockResolvedValueOnce({ result: { retval: rawSubscription() } }); // refetch
-    mockSignTransactionWithWallet.mockResolvedValue({
-      signedXDR: "SIGNED_XDR",
-      error: null,
-    });
-    mockSubmitSorobanTransaction.mockResolvedValue({
-      hash: "abc",
-      ledger: 100,
-    });
-
-    const result = await createMonthlySubscription({
-      donor: DONOR,
-      projectId: PROJECT_ID,
-      amountXLM: "25",
-    });
-
-    expect(mockSignTransactionWithWallet).toHaveBeenCalledWith(
-      "PREPARED_XDR",
+/**
+ * Enumerates every subscription on the contract and returns only the ones
+ * belonging to `donor` that are active and due (next_execution has
+ * already passed). A single unreadable index is skipped rather than
+ * aborting the whole scan.
+ */
+export async function getDueMonthlySubscriptionsForDonor(
+  donor: string,
+): Promise<OnChainSubscription[]> {
+  const due: OnChainSubscription[] = [];
+  try {
+    const countSim = await simulateReadCall(
+      donor,
+      "get_subscription_count",
+      [],
     );
-    expect(mockSubmitSorobanTransaction).toHaveBeenCalledWith("SIGNED_XDR");
-    expect(result.error).toBeNull();
-    expect(result.subscription?.projectId).toBe(PROJECT_ID);
-  });
+    if (!rpc.Api.isSimulationSuccess(countSim)) return due;
+    const count = Number(scValToNative((countSim as any).result.retval));
 
-  it("returns a friendly error and never submits when the wallet rejects signing", async () => {
-    mockLoadAccount.mockResolvedValue({ accountId: () => DONOR });
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(true);
-    (rpc.assembleTransaction as jest.Mock).mockReturnValue({
-      build: () => ({ toXDR: () => "PREPARED_XDR" }),
-    });
-    mockSimulateTransaction.mockResolvedValueOnce({
-      result: { retval: null },
-    });
-    mockSignTransactionWithWallet.mockResolvedValue({
-      signedXDR: null,
-      error: "Transaction rejected.",
-    });
+    const { sequence: currentLedger } = await rpcServer.getLatestLedger();
 
-    const result = await createMonthlySubscription({
-      donor: DONOR,
-      projectId: PROJECT_ID,
-      amountXLM: "25",
-    });
+    for (let i = 0; i < count; i++) {
+      try {
+        const sim = await simulateReadCall(donor, "get_subscription_by_index", [
+          i,
+        ]);
+        if (!rpc.Api.isSimulationSuccess(sim)) continue;
+        const raw = scValToNative((sim as any).result.retval);
+        if (!raw) continue;
 
-    expect(mockSubmitSorobanTransaction).not.toHaveBeenCalled();
-    expect(result.subscription).toBeNull();
-    expect(result.error).toBe("Transaction rejected.");
-  });
+        const sub = decodeSubscription(raw);
+        if (
+          sub.donor === donor &&
+          sub.active &&
+          sub.nextExecutionLedger <= currentLedger
+        ) {
+          due.push(sub);
+        }
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    return due;
+  }
+  return due;
+}
 
-  it("maps a duplicate-subscription simulation failure to friendly text", async () => {
-    mockLoadAccount.mockResolvedValue({ accountId: () => DONOR });
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(false);
-    mockSimulateTransaction.mockResolvedValueOnce({
-      error: "HostError: Subscription already exists",
-    });
+/**
+ * Builds, simulates, signs (via the connected wallet), and submits a
+ * `create_subscription` call, then refetches the resulting subscription.
+ */
+export async function createMonthlySubscription({
+  donor,
+  projectId,
+  amountXLM,
+  intervalLedgers = MIN_SUBSCRIPTION_INTERVAL_LEDGERS,
+}: CreateMonthlySubscriptionParams): Promise<CreateMonthlySubscriptionResult> {
+  try {
+    const account = await server.loadAccount(donor);
+    const amountStroops = BigInt(
+      Math.round(Number.parseFloat(amountXLM) * 10_000_000),
+    );
 
-    const result = await createMonthlySubscription({
-      donor: DONOR,
-      projectId: PROJECT_ID,
-      amountXLM: "25",
-    });
+    const contract = new Contract(CONTRACT_ID);
+    const op = contract.call(
+      "create_subscription",
+      nativeToScVal(donor),
+      nativeToScVal(projectId),
+      nativeToScVal(amountStroops),
+      nativeToScVal(intervalLedgers),
+    );
 
-    expect(result.subscription).toBeNull();
-    expect(result.error).toMatch(/already have an active subscription/i);
-  });
+    const tx = new TransactionBuilder(account, {
+      fee: "100",
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .addOperation(op)
+      .setTimeout(30)
+      .build();
 
-  it("defaults intervalLedgers to MIN_SUBSCRIPTION_INTERVAL_LEDGERS when omitted", async () => {
-    mockLoadAccount.mockResolvedValue({ accountId: () => DONOR });
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(true);
-    (rpc.assembleTransaction as jest.Mock).mockReturnValue({
-      build: () => ({ toXDR: () => "PREPARED_XDR" }),
-    });
-    mockSimulateTransaction
-      .mockResolvedValueOnce({ result: { retval: null } })
-      .mockResolvedValueOnce({ result: { retval: rawSubscription() } });
-    mockSignTransactionWithWallet.mockResolvedValue({
-      signedXDR: "SIGNED_XDR",
-      error: null,
-    });
-    mockSubmitSorobanTransaction.mockResolvedValue({
-      hash: "abc",
-      ledger: 100,
-    });
+    const sim = await rpcServer.simulateTransaction(tx);
+    if (!rpc.Api.isSimulationSuccess(sim)) {
+      return {
+        subscription: null,
+        error: friendlySimulationError((sim as any).error),
+      };
+    }
 
-    await createMonthlySubscription({
-      donor: DONOR,
-      projectId: PROJECT_ID,
-      amountXLM: "25",
-    });
+    const prepared = rpc.assembleTransaction(tx, sim).build();
+    const preparedXDR = prepared.toXDR();
 
-    const contractInstance = (Contract as jest.Mock).mock.results[0].value;
-    const callArgs = contractInstance.call.mock.calls[0];
-    // ["create_subscription", donorScVal, projectIdScVal, amountScVal, intervalScVal]
-    expect(callArgs[0]).toBe("create_subscription");
-    expect(callArgs[4]).toBe(MIN_SUBSCRIPTION_INTERVAL_LEDGERS);
-  });
-});
+    const { signedXDR, error: signError } =
+      await signTransactionWithWallet(preparedXDR);
+    if (signError || !signedXDR) {
+      return { subscription: null, error: signError || "Signing failed." };
+    }
 
-describe("cancelMonthlySubscription", () => {
-  it("signs and submits the cancel transaction", async () => {
-    mockLoadAccount.mockResolvedValue({ accountId: () => DONOR });
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(true);
-    (rpc.assembleTransaction as jest.Mock).mockReturnValue({
-      build: () => ({ toXDR: () => "PREPARED_XDR" }),
-    });
-    mockSimulateTransaction.mockResolvedValueOnce({
-      result: { retval: null },
-    });
-    mockSignTransactionWithWallet.mockResolvedValue({
-      signedXDR: "SIGNED_XDR",
-      error: null,
-    });
-    mockSubmitSorobanTransaction.mockResolvedValue({
-      hash: "abc",
-      ledger: 100,
-    });
+    await submitSorobanTransaction(signedXDR);
 
-    const result = await cancelMonthlySubscription(DONOR, PROJECT_ID);
+    const subscription = await getMonthlySubscription(donor, projectId);
+    return { subscription, error: null };
+  } catch (err) {
+    return {
+      subscription: null,
+      error:
+        err instanceof Error
+          ? err.message
+          : "Something went wrong. Please try again.",
+    };
+  }
+}
 
-    expect(mockSubmitSorobanTransaction).toHaveBeenCalledWith("SIGNED_XDR");
-    expect(result.success).toBe(true);
-    expect(result.error).toBeNull();
-  });
+/**
+ * Builds, simulates, signs (via the connected wallet), and submits a
+ * `cancel_subscription` call.
+ */
+/**
+ * Legacy compatibility shim: the pre-migration localStorage-based
+ * subscription model tracked a client-side "paid" flag per subscription.
+ * On-chain, that state lives entirely on the contract (next_execution /
+ * active), updated when the recurring donation actually executes, so
+ * there's nothing for the client to persist here. Kept as a no-op purely
+ * so existing call sites (e.g. pages/projects/[id].tsx) keep compiling.
+ */
+export async function markMonthlySubscriptionPaid(
+  _subscriptionId: string,
+  _amountXLM: string,
+): Promise<void> {
+  return;
+}
 
-  it("maps a not-found simulation failure to friendly text", async () => {
-    mockLoadAccount.mockResolvedValue({ accountId: () => DONOR });
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(false);
-    mockSimulateTransaction.mockResolvedValueOnce({
-      error: "HostError: Subscription not found",
-    });
+export async function cancelMonthlySubscription(
+  donor: string,
+  projectId: string,
+): Promise<CancelMonthlySubscriptionResult> {
+  try {
+    const account = await server.loadAccount(donor);
+    const contract = new Contract(CONTRACT_ID);
+    const op = contract.call(
+      "cancel_subscription",
+      nativeToScVal(donor),
+      nativeToScVal(projectId),
+    );
 
-    const result = await cancelMonthlySubscription(DONOR, PROJECT_ID);
+    const tx = new TransactionBuilder(account, {
+      fee: "100",
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .addOperation(op)
+      .setTimeout(30)
+      .build();
 
-    expect(result.success).toBe(false);
-    expect(result.error).toMatch(/no subscription was found/i);
-  });
+    const sim = await rpcServer.simulateTransaction(tx);
+    if (!rpc.Api.isSimulationSuccess(sim)) {
+      return { success: false, error: friendlySimulationError((sim as any).error) };
+    }
 
-  it("never submits when the wallet rejects signing", async () => {
-    mockLoadAccount.mockResolvedValue({ accountId: () => DONOR });
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(true);
-    (rpc.assembleTransaction as jest.Mock).mockReturnValue({
-      build: () => ({ toXDR: () => "PREPARED_XDR" }),
-    });
-    mockSimulateTransaction.mockResolvedValueOnce({
-      result: { retval: null },
-    });
-    mockSignTransactionWithWallet.mockResolvedValue({
-      signedXDR: null,
-      error: "Transaction rejected.",
-    });
+    const prepared = rpc.assembleTransaction(tx, sim).build();
+    const preparedXDR = prepared.toXDR();
 
-    const result = await cancelMonthlySubscription(DONOR, PROJECT_ID);
+    const { signedXDR, error: signError } =
+      await signTransactionWithWallet(preparedXDR);
+    if (signError || !signedXDR) {
+      return { success: false, error: signError || "Signing failed." };
+    }
 
-    expect(mockSubmitSorobanTransaction).not.toHaveBeenCalled();
-    expect(result.success).toBe(false);
-  });
-});
+    await submitSorobanTransaction(signedXDR);
+
+    return { success: true, error: null };
+  } catch (err) {
+    return {
+      success: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : "Something went wrong. Please try again.",
+    };
+  }
+}

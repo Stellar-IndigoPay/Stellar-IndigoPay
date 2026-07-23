@@ -37,12 +37,6 @@ describe("MonthlyGivingSetup modal a11y", () => {
     mockGetMonthlySubscription.mockResolvedValue(null);
   });
 
-// Provide a deterministic projectId so the storage subset returns []
-// (we don't want localStorage state leaking between test runs).
-const PROJECT_ID = "test-project";
-const PROJECT_NAME = "Amazon Reforestation";
-
-describe("MonthlyGivingSetup modal a11y", () => {
   it("exposes the proper WAI-ARIA dialog metadata", () => {
     render(
       <MonthlyGivingSetup
@@ -97,7 +91,6 @@ describe("MonthlyGivingSetup modal a11y", () => {
   });
 
   it("associates labels with form fields once subscription status has loaded", async () => {
-  it("associates labels with form fields", () => {
     render(
       <MonthlyGivingSetup
         projectId={PROJECT_ID}
@@ -123,21 +116,6 @@ describe("MonthlyGivingSetup modal a11y", () => {
     // Wait for the subscription-status fetch to settle so the scan runs
     // against the form (not the transient "Checking…" state).
     await findByLabelText(/amount \(xlm\)/i);
-        onClose={() => {}}
-      />,
-    );
-    expect(screen.getByLabelText(/amount \(xlm\)/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/start date/i)).toBeInTheDocument();
-  });
-
-  it("has no axe violations (critical/serious)", async () => {
-    const { container } = render(
-      <MonthlyGivingSetup
-        projectId={PROJECT_ID}
-        projectName={PROJECT_NAME}
-        onClose={() => {}}
-      />,
-    );
     const results = await axe(container);
     // Only fail the build on critical/serious issues per WCAG 2.1 AA scope.
     type Violation = (typeof results.violations)[number];
