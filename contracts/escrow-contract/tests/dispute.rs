@@ -184,7 +184,7 @@ fn test_resolve_non_disputed_job_panics() {
 fn test_non_admin_cannot_dispute() {
     let env = Env::default();
     env.mock_all_auths();
-    let (admin, client) = common::setup(&env);
+    let (_admin, client) = common::setup(&env);
 
     let client_addr = Address::generate(&env);
     let freelancer = Address::generate(&env);

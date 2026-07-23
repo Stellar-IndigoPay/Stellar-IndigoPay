@@ -660,6 +660,9 @@ impl EscrowContract {
     }
 }
 
+#[cfg(all(test, feature = "testutils"))]
+mod escrow_fuzz;
+
 #[cfg(test)]
 mod tests {
     use super::*;
