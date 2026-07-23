@@ -39,6 +39,9 @@ jobs:
       - name: Run tests (skip duplicate fuzz run -- handled by dedicated fuzz job)
         run: "cargo test --features testutils --workspace -- --skip fuzz::"
 
+      - name: Run ignored integration cross-contract tests
+        run: cargo test --features testutils --workspace -- --ignored
+
       - name: Build WASM
         run: cargo build --workspace --target wasm32v1-none --release
 
