@@ -2561,6 +2561,7 @@ impl IndigoPayContract {
             .remove(&ImpactVerificationKey::ImpactVerifier(verifier.clone()));
         env.events()
             .publish((symbol_short!("impv_rem"), admin), verifier);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     #[cfg(feature = "impact_verification")]
@@ -2585,6 +2586,7 @@ impl IndigoPayContract {
             .set(&ImpactVerificationKey::ImpactReportThreshold, &threshold);
         env.events()
             .publish((symbol_short!("impv_thr"), admin), threshold);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Admin-only: clear a project's deviation flag, e.g. after investigating
@@ -2593,11 +2595,13 @@ impl IndigoPayContract {
     #[cfg(feature = "impact_verification")]
     pub fn clear_impact_flag(env: Env, admin: Address, project_id: String) {
         require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
         env.storage()
             .instance()
             .remove(&ImpactVerificationKey::ImpactFlagged(project_id.clone()));
         env.events()
             .publish((symbol_short!("impv_clr"), admin), project_id);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Authorised verifier: submit (or update) an independent CO2-impact
