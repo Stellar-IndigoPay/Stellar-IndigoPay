@@ -17,3 +17,4 @@ proptest = "1.4"
 
 [features]
 testutils = ["soroban-sdk/testutils"]
+oracle-escrow = []
