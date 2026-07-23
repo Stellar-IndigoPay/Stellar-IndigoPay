@@ -30,3 +30,5 @@ Thumbs.db
 backend/uploads/*
 !backend/uploads/.gitkeep
 
+.vercel
+.env*

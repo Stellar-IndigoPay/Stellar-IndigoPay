@@ -18,8 +18,9 @@
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker)](https://docker.com)
 [![Rust](https://img.shields.io/badge/Rust-WASM-DEA584?logo=rust)](https://rust-lang.org)
 [![Tailwind](https://img.shields.io/badge/Tailwind-v3-06B6D4?logo=tailwindcss)](https://tailwindcss.com)
+[![Vercel](https://img.shields.io/badge/Vercel-Deployed-000000?logo=vercel)](https://stellar-indigo-pay.vercel.app)
 
-[**🌐 Web App**](https://stellarindigopay.com) · [**📱 Mobile App**](https://expo.dev/) · [**🧩 Chrome Extension**](https://chrome.google.com/webstore/) · [**📚 Docs**](docs/README.md) · [**🚀 Quick Start**](#-quick-start)
+[**🌐 Web App**](https://stellar-indigo-pay.vercel.app) · [**📱 Mobile App**](https://expo.dev/) · [**🧩 Chrome Extension**](https://chrome.google.com/webstore/) · [**📚 Docs**](docs/README.md) · [**🚀 Quick Start**](#-quick-start)
 
 </div>
 
