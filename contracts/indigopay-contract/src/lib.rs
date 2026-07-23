@@ -162,6 +162,39 @@ pub struct RateLimitWindow {
     pub count: u32,
 }
 
+/// Anomaly metric type for circuit-breaker rules.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AnomalyMetric {
+    DonationVolume,
+    DonationCount,
+    NewDonorRate,
+    AverageDonationSize,
+}
+
+/// A single anomaly-detection rule for a project.
+/// `threshold` is in stroops for volume/average and in basis points (×100) for
+/// NewDonorRate (e.g. 50_00 = 50%). `window_ledgers` is the sliding window
+/// width in ledger sequences.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AnomalyRule {
+    pub metric: AnomalyMetric,
+    pub threshold: i128,
+    pub window_ledgers: u32,
+}
+
+/// Sliding-window accumulator for anomaly detection — one per
+/// (project, rule_index) pair.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AnomalyWindow {
+    pub window_start: u32,
+    pub count: u32,
+    pub volume: i128,
+    pub new_donor_count: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ImpactNFT {
@@ -430,6 +463,11 @@ pub enum DataKey {
     PlatformTreasury,
     /// Quadratic voting: credits spent by a voter on a project proposal.
     VoteCredits(String, Address),
+    // Anomaly detection circuit breaker (#461)
+    /// Anomaly rules configured per project (Vec<AnomalyRule>).
+    AnomalyRules(String),
+    /// Sliding-window counter per (project, rule_index).
+    AnomalyWindow(String, u32),
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -442,6 +480,9 @@ const VOTING_WINDOW_LEDGERS: u32 = 120_960;
 
 const DEFAULT_DONATION_RATE_LIMIT_MAX: u32 = 10;
 const DEFAULT_DONATION_RATE_LIMIT_WINDOW: u32 = 720;
+
+// Anomaly detection: default sliding-window size when rule.window_ledgers == 0.
+const DEFAULT_ANOMALY_WINDOW: u32 = 720;
 
 // Bounds on caller-supplied voting durations. Floor (~1 hour) keeps the
 // window long enough to be observed; ceiling (~30 days) bounds storage TTL
@@ -1008,6 +1049,122 @@ fn process_donation(
         (symbol_short!("donated"), donor.clone(), project_id.clone()),
         (amount, donor_stats.badge.clone(), msg_hash),
     );
+
+    // ── Anomaly detection: check rules AFTER external transfer completes.
+    check_anomaly_rules(env, project_id, donor, amount);
+}
+
+/// Evaluate every anomaly rule for `project_id`. If any rule is violated the
+/// project is auto-paused and an `anomaly_detected` event is emitted.
+/// Empty rules vector = no detection (backward compatible).
+fn check_anomaly_rules(env: &Env, project_id: &String, donor: &Address, amount: i128) {
+    let rules_key = DataKey::AnomalyRules(project_id.clone());
+    let rules: Vec<AnomalyRule> = env
+        .storage()
+        .instance()
+        .get(&rules_key)
+        .unwrap_or(Vec::new(env));
+    if rules.is_empty() {
+        return;
+    }
+
+    let current_ledger = env.ledger().sequence();
+
+    for (idx, rule) in rules.iter().enumerate() {
+        let window_ledgers = if rule.window_ledgers == 0 {
+            DEFAULT_ANOMALY_WINDOW
+        } else {
+            rule.window_ledgers
+        };
+
+        let w_key = DataKey::AnomalyWindow(project_id.clone(), idx as u32);
+        let mut window: AnomalyWindow = env
+            .storage()
+            .instance()
+            .get(&w_key)
+            .unwrap_or(AnomalyWindow {
+                window_start: current_ledger,
+                count: 0,
+                volume: 0,
+                new_donor_count: 0,
+            });
+
+        if current_ledger >= window.window_start
+            && current_ledger - window.window_start >= window_ledgers
+        {
+            window.window_start = current_ledger;
+            window.count = 0;
+            window.volume = 0;
+            window.new_donor_count = 0;
+        }
+
+        let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
+        let is_new_donor = !env.storage().instance().has(&donated_key);
+
+        window.count = window.count.checked_add(1).unwrap_or(u32::MAX);
+        window.volume = window
+            .volume
+            .checked_add(amount)
+            .unwrap_or(i128::MAX);
+        if is_new_donor {
+            window.new_donor_count = window
+                .new_donor_count
+                .checked_add(1)
+                .unwrap_or(u32::MAX);
+        }
+
+        let violated = match rule.metric {
+            AnomalyMetric::DonationVolume => window.volume >= rule.threshold,
+            AnomalyMetric::DonationCount => (window.count as i128) >= rule.threshold,
+            AnomalyMetric::NewDonorRate => {
+                if window.count == 0 {
+                    false
+                } else {
+                    let rate_bps =
+                        (window.new_donor_count as i128) * 10_000 / (window.count as i128);
+                    rate_bps >= rule.threshold
+                }
+            }
+            AnomalyMetric::AverageDonationSize => {
+                if window.count == 0 {
+                    false
+                } else {
+                    let avg = window.volume / (window.count as i128);
+                    avg >= rule.threshold
+                }
+            }
+        };
+
+        if violated {
+            env.storage().instance().set(&w_key, &window);
+
+            let mut project: Project = env
+                .storage()
+                .instance()
+                .get(&DataKey::Project(project_id.clone()))
+                .expect("Project not found");
+            if project.active && !project.paused {
+                project.paused = true;
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Project(project_id.clone()), &project);
+            }
+
+            let metric_symbol = match rule.metric {
+                AnomalyMetric::DonationVolume => symbol_short!("vol"),
+                AnomalyMetric::DonationCount => symbol_short!("cnt"),
+                AnomalyMetric::NewDonorRate => symbol_short!("ndr"),
+                AnomalyMetric::AverageDonationSize => symbol_short!("avg"),
+            };
+            env.events().publish(
+                (symbol_short!("anomaly"), project_id.clone()),
+                (metric_symbol, rule.threshold, rule.window_ledgers, idx as u32),
+            );
+            return;
+        }
+
+        env.storage().instance().set(&w_key, &window);
+    }
 }
 
 /// After `total_raised` is updated, flip `Active` → `GoalReached` when the
@@ -1483,6 +1640,107 @@ impl IndigoPayContract {
         env.events()
             .publish((symbol_short!("prj_resm"), admin), project_id);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Admin-only: configure anomaly-detection rules for a project.
+    /// M-of-N signatures required (critical operation).
+    /// Empty rules vector disables anomaly detection for the project.
+    pub fn set_anomaly_rules(
+        env: Env,
+        signers: Vec<Address>,
+        project_id: String,
+        rules: Vec<AnomalyRule>,
+    ) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+
+        let project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        if !project.active {
+            panic!("Project is not active");
+        }
+
+        // Validate rules
+        for rule in rules.iter() {
+            if rule.window_ledgers == 0 {
+                panic!("Window must be > 0");
+            }
+            if rule.threshold <= 0 {
+                panic!("Threshold must be positive");
+            }
+        }
+
+        // Clear old windows BEFORE overwriting rules so we can use the old
+        // rule count to know which window indices to remove.
+        let old_rules: Vec<AnomalyRule> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AnomalyRules(project_id.clone()))
+            .unwrap_or(Vec::new(&env));
+        for i in 0..old_rules.len() {
+            let w_key = DataKey::AnomalyWindow(project_id.clone(), i as u32);
+            if env.storage().instance().has(&w_key) {
+                env.storage().instance().remove(&w_key);
+            }
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::AnomalyRules(project_id.clone()), &rules);
+
+        env.events().publish(
+            (symbol_short!("anm_rule"), admin),
+            (project_id, rules.len()),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Admin-only: clear anomaly window counters and resume a paused project.
+    /// Single admin signature required (routine operation).
+    pub fn clear_anomaly(env: Env, admin: Address, project_id: String) {
+        require_admin_for_routine(&env, &admin);
+        // Intentionally NOT paused-gated so the admin can always recover.
+
+        let rules_key = DataKey::AnomalyRules(project_id.clone());
+        let rules: Vec<AnomalyRule> = env
+            .storage()
+            .instance()
+            .get(&rules_key)
+            .unwrap_or(Vec::new(&env));
+
+        for i in 0..rules.len() {
+            let w_key = DataKey::AnomalyWindow(project_id.clone(), i as u32);
+            if env.storage().instance().has(&w_key) {
+                env.storage().instance().remove(&w_key);
+            }
+        }
+
+        let mut project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        if project.paused {
+            project.paused = false;
+            env.storage()
+                .instance()
+                .set(&DataKey::Project(project_id.clone()), &project);
+        }
+
+        env.events()
+            .publish((symbol_short!("anm_clr"), admin), project_id);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Read-only: return the anomaly rules configured for a project.
+    pub fn get_anomaly_rules(env: Env, project_id: String) -> Vec<AnomalyRule> {
+        env.storage()
+            .instance()
+            .get(&DataKey::AnomalyRules(project_id))
+            .unwrap_or(Vec::new(&env))
     }
 
     // ─── Time-bound campaigns ─────────────────────────────────────────────────
@@ -9077,5 +9335,169 @@ mod tests {
         assert_eq!(record.project, pid);
         assert_eq!(record.amount, 10 * STROOP);
         assert_eq!(record.message_hash, 99u32);
+    }
+
+    // ─── Anomaly detection / circuit breaker tests ────────────────────────────
+
+    #[test]
+    fn test_anomaly_disabled_no_rules() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 100 * STROOP);
+
+        client.donate(&token, &donor, &pid, &(50 * STROOP), &0u32, &false);
+
+        let p = client.get_project(&pid);
+        assert!(!p.paused);
+        let rules = client.get_anomaly_rules(&pid);
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn test_anomaly_rule_volume_below_threshold() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 100 * STROOP);
+
+        // Rule: pause if volume >= 200 stroops in 1000 ledgers
+        let mut rules = Vec::new(&env);
+        rules.push_back(AnomalyRule {
+            metric: AnomalyMetric::DonationVolume,
+            threshold: 200 * STROOP,
+            window_ledgers: 1000,
+        });
+        client.set_anomaly_rules(&signers1(&env, &admin), &pid, &rules);
+
+        // Donate 50 — below threshold
+        client.donate(&token, &donor, &pid, &(50 * STROOP), &0u32, &false);
+        let p = client.get_project(&pid);
+        assert!(!p.paused);
+    }
+
+    #[test]
+    fn test_anomaly_rule_volume_above_threshold() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 200 * STROOP);
+
+        // Rule: pause if volume >= 100 stroops
+        let mut rules = Vec::new(&env);
+        rules.push_back(AnomalyRule {
+            metric: AnomalyMetric::DonationVolume,
+            threshold: 100 * STROOP,
+            window_ledgers: 1000,
+        });
+        client.set_anomaly_rules(&signers1(&env, &admin), &pid, &rules);
+
+        // Donate 150 — above threshold
+        client.donate(&token, &donor, &pid, &(150 * STROOP), &0u32, &false);
+        let p = client.get_project(&pid);
+        assert!(p.paused);
+    }
+
+    #[test]
+    fn test_anomaly_rule_count_below_threshold() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 100 * STROOP);
+
+        // Rule: pause if donation count >= 5
+        let mut rules = Vec::new(&env);
+        rules.push_back(AnomalyRule {
+            metric: AnomalyMetric::DonationCount,
+            threshold: 5,
+            window_ledgers: 1000,
+        });
+        client.set_anomaly_rules(&signers1(&env, &admin), &pid, &rules);
+
+        // Make 2 donations (each 1 stroop) — below threshold
+        client.donate(&token, &donor, &pid, &1, &0u32, &false);
+        client.donate(&token, &donor, &pid, &1, &0u32, &false);
+        let p = client.get_project(&pid);
+        assert!(!p.paused);
+    }
+
+    #[test]
+    fn test_anomaly_rule_count_above_threshold() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 100 * STROOP);
+
+        // Rule: pause if donation count >= 3
+        let mut rules = Vec::new(&env);
+        rules.push_back(AnomalyRule {
+            metric: AnomalyMetric::DonationCount,
+            threshold: 3,
+            window_ledgers: 1000,
+        });
+        client.set_anomaly_rules(&signers1(&env, &admin), &pid, &rules);
+
+        client.donate(&token, &donor, &pid, &1, &0u32, &false);
+        client.donate(&token, &donor, &pid, &1, &0u32, &false);
+        client.donate(&token, &donor, &pid, &1, &0u32, &false);
+        let p = client.get_project(&pid);
+        assert!(p.paused);
+    }
+
+    #[test]
+    fn test_anomaly_auto_pause_and_clear() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 200 * STROOP);
+
+        let mut rules = Vec::new(&env);
+        rules.push_back(AnomalyRule {
+            metric: AnomalyMetric::DonationVolume,
+            threshold: 50 * STROOP,
+            window_ledgers: 1000,
+        });
+        client.set_anomaly_rules(&signers1(&env, &admin), &pid, &rules);
+
+        client.donate(&token, &donor, &pid, &(100 * STROOP), &0u32, &false);
+        let p = client.get_project(&pid);
+        assert!(p.paused);
+
+        // Clear anomaly — should resume the project
+        client.clear_anomaly(&admin, &pid);
+        let p2 = client.get_project(&pid);
+        assert!(!p2.paused);
+    }
+
+    #[test]
+    fn test_anomaly_clear_only_resumes_paused() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 100 * STROOP);
+
+        // No rules → no pause
+        client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32, &false);
+        let p = client.get_project(&pid);
+        assert!(!p.paused);
+
+        // clear_anomaly on an unpaused project should be a no-op (no panic)
+        client.clear_anomaly(&admin, &pid);
+        let p2 = client.get_project(&pid);
+        assert!(!p2.paused);
+    }
+
+    #[test]
+    fn test_anomaly_cannot_donate_when_paused() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 200 * STROOP);
+
+        let mut rules = Vec::new(&env);
+        rules.push_back(AnomalyRule {
+            metric: AnomalyMetric::DonationVolume,
+            threshold: 50 * STROOP,
+            window_ledgers: 1000,
+        });
+        client.set_anomaly_rules(&signers1(&env, &admin), &pid, &rules);
+
+        client.donate(&token, &donor, &pid, &(100 * STROOP), &0u32, &false);
+
+        // Second donation should panic because project is paused
+        let result = client.try_donate(&token, &donor, &pid, &(1 * STROOP), &0u32, &false);
+        assert!(result.is_err());
     }
 }

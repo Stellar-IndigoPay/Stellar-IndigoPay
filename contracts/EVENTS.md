@@ -362,6 +362,38 @@ and advances `next_execution`. Shortened from `sub_executed`.
 
 ---
 
+## 33. `anomaly` (Anomaly Detected — Circuit Breaker)
+
+**Description**: Emitted when an anomaly-detection rule is violated. The project is auto-paused.
+
+| Event Name | Topics                            | Data                                                              | When Emitted                        |
+| ---------- | --------------------------------- | ----------------------------------------------------------------- | ----------------------------------- |
+| `anomaly`  | `["anomaly", project_id]`        | `(metric_symbol: Symbol, threshold: i128, window_ledgers: u32, rule_index: u32)` | When any anomaly rule is violated |
+
+`metric_symbol` is one of: `vol` (DonationVolume), `cnt` (DonationCount), `ndr` (NewDonorRate), `avg` (AverageDonationSize).
+
+---
+
+## 34. `anm_rule` (Anomaly Rules Updated)
+
+**Description**: Emitted when admin configures anomaly-detection rules for a project.
+
+| Event Name  | Topics                      | Data                                | When Emitted                         |
+| ---------- | --------------------------- | ----------------------------------- | ------------------------------------ |
+| `anm_rule` | `["anm_rule", admin]`      | `(project_id, rule_count: u32)`     | When `set_anomaly_rules` is called   |
+
+---
+
+## 35. `anm_clr` (Anomaly Cleared)
+
+**Description**: Emitted when admin clears anomaly window counters and resumes a paused project.
+
+| Event Name  | Topics                      | Data                                | When Emitted                         |
+| ---------- | --------------------------- | ----------------------------------- | ------------------------------------ |
+| `anm_clr`  | `["anm_clr", admin]`       | `project_id`                        | When `clear_anomaly` is called       |
+
+---
+
 ## Usage Notes
 
 - All events follow Soroban’s standard event format: `topics: Vec<Val>`, `data: Val`.
