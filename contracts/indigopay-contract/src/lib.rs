@@ -892,10 +892,10 @@ fn process_donation(
         .total_raised
         .checked_add(amount)
         .expect("Project total_raised overflow");
-        let goal_reached = apply_campaign_goal_progress(&mut project);
-        let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
-        let asset_is_new_donor = !env.storage().instance().has(&donated_key);
-        if !env.storage().instance().has(&donated_key) {
+    let goal_reached = apply_campaign_goal_progress(&mut project);
+    let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
+    let asset_is_new_donor = !env.storage().instance().has(&donated_key);
+    if !env.storage().instance().has(&donated_key) {
         env.storage().instance().set(&donated_key, &true);
         project.donor_count = project
             .donor_count
@@ -1091,16 +1091,16 @@ fn check_anomaly_rules(
         };
 
         let w_key = DataKey::AnomalyWindow(project_id.clone(), idx as u32);
-        let mut window: AnomalyWindow = env
-            .storage()
-            .instance()
-            .get(&w_key)
-            .unwrap_or(AnomalyWindow {
-                window_start: current_ledger,
-                count: 0,
-                volume: 0,
-                new_donor_count: 0,
-            });
+        let mut window: AnomalyWindow =
+            env.storage()
+                .instance()
+                .get(&w_key)
+                .unwrap_or(AnomalyWindow {
+                    window_start: current_ledger,
+                    count: 0,
+                    volume: 0,
+                    new_donor_count: 0,
+                });
 
         if current_ledger >= window.window_start
             && current_ledger - window.window_start >= window_ledgers
@@ -1112,15 +1112,9 @@ fn check_anomaly_rules(
         }
 
         window.count = window.count.checked_add(1).unwrap_or(u32::MAX);
-        window.volume = window
-            .volume
-            .checked_add(amount)
-            .unwrap_or(i128::MAX);
+        window.volume = window.volume.checked_add(amount).unwrap_or(i128::MAX);
         if is_new_donor {
-            window.new_donor_count = window
-                .new_donor_count
-                .checked_add(1)
-                .unwrap_or(u32::MAX);
+            window.new_donor_count = window.new_donor_count.checked_add(1).unwrap_or(u32::MAX);
         }
 
         let violated = match rule.metric {
@@ -1168,7 +1162,12 @@ fn check_anomaly_rules(
             };
             env.events().publish(
                 (symbol_short!("anomaly"), project_id.clone()),
-                (metric_symbol, rule.threshold, rule.window_ledgers, idx as u32),
+                (
+                    metric_symbol,
+                    rule.threshold,
+                    rule.window_ledgers,
+                    idx as u32,
+                ),
             );
             return;
         }
@@ -3632,7 +3631,13 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
 
         // ── Anomaly detection
-        check_anomaly_rules(env, &usdc_project_id, &donor, xlm_equivalent, usdc_is_new_donor);
+        check_anomaly_rules(
+            env,
+            &usdc_project_id,
+            &donor,
+            xlm_equivalent,
+            usdc_is_new_donor,
+        );
     }
 
     /// Admin-only: Set the USDC token address for multi-currency donations.
@@ -4749,7 +4754,13 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
 
         // ── Anomaly detection
-        check_anomaly_rules(env, &recurring.project_id, &rec_donor, xlm_equivalent, recurring_is_new_donor);
+        check_anomaly_rules(
+            env,
+            &recurring.project_id,
+            &rec_donor,
+            xlm_equivalent,
+            recurring_is_new_donor,
+        );
     }
 
     pub fn get_recurring(env: Env, donor: Address, recurring_id: u32) -> RecurringDonation {
@@ -9525,7 +9536,8 @@ mod tests {
         client.donate_with_privacy(&token, &donor, &pid, &(100 * STROOP), &0u32, &false);
 
         // Second donation should panic because project is paused
-        let result = client.try_donate_with_privacy(&token, &donor, &pid, &(1 * STROOP), &0u32, &false);
+        let result =
+            client.try_donate_with_privacy(&token, &donor, &pid, &(1 * STROOP), &0u32, &false);
         assert!(result.is_err());
     }
 }
