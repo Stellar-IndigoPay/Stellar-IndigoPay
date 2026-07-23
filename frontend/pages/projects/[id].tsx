@@ -1981,10 +1981,11 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
         </div>
       </div>
 
-      {showMonthlySetup && (
+      {showMonthlySetup && publicKey && (
         <MonthlyGivingSetup
           projectId={project.id}
           projectName={project.name}
+          publicKey={publicKey}
           onClose={() => setShowMonthlySetup(false)}
         />
       )}

@@ -1,7 +1,7 @@
 #![no_std]
 #![allow(deprecated)]
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec};
 
 const MAX_OBSERVATIONS: u32 = 20;
 const TWAP_WINDOW: u32 = 10;
@@ -26,6 +26,7 @@ pub enum DataKey {
     ObservationIndex,
     Reporter(Address),
     FallbackPrice,
+    MaxPriceDeviationBps,
 }
 
 #[contract]
@@ -40,6 +41,113 @@ fn require_admin(env: &Env, admin: &Address) {
     if stored_admin != *admin {
         panic!("Only admin can perform this action");
     }
+}
+
+/// Computes the absolute deviation between `new_price` and `current_price`
+/// in basis points (1 bps = 0.01%): `|new_price - current_price| * 10_000
+/// / current_price`.
+///
+/// Pure integer arithmetic, panic-free for any `i128` input pair — every
+/// overflow or non-positive-baseline case saturates to `u32::MAX` ("treat
+/// as exceeding any configured threshold") rather than panicking, since
+/// this helper also backs the deviation check inside `report_price`, where
+/// a malformed comparison must never itself become a way to brick the
+/// contract.
+fn calculate_deviation_bps(new_price: i128, current_price: i128) -> u32 {
+    if current_price <= 0 {
+        return u32::MAX;
+    }
+    let diff = new_price
+        .checked_sub(current_price)
+        .and_then(i128::checked_abs)
+        .unwrap_or(i128::MAX);
+    match diff
+        .checked_mul(10_000)
+        .and_then(|scaled| scaled.checked_div(current_price))
+    {
+        Some(bps) => u32::try_from(bps).unwrap_or(u32::MAX),
+        None => u32::MAX,
+    }
+}
+
+/// Time-weighted current price in the same raw scale as `PriceObservation
+/// ::price` / `report_price`'s `price` argument (i.e. *not* divided by
+/// `PRICE_SCALE`, unlike the public `get_price`). Used exclusively as the
+/// deviation-check baseline in `report_price`.
+///
+/// Returns `None` when there is no observation history to weight (no
+/// observations, the latest one is stale, or the weighted window sums to
+/// zero) — in every such case there is no reliable baseline, so the
+/// deviation check is skipped rather than falling back to a configured
+/// fallback price (a fallback price is a display/consumption concern for
+/// `get_price`, not a valid deviation baseline for a fresh report).
+fn current_price_raw(env: &Env) -> Option<i128> {
+    let count: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::ObservationCount)
+        .unwrap_or(0);
+    if count == 0 {
+        return None;
+    }
+
+    let next_index: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::ObservationIndex)
+        .unwrap_or(0);
+    let current_ledger = env.ledger().sequence();
+
+    let latest_index = (next_index + MAX_OBSERVATIONS - 1) % MAX_OBSERVATIONS;
+    let latest: PriceObservation = env
+        .storage()
+        .instance()
+        .get(&DataKey::Observations(latest_index))
+        .expect("Oracle observation missing");
+
+    if current_ledger.saturating_sub(latest.ledger) > STALENESS_THRESHOLD {
+        return None;
+    }
+
+    let window = TWAP_WINDOW.min(count);
+    let mut observations = Vec::new(env);
+    let start_offset = (next_index + MAX_OBSERVATIONS - window) % MAX_OBSERVATIONS;
+    for i in 0..window {
+        let index = (start_offset + i) % MAX_OBSERVATIONS;
+        let obs: PriceObservation = env
+            .storage()
+            .instance()
+            .get(&DataKey::Observations(index))
+            .expect("Oracle observation missing");
+        observations.push_back(obs);
+    }
+
+    let mut weighted_sum = 0_i128;
+    let mut total_weight = 0_i128;
+    for i in 0..window {
+        let obs = observations.get(i).unwrap();
+        let next_ledger = if i + 1 < window {
+            observations.get(i + 1).unwrap().ledger
+        } else {
+            current_ledger
+        };
+        let mut weight = next_ledger.saturating_sub(obs.ledger) as i128;
+        if weight == 0 {
+            weight = 1;
+        }
+        weighted_sum = weighted_sum
+            .checked_add(obs.price.checked_mul(weight).expect("TWAP mul overflow"))
+            .expect("TWAP overflow");
+        total_weight = total_weight
+            .checked_add(weight)
+            .expect("Total weight overflow");
+    }
+
+    if total_weight == 0 {
+        return None;
+    }
+
+    Some(weighted_sum / total_weight)
 }
 
 #[contractimpl]
@@ -97,6 +205,38 @@ impl SimpleOracle {
             .instance()
             .get(&DataKey::ObservationCount)
             .unwrap_or(0);
+
+        // Price deviation circuit breaker: reject a new observation that
+        // deviates too far from the current TWAP, capping the per-report
+        // impact a compromised reporter can have even before TWAP
+        // averaging kicks in. Disabled when the threshold is 0 (backward
+        // compatible) or when there are fewer than 2 prior observations
+        // (no reliable baseline yet).
+        let max_deviation_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxPriceDeviationBps)
+            .unwrap_or(0);
+        if max_deviation_bps > 0 && count >= 2 {
+            if let Some(current_price) = current_price_raw(&env) {
+                let deviation_bps = calculate_deviation_bps(price, current_price);
+                if deviation_bps > max_deviation_bps {
+                    // Reject by dropping the observation rather than panicking:
+                    // Soroban reverts *all* effects of an invocation — storage
+                    // writes and published events alike — when it traps, so a
+                    // panic here would also erase the `price_rejected` event
+                    // this check exists to leave behind. Returning normally
+                    // (without recording the observation) is what lets the
+                    // event actually reach an indexer/monitor.
+                    env.events().publish(
+                        (Symbol::new(&env, "price_rejected"), reporter.clone()),
+                        (price, current_price, deviation_bps),
+                    );
+                    return;
+                }
+            }
+        }
+
         let index: u32 = env
             .storage()
             .instance()
@@ -134,6 +274,17 @@ impl SimpleOracle {
         env.storage()
             .instance()
             .set(&DataKey::FallbackPrice, &price);
+    }
+
+    /// Configures the price deviation circuit breaker threshold, in basis
+    /// points (e.g. 500 = 5%). A value of 0 disables the check entirely,
+    /// preserving the pre-circuit-breaker behaviour.
+    pub fn set_max_price_deviation(env: Env, admin: Address, deviation_bps: u32) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxPriceDeviationBps, &deviation_bps);
     }
 
     /// Compute the Time-Weighted Average Price (TWAP) from recent observations.
@@ -238,9 +389,11 @@ impl SimpleOracle {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Ledger},
+        testutils::{Address as _, Events, Ledger},
         Env,
     };
 
@@ -567,5 +720,205 @@ mod tests {
         let twap = client.get_price();
         // (10×100 + 1000×1) / 101 = 2000 / 101 = 19 — attack negligible.
         assert_eq!(twap, 19);
+    }
+
+    // ─── Price deviation circuit breaker (#464) ────────────────────────────
+
+    /// Seeds two same-ledger observations at `base_price`, giving a clean,
+    /// exactly-computable TWAP baseline of `base_price` (see `current_price_raw`
+    /// doc comment: same-ledger observations each get weight 1).
+    fn seed_baseline(
+        env: &Env,
+        contract_id: &Address,
+        admin: &Address,
+        reporter: &Address,
+        base_price: i128,
+    ) {
+        let client = SimpleOracleClient::new(env, contract_id);
+        add_reporter(env, contract_id, admin, reporter);
+        client.report_price(reporter, &base_price);
+        client.report_price(reporter, &base_price);
+    }
+
+    #[test]
+    fn test_set_deviation_threshold() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        client.set_max_price_deviation(&admin, &500);
+        env.as_contract(&contract_id, || {
+            let stored: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::MaxPriceDeviationBps)
+                .unwrap();
+            assert_eq!(stored, 500);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn only_admin_can_set_deviation_threshold() {
+        let (env, contract_id, _, _) = setup();
+        let non_admin = Address::generate(&env);
+        SimpleOracleClient::new(&env, &contract_id).set_max_price_deviation(&non_admin, &500);
+    }
+
+    #[test]
+    fn test_deviation_accept_within_bounds() {
+        let (env, contract_id, admin, reporter) = setup();
+        seed_baseline(&env, &contract_id, &admin, &reporter, 80_000_000);
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        client.set_max_price_deviation(&admin, &500); // 5%
+
+        // 82_000_000 vs baseline 80_000_000 → 2.5% deviation, within 5%.
+        client.report_price(&reporter, &82_000_000);
+
+        env.as_contract(&contract_id, || {
+            let count: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::ObservationCount)
+                .unwrap();
+            assert_eq!(count, 3);
+        });
+    }
+
+    #[test]
+    fn test_deviation_reject() {
+        let (env, contract_id, admin, reporter) = setup();
+        seed_baseline(&env, &contract_id, &admin, &reporter, 80_000_000);
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        client.set_max_price_deviation(&admin, &500); // 5%
+
+        // 90_000_000 vs baseline 80_000_000 → 12.5% deviation, exceeds 5%.
+        // Rejected observations are dropped, not panicked (see comment in
+        // report_price: a panic would also erase the price_rejected event).
+        client.report_price(&reporter, &90_000_000);
+
+        env.as_contract(&contract_id, || {
+            let count: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::ObservationCount)
+                .unwrap();
+            assert_eq!(count, 2, "rejected observation must not be stored");
+        });
+    }
+
+    #[test]
+    fn test_deviation_reject_emits_price_rejected_event() {
+        use std::format;
+
+        let (env, contract_id, admin, reporter) = setup();
+        seed_baseline(&env, &contract_id, &admin, &reporter, 80_000_000);
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        client.set_max_price_deviation(&admin, &500);
+
+        let events_before = env.events().all().events().len();
+        client.report_price(&reporter, &90_000_000);
+
+        let events_after = env.events().all();
+        assert_eq!(
+            events_after.events().len(),
+            events_before + 1,
+            "expected exactly one additional event to have been published on rejection"
+        );
+
+        let latest = format!("{:?}", events_after.events().last().unwrap());
+        assert!(
+            latest.contains("price_rejected"),
+            "expected the new event to reference price_rejected, got: {}",
+            latest
+        );
+    }
+
+    #[test]
+    fn test_deviation_disabled_zero() {
+        let (env, contract_id, admin, reporter) = setup();
+        // max_price_deviation_bps defaults to 0 (never configured) — the
+        // circuit breaker must be fully bypassed regardless of magnitude.
+        seed_baseline(&env, &contract_id, &admin, &reporter, 80_000_000);
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        client.report_price(&reporter, &800_000_000); // 10x the baseline
+
+        env.as_contract(&contract_id, || {
+            let count: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::ObservationCount)
+                .unwrap();
+            assert_eq!(count, 3);
+        });
+    }
+
+    #[test]
+    fn test_deviation_skip_few_observations() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+        client.set_max_price_deviation(&admin, &500);
+
+        // First observation: 0 prior observations — check must be skipped.
+        client.report_price(&reporter, &80_000_000);
+        // Second observation: only 1 prior observation — check must still
+        // be skipped, even though this "deviates" wildly from the first.
+        client.report_price(&reporter, &8_000_000_000);
+
+        env.as_contract(&contract_id, || {
+            let count: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::ObservationCount)
+                .unwrap();
+            assert_eq!(count, 2);
+        });
+    }
+}
+
+#[cfg(test)]
+mod deviation_fuzz {
+    extern crate std;
+
+    use super::calculate_deviation_bps;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2048))]
+
+        /// `calculate_deviation_bps` must match an independently-derived
+        /// reference computation (via `u128::abs_diff` instead of the
+        /// implementation's `i128` checked-arithmetic path) for any pair of
+        /// positive prices within a range that does not overflow either path.
+        #[test]
+        fn prop_deviation_calculation_correct(
+            current in 1_i128..1_000_000_000_000_i128,
+            new in 1_i128..1_000_000_000_000_i128,
+        ) {
+            let bps = calculate_deviation_bps(new, current);
+
+            let diff = new.abs_diff(current);
+            let expected = diff
+                .checked_mul(10_000)
+                .map(|scaled| scaled / (current as u128))
+                .and_then(|v| u32::try_from(v).ok())
+                .unwrap_or(u32::MAX);
+
+            prop_assert_eq!(bps, expected);
+        }
+
+        /// Identical prices must always report zero deviation.
+        #[test]
+        fn prop_deviation_is_zero_when_prices_match(price in 1_i128..1_000_000_000_000_i128) {
+            prop_assert_eq!(calculate_deviation_bps(price, price), 0);
+        }
+
+        /// The helper must never panic, for any `i128` input pair — it backs
+        /// a security check inside `report_price` and must degrade to
+        /// "treat as exceeding any threshold" rather than trap the contract.
+        #[test]
+        fn prop_deviation_never_panics(new in any::<i128>(), current in any::<i128>()) {
+            let _ = calculate_deviation_bps(new, current);
+        }
     }
 }
