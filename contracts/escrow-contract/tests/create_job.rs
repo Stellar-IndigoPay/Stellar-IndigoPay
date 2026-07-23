@@ -65,12 +65,18 @@ fn test_milestone_validation() {
         percentage: 50,
         released: false,
         disputed: false,
+        oracle: None,
+        verified: false,
+        proof_hash: None,
     });
     milestones.push_back(Milestone {
         name: SorobanString::from_str(&env, "M2"),
         percentage: 40,
         released: false,
         disputed: false,
+        oracle: None,
+        verified: false,
+        proof_hash: None,
     });
 
     client.create_job(
@@ -189,12 +195,18 @@ fn test_zero_percentage_milestone() {
         percentage: 0,
         released: false,
         disputed: false,
+        oracle: None,
+        verified: false,
+        proof_hash: None,
     });
     milestones.push_back(Milestone {
         name: SorobanString::from_str(&env, "Full"),
         percentage: 100,
         released: false,
         disputed: false,
+        oracle: None,
+        verified: false,
+        proof_hash: None,
     });
 
     client.create_job(

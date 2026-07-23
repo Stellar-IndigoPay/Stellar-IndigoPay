@@ -8,9 +8,9 @@
 ///   - Claiming an invalid milestone index panics (new)
 ///   - Full claim flow transitions to Completed (new)
 use soroban_sdk::testutils::{Address as _, Ledger};
-use soroban_sdk::{Address, Env, String as SorobanString, Vec};
+use soroban_sdk::{Address, Env, String as SorobanString};
 
-use escrow_contract::{EscrowContractClient, JobStatus};
+use escrow_contract::JobStatus;
 
 mod common;
 

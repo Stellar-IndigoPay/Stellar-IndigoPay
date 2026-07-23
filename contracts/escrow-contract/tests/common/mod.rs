@@ -13,8 +13,8 @@ use escrow_contract::{EscrowContract, EscrowContractClient, Milestone};
 
 /// Create an escrow contract instance with a freshly-generated admin,
 /// and return the admin address + contract client.
-pub fn setup(env: &Env) -> (Address, EscrowContractClient) {
-    let cid = env.register_contract(None, EscrowContract);
+pub fn setup<'a>(env: &'a Env) -> (Address, EscrowContractClient<'a>) {
+    let cid = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(env, &cid);
     let admin = Address::generate(env);
     client.initialize(&admin);
@@ -51,6 +51,9 @@ pub fn create_simple_job(
         percentage: 100,
         released: false,
         disputed: false,
+        oracle: None,
+        verified: false,
+        proof_hash: None,
     });
     client.create_job(
         client_addr,
@@ -63,6 +66,7 @@ pub fn create_simple_job(
 }
 
 /// Return the token balance for a given address.
+#[allow(dead_code)]
 pub fn token_balance(env: &Env, token: &Address, owner: &Address) -> i128 {
     TokenClient::new(env, token).balance(owner)
 }
@@ -76,18 +80,27 @@ pub fn three_milestones(env: &Env) -> Vec<Milestone> {
         percentage: 50,
         released: false,
         disputed: false,
+        oracle: None,
+        verified: false,
+        proof_hash: None,
     });
     milestones.push_back(Milestone {
         name: SorobanString::from_str(env, "Development"),
         percentage: 30,
         released: false,
         disputed: false,
+        oracle: None,
+        verified: false,
+        proof_hash: None,
     });
     milestones.push_back(Milestone {
         name: SorobanString::from_str(env, "Testing"),
         percentage: 20,
         released: false,
         disputed: false,
+        oracle: None,
+        verified: false,
+        proof_hash: None,
     });
     milestones
 }
