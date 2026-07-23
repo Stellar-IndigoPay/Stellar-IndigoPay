@@ -8,7 +8,7 @@
 use soroban_sdk::testutils::{Address as _, Ledger};
 use soroban_sdk::{Address, Env, String as SorobanString, Vec};
 
-use escrow_contract::{EscrowContractClient, JobStatus, Milestone};
+use escrow_contract::{JobStatus, Milestone};
 
 mod common;
 

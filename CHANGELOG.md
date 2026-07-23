@@ -18,6 +18,8 @@
 
 ### Features
 
+* **contracts/backend:** add opt-in anonymous donations and signed, cached tax receipt PDFs with locked XLM/USD values
+
 * **frontend:** complete 100% i18n coverage across all locale dictionaries, pluralization, and locale-aware formatting (closes #264, #262)
   - Extract all hardcoded strings into `en.json`, `fr.json`, `es.json` with 300+ keys and full key parity
   - Enhance `useI18n()` hook in `frontend/lib/i18n.tsx` with `tPlural()` pluralization, string interpolation (`{{param}}`), and English fallback

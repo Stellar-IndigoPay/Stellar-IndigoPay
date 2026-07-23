@@ -90,14 +90,18 @@ export default function SEP0007Screen() {
       const { signedXDR, transactionHash } = signTransaction(xdr, secretKey);
       const result = await submitTransaction(signedXDR);
 
-      await addToHistory({
-        type: "sep0007",
-        address: params.destination,
-        amount: params.amount,
-        memo: params.memo,
-        timestamp: Date.now(),
-        raw: url || "",
-      });
+      try {
+        await addToHistory({
+          type: "sep0007",
+          address: params.destination,
+          amount: params.amount,
+          memo: params.memo,
+          timestamp: Date.now(),
+          raw: url || "",
+        });
+      } catch {
+        // History persistence is best-effort and should not block payments.
+      }
 
       if (params.callback) {
         const callbackUrl = new URL(params.callback);
@@ -106,8 +110,9 @@ export default function SEP0007Screen() {
       }
 
       router.replace(`/donate/success?txHash=${result.hash || transactionHash}`);
-    } catch (err: any) {
-      setError(err?.message || "Payment failed");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Payment failed";
+      setError(message);
     } finally {
       setSubmitting(false);
     }
