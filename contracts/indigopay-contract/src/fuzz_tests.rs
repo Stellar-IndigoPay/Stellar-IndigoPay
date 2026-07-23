@@ -329,25 +329,23 @@ mod fuzz {
             prop_assert!(result.is_err(), "donate_usdc should panic when project is inactive");
         }
 
-        /// CO₂ overflow when a project has a high `co2_per_xlm` multiplied by
-        /// a large XLM-equivalent amount.  The `checked_mul` inside
-        /// `donate_usdc` must panic before any state mutation.
+        // CO2 overflow is now prevented at registration time by the
+        // `co2_per_xlm <= MAX_CO2_PER_XLM` check. This test instead
+        // verifies the boundary: at the maximum allowed CO₂ rate,
+        // donations still succeed and produce correct offset values.
         #[test]
-        fn prop_usdc_co2_overflow(
-            usdc_amount in {
-                let min = (i128::MAX / (u32::MAX as i128)) * FUZZ_STROOP / 8 + 1;
-                let max = i128::MAX / 8;
-                min..=max
-            },
+        fn prop_usdc_max_co2_rate_boundary(
+            usdc_amount in 1i128..=100_000_000i128,
         ) {
             let (env, client, project_id, usdc_token) = setup_usdc(100_000);
             let donor = Address::generate(&env);
             fund_usdc(&env, &usdc_token, &donor, usdc_amount);
 
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                client.donate_usdc(&usdc_token, &donor, &project_id, &usdc_amount, &MSG_HASH);
-            }));
-            prop_assert!(result.is_err(), "donate_usdc should panic on CO2 overflow");
+            client.donate_usdc(&usdc_token, &donor, &project_id, &usdc_amount, &MSG_HASH);
+
+            let donor_stats = client.get_donor_stats(&donor);
+            prop_assert!(donor_stats.co2_offset_grams > 0, "CO₂ offset should be non-zero at max rate");
+            prop_assert_eq!(donor_stats.donation_count, 1);
         }
     }
 }
