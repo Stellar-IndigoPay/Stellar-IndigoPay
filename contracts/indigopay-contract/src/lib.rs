@@ -4,6 +4,9 @@
 // TODO(indigopay-272): migrate to #[contractevent] pattern.
 #![allow(deprecated)]
 
+#[cfg(all(test, feature = "testutils"))]
+mod fuzz_tests;
+
 #[cfg(feature = "donation")]
 pub mod donation;
 
@@ -5134,7 +5137,7 @@ mod tests {
     #[cfg(feature = "upgrade")]
     #[test]
     fn test_storage_version_initialized() {
-        let (env, _cid, client, _admin, _pid) = setup();
+        let (_env, _cid, client, _admin, _pid) = setup();
         // After initialize(), StorageVersion must equal CURRENT_STORAGE_VERSION.
         assert_eq!(client.get_storage_version(), CURRENT_STORAGE_VERSION);
     }
