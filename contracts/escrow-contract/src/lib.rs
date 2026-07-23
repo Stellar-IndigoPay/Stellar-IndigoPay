@@ -4,11 +4,11 @@
 //! Escrow contract with milestone-based fund release.
 //! Client locks funds with `create_job`, then releases them per milestone.
 
+#[cfg(feature = "oracle-escrow")]
+use soroban_sdk::BytesN;
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, token, Address, Env, String, Vec,
 };
-#[cfg(feature = "oracle-escrow")]
-use soroban_sdk::BytesN;
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
