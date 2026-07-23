@@ -1671,7 +1671,7 @@ impl IndigoPayContract {
         project_id: String,
         amount: i128,
         msg_hash: u32,
-        _anonymous: bool,
+        anonymous: bool,
     ) {
         donor.require_auth();
         require_not_paused(&env);
