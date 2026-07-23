@@ -20,6 +20,14 @@
 
 * **contracts/backend:** add opt-in anonymous donations and signed, cached tax receipt PDFs with locked XLM/USD values
 
+* **contracts:** on-chain anomaly detection with circuit breaker per project (closes #461)
+  - Configurable anomaly rules (`AnomalyMetric::DonationVolume | DonationCount | NewDonorRate | AverageDonationSize`) with sliding-window counters per project
+  - Auto-pause on rule violation with `anomaly` event for indexer/monitoring relay
+  - M-of-N admin `set_anomaly_rules` / routine `clear_anomaly` to reset counters and resume project
+  - Empty rules vector = no detection (backward compatible)
+  - Unit tests: volume below/above threshold, count below/above threshold, auto-pause + clear, no-op clear, donation rejected when paused
+  - Fuzz test: `prop_anomaly_no_false_positive_below_threshold` (proptest)
+
 * **frontend:** complete 100% i18n coverage across all locale dictionaries, pluralization, and locale-aware formatting (closes #264, #262)
   - Extract all hardcoded strings into `en.json`, `fr.json`, `es.json` with 300+ keys and full key parity
   - Enhance `useI18n()` hook in `frontend/lib/i18n.tsx` with `tPlural()` pluralization, string interpolation (`{{param}}`), and English fallback

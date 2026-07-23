@@ -342,5 +342,44 @@ mod fuzz {
             prop_assert!(donor_stats.co2_offset_grams > 0, "CO₂ offset should be non-zero at max rate");
             prop_assert_eq!(donor_stats.donation_count, 1);
         }
+
+        /// When a Volume rule is set with a given threshold, donations
+        /// whose cumulative volume stays BELOW the threshold must never
+        /// trigger the circuit breaker (no false positives).
+        #[test]
+        fn prop_anomaly_no_false_positive_below_threshold(
+            amounts in proptest::collection::vec(1i128..=1_000_000_000i128, 1..5),
+            multiplier in 2i128..=100i128,
+        ) {
+            let (env, _cid, client, _wallet, project_id, token) = setup();
+
+            // Compute the safe threshold: sum(amounts) * multiplier
+            // so the total is guaranteed below threshold.
+            let total: i128 = amounts.iter().sum();
+            let threshold = total * multiplier;
+
+            // Configure anomaly rule with the safe threshold.
+            let mut rules = soroban_sdk::Vec::new(&env);
+            rules.push_back(crate::AnomalyRule {
+                metric: crate::AnomalyMetric::DonationVolume,
+                threshold,
+                window_ledgers: 1_000_000, // large window so it never resets
+            });
+            client.set_anomaly_rules(
+                &soroban_sdk::vec![&env, client.get_admin_set().get(0).unwrap()],
+                &project_id,
+                &rules,
+            );
+
+            let donor = Address::generate(&env);
+            StellarAssetClient::new(&env, &token).mint(&donor, &(total + 10_000_000));
+
+            // Donate each amount — project must never be paused.
+            for amt in amounts {
+                client.donate_with_privacy(&token, &donor, &project_id, &amt, &MSG_HASH, &false);
+                let p = client.get_project(&project_id);
+                prop_assert!(!p.paused, "project was falsely paused at amount {amt}");
+            }
+        }
     }
 }

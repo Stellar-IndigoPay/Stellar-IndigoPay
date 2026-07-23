@@ -236,6 +236,41 @@ Badge tiers and minted NFTs are **never** downgraded or burned on refund. The re
 
 All counter decrements on refund use `checked_sub(...).expect("...underflow on refund")`, consistent with the `checked_add` convention used for donations. If a refund would drive any counter negative, the transaction panics and reverts.
 
+## Anomaly Detection — On-Chain Circuit Breaker (#461)
+
+### Problem addressed
+
+Manual admin monitoring cannot react quickly enough to coordinated attacks (e.g., Sybil attacks using many wallets each donating just below rate limits). An on-chain circuit breaker with configurable anomaly rules provides automated defense.
+
+### Trust model
+
+- **Rule configuration**: M-of-N admin signatures required (`require_admin_for_critical`). Rules are per-project.
+- **Anomaly clearance**: Single admin signature required (`require_admin_for_routine`). Clears window counters and resumes a paused project.
+- **Auto-pause**: No additional auth required — triggered automatically when a rule is violated during `process_donation`.
+- **No auto-unpause**: Admin must explicitly call `clear_anomaly` to resume. This prevents an attacker from triggering and then clearing anomalies in a single transaction.
+
+### Data model
+
+| Key                         | Type                       | Description                                      |
+| --------------------------- | -------------------------- | ------------------------------------------------ |
+| `DataKey::AnomalyRules(String)`    | `Vec<AnomalyRule>`  | Anomaly rules configured for a project           |
+| `DataKey::AnomalyWindow(String, u32)` | `AnomalyWindow`   | Sliding-window counter per (project, rule_index) |
+
+### Metrics
+
+| Metric                | Threshold unit      | Description                                      |
+| --------------------- | ------------------- | ------------------------------------------------ |
+| `DonationVolume`      | stroops (i128)      | Total donation volume in the sliding window      |
+| `DonationCount`       | count (i128)        | Number of donations in the sliding window        |
+| `NewDonorRate`        | basis points (i128) | Percentage of first-time donors (×100)           |
+| `AverageDonationSize` | stroops (i128)      | Average donation size in the sliding window      |
+
+### Known limitations
+
+- **No cross-project correlation**: Each project's rules are evaluated independently. A coordinated attack across multiple projects requires separate rules for each.
+- **No ML-based detection**: On-chain detection uses simple threshold comparison. Sophisticated patterns may evade detection.
+- **Window granularity**: The sliding window resets based on ledger sequence, not wall-clock time. Ledger times may vary slightly.
+
 ## Off-Chain Oracle Attestation for Project Impact Verification (#459)
 
 Gated behind the `impact_verification` Cargo feature (on by default; excluded from the size-checked `--no-default-features` CI build). Lets admin-authorised verifiers submit independent measurements of a project's actual CO₂ impact, which the contract compares against the project's self-reported (claimed) rate.
