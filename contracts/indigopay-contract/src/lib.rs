@@ -30,9 +30,14 @@ pub mod donation;
  *     --source alice --network testnet
  */
 use soroban_sdk::{
-    contract, contractclient, contractimpl, contracttype, symbol_short, token, Address, Bytes,
-    BytesN, Env, String, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, String,
+    Symbol, Vec,
 };
+
+#[cfg(feature = "impact")]
+use soroban_sdk::Bytes;
+#[cfg(feature = "usdc")]
+use soroban_sdk::contractclient;
 
 // ─── Oracle interface ─────────────────────────────────────────────────────────
 
@@ -40,6 +45,7 @@ use soroban_sdk::{
 /// Any on-chain contract implementing `get_price` can serve as the oracle.
 /// `get_price` returns the number of XLM stroops equivalent to 1 USDC stroop.
 /// Example: if 1 USDC = 8 XLM, return 8.
+#[cfg(feature = "usdc")]
 #[contractclient(name = "OracleClient")]
 pub trait OracleInterface {
     fn get_price(env: Env) -> i128;
@@ -169,6 +175,7 @@ pub struct ProjectMilestoneNFT {
 }
 
 /// A community voting proposal to verify a project.
+#[cfg(feature = "governance")]
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct VoteProposal {
@@ -203,6 +210,7 @@ pub struct GlobalStats {
 /// execute withdrawals sequentially, not in parallel).
 /// The `amount` field must not exceed `ProjectContractBalance(project_id, token)`
 /// at execution time — enforced by `execute_emergency_withdrawal`.
+#[cfg(feature = "emergency")]
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct EmergencyWithdrawal {
@@ -216,6 +224,7 @@ pub struct EmergencyWithdrawal {
 // ─── Donation refund (#290) ─────────────────────────────────────────────────
 
 /// Status of a refund request.
+#[cfg(feature = "refund")]
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum RefundRequestStatus {
@@ -226,6 +235,7 @@ pub enum RefundRequestStatus {
 
 /// A donor-initiated refund request. Created by `request_refund`, resolved by
 /// `approve_refund` (which atomically transfers tokens back) or `reject_refund`.
+#[cfg(feature = "refund")]
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct RefundRequest {
@@ -242,6 +252,7 @@ pub struct RefundRequest {
     pub co2_offset_grams: i128,
 }
 
+#[cfg(feature = "recurring")]
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct RecurringDonation {
@@ -261,6 +272,7 @@ pub struct RecurringDonation {
 /// in equal installments over a configurable number of ledgers, rather
 /// than all at once. The first installment is transferred immediately;
 /// subsequent installments are claimable after each interval elapses.
+#[cfg(feature = "vesting")]
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct VestingSchedule {
@@ -447,7 +459,9 @@ const DEFAULT_DONATION_RATE_LIMIT_WINDOW: u32 = 720;
 // Bounds on caller-supplied voting durations. Floor (~1 hour) keeps the
 // window long enough to be observed; ceiling (~30 days) bounds storage TTL
 // pressure and prevents proposals from sitting open indefinitely.
+#[cfg(feature = "governance")]
 const MIN_VOTING_WINDOW_LEDGERS: u32 = 720; // 1 hour @ 5s/ledger
+#[cfg(feature = "governance")]
 const MAX_VOTING_WINDOW_LEDGERS: u32 = 518_400; // 30 days @ 5s/ledger
 
 // Upper bound on co2_per_xlm at registration — prevents donate-time CO₂ overflow
@@ -460,6 +474,7 @@ const MAX_CO2_PER_XLM: u32 = 100_000;
 // downstream observers a 48-hour window to react to a pending upgrade
 // (e.g. by exiting their positions or signalling objections via
 // off-chain channels) before the WASM is swapped.
+#[cfg(feature = "upgrade")]
 const UPGRADE_TIMELOCK_LEDGERS: u32 = 34_560;
 
 // 7 days × 24 h × 3600 s ÷ 5 s per ledger = 120_960 ledgers. The minimum
@@ -467,11 +482,13 @@ const UPGRADE_TIMELOCK_LEDGERS: u32 = 34_560;
 // which `execute_emergency_withdrawal` can fire. Gives donors and observers
 // a 7-day window to object off-chain before contract-held funds are sent to
 // the new wallet.
+#[cfg(feature = "emergency")]
 const EMERGENCY_WITHDRAWAL_TIMELOCK: u32 = 120_960;
 
 // 24 hours × 3600 s / 5 s per ledger = 17 280 ledgers. The window after a
 // donation during which the donor may request a refund (subject to admin +
 // project wallet approval).
+#[cfg(feature = "refund")]
 const REFUND_COOLDOWN_LEDGERS: u32 = 17_280;
 
 /// Current storage schema version. Bump this and add a migration step in
@@ -480,6 +497,7 @@ const REFUND_COOLDOWN_LEDGERS: u32 = 17_280;
 ///
 /// v1: original schema (no version tracking)
 /// v2: Symbol-keyed storage version added (#379)
+#[cfg(feature = "upgrade")]
 const CURRENT_STORAGE_VERSION: u32 = 2;
 /// Storage key for the schema version. Uses a Symbol (not a DataKey variant)
 /// to avoid XDR codegen overhead in the slim WASM build.
@@ -3956,6 +3974,7 @@ impl IndigoPayContract {
 
     /// Read-only: returns the refund request for the given ID, or panics if
     /// not found.
+    #[cfg(feature = "refund")]
     pub fn get_refund_request(env: Env, refund_id: u32) -> RefundRequest {
         env.storage()
             .instance()
@@ -4304,6 +4323,7 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
+    #[cfg(feature = "recurring")]
     pub fn get_recurring(env: Env, donor: Address, recurring_id: u32) -> RecurringDonation {
         env.storage()
             .instance()
@@ -4311,6 +4331,7 @@ impl IndigoPayContract {
             .expect("Recurring donation not found")
     }
 
+    #[cfg(feature = "recurring")]
     pub fn get_donor_recurrings(env: Env, donor: Address) -> Vec<RecurringDonation> {
         let count_key = DataKey::DonorRecurringCount(donor.clone());
         let count: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
@@ -4573,6 +4594,7 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
+    #[cfg(feature = "recurring")]
     pub fn get_native_token(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::NativeTokenAddress)
     }
@@ -4589,9 +4611,11 @@ impl IndigoPayContract {
 ///   - The admin registers it via `IndigoPayContract::set_oracle(admin, oracle_address)`
 ///
 /// Example real oracle sources: Band Protocol, DIA, or a custom TWAP contract.
+#[cfg(feature = "usdc")]
 #[contract]
 pub struct MockOracle;
 
+#[cfg(feature = "usdc")]
 #[contractimpl]
 impl OracleInterface for MockOracle {
     fn get_price(_env: Env) -> i128 {
