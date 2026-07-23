@@ -916,6 +916,7 @@ fn process_donation(
     // Store donation record for trustless enumeration
     let donation_record = DonationRecord {
         donor: donor.clone(),
+        anonymous: false,
         project: project_id.clone(),
         amount,
         ledger: env.ledger().sequence(),
@@ -1618,7 +1619,7 @@ impl IndigoPayContract {
         project_id: String,
         amount: i128,
         msg_hash: u32,
-        anonymous: bool,
+        _anonymous: bool,
     ) {
         donor.require_auth();
         require_not_paused(&env);
@@ -1659,108 +1660,6 @@ impl IndigoPayContract {
             );
         }
 
-        let dc: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::DonationCount)
-            .unwrap_or(0);
-        let new_dc = dc.checked_add(1).expect("DonationCount overflow");
-        env.storage()
-            .instance()
-            .set(&DataKey::DonationCount, &new_dc);
-        // Store donation record for trustless enumeration
-        let donation_record = DonationRecord {
-            donor: donor.clone(),
-            anonymous,
-            project: project_id.clone(),
-            amount,
-            ledger: env.ledger().sequence(),
-            message_hash: msg_hash,
-            currency: symbol_short!("XLM"),
-        };
-        env.storage()
-            .instance()
-            .set(&DataKey::DonationRecord(dc), &donation_record);
-        if anonymous {
-            let count: u32 = env
-                .storage()
-                .instance()
-                .get(&DataKey::AnonymousDonationCount)
-                .unwrap_or(0);
-            env.storage().instance().set(
-                &DataKey::AnonymousDonationCount,
-                &count
-                    .checked_add(1)
-                    .expect("AnonymousDonationCount overflow"),
-            );
-        }
-        // Snapshot CO₂ offset for exact reversal on refund (#290).
-        env.storage()
-            .instance()
-            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
-
-        let gr: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::GlobalTotalRaised)
-            .unwrap_or(0);
-        let new_gr = gr.checked_add(amount).expect("GlobalTotalRaised overflow");
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalTotalRaised, &new_gr);
-
-        let gc: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::GlobalCO2OffsetGrams)
-            .unwrap_or(0);
-        let new_gc = gc.checked_add(co2_increment).expect("GlobalCO2 overflow");
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalCO2OffsetGrams, &new_gc);
-
-        // ── Interaction: external call happens after every effect is durable.
-        let fee_bps = read_platform_fee_bps(&env);
-        #[allow(unused_variables)]
-        let (project_amount, fee_amount) = split_fee(amount, fee_bps);
-
-        let token_client = token::Client::new(&env, &token);
-
-        // Transfer platform fee to treasury (if configured and feature enabled).
-        #[cfg(feature = "fees")]
-        if fee_amount > 0 {
-            let treasury: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::PlatformTreasury)
-                .expect("Platform treasury not configured");
-            token_client.transfer(&donor, &treasury, &fee_amount);
-        }
-
-        // Transfer remainder to project wallet.
-        token_client.transfer(&donor, &project.wallet, &project_amount);
-
-        #[cfg(feature = "fees")]
-        env.events().publish(
-            (symbol_short!("donated"), donor.clone(), project_id.clone()),
-            (amount, donor_stats.badge.clone(), msg_hash, fee_amount),
-        );
-        #[cfg(not(feature = "fees"))]
-        env.events().publish(
-            (
-                symbol_short!("donated"),
-                if anonymous {
-                    Address::from_string(&String::from_str(
-                        &env,
-                        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-                    ))
-                } else {
-                    donor.clone()
-                },
-                project_id.clone(),
-            ),
-            (amount, donor_stats.badge.clone(), msg_hash),
-        );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
