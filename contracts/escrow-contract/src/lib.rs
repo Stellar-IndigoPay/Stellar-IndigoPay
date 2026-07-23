@@ -4,6 +4,8 @@
 //! Escrow contract with milestone-based fund release.
 //! Client locks funds with `create_job`, then releases them per milestone.
 
+#[cfg(feature = "oracle-escrow")]
+use soroban_sdk::BytesN;
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, String, Vec,
 };
@@ -17,6 +19,20 @@ pub enum JobStatus {
     Disputed,
 }
 
+#[cfg(not(feature = "oracle-escrow"))]
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Milestone {
+    pub name: String,
+    pub percentage: u32, // 0-100
+    pub released: bool,
+    pub disputed: bool,
+    pub oracle: Option<Address>,
+    pub verified: bool,
+    pub proof_hash: Option<BytesN<32>>,
+}
+
+#[cfg(feature = "oracle-escrow")]
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Milestone {
