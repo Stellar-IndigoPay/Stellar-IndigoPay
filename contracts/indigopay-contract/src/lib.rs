@@ -275,6 +275,8 @@ pub enum DataKey {
     // Governance
     Proposal(String),
     HasVoted(String, Address),
+    VoteDelegation(Address),
+    DelegatedWeight(Address),
     // Per-donor per-project cumulative donation total for milestone NFT gating
     DonorProjectTotal(String, Address),
     // Per-donor per-project sliding-window donation rate limit
@@ -474,7 +476,7 @@ fn ensure_min_ttl(env: &Env, min_ledgers: u32) {
         .extend_ttl(min_ledgers, min_ledgers);
 }
 
-fn calculate_badge(total_stroops: i128) -> BadgeTier {
+pub fn calculate_badge(total_stroops: i128) -> BadgeTier {
     let xlm = total_stroops / STROOP;
     if xlm >= 2000 {
         BadgeTier::EarthGuardian
@@ -518,7 +520,7 @@ fn apply_campaign_goal_progress(project: &mut Project) -> bool {
     }
 }
 
-fn voting_weight_from_badge(badge: &BadgeTier) -> u32 {
+pub fn voting_weight_from_badge(badge: &BadgeTier) -> u32 {
     match badge {
         BadgeTier::None => 0,
         BadgeTier::Seedling => 100,

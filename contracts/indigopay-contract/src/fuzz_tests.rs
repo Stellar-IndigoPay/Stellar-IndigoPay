@@ -885,10 +885,10 @@ mod fuzz {
 
             let stats = client.get_donor_stats(&donor);
             let expected_weight = match stats.badge {
-                BadgeTier::Seedling => 1u32,
-                BadgeTier::Tree => 3u32,
-                BadgeTier::Forest => 10u32,
-                BadgeTier::EarthGuardian => 25u32,
+                BadgeTier::Seedling => 100u32,
+                BadgeTier::Tree => 141u32,
+                BadgeTier::Forest => 173u32,
+                BadgeTier::EarthGuardian => 200u32,
                 BadgeTier::None => 0u32,
             };
 
@@ -1068,7 +1068,7 @@ mod fuzz {
         client.vote_verify_project(&donor_earth, &project_id, &true);
 
         let proposal = client.get_proposal(&project_id);
-        assert_eq!(proposal.votes_for, 26u32);
+        assert_eq!(proposal.votes_for, 300u32);
     }
 
     #[test]
@@ -1536,10 +1536,10 @@ mod fuzz {
                 // Try voting
                 let badge = client.get_badge(&donor);
                 let weight = match badge {
-                    BadgeTier::Seedling => 1u32,
-                    BadgeTier::Tree => 3u32,
-                    BadgeTier::Forest => 10u32,
-                    BadgeTier::EarthGuardian => 25u32,
+                    BadgeTier::Seedling => 100u32,
+                    BadgeTier::Tree => 141u32,
+                    BadgeTier::Forest => 173u32,
+                    BadgeTier::EarthGuardian => 200u32,
                     BadgeTier::None => 0u32,
                 };
 
