@@ -183,6 +183,24 @@ pub struct ProjectMilestoneNFT {
     pub minted_at_ledger: u32,
 }
 
+/// Donation receipt NFT — a permanent, non-transferable (soulbound) record
+/// of a specific individual donation. One per (donor, donation_index) pair.
+/// Contains verifiable on-chain metadata: donor, project, amount, CO₂ offset,
+/// currency, ledger, and timestamp.
+#[cfg(feature = "receipts")]
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DonationReceipt {
+    pub donor: Address,
+    pub project_id: String,
+    pub amount: i128,
+    pub co2_offset_grams: i128,
+    pub currency: Symbol,
+    pub ledger: u32,
+    pub timestamp: u64,
+    pub donation_index: u32,
+}
+
 /// A community voting proposal to verify a project.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -4737,6 +4755,106 @@ impl IndigoPayContract {
 
     pub fn get_native_token(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::NativeTokenAddress)
+    }
+
+    // ─── Donation Receipt NFTs (#384) ───────────────────────────────────────
+
+    /// Mint a donation receipt NFT for a specific donation.
+    ///
+    /// The receipt is soulbound (non-transferable) and contains verifiable
+    /// on-chain metadata: donor, project_id, amount, CO₂ offset, currency,
+    /// ledger, and timestamp. One receipt per (donor, donation_index) pair —
+    /// calling this for an already-minted receipt panics.
+    ///
+    /// # Panics
+    /// - If the donation record at `donation_index` does not exist.
+    /// - If a receipt has already been minted for this (donor, donation_index).
+    #[cfg(feature = "receipts")]
+    pub fn mint_donation_receipt(env: Env, donor: Address, donation_index: u32) {
+        donor.require_auth();
+        require_not_paused(&env);
+
+        let record: DonationRecord = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationRecord(donation_index))
+            .expect("Donation record not found");
+
+        if record.donor != donor {
+            panic!("Donor does not match donation record");
+        }
+
+        let receipt_key = DataKey::DonationReceiptNFT(donor.clone(), donation_index);
+        if env.storage().instance().has(&receipt_key) {
+            panic!("Donation receipt already minted for this donation");
+        }
+
+        let co2_offset_grams: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationCO2Offset(donation_index))
+            .unwrap_or(0);
+
+        let receipt = DonationReceipt {
+            donor: donor.clone(),
+            project_id: record.project.clone(),
+            amount: record.amount,
+            co2_offset_grams,
+            currency: record.currency.clone(),
+            ledger: record.ledger,
+            timestamp: env.ledger().timestamp(),
+            donation_index,
+        };
+        env.storage().instance().set(&receipt_key, &receipt);
+        env.events().publish(
+            (symbol_short!("rcpt_mint"), donor, donation_index),
+            (record.project, record.amount, record.currency),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Check whether a donation receipt NFT has been minted for a given
+    /// (donor, donation_index) pair.
+    #[cfg(feature = "receipts")]
+    pub fn has_donation_receipt(env: Env, donor: Address, donation_index: u32) -> bool {
+        env.storage()
+            .instance()
+            .has(&DataKey::DonationReceiptNFT(donor, donation_index))
+    }
+
+    /// Retrieve a donation receipt NFT by donor and donation index.
+    #[cfg(feature = "receipts")]
+    pub fn get_donation_receipt(env: Env, donor: Address, donation_index: u32) -> DonationReceipt {
+        env.storage()
+            .instance()
+            .get(&DataKey::DonationReceiptNFT(donor, donation_index))
+            .expect("Donation receipt not found")
+    }
+
+    /// Admin-only: enable or disable auto-minting of donation receipt NFTs.
+    /// When enabled, `donate()` will automatically mint a receipt for every
+    /// donation without requiring a separate `mint_donation_receipt` call.
+    #[cfg(feature = "receipts")]
+    pub fn set_auto_mint_receipt(env: Env, admin: Address, enabled: bool) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::AutoMintReceipt, &enabled);
+        env.events().publish(
+            (symbol_short!("rcpt_cfg"), admin),
+            enabled,
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Read whether auto-minting of donation receipt NFTs is enabled.
+    #[cfg(feature = "receipts")]
+    pub fn get_auto_mint_receipt(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::AutoMintReceipt)
+            .unwrap_or(false)
     }
 }
 
