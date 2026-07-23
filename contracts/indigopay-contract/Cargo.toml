@@ -31,6 +31,7 @@ zk = []
 vesting = []
 fees = []
 impact = []
+ratings = []
 
 [profile.release]
 lto = true
