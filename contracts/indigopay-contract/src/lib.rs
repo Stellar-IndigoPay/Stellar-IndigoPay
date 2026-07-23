@@ -8940,7 +8940,7 @@ mod tests {
             };
             env.storage()
                 .instance()
-                .set(&DataKey::AdminSigners, &signers);
+                .set(&DataKey::AdminSet, &signers);
             env.storage()
                 .instance()
                 .set(&DataKey::AdminThreshold, &1u32);
@@ -8954,8 +8954,10 @@ mod tests {
                 total_raised: 0,
                 donor_count: 0,
                 co2_per_xlm: 100,
-                campaign_deadline: 0,
-                campaign_status: CampaignStatus::Inactive,
+                deadline_ledger: 0,
+                campaign_status: CampaignStatus::None,
+                registered_at: 0,
+                parent_project_id: None,
                 goal: 0,
             };
             env.storage()
