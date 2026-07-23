@@ -35,7 +35,7 @@ Adds configurable anomaly-detection rules with sliding-window counters that auto
 2. If the window has expired, reset counters
 3. Increment count, volume, and (if applicable) new-donor tracking
 4. Evaluate the rule threshold
-5. If violated: persist the window, auto-pause the project, emit `anomaly_detected`, and return early
+5. If violated: persist the window, auto-pause the project, emit `anomaly`, and return early
 
 ### Events
 

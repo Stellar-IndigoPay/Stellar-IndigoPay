@@ -1183,17 +1183,13 @@ fn process_donation(
     );
 
     // ── Anomaly detection: check rules AFTER external transfer completes.
-    //    Capture new-donor status BEFORE HasDonated is written (done earlier
-    //    in the Effects phase) so NewDonorRate can detect first-time donors.
-    let is_new_donor = !env
-        .storage()
-        .instance()
-        .has(&DataKey::HasDonated(project_id.clone(), donor.clone()));
-    check_anomaly_rules(env, project_id, donor, amount, is_new_donor);
+    //    asset_is_new_donor was captured before HasDonated was written in the
+    //    Effects phase, so it correctly reflects first-time donor status.
+    check_anomaly_rules(env, project_id, donor, amount, asset_is_new_donor);
 }
 
 /// Evaluate every anomaly rule for `project_id`. If any rule is violated the
-/// project is auto-paused and an `anomaly_detected` event is emitted.
+/// project is auto-paused and an `anomaly` event is emitted.
 /// Empty rules vector = no detection (backward compatible).
 fn check_anomaly_rules(
     env: &Env,
