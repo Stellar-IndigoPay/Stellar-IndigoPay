@@ -26,6 +26,7 @@
 /// formal state machine API while being compatible with Soroban's test
 /// environment.
 #[cfg(all(test, feature = "testutils"))]
+#[allow(deprecated)]
 mod fuzz {
     extern crate std;
 

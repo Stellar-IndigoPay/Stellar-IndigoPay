@@ -342,5 +342,40 @@ mod fuzz {
             prop_assert!(donor_stats.co2_offset_grams > 0, "CO₂ offset should be non-zero at max rate");
             prop_assert_eq!(donor_stats.donation_count, 1);
         }
+
+        // ── Receipt commitment uniqueness (#455) ──────────────────────────────
+
+        /// Two different donations by the same donor must produce different
+        /// receipt commitments (SHA-256 signatures). Verifies that receipt
+        /// hashes are unique per donation, not per donor.
+        #[test]
+        fn prop_receipt_commitment_unique(
+            amount_a in 100i128..=MAX_DONATION,
+            amount_b in 100i128..=MAX_DONATION,
+        ) {
+            let (env, _contract_id, client, _wallet, project_id, token) = setup();
+            let donor = Address::generate(&env);
+            mint_tokens(&env, &token, &donor, amount_a + amount_b);
+
+            client.donate(&token, &donor, &project_id, &amount_a, &MSG_HASH);
+            client.donate(&token, &donor, &project_id, &amount_b, &MSG_HASH);
+
+            let receipt_a = client.generate_receipt(&donor, &0u32);
+            let receipt_b = client.generate_receipt(&donor, &1u32);
+
+            // Different donation indices → different commitments
+            prop_assert_ne!(
+                receipt_a.contract_signature,
+                receipt_b.contract_signature,
+                "Different donations must produce unique receipt signatures"
+            );
+
+            // Both donors should be the same.
+            // Borrow through `&` because `soroban_sdk::Address` is not `Copy`
+            // — passing the owned field twice would move it on the first use
+            // and trip an `E0382` on the second.
+            prop_assert_eq!(&receipt_a.donor, &receipt_b.donor);
+            prop_assert_eq!(&receipt_a.donor, &donor);
+        }
     }
 }

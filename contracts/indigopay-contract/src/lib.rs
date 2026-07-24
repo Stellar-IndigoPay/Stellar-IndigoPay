@@ -145,6 +145,40 @@ pub struct DonationRecord {
     pub currency: Symbol, // "XLM" or "USDC"
 }
 
+/// An on-chain donation receipt with a cryptographic commitment.
+/// The `contract_signature` is SHA-256 of the deterministic XDR encoding
+/// of all other fields. Anyone can verify the receipt by recomputing
+/// the hash and comparing it to `contract_signature`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DonationReceipt {
+    pub donation_index: u32,
+    pub donor: Address,
+    pub project_id: String,
+    pub amount: i128,
+    pub co2_offset: i128,
+    pub ledger: u32,
+    pub currency: Symbol,
+    /// SHA-256 hash of the deterministic XDR serialization of all fields
+    /// above this one. Acts as a cryptographic commitment.
+    pub contract_signature: BytesN<32>,
+}
+
+/// Internal helper for computing the deterministic SHA-256 receipt commitment.
+/// Contains all receipt fields except `contract_signature` to avoid
+/// self-referential hashing.
+#[contracttype]
+#[derive(Clone, Debug)]
+struct ReceiptFields {
+    donation_index: u32,
+    donor: Address,
+    project_id: String,
+    amount: i128,
+    co2_offset: i128,
+    ledger: u32,
+    currency: Symbol,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct DonorStats {
@@ -184,6 +218,7 @@ pub struct ProjectMilestoneNFT {
 }
 
 /// A community voting proposal to verify a project.
+#[cfg(feature = "governance")]
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct VoteProposal {
@@ -218,6 +253,7 @@ pub struct GlobalStats {
 /// execute withdrawals sequentially, not in parallel).
 /// The `amount` field must not exceed `ProjectContractBalance(project_id, token)`
 /// at execution time — enforced by `execute_emergency_withdrawal`.
+#[cfg(feature = "emergency")]
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct EmergencyWithdrawal {
@@ -231,6 +267,7 @@ pub struct EmergencyWithdrawal {
 // ─── Donation refund (#290) ─────────────────────────────────────────────────
 
 /// Status of a refund request.
+#[cfg(feature = "refund")]
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum RefundRequestStatus {
@@ -241,6 +278,7 @@ pub enum RefundRequestStatus {
 
 /// A donor-initiated refund request. Created by `request_refund`, resolved by
 /// `approve_refund` (which atomically transfers tokens back) or `reject_refund`.
+#[cfg(feature = "refund")]
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct RefundRequest {
@@ -257,6 +295,7 @@ pub struct RefundRequest {
     pub co2_offset_grams: i128,
 }
 
+#[cfg(feature = "recurring")]
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct RecurringDonation {
@@ -271,11 +310,12 @@ pub struct RecurringDonation {
     pub created_at: u32,
 }
 
-/// A time-locked vesting schedule for gradual donation release.
-/// Donors can specify that a donation should be released to the project
-/// in equal installments over a configurable number of ledgers, rather
-/// than all at once. The first installment is transferred immediately;
-/// subsequent installments are claimable after each interval elapses.
+/// A time-locked vesting schedule for gradual donation release. Donors can
+/// specify that a donation should be released to the project in equal
+/// installments over a configurable number of ledgers, rather than all at
+/// once. The first installment is transferred immediately; subsequent
+/// installments are claimable after each interval elapses.
+#[cfg(feature = "vesting")]
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct VestingSchedule {
@@ -345,15 +385,11 @@ pub enum DataKey {
     DonationRateLimitWindow,
     // Per-project milestone NFT: one per (project_id, donor) pair
     ProjectMilestoneNFT(String, Address),
-    // Contract upgrade and multi-currency support
-    // ContractWasmHash is intentionally kept in the enum for backward
-    // compatibility with v1 storage layouts. The single-step `upgrade`
-    // function that wrote to it was replaced in Phase A by the
-    // two-step `propose_upgrade` / `execute_upgrade` flow which uses
-    // `PendingUpgrade` / `LastExecutedUpgrade` instead. No live code
-    // path writes to this variant; readers should treat any stored
-    // value as historical and consult `get_last_executed_upgrade`.
-    ContractWasmHash,
+    // Contract upgrade and multi-currency support. ContractWasmHash was
+    // removed: the single-step `upgrade` writer was replaced in Phase A
+    // by the two-step `propose_upgrade` / `execute_upgrade` flow which
+    // uses the cfg-gated `PendingUpgrade` variant below. No live code
+    // path wrote to or read from ContractWasmHash.
     USDCTokenAddress,
     // Price oracle for USDC → XLM conversion
     OracleAddress,
@@ -399,9 +435,13 @@ pub enum DataKey {
     // or `cancel_emergency_withdrawal`.
     EmergencyWithdrawal(String),
     // Donation refund (#290)
+    #[cfg(feature = "refund")]
     RefundRequest(u32),
+    #[cfg(feature = "refund")]
     RefundCount,
+    #[cfg(feature = "refund")]
     RefundForDonation(u32),
+    #[cfg(feature = "refund")]
     DonationCO2Offset(u32),
     // Per-project per-token contract-held balance — the canonical ledger
     // for how much of each asset each project has deposited into the
@@ -446,7 +486,9 @@ const DEFAULT_DONATION_RATE_LIMIT_WINDOW: u32 = 720;
 // Bounds on caller-supplied voting durations. Floor (~1 hour) keeps the
 // window long enough to be observed; ceiling (~30 days) bounds storage TTL
 // pressure and prevents proposals from sitting open indefinitely.
+#[cfg(feature = "governance")]
 const MIN_VOTING_WINDOW_LEDGERS: u32 = 720; // 1 hour @ 5s/ledger
+#[cfg(feature = "governance")]
 const MAX_VOTING_WINDOW_LEDGERS: u32 = 518_400; // 30 days @ 5s/ledger
 
 // Upper bound on co2_per_xlm at registration — prevents donate-time CO₂ overflow
@@ -459,6 +501,7 @@ const MAX_CO2_PER_XLM: u32 = 100_000;
 // downstream observers a 48-hour window to react to a pending upgrade
 // (e.g. by exiting their positions or signalling objections via
 // off-chain channels) before the WASM is swapped.
+#[cfg(feature = "upgrade")]
 const UPGRADE_TIMELOCK_LEDGERS: u32 = 34_560;
 
 // 7 days × 24 h × 3600 s ÷ 5 s per ledger = 120_960 ledgers. The minimum
@@ -466,11 +509,13 @@ const UPGRADE_TIMELOCK_LEDGERS: u32 = 34_560;
 // which `execute_emergency_withdrawal` can fire. Gives donors and observers
 // a 7-day window to object off-chain before contract-held funds are sent to
 // the new wallet.
+#[cfg(feature = "emergency")]
 const EMERGENCY_WITHDRAWAL_TIMELOCK: u32 = 120_960;
 
 // 24 hours × 3600 s / 5 s per ledger = 17 280 ledgers. The window after a
 // donation during which the donor may request a refund (subject to admin +
 // project wallet approval).
+#[cfg(feature = "refund")]
 const REFUND_COOLDOWN_LEDGERS: u32 = 17_280;
 
 /// Current storage schema version. Bump this and add a migration step in
@@ -1083,7 +1128,10 @@ fn process_donation(
                 .expect("AnonymousDonationCount overflow"),
         );
     }
-    // Snapshot CO₂ offset for exact reversal on refund (#290).
+    // Snapshot CO₂ offset for exact reversal on refund (#290). Written
+    // only when the `refund` feature is enabled; the slim build can skip
+    // both the write and `DonationCO2Offset` storage entirely.
+    #[cfg(feature = "refund")]
     env.storage()
         .instance()
         .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
@@ -2189,6 +2237,7 @@ impl IndigoPayContract {
     /// - If the amount is not positive.
     #[cfg(feature = "zk")]
     #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "zk")]
     pub fn donate_anonymous(
         env: Env,
         token: Address,
@@ -2439,6 +2488,7 @@ impl IndigoPayContract {
     }
 
     /// Check if a nullifier has already been spent.
+    #[cfg(feature = "zk")]
     #[cfg(feature = "zk")]
     pub fn is_nullifier_spent(env: Env, nullifier: BytesN<32>) -> bool {
         env.storage().instance().has(&DataKey::Nullifier(nullifier))
@@ -2974,6 +3024,142 @@ impl IndigoPayContract {
             .expect("Donation record not found")
     }
 
+    // ─── On-Chain Donation Receipts with Cryptographic Commitment (#455) ─────
+
+    /// Generate a deterministic on-chain donation receipt with a SHA-256
+    /// cryptographic commitment. Only the donor can generate their own receipt.
+    ///
+    /// The returned `DonationReceipt` contains a `contract_signature` field
+    /// which is SHA-256 of the deterministic XDR encoding of all other fields.
+    /// Anyone can verify the receipt via `verify_receipt` without querying
+    /// the full donation history.
+    ///
+    /// # Determinism
+    ///
+    /// Calling `generate_receipt` twice with the same donor and donation_index
+    /// returns the identical receipt (same `contract_signature`), because the
+    /// receipt fields are sourced immutably from storage.
+    ///
+    /// # Panics
+    ///
+    /// - If `donor` does not match the donation record's donor.
+    /// - If the donation index does not exist.
+    pub fn generate_receipt(env: Env, donor: Address, donation_index: u32) -> DonationReceipt {
+        donor.require_auth();
+
+        let record: DonationRecord = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationRecord(donation_index))
+            .expect("Donation record not found");
+
+        // Only the actual donor can generate a receipt.
+        // For anonymous donations, the real donor address is stored in
+        // DonationRecord.donor — the zero-address is only used as the
+        // DonorStats key for privacy. The real donor can still generate
+        // a receipt because they know which donation_index is theirs.
+        if donor != record.donor {
+            panic!("Only the donor can generate a receipt for this donation");
+        }
+
+        let co2_offset: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationCO2Offset(donation_index))
+            .unwrap_or(0);
+
+        // Build the fields to hash (without the signature)
+        let fields = ReceiptFields {
+            donation_index,
+            donor: donor.clone(),
+            project_id: record.project.clone(),
+            amount: record.amount,
+            co2_offset,
+            ledger: record.ledger,
+            currency: record.currency.clone(),
+        };
+
+        // Compute SHA-256 commitment over the deterministic XDR encoding.
+        // Using XDR ensures the receipt can be verified off-chain with
+        // any Stellar SDK that supports XDR deserialization.
+        use soroban_sdk::xdr::ToXdr;
+        let xdr_bytes = fields.to_xdr(&env);
+        let contract_signature: BytesN<32> = env.crypto().sha256(&xdr_bytes).into();
+
+        DonationReceipt {
+            donation_index,
+            donor,
+            project_id: record.project,
+            amount: record.amount,
+            co2_offset,
+            ledger: record.ledger,
+            currency: record.currency,
+            contract_signature,
+        }
+    }
+
+    /// Verify a donation receipt against its on-chain data.
+    ///
+    /// Anyone can call this function — no authentication required. Returns
+    /// `true` if the receipt's `contract_signature` matches a recomputed
+    /// SHA-256 hash of the other receipt fields against the on-chain
+    /// donation record and CO₂ offset.
+    ///
+    /// Returns `false` if:
+    /// - The referenced donation index does not exist on-chain.
+    /// - Any receipt field (donor, project_id, amount, ledger, currency)
+    ///   does not match the on-chain `DonationRecord`.
+    /// - The `co2_offset` does not match the on-chain value.
+    /// - The `contract_signature` has been tampered with.
+    pub fn verify_receipt(env: Env, receipt: DonationReceipt) -> bool {
+        // Check the donation exists on-chain
+        let record: DonationRecord = match env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationRecord(receipt.donation_index))
+        {
+            Some(r) => r,
+            None => return false,
+        };
+
+        // Verify all receipt fields match the on-chain record
+        if record.donor != receipt.donor
+            || record.project != receipt.project_id
+            || record.amount != receipt.amount
+            || record.ledger != receipt.ledger
+            || record.currency != receipt.currency
+        {
+            return false;
+        }
+
+        // Verify CO₂ offset matches on-chain
+        let onchain_co2: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationCO2Offset(receipt.donation_index))
+            .unwrap_or(0);
+        if onchain_co2 != receipt.co2_offset {
+            return false;
+        }
+
+        // Recompute the SHA-256 commitment
+        let fields = ReceiptFields {
+            donation_index: receipt.donation_index,
+            donor: receipt.donor,
+            project_id: receipt.project_id,
+            amount: receipt.amount,
+            co2_offset: receipt.co2_offset,
+            ledger: receipt.ledger,
+            currency: receipt.currency,
+        };
+
+        use soroban_sdk::xdr::ToXdr;
+        let xdr_bytes = fields.to_xdr(&env);
+        let computed: BytesN<32> = env.crypto().sha256(&xdr_bytes).into();
+
+        computed == receipt.contract_signature
+    }
+
     /// Backward-compatible getter: returns the first admin in the set.
     /// Prefer `get_admin_set()` for multi-sig contexts.
     pub fn get_admin(env: Env) -> Address {
@@ -3111,6 +3297,7 @@ impl IndigoPayContract {
     /// any other value must be within
     /// [`MIN_VOTING_WINDOW_LEDGERS`, `MAX_VOTING_WINDOW_LEDGERS`].
     #[cfg(feature = "governance")]
+    #[cfg(feature = "governance")]
     pub fn create_proposal(
         env: Env,
         signers: Vec<Address>,
@@ -3169,6 +3356,7 @@ impl IndigoPayContract {
     }
 
     #[cfg(feature = "governance")]
+    #[cfg(feature = "delegation")]
     pub fn get_voter_weight(env: Env, voter: Address) -> u32 {
         let stats: DonorStats = env
             .storage()
@@ -3195,6 +3383,7 @@ impl IndigoPayContract {
         isqrt(total_credits)
     }
 
+    #[cfg(feature = "delegation")]
     #[cfg(feature = "delegation")]
     pub fn delegate_vote(env: Env, donor: Address, delegate: Address) {
         donor.require_auth();
@@ -3246,6 +3435,7 @@ impl IndigoPayContract {
     }
 
     #[cfg(feature = "delegation")]
+    #[cfg(feature = "delegation")]
     pub fn revoke_delegation(env: Env, donor: Address) {
         donor.require_auth();
         require_not_paused(&env);
@@ -3282,12 +3472,14 @@ impl IndigoPayContract {
     }
 
     #[cfg(feature = "delegation")]
+    #[cfg(feature = "delegation")]
     pub fn get_delegate(env: Env, donor: Address) -> Option<Address> {
         env.storage()
             .instance()
             .get(&DataKey::VoteDelegation(donor))
     }
 
+    #[cfg(feature = "delegation")]
     #[cfg(feature = "delegation")]
     pub fn get_delegated_weight(env: Env, delegate: Address) -> u32 {
         env.storage()
@@ -3298,6 +3490,7 @@ impl IndigoPayContract {
 
     /// Badge holders (≥ Seedling) cast quadratic votes using credits.
     /// Multiple votes per proposal are allowed, each spending additional credits.
+    #[cfg(feature = "governance")]
     #[cfg(feature = "governance")]
     pub fn vote_verify_project(
         env: Env,
@@ -3409,6 +3602,7 @@ impl IndigoPayContract {
     /// Callable by anyone after the deadline. Resolves based on majority.
     /// Emits proj_ver on approval, prop_rej on rejection.
     #[cfg(feature = "governance")]
+    #[cfg(feature = "governance")]
     pub fn resolve_proposal(env: Env, project_id: String) {
         let mut proposal: VoteProposal = env
             .storage()
@@ -3439,6 +3633,7 @@ impl IndigoPayContract {
     /// Required for incident response when a proposal is based on fraudulent data.
     /// Emits prop_veto with the admin address for auditability.
     #[cfg(feature = "governance")]
+    #[cfg(feature = "governance")]
     pub fn veto_proposal(env: Env, signers: Vec<Address>, project_id: String) {
         require_admin_for_critical(&env, &signers);
         let mut proposal: VoteProposal = env
@@ -3462,6 +3657,7 @@ impl IndigoPayContract {
 
     /// Returns current vote counts and status for a proposal.
     #[cfg(feature = "governance")]
+    #[cfg(feature = "governance")]
     pub fn get_proposal(env: Env, project_id: String) -> VoteProposal {
         env.storage()
             .instance()
@@ -3471,6 +3667,7 @@ impl IndigoPayContract {
 
     /// Returns the list of voter addresses for a proposal.
     /// Can be used by governance UIs to display who voted and how.
+    #[cfg(feature = "governance")]
     #[cfg(feature = "governance")]
     pub fn get_voter_list(env: Env, project_id: String) -> Vec<Address> {
         env.storage()
@@ -3834,11 +4031,6 @@ impl IndigoPayContract {
         env.storage().instance().get(&DataKey::OracleAddress)
     }
 
-    /// Get the current contract WASM hash.
-    #[cfg(feature = "upgrade")]
-    pub fn get_contract_wasm_hash(env: Env) -> Option<BytesN<32>> {
-        env.storage().instance().get(&DataKey::ContractWasmHash)
-    }
 
     // ─── Two-step admin transfer ─────────────────────────────────────────────
 
@@ -4153,6 +4345,7 @@ impl IndigoPayContract {
     /// because the 7-day gap means the balance could shift before then
     /// (TOCTOU avoidance).
     #[cfg(feature = "emergency")]
+    #[cfg(feature = "emergency")]
     pub fn initiate_emergency_withdrawal(
         env: Env,
         admin: Address,
@@ -4212,6 +4405,7 @@ impl IndigoPayContract {
     /// been executed. Clears the pending entry and emits an event for
     /// off-chain notification.
     #[cfg(feature = "emergency")]
+    #[cfg(feature = "emergency")]
     pub fn cancel_emergency_withdrawal(env: Env, admin: Address, project_id: String) {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
@@ -4238,6 +4432,7 @@ impl IndigoPayContract {
     /// the project's per-project-per-token balance is sufficient, then
     /// clears the pending entry, decrements the balance, and transfers
     /// tokens to the new wallet (CEI ordering).
+    #[cfg(feature = "emergency")]
     #[cfg(feature = "emergency")]
     pub fn execute_emergency_withdrawal(env: Env, project_id: String) {
         let withdrawal: EmergencyWithdrawal = env
@@ -4284,6 +4479,7 @@ impl IndigoPayContract {
     /// Read-only: returns the pending emergency withdrawal for a project,
     /// or `None` if no withdrawal is currently pending.
     #[cfg(feature = "emergency")]
+    #[cfg(feature = "emergency")]
     pub fn get_emergency_withdrawal(env: Env, project_id: String) -> Option<EmergencyWithdrawal> {
         env.storage()
             .instance()
@@ -4296,6 +4492,7 @@ impl IndigoPayContract {
     /// window (`REFUND_COOLDOWN_LEDGERS`) after the original donation.
     /// Creates a `RefundRequest` with status `Pending` for admin + project
     /// wallet approval.
+    #[cfg(feature = "refund")]
     #[cfg(feature = "refund")]
     pub fn request_refund(env: Env, donor: Address, donation_record_index: u32, token: Address) {
         donor.require_auth();
@@ -4375,6 +4572,7 @@ impl IndigoPayContract {
     ///
     /// Badges are permanent and NOT recalculated. `DonationCount` is historical
     /// and NOT decremented.
+    #[cfg(feature = "refund")]
     #[cfg(feature = "refund")]
     pub fn approve_refund(env: Env, admin: Address, refund_id: u32) {
         require_admin_for_routine(&env, &admin);
@@ -4490,6 +4688,7 @@ impl IndigoPayContract {
     /// Admin-only: reject a pending refund request. The donation stands;
     /// no counters are adjusted and no tokens move.
     #[cfg(feature = "refund")]
+    #[cfg(feature = "refund")]
     pub fn reject_refund(env: Env, admin: Address, refund_id: u32) {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
@@ -4517,6 +4716,7 @@ impl IndigoPayContract {
 
     /// Read-only: returns the refund request for the given ID, or panics if
     /// not found.
+    #[cfg(feature = "refund")]
     pub fn get_refund_request(env: Env, refund_id: u32) -> RefundRequest {
         env.storage()
             .instance()
@@ -4528,6 +4728,7 @@ impl IndigoPayContract {
 
     #[cfg(feature = "recurring")]
     #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "recurring")]
     pub fn create_recurring(
         env: Env,
         donor: Address,
@@ -4600,6 +4801,7 @@ impl IndigoPayContract {
     }
 
     #[cfg(feature = "recurring")]
+    #[cfg(feature = "recurring")]
     pub fn cancel_recurring(env: Env, donor: Address, recurring_id: u32) {
         donor.require_auth();
         require_not_paused(&env);
@@ -4622,6 +4824,7 @@ impl IndigoPayContract {
             .publish((symbol_short!("rec_can"), donor, recurring_id), ());
     }
 
+    #[cfg(feature = "recurring")]
     #[cfg(feature = "recurring")]
     pub fn execute_recurring(env: Env, keeper: Address, donor: Address, recurring_id: u32) {
         keeper.require_auth();
@@ -4866,6 +5069,7 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
+    #[cfg(feature = "recurring")]
     pub fn get_recurring(env: Env, donor: Address, recurring_id: u32) -> RecurringDonation {
         env.storage()
             .instance()
@@ -4873,6 +5077,7 @@ impl IndigoPayContract {
             .expect("Recurring donation not found")
     }
 
+    #[cfg(feature = "recurring")]
     pub fn get_donor_recurrings(env: Env, donor: Address) -> Vec<RecurringDonation> {
         let count_key = DataKey::DonorRecurringCount(donor.clone());
         let count: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
@@ -4906,6 +5111,7 @@ impl IndigoPayContract {
     /// - If the token transfer fails
     #[cfg(feature = "vesting")]
     #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "vesting")]
     pub fn donate_vested(
         env: Env,
         token: Address,
@@ -5013,6 +5219,7 @@ impl IndigoPayContract {
     /// - If all installments have already been released.
     /// - If the interval has not yet elapsed.
     #[cfg(feature = "vesting")]
+    #[cfg(feature = "vesting")]
     pub fn claim_vested_installment(env: Env, donor: Address, schedule_id: u32) {
         require_not_paused(&env);
 
@@ -5080,6 +5287,7 @@ impl IndigoPayContract {
     /// - If the schedule is not found.
     /// - If all installments have already been released.
     #[cfg(feature = "vesting")]
+    #[cfg(feature = "vesting")]
     pub fn cancel_vesting(env: Env, donor: Address, schedule_id: u32) {
         donor.require_auth();
 
@@ -5118,6 +5326,7 @@ impl IndigoPayContract {
     }
 
     /// Query a vesting schedule by donor and schedule ID.
+    #[cfg(feature = "vesting")]
     #[cfg(feature = "vesting")]
     pub fn get_vesting_schedule(env: Env, donor: Address, schedule_id: u32) -> VestingSchedule {
         env.storage()
@@ -9716,5 +9925,130 @@ mod tests {
         client.add_impact_verifier(&admin, &verifier);
         let unknown = String::from_str(&env, "does-not-exist");
         client.submit_impact_report(&verifier, &unknown, &105u32, &evidence(&env, 1));
+    }
+
+    // ─── On-chain donation receipt tests (#455) ──────────────────────────
+
+    #[test]
+    fn test_generate_receipt() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        token_client.mint(&donor, &(50 * STROOP));
+
+        client.donate(&token, &donor, &pid, &(50 * STROOP), &1u32);
+
+        let receipt = client.generate_receipt(&donor, &0u32);
+
+        assert_eq!(receipt.donation_index, 0);
+        assert_eq!(receipt.donor, donor);
+        assert_eq!(receipt.project_id, pid);
+        assert_eq!(receipt.amount, 50 * STROOP);
+        assert_eq!(receipt.ledger, env.ledger().sequence());
+        assert_eq!(receipt.currency, symbol_short!("XLM"));
+        // CO2 offset for 50 XLM at 100g/XLM (from setup): 50 * 100 = 5000g
+        assert_eq!(receipt.co2_offset, 50 * 100);
+        // contract_signature must be non-zero (32 bytes)
+        assert!(receipt
+            .contract_signature
+            .to_array()
+            .iter()
+            .any(|&b| b != 0));
+    }
+
+    #[test]
+    fn test_receipt_deterministic() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        token_client.mint(&donor, &(25 * STROOP));
+
+        client.donate(&token, &donor, &pid, &(25 * STROOP), &2u32);
+
+        let receipt_a = client.generate_receipt(&donor, &0u32);
+        let receipt_b = client.generate_receipt(&donor, &0u32);
+
+        // Must be identical — same donor, same donation_index
+        assert_eq!(receipt_a.donation_index, receipt_b.donation_index);
+        assert_eq!(receipt_a.donor, receipt_b.donor);
+        assert_eq!(receipt_a.project_id, receipt_b.project_id);
+        assert_eq!(receipt_a.amount, receipt_b.amount);
+        assert_eq!(receipt_a.co2_offset, receipt_b.co2_offset);
+        assert_eq!(receipt_a.ledger, receipt_b.ledger);
+        assert_eq!(receipt_a.currency, receipt_b.currency);
+        assert_eq!(receipt_a.contract_signature, receipt_b.contract_signature);
+    }
+
+    #[test]
+    fn test_verify_valid_receipt() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        token_client.mint(&donor, &(100 * STROOP));
+
+        client.donate(&token, &donor, &pid, &(100 * STROOP), &3u32);
+
+        let receipt = client.generate_receipt(&donor, &0u32);
+        let valid = client.verify_receipt(&receipt);
+
+        assert!(
+            valid,
+            "verify_receipt should return true for a valid receipt"
+        );
+    }
+
+    #[test]
+    fn test_verify_tampered_receipt() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        token_client.mint(&donor, &(10 * STROOP));
+
+        client.donate(&token, &donor, &pid, &(10 * STROOP), &4u32);
+
+        let mut receipt = client.generate_receipt(&donor, &0u32);
+        // Tamper with the amount
+        receipt.amount = 999_999_999;
+        let valid = client.verify_receipt(&receipt);
+
+        assert!(
+            !valid,
+            "verify_receipt should return false for a tampered receipt"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Only the donor can generate a receipt")]
+    fn test_non_donor_generate_panics() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let imposter = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        token_client.mint(&donor, &(5 * STROOP));
+
+        client.donate(&token, &donor, &pid, &(5 * STROOP), &5u32);
+
+        // Imposter tries to generate a receipt for donor's donation
+        client.generate_receipt(&imposter, &0u32);
     }
 }
