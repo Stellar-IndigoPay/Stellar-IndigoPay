@@ -336,6 +336,8 @@ pub enum DataKey {
     // Governance
     Proposal(String),
     HasVoted(String, Address),
+    VoteDelegation(Address),
+    DelegatedWeight(Address),
     // Per-donor per-project cumulative donation total for milestone NFT gating
     DonorProjectTotal(String, Address),
     // Per-donor per-project sliding-window donation rate limit
@@ -802,62 +804,7 @@ fn ensure_min_ttl(env: &Env, min_ledgers: u32) {
         .extend_ttl(min_ledgers, min_ledgers);
 }
 
-// ─── Storage versioning & migration (#379) ────────────────────────────────
-
-/// Run pending storage migrations sequentially from the current version to
-/// `CURRENT_STORAGE_VERSION`. Called automatically by `execute_upgrade()` after
-/// the WASM is swapped, before any other contract function can be invoked.
-///
-/// Each migration step function (e.g., `migrate_v1_to_v2`) is responsible for
-/// transforming old storage layouts to the new schema. After each step, the
-/// `StorageVersion` key is updated so the migration is never applied twice.
-#[cfg(feature = "upgrade")]
-fn migrate(env: &Env) {
-    let current: u32 = env
-        .storage()
-        .instance()
-        .get(&STORAGE_VERSION_KEY)
-        .unwrap_or(1);
-
-    if current < 2 {
-        migrate_v1_to_v2(env);
-        env.storage().instance().set(&STORAGE_VERSION_KEY, &2u32);
-    }
-    // if current < 3 { migrate_v2_to_v3(env); ... }
-
-    // After all migrations, StorageVersion must equal CURRENT_STORAGE_VERSION.
-    // If a deployer forgot to bump CURRENT_STORAGE_VERSION after adding a
-    // migration, this assertion catches it at upgrade time.
-    let final_version: u32 = env
-        .storage()
-        .instance()
-        .get(&STORAGE_VERSION_KEY)
-        .unwrap_or(1);
-    if final_version != CURRENT_STORAGE_VERSION {
-        panic!(
-            "Migration incomplete: at version {} but target is {}",
-            final_version, CURRENT_STORAGE_VERSION
-        );
-    }
-}
-
-/// v1 → v2: No data transformation needed.
-///
-/// Storage keys and struct layouts are backward-compatible from v1 to v2.
-/// This empty migration exists to establish the migration framework pattern.
-/// When the first real schema change is introduced, replace this with actual
-/// data transformations that rename keys, restructure values, or backfill
-/// missing entries.
-#[cfg(feature = "upgrade")]
-fn migrate_v1_to_v2(_env: &Env) {
-    // Intentionally empty — v1 data is v2-compatible.
-    // Example pattern for a real migration:
-    //   let old_value = env.storage().instance().get(&OldKey);
-    //   env.storage().instance().set(&NewKey, &transformed_value);
-    //   env.storage().instance().remove(&OldKey);
-}
-
-pub fn calculate_badge(total_stroops: i128) -> BadgeTier {
+fn calculate_badge(total_stroops: i128) -> BadgeTier {
     let xlm = total_stroops / STROOP;
     if xlm >= 2000 {
         BadgeTier::EarthGuardian

@@ -40,11 +40,8 @@ jobs:
       - name: Run tests
         run: "cargo test --features testutils --workspace -- --skip fuzz"
 
-      - name: Build WASM (slim)
-        run: cargo build --workspace --target wasm32v1-none --release --no-default-features
-
-      - name: Install wasm-opt
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq binaryen
+      - name: Build WASM
+        run: cargo build --workspace --target wasm32v1-none --release
 
       - name: Check WASM size
         run: |
@@ -64,7 +61,7 @@ jobs:
     timeout-minutes: 15
     defaults:
       run:
-        working-directory: contracts
+        working-directory: contracts/indigopay-contract
     steps:
       - uses: actions/checkout@v4
 
@@ -75,7 +72,7 @@ jobs:
           components: llvm-tools-preview
 
       - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
+        run: cargo install --locked cargo-tarpaulin
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -83,10 +80,38 @@ jobs:
           workspaces: contracts
 
       - name: Run coverage
-        run: cargo tarpaulin --config indigopay-contract/.tarpaulin.toml --features testutils --out Html --out Lcov -- --skip fuzz
+        run: cargo tarpaulin --config .tarpaulin.toml --features testutils --out Html --out Lcov -- --skip fuzz
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: contracts/indigopay-contract/coverage/
+  verification:
+    name: Formal Verification (Kani)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts/indigopay-contract/verification/kani
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts/indigopay-contract/verification/kani
+
+      - name: Run Kani verification
+        run: cargo kani --release
+
+      - name: Upload verification report
+        uses: actions/upload-artifact@v4
+        with:
+          name: kani-verification-report
+          path: ./target/kani

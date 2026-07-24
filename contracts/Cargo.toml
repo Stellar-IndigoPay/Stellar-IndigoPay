@@ -1,5 +1,5 @@
 [workspace]
-members = ["indigopay-contract", "escrow-contract", "oracle-contract", "attestation-contract"]
+members = ["indigopay-contract", "escrow-contract", "oracle-contract", "attestation-contract", "tests"]
 resolver = "2"
 
 [profile.release]

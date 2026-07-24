@@ -1,0 +1,11 @@
+[package]
+name = "contracts-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dev-dependencies]
+soroban-sdk = { version = "27.0.0", features = ["testutils"] }
+indigopay-contract = { path = "../indigopay-contract" }
+oracle-contract = { path = "../oracle-contract" }
+escrow-contract = { path = "../escrow-contract" }
