@@ -145,6 +145,40 @@ pub struct DonationRecord {
     pub currency: Symbol, // "XLM" or "USDC"
 }
 
+/// An on-chain donation receipt with a cryptographic commitment.
+/// The `contract_signature` is SHA-256 of the deterministic XDR encoding
+/// of all other fields. Anyone can verify the receipt by recomputing
+/// the hash and comparing it to `contract_signature`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DonationReceipt {
+    pub donation_index: u32,
+    pub donor: Address,
+    pub project_id: String,
+    pub amount: i128,
+    pub co2_offset: i128,
+    pub ledger: u32,
+    pub currency: Symbol,
+    /// SHA-256 hash of the deterministic XDR serialization of all fields
+    /// above this one. Acts as a cryptographic commitment.
+    pub contract_signature: BytesN<32>,
+}
+
+/// Internal helper for computing the deterministic SHA-256 receipt commitment.
+/// Contains all receipt fields except `contract_signature` to avoid
+/// self-referential hashing.
+#[contracttype]
+#[derive(Clone, Debug)]
+struct ReceiptFields {
+    donation_index: u32,
+    donor: Address,
+    project_id: String,
+    amount: i128,
+    co2_offset: i128,
+    ledger: u32,
+    currency: Symbol,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct DonorStats {
@@ -2972,6 +3006,138 @@ impl IndigoPayContract {
             .instance()
             .get(&DataKey::DonationRecord(index))
             .expect("Donation record not found")
+    }
+
+    // ─── On-Chain Donation Receipts with Cryptographic Commitment (#455) ─────
+
+    /// Generate a deterministic on-chain donation receipt with a SHA-256
+    /// cryptographic commitment. Only the donor can generate their own receipt.
+    ///
+    /// The returned `DonationReceipt` contains a `contract_signature` field
+    /// which is SHA-256 of the deterministic XDR encoding of all other fields.
+    /// Anyone can verify the receipt via `verify_receipt` without querying
+    /// the full donation history.
+    ///
+    /// # Determinism
+    ///
+    /// Calling `generate_receipt` twice with the same donor and donation_index
+    /// returns the identical receipt (same `contract_signature`), because the
+    /// receipt fields are sourced immutably from storage.
+    ///
+    /// # Panics
+    ///
+    /// - If `donor` does not match the donation record's donor.
+    /// - If the donation index does not exist.
+    pub fn generate_receipt(env: Env, donor: Address, donation_index: u32) -> DonationReceipt {
+        donor.require_auth();
+
+        let record: DonationRecord = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationRecord(donation_index))
+            .expect("Donation record not found");
+
+        // Only the actual donor can generate a receipt.
+        // For anonymous donations, the real donor address is stored in
+        // DonationRecord.donor — the zero-address is only used as the
+        // DonorStats key for privacy. The real donor can still generate
+        // a receipt because they know which donation_index is theirs.
+        if donor != record.donor {
+            panic!("Only the donor can generate a receipt for this donation");
+        }
+
+        let co2_offset: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationCO2Offset(donation_index))
+            .unwrap_or(0);
+
+        // Build the fields to hash (without the signature)
+        let fields = ReceiptFields {
+            donation_index,
+            donor: donor.clone(),
+            project_id: record.project.clone(),
+            amount: record.amount,
+            co2_offset,
+            ledger: record.ledger,
+            currency: record.currency.clone(),
+        };
+
+        // Compute SHA-256 commitment over the deterministic XDR encoding.
+        // Using XDR ensures the receipt can be verified off-chain with
+        // any Stellar SDK that supports XDR deserialization.
+        use soroban_sdk::xdr::ToXdr;
+        let xdr_bytes = fields.to_xdr(&env);
+        let contract_signature: BytesN<32> = env.crypto().sha256(&xdr_bytes).into();
+
+        DonationReceipt {
+            donation_index,
+            donor,
+            project_id: record.project,
+            amount: record.amount,
+            co2_offset,
+            ledger: record.ledger,
+            currency: record.currency,
+            contract_signature,
+        }
+    }
+
+    /// Verify a donation receipt against its on-chain data.
+    ///
+    /// Anyone can call this function — no authentication required. Returns
+    /// `true` if the receipt's `contract_signature` matches a recomputed
+    /// SHA-256 hash of the other receipt fields against the on-chain
+    /// donation record and CO₂ offset.
+    ///
+    /// Returns `false` if:
+    /// - The referenced donation index does not exist on-chain.
+    /// - Any receipt field (donor, project_id, amount, ledger, currency)
+    ///   does not match the on-chain `DonationRecord`.
+    /// - The `co2_offset` does not match the on-chain value.
+    /// - The `contract_signature` has been tampered with.
+    pub fn verify_receipt(env: Env, receipt: DonationReceipt) -> bool {
+        // Check the donation exists on-chain
+        let record: DonationRecord = match env.storage().instance().get(&DataKey::DonationRecord(receipt.donation_index)) {
+            Some(r) => r,
+            None => return false,
+        };
+
+        // Verify all receipt fields match the on-chain record
+        if record.donor != receipt.donor
+            || record.project != receipt.project_id
+            || record.amount != receipt.amount
+            || record.ledger != receipt.ledger
+            || record.currency != receipt.currency
+        {
+            return false;
+        }
+
+        // Verify CO₂ offset matches on-chain
+        let onchain_co2: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationCO2Offset(receipt.donation_index))
+            .unwrap_or(0);
+        if onchain_co2 != receipt.co2_offset {
+            return false;
+        }
+
+        // Recompute the SHA-256 commitment
+        let fields = ReceiptFields {
+            donation_index: receipt.donation_index,
+            donor: receipt.donor,
+            project_id: receipt.project_id,
+            amount: receipt.amount,
+            co2_offset: receipt.co2_offset,
+            ledger: receipt.ledger,
+            currency: receipt.currency,
+        };
+
+        use soroban_sdk::xdr::ToXdr;
+        let xdr_bytes = fields.to_xdr(&env);
+        let computed: BytesN<32> = env.crypto().sha256(&xdr_bytes).into();
+
+        computed == receipt.contract_signature
     }
 
     /// Backward-compatible getter: returns the first admin in the set.
@@ -9716,5 +9882,120 @@ mod tests {
         client.add_impact_verifier(&admin, &verifier);
         let unknown = String::from_str(&env, "does-not-exist");
         client.submit_impact_report(&verifier, &unknown, &105u32, &evidence(&env, 1));
+    }
+
+    // ─── On-chain donation receipt tests (#455) ──────────────────────────
+
+    #[test]
+    fn test_generate_receipt() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        token_client.mint(&donor, &(50 * STROOP));
+
+        client.donate(&token, &donor, &pid, &(50 * STROOP), &1u32);
+
+        let receipt = client.generate_receipt(&donor, &0u32);
+
+        assert_eq!(receipt.donation_index, 0);
+        assert_eq!(receipt.donor, donor);
+        assert_eq!(receipt.project_id, pid);
+        assert_eq!(receipt.amount, 50 * STROOP);
+        assert_eq!(receipt.ledger, env.ledger().sequence());
+        assert_eq!(receipt.currency, symbol_short!("XLM"));
+        // CO2 offset for 50 XLM at 100g/XLM (from setup): 50 * 100 = 5000g
+        assert_eq!(receipt.co2_offset, 50 * 100);
+        // contract_signature must be non-zero (32 bytes)
+        assert!(receipt.contract_signature.to_array().iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn test_receipt_deterministic() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        token_client.mint(&donor, &(25 * STROOP));
+
+        client.donate(&token, &donor, &pid, &(25 * STROOP), &2u32);
+
+        let receipt_a = client.generate_receipt(&donor, &0u32);
+        let receipt_b = client.generate_receipt(&donor, &0u32);
+
+        // Must be identical — same donor, same donation_index
+        assert_eq!(receipt_a.donation_index, receipt_b.donation_index);
+        assert_eq!(receipt_a.donor, receipt_b.donor);
+        assert_eq!(receipt_a.project_id, receipt_b.project_id);
+        assert_eq!(receipt_a.amount, receipt_b.amount);
+        assert_eq!(receipt_a.co2_offset, receipt_b.co2_offset);
+        assert_eq!(receipt_a.ledger, receipt_b.ledger);
+        assert_eq!(receipt_a.currency, receipt_b.currency);
+        assert_eq!(receipt_a.contract_signature, receipt_b.contract_signature);
+    }
+
+    #[test]
+    fn test_verify_valid_receipt() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        token_client.mint(&donor, &(100 * STROOP));
+
+        client.donate(&token, &donor, &pid, &(100 * STROOP), &3u32);
+
+        let receipt = client.generate_receipt(&donor, &0u32);
+        let valid = client.verify_receipt(&receipt);
+
+        assert!(valid, "verify_receipt should return true for a valid receipt");
+    }
+
+    #[test]
+    fn test_verify_tampered_receipt() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        token_client.mint(&donor, &(10 * STROOP));
+
+        client.donate(&token, &donor, &pid, &(10 * STROOP), &4u32);
+
+        let mut receipt = client.generate_receipt(&donor, &0u32);
+        // Tamper with the amount
+        receipt.amount = 999_999_999;
+        let valid = client.verify_receipt(&receipt);
+
+        assert!(!valid, "verify_receipt should return false for a tampered receipt");
+    }
+
+    #[test]
+    #[should_panic(expected = "Only the donor can generate a receipt")]
+    fn test_non_donor_generate_panics() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let imposter = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        token_client.mint(&donor, &(5 * STROOP));
+
+        client.donate(&token, &donor, &pid, &(5 * STROOP), &5u32);
+
+        // Imposter tries to generate a receipt for donor's donation
+        client.generate_receipt(&imposter, &0u32);
     }
 }
