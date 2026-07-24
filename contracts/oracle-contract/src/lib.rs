@@ -445,7 +445,7 @@ impl SimpleOracle {
             .publish((symbol_short!("stake_wdr"), reporter.clone()), amount);
 
         token::Client::new(&env, &stake_token).transfer(
-            env.current_contract_address(),
+            &env.current_contract_address(),
             &reporter,
             &amount,
         );
@@ -503,7 +503,7 @@ impl SimpleOracle {
         );
 
         token::Client::new(&env, &stake_token).transfer(
-            env.current_contract_address(),
+            &env.current_contract_address(),
             &treasury,
             &amount,
         );
