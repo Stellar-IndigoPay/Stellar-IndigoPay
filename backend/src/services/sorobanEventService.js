@@ -35,6 +35,7 @@ const { registry } = require("./metrics");
 const { Counter, Gauge } = require("prom-client");
 const { v4: uuid } = require("uuid");
 const { computeBadges } = require("./store");
+const { insertEvent, processEvent } = require("./projectionEngine");
 
 // ── Configuration ───────────────────────────────────────────────────────────
 
@@ -378,6 +379,62 @@ async function handleDonated(evt, topics, value) {
 
     await client.query("COMMIT");
 
+    // ── Event sourcing: append the immutable event, then update projections ──
+    // The `donations`/`projects`/`profiles` writes above remain the
+    // authoritative row store for endpoints that join on `donations`, while
+    // the projection tables become the canonical read models for the
+    // leaderboard, project stats, donor history, and global stats endpoints.
+    // Appending the event makes the Soroban contract the single source of
+    // truth and lets any projection be rebuilt deterministically.
+    try {
+      const projectStats = await pool.query(
+        "SELECT raised_xlm, co2_offset_kg FROM projects WHERE id = $1",
+        [projectId],
+      );
+      const raisedXlm = Number(
+        projectStats.rows[0] ? projectStats.rows[0].raised_xlm || 0 : 0,
+      );
+      const co2Kg = Number(
+        projectStats.rows[0] ? projectStats.rows[0].co2_offset_kg || 0 : 0,
+      );
+      const co2OffsetKg = raisedXlm > 0 && co2Kg > 0
+        ? (xlmAmount * co2Kg) / raisedXlm
+        : 0;
+
+      const donationEvent = {
+        event_type: "DonationRecorded",
+        aggregate_id: projectId,
+        event_data: {
+          donorAddress: donor,
+          projectId,
+          amountXLM: xlmAmount,
+          amount: xlmAmount,
+          currency: "XLM",
+          message: msgHash != null ? `msg#${msgHash}` : null,
+          co2OffsetKg,
+          projectsSupported,
+          transactionHash: txHash || "soroban-" + donationId,
+        },
+        soroban_ledger: ledger,
+        transaction_hash: txHash || "soroban-" + donationId,
+      };
+
+      await insertEvent(donationEvent);
+      await processEvent(donationEvent);
+    } catch (projErr) {
+      // Projection failure must not fail the donation commit (which already
+      // succeeded). The admin can rebuild projections from the event store.
+      logger.error(
+        {
+          event: "soroban_events_projection_error",
+          err: projErr.message,
+          projectId,
+          txHash,
+        },
+        "Failed to update projections from donation event",
+      );
+    }
+
     logger.info(
       {
         event: "soroban_events_donated_processed",
@@ -434,7 +491,249 @@ async function handleProjReg(evt, topics, value) {
 }
 
 /**
- * Handle an `nft_mint` event — Impact NFT minted.
+ * Handle a `rec_cr` event — recurring donation created.
+ * Topics: [symbol("rec_cr"), donor_address, project_id_string]
+ * Value: [recurring_id, amount, currency, interval_ledgers, keeper_incentive, msg_hash]
+ */
+async function handleRecCr(evt, topics, value) {
+  const donor = topics[1] || "";
+  const projectId = topics[2] || "";
+  
+  if (!Array.isArray(value) || value.length < 5) {
+    logger.warn({ event: "soroban_events_rec_cr_invalid_value", value }, "Invalid value format for rec_cr event");
+    return { action: "skipped", reason: "invalid_value" };
+  }
+
+  const recurringId = Number(value[0]);
+  const amountStroops = String(value[1]);
+  const currency = String(value[2]);
+  const intervalLedgers = Number(value[3]);
+  const keeperIncentiveStroops = String(value[4]);
+
+  const amount = parseFloat(amountStroops) / 10_000_000;
+  const keeperIncentive = parseFloat(keeperIncentiveStroops) / 10_000_000;
+  const intervalSeconds = intervalLedgers * 5;
+  const nextExecutionAt = new Date(Date.now() + intervalSeconds * 1000);
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Insert or update recurring donation
+    await client.query(
+      `INSERT INTO recurring_donations 
+         (donor_address, recurring_id, project_id, amount, currency, interval_seconds, next_execution_at, keeper_incentive, active, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, NOW(), NOW())
+       ON CONFLICT (donor_address, recurring_id) DO UPDATE SET
+         project_id = EXCLUDED.project_id,
+         amount = EXCLUDED.amount,
+         currency = EXCLUDED.currency,
+         interval_seconds = EXCLUDED.interval_seconds,
+         next_execution_at = EXCLUDED.next_execution_at,
+         keeper_incentive = EXCLUDED.keeper_incentive,
+         active = TRUE,
+         updated_at = NOW()`,
+      [donor, recurringId, projectId, amount, currency, intervalSeconds, nextExecutionAt, keeperIncentive]
+    );
+
+    await client.query("COMMIT");
+    logger.info(
+      { event: "soroban_events_rec_cr_processed", donor, recurringId, projectId, amount, currency },
+      "Recurring donation creation indexed successfully"
+    );
+    return { action: "inserted", donor, recurringId };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Handle a `rec_can` event — recurring donation cancelled.
+ * Topics: [symbol("rec_can"), donor_address, recurring_id]
+ * Value: ()
+ */
+async function handleRecCan(evt, topics, value) {
+  const donor = topics[1] || "";
+  const recurringId = Number(topics[2]);
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    await client.query(
+      `UPDATE recurring_donations
+       SET active = FALSE,
+           updated_at = NOW()
+       WHERE donor_address = $1 AND recurring_id = $2`,
+      [donor, recurringId]
+    );
+
+    await client.query("COMMIT");
+    logger.info(
+      { event: "soroban_events_rec_can_processed", donor, recurringId },
+      "Recurring donation cancellation indexed successfully"
+    );
+    return { action: "cancelled", donor, recurringId };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Handle a `rec_exec` event — recurring donation executed.
+ * Topics: [symbol("rec_exec"), donor_address, recurring_id]
+ * Value: [keeper, amount, currency, next_execution_ledger]
+ */
+async function handleRecExec(evt, topics, value) {
+  const donor = topics[1] || "";
+  const recurringId = Number(topics[2]);
+  const txHash = evt.txHash || "";
+
+  if (!Array.isArray(value) || value.length < 3) {
+    logger.warn({ event: "soroban_events_rec_exec_invalid_value", value }, "Invalid value format for rec_exec event");
+    return { action: "skipped", reason: "invalid_value" };
+  }
+
+  const keeper = String(value[0]);
+  const amountStroops = String(value[1]);
+  const currency = String(value[2]);
+  const nextExecutionLedger = Number(value[3]);
+
+  const xlmAmount = parseFloat(amountStroops) / 10_000_000;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // 1. Lookup recurring donation configuration to get project_id and interval_seconds
+    const recurringRes = await client.query(
+      "SELECT project_id, interval_seconds FROM recurring_donations WHERE donor_address = $1 AND recurring_id = $2",
+      [donor, recurringId]
+    );
+
+    if (recurringRes.rows.length === 0) {
+      logger.warn(
+        { event: "soroban_events_rec_exec_config_not_found", donor, recurringId },
+        "Recurring donation config not found in DB - skipping execution indexing"
+      );
+      await client.query("ROLLBACK");
+      return { action: "skipped", reason: "config_not_found" };
+    }
+
+    const { project_id: projectId, interval_seconds: intervalSeconds } = recurringRes.rows[0];
+
+    // 2. Dedup by transaction hash to avoid duplicate recording
+    if (txHash) {
+      const existing = await client.query(
+        "SELECT id FROM donations WHERE transaction_hash = $1",
+        [txHash]
+      );
+      if (existing.rows.length > 0) {
+        logger.debug(
+          { event: "soroban_events_rec_exec_skipped", txHash, projectId },
+          "Recurring donation already recorded - skipping duplicate event"
+        );
+        await client.query("ROLLBACK");
+        return { action: "skipped", reason: "duplicate" };
+      }
+    }
+
+    const donationId = uuid();
+
+    // 3. Insert donation record
+    await client.query(
+      `INSERT INTO donations (id, project_id, donor_address, amount_xlm, amount, currency, transaction_hash, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+      [donationId, projectId, donor, xlmAmount, xlmAmount, currency, txHash || "soroban-" + donationId]
+    );
+
+    // 4. Update project raised_xlm and donor_count
+    await client.query(
+      `UPDATE projects
+       SET raised_xlm = raised_xlm + $1,
+           donor_count = (SELECT COUNT(DISTINCT donor_address) FROM donations WHERE project_id = $2),
+           updated_at = NOW()
+       WHERE id = $2`,
+      [xlmAmount, projectId]
+    );
+
+    // 5. Update donor profile
+    const profileResult = await client.query(
+      "SELECT total_donated_xlm FROM profiles WHERE public_key = $1",
+      [donor]
+    );
+    const prevTotal = profileResult.rows[0]
+      ? parseFloat(profileResult.rows[0].total_donated_xlm || "0")
+      : 0;
+    const newTotal = prevTotal + xlmAmount;
+
+    const projectsSupportedResult = await client.query(
+      "SELECT COUNT(DISTINCT project_id) AS count FROM donations WHERE donor_address = $1",
+      [donor]
+    );
+    const projectsSupported =
+      parseInt(projectsSupportedResult.rows[0].count, 10) || 1;
+
+    const badges = computeBadges(newTotal);
+
+    await client.query(
+      `INSERT INTO profiles (public_key, total_donated_xlm, projects_supported, badges, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, NOW(), NOW())
+       ON CONFLICT (public_key) DO UPDATE SET
+         total_donated_xlm = EXCLUDED.total_donated_xlm,
+         projects_supported = EXCLUDED.projects_supported,
+         badges = EXCLUDED.badges,
+         updated_at = NOW()`,
+      [donor, newTotal.toFixed(7), projectsSupported, JSON.stringify(badges)]
+    );
+
+    // 6. Update recurring donation next execution timestamp
+    const nextExecutionAt = new Date(Date.now() + intervalSeconds * 1000);
+    await client.query(
+      `UPDATE recurring_donations
+       SET next_execution_at = $1,
+           updated_at = NOW()
+       WHERE donor_address = $2 AND recurring_id = $3`,
+      [nextExecutionAt, donor, recurringId]
+    );
+
+    await client.query("COMMIT");
+
+    logger.info(
+      { event: "soroban_events_rec_exec_processed", donationId, donor, recurringId, projectId, amount: xlmAmount, keeper, txHash },
+      "Recurring donation execution processed and recorded successfully"
+    );
+
+    // Emit WebSocket event for real-time frontend updates
+    if (io) {
+      io.emit("newDonation", {
+        projectId,
+        donorAddress: donor,
+        amountXLM: xlmAmount,
+        amount: xlmAmount,
+        currency,
+        txHash: txHash || "soroban-" + donationId,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    return { action: "executed", donationId };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Handle an nft_mint event — Impact NFT minted.
  * Topics: [symbol("nft_mint"), donor_address]
  * Value: badge_tier (BadgeTier enum)
  */
@@ -636,6 +935,9 @@ const HANDLERS = {
   prop_rej: handlePropRej,
   prop_veto: handlePropVeto,
   prop_new: handlePropNew,
+  rec_cr: handleRecCr,
+  rec_can: handleRecCan,
+  rec_exec: handleRecExec,
   // Events that are logged only:
   deact_all: handleOtherEvent,
   co2_rate: handleOtherEvent,

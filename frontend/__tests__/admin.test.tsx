@@ -48,7 +48,10 @@ jest.mock("@/lib/api", () => ({
   fetchDeadLetterWebhooks: (...args: unknown[]) => mockFetchDeadLetterWebhooks(...args),
   replayWebhookDelivery: jest.fn(),
   replayAllWebhookDeliveries: jest.fn(),
-  fetchWebhookDeliveries: (...args: unknown[]) => mockFetchWebhookDeliveries(...args),
+  listAdminMatches: jest.fn().mockResolvedValue([]),
+  createAdminMatch: jest.fn(),
+  updateAdminMatch: jest.fn(),
+  deleteAdminMatch: jest.fn(),
 }));
 
 describe("AdminIndex - Queue Monitoring", () => {

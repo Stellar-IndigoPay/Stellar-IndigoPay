@@ -106,6 +106,153 @@ If Redis is unreachable the rate limiter enters **degraded mode**:
   with the configured limit.
 - A warning is logged for observability.
 
+### Distributed Rate Limiting (Multi-Node)
+
+When deploying across multiple backend pods, the API supports **sharded Redis
+rate limiting** with consistent hashing to prevent a single Redis instance
+from becoming a throughput bottleneck.
+
+**How it works:**
+
+1. Set `REDIS_URLS` to a comma-separated list of Redis instance URLs.
+2. Rate limit keys (e.g. `ratelimit:sw:10.0.0.1:POST:/api/donations`) are
+   hashed and routed to a specific Redis shard using a consistent hash ring.
+3. The same key always maps to the same shard — even when pods scale up or
+   down — so rate limit state is never split.
+4. Adding or removing a Redis instance redistributes approximately `1/N`
+   of keys (the consistent hashing property).
+
+**Configuration:**
+
+```bash
+# Single Redis (current setup, backward compatible):
+REDIS_URL=redis://localhost:6379
+
+# Sharded Redis (for multi-node scaling):
+REDIS_URLS=redis://redis-0:6379,redis://redis-1:6379,redis://redis-2:6379
+```
+
+**Prometheus metrics:**
+
+| Metric | Type | Description |
+| ------ | ---- | ----------- |
+| `indigopay_ratelimit_shard_requests_total` | Counter | Rate limit decisions per shard, labelled by `shard` and `decision` (allowed, denied) |
+| `indigopay_ratelimit_shard_keys` | Gauge | Approximate number of rate limit keys per shard |
+
+**Graceful degradation:** If one Redis shard becomes unavailable, only rate
+limiting for keys mapped to that shard is affected. Requests for other shards
+continue to be rate-limited normally.
+
+---
+
+## Response Caching
+
+The API uses a Redis-backed response cache on expensive read endpoints to reduce database pressure and improve p99 latency. Cache entries are automatically invalidated when the underlying data changes.
+
+### Cache headers
+
+Every cached response includes:
+
+| Header          | Description                                                    |
+| --------------- | -------------------------------------------------------------- |
+| `X-Cache`       | `HIT` — served from cache, `MISS` — computed fresh, `COALESCED` — shared with an in-flight request |
+| `Cache-Control` | `public, max-age=<ttl>, stale-while-revalidate=<2x ttl>`       |
+
+### Cache key patterns
+
+| Endpoint                       | Cache Key Pattern                          | TTL  |
+| ------------------------------ | ------------------------------------------ | ---- |
+| `GET /api/v1/projects`         | `cache:v1:projects:list:<params_hash>`     | 120s |
+| `GET /api/v1/projects/:id`     | `cache:v1:projects:detail:<id>`            | 300s |
+| `GET /api/v1/leaderboard`      | `cache:v1:leaderboard:<params_hash>`       | 60s  |
+| `GET /api/v1/stats/global`     | `cache:v1:stats:global`                    | 300s |
+| `GET /api/v1/impact/global`    | `cache:v1:impact:global`                   | 300s |
+| `GET /api/v1/impact/project/:id` | `cache:v1:impact:project:<id>`          | 300s |
+| `GET /api/v1/impact/donor/:key`  | `cache:v1:impact:donor:<publicKey>`     | 300s |
+| `GET /api/v1/map`              | `cache:v1:map:<params_hash>`              | 600s |
+
+### Cache invalidation
+
+Mutating operations automatically invalidate the relevant cache keys:
+
+| Operation                            | Invalidated patterns                                          |
+| ------------------------------------ | ------------------------------------------------------------- |
+| `POST /api/v1/donations`             | `cache:v1:projects:detail:<id>`, `cache:v1:leaderboard:*`, `cache:v1:stats:global`, `cache:v1:impact:global` |
+| `POST /api/v1/projects`              | `cache:v1:projects:list:*`, `cache:v1:map:*`                  |
+| `PATCH /api/v1/projects/:id/status`  | `cache:v1:projects:detail:<id>`, `cache:v1:projects:list:*`, `cache:v1:stats:global`, `cache:v1:impact:global` |
+| `POST /api/v1/profiles`              | `cache:v1:leaderboard:*`                                      |
+
+### Request coalescing (stampede protection)
+
+When a cache entry expires during high traffic, only one request computes the response while concurrent requests for the same cache key await the result. Coalesced requests receive `X-Cache: COALESCED`.
+
+### Redis failure fallback
+
+If Redis is unreachable the cache middleware degrades gracefully to pass-through (all requests reach the route handler), and a warning is logged. The API stays available during a cache layer outage.
+
+### Prometheus metrics
+
+| Metric name                          | Type    | Labels         | Description                                   |
+| ------------------------------------ | ------- | -------------- | --------------------------------------------- |
+| `indigopay_cache_hits_total`         | Counter | `route`        | Total cache hits                              |
+| `indigopay_cache_misses_total`       | Counter | `route`        | Total cache misses (computed fresh)           |
+| `indigopay_cache_coalesced_total`    | Counter | —              | Requests served via request coalescing        |
+
+---
+
+## Response Caching
+
+The API uses a Redis-backed response cache on expensive read endpoints to reduce database pressure and improve p99 latency. Cache entries are automatically invalidated when the underlying data changes.
+
+### Cache headers
+
+Every cached response includes:
+
+| Header          | Description                                                    |
+| --------------- | -------------------------------------------------------------- |
+| `X-Cache`       | `HIT` — served from cache, `MISS` — computed fresh, `COALESCED` — shared with an in-flight request |
+| `Cache-Control` | `public, max-age=<ttl>, stale-while-revalidate=<2x ttl>`       |
+
+### Cache key patterns
+
+| Endpoint                       | Cache Key Pattern                          | TTL  |
+| ------------------------------ | ------------------------------------------ | ---- |
+| `GET /api/v1/projects`         | `cache:v1:projects:list:<params_hash>`     | 120s |
+| `GET /api/v1/projects/:id`     | `cache:v1:projects:detail:<id>`            | 300s |
+| `GET /api/v1/leaderboard`      | `cache:v1:leaderboard:<params_hash>`       | 60s  |
+| `GET /api/v1/stats/global`     | `cache:v1:stats:global`                    | 300s |
+| `GET /api/v1/impact/global`    | `cache:v1:impact:global`                   | 300s |
+| `GET /api/v1/impact/project/:id` | `cache:v1:impact:project:<id>`          | 300s |
+| `GET /api/v1/impact/donor/:key`  | `cache:v1:impact:donor:<publicKey>`     | 300s |
+| `GET /api/v1/map`              | `cache:v1:map:<params_hash>`              | 600s |
+
+### Cache invalidation
+
+Mutating operations automatically invalidate the relevant cache keys:
+
+| Operation                            | Invalidated patterns                                          |
+| ------------------------------------ | ------------------------------------------------------------- |
+| `POST /api/v1/donations`             | `cache:v1:projects:detail:<id>`, `cache:v1:leaderboard:*`, `cache:v1:stats:global`, `cache:v1:impact:global` |
+| `POST /api/v1/projects`              | `cache:v1:projects:list:*`, `cache:v1:map:*`                  |
+| `PATCH /api/v1/projects/:id/status`  | `cache:v1:projects:detail:<id>`, `cache:v1:projects:list:*`, `cache:v1:stats:global`, `cache:v1:impact:global` |
+| `POST /api/v1/profiles`              | `cache:v1:leaderboard:*`                                      |
+
+### Request coalescing (stampede protection)
+
+When a cache entry expires during high traffic, only one request computes the response while concurrent requests for the same cache key await the result. Coalesced requests receive `X-Cache: COALESCED`.
+
+### Redis failure fallback
+
+If Redis is unreachable the cache middleware degrades gracefully to pass-through (all requests reach the route handler), and a warning is logged. The API stays available during a cache layer outage.
+
+### Prometheus metrics
+
+| Metric name                          | Type    | Labels         | Description                                   |
+| ------------------------------------ | ------- | -------------- | --------------------------------------------- |
+| `indigopay_cache_hits_total`         | Counter | `route`        | Total cache hits                              |
+| `indigopay_cache_misses_total`       | Counter | `route`        | Total cache misses (computed fresh)           |
+| `indigopay_cache_coalesced_total`    | Counter | —              | Requests served via request coalescing        |
+
 ---
 
 ## Health

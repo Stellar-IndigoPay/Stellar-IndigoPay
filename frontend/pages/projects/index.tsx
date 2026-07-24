@@ -2,10 +2,10 @@
  * pages/projects/index.tsx — Browse all climate projects
  */
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import dynamic from "next/dynamic";
 import type { GetServerSideProps } from "next";
 import { useRouter } from "next/router";
 import ProjectCard, { ProjectCardSkeleton } from "@/components/ProjectCard";
-import ProjectComparison from "@/components/ProjectComparison";
 import {
   fetchProjects,
   fetchProjectFacets,
@@ -15,7 +15,13 @@ import {
 import { PROJECT_CATEGORIES, CATEGORY_ICONS } from "@/utils/format";
 import type { ClimateProject } from "@/utils/types";
 import { useAutocomplete } from "@/hooks/useAutocomplete";
+import { trackEvent } from "@/lib/analytics";
 import clsx from "clsx";
+
+const ProjectComparison = dynamic(
+  () => import("@/components/ProjectComparison"),
+  { ssr: false },
+);
 
 export default function ProjectsPage() {
   const router = useRouter();
@@ -97,6 +103,16 @@ export default function ProjectsPage() {
 
     return () => clearTimeout(timer);
   }, [category, status, verified, search, location, co2Min, co2Max]);
+
+  useEffect(() => {
+    if (!loading) {
+      trackEvent("project_browsed", {
+        category: category || undefined,
+        verified: verified || undefined,
+        resultCount: projects.length,
+      });
+    }
+  }, [loading, category, verified, projects.length]);
 
   useEffect(() => {
     if (!compareQuery || projects.length === 0) return;

@@ -1,0 +1,80 @@
+# monitoring/recording-rules.yml
+#
+# SLO Recording Rules for the Stellar IndigoPay backend.
+#
+# Evaluated by Prometheus every `evaluation_interval`. Pre-computes error
+# ratios and request counts for the two critical user journeys so alert
+# rules and dashboards can reference concise metric names.
+#
+# SLO definitions (see docs/performance.md#slo-definitions):
+#   Donation recording: 99.5% availability (30-day window)
+#     Error = any 5xx response on POST /api/donations
+#   Project listing:    99.9% availability (30-day window)
+#     Error = any 5xx response OR >2s latency on GET /api/projects
+#
+# Reference: Google SRE Workbook, Chapter 5 — Alerting on SLOs
+
+groups:
+  - name: indigopay-slo-recording
+    interval: 30s
+    rules:
+      # ── Donation recording SLO: 99.5% ────────────────────────────────
+
+      # Total donation requests per second
+      - record: slo:donations:requests_total
+        expr: sum(rate(http_requests_total{method="POST", route="/api/donations"}[1m]))
+
+      # Donation 5xx errors per second
+      - record: slo:donations:errors_total
+        expr: sum(rate(http_requests_total{method="POST", route="/api/donations",status_code=~"5.."}[1m]))
+
+      # Donation error ratio (0–1). Clamped to avoid NaN when traffic is zero.
+      - record: slo:donations:error_ratio
+        expr: |
+          slo:donations:errors_total
+          /
+          (slo:donations:requests_total > 0)
+
+      # ── Project listing SLO: 99.9% ───────────────────────────────────
+
+      # Total project-listing requests per second
+      - record: slo:projects:requests_total
+        expr: sum(rate(http_requests_total{method="GET", route="/api/projects"}[1m]))
+
+      # Project-listing 5xx errors per second
+      - record: slo:projects:errors_5xx_total
+        expr: sum(rate(http_requests_total{method="GET", route="/api/projects",status_code=~"5.."}[1m]))
+
+      # Project-listing slow requests (>2s) per second.
+      # Computed as: total duration observations − observations ≤ 2 s.
+      # We use the histogram _count (total observations) and the "le=2"
+      # bucket (observations ≤ 2 s); the difference is the slow count.
+      - record: slo:projects:errors_slow_total
+        expr: |
+          sum(rate(http_request_duration_seconds_count{method="GET", route="/api/projects"}[1m]))
+          -
+          sum(rate(http_request_duration_seconds_bucket{method="GET", route="/api/projects",le="2"}[1m]))
+
+      # Combined project-listing errors (5xx + slow >2s) per second
+      - record: slo:projects:errors_total
+        expr: slo:projects:errors_5xx_total + slo:projects:errors_slow_total
+
+      # Project-listing error ratio (0–1)
+      - record: slo:projects:error_ratio
+        expr: |
+          slo:projects:errors_total
+          /
+          (slo:projects:requests_total > 0)
+
+      # ── Error budget remaining gauges ────────────────────────────────
+
+      # Remaining error budget for donations (0–100%). Target: 99.5%.
+      # 100% = full budget remaining; 0% = budget exhausted.
+      - record: slo:donations:error_budget_remaining_pct
+        expr: |
+          (1 - (slo:donations:error_ratio / 0.005)) * 100
+
+      # Remaining error budget for project listing (0–100%). Target: 99.9%.
+      - record: slo:projects:error_budget_remaining_pct
+        expr: |
+          (1 - (slo:projects:error_ratio / 0.001)) * 100

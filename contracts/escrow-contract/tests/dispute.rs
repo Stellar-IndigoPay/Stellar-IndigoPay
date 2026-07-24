@@ -109,11 +109,19 @@ fn test_resolve_dispute_refund_client() {
         name: SorobanString::from_str(&env, "M1"),
         percentage: 50,
         released: false,
+        disputed: false,
+        oracle: None,
+        verified: false,
+        proof_hash: None,
     });
     milestones.push_back(escrow_contract::Milestone {
         name: SorobanString::from_str(&env, "M2"),
         percentage: 50,
         released: false,
+        disputed: false,
+        oracle: None,
+        verified: false,
+        proof_hash: None,
     });
 
     client.create_job(
@@ -176,7 +184,7 @@ fn test_resolve_non_disputed_job_panics() {
 fn test_non_admin_cannot_dispute() {
     let env = Env::default();
     env.mock_all_auths();
-    let (admin, client) = common::setup(&env);
+    let (_admin, client) = common::setup(&env);
 
     let client_addr = Address::generate(&env);
     let freelancer = Address::generate(&env);
