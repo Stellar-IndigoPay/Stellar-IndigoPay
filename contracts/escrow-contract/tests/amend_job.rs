@@ -30,6 +30,7 @@ fn test_create_amend_then_release_new_milestones() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
     // Client and freelancer agree to reallocate: split the 50% Design
@@ -120,6 +121,7 @@ fn test_amend_after_release_panics_integration() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
     client.release_milestone(&client_addr, &job_id, &0u32);
 
