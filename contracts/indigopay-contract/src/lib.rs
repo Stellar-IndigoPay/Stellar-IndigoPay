@@ -36,6 +36,8 @@ use soroban_sdk::{
     contract, contractclient, contractimpl, contracttype, symbol_short, token, Address, Bytes,
     BytesN, Env, String, Symbol, Vec,
 };
+#[cfg(feature = "project_verification")]
+use soroban_sdk::{contracterror, panic_with_error};
 
 // ─── Oracle interface ─────────────────────────────────────────────────────────
 
@@ -765,6 +767,202 @@ fn median_u32(values: &Vec<u32>) -> u32 {
     }
 }
 
+// ─── Off-Chain Multi-Verifier Project Verification Oracle ──────────────────
+//
+// A configurable M-of-N committee of admin-appointed verifiers attests that
+// a registered project has passed independent off-chain due diligence (the
+// contract does not interpret what "verified" means — only that enough
+// distinct, authorised verifiers vouched for it via a hash of their
+// evidence). Deliberately separate from `impact_verification` above: that
+// feature audits an *ongoing metric* (co2_per_xlm); this one gates a
+// project's *eligibility to receive donations at all*.
+//
+//   1. Admins authorise verifier addresses via `add_verifier` (M-of-N).
+//   2. A verifier calls `attest_project` once per project with a hash of
+//      their evidence. A second call from the same verifier for the same
+//      project panics rather than silently updating — resubmission is not
+//      supported (unlike `impact_verification`'s reports), so a verifier
+//      who made a mistake needs an admin to `revoke_verification` first.
+//   3. Once `VerificationThreshold` distinct verifiers have attested, the
+//      project auto-transitions to `Verified` in the same call that
+//      crosses the threshold.
+//   4. Every `donate*` entry point rejects donations to a project that is
+//      not `Verified`, unless `VerificationThreshold == 0` (legacy/
+//      disabled mode) and the project is still `Unverified` — this keeps
+//      every project registered before this feature existed donatable.
+//   5. Admins may `revoke_verification` (M-of-N) at any time, clearing all
+//      accumulated attestations and returning the project to `Unverified`.
+//
+// Kept as a separate `ProjectVerificationKey` enum — mirroring
+// `ImpactVerificationKey` above — rather than new `DataKey` variants.
+// Appending `#[cfg(feature = "project_verification")]`-gated variants
+// directly to the shared, always-on `DataKey` enum would shift every
+// later variant's XDR discriminant depending on whether the feature is
+// compiled in, silently corrupting storage reads across builds with
+// different feature sets. A separate enum sidesteps that hazard entirely.
+
+#[cfg(feature = "project_verification")]
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum VerificationError {
+    NotAuthorizedVerifier = 1,
+    ProjectNotFound = 2,
+    DuplicateAttestation = 3,
+    ProjectNotVerified = 4,
+    AlreadyVerifier = 5,
+    NotAVerifier = 6,
+}
+
+/// State machine for a project's multi-verifier attestation status.
+/// `Pending(u32)` carries the current distinct-attester count so callers
+/// don't need a second read to show progress toward the threshold.
+///
+/// `Rejected` is reserved for a future issue (e.g. an explicit verifier
+/// rejection vote) — no public function in this feature assigns it yet.
+#[cfg(feature = "project_verification")]
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum VerificationStatus {
+    Unverified,
+    Pending(u32),
+    Verified,
+    Rejected,
+}
+
+#[cfg(feature = "project_verification")]
+#[contracttype]
+#[derive(Clone, Debug)]
+#[allow(clippy::enum_variant_names)]
+enum ProjectVerificationKey {
+    /// Authorised verifier addresses. A verifier is a distinct role from
+    /// an admin — being in `AdminSet` does not imply membership here.
+    VerifierSet,
+    /// Distinct-verifier attestations required before a project
+    /// auto-transitions to `Verified`. Absent/`0` = disabled/legacy mode:
+    /// `Unverified` projects can still receive donations exactly as
+    /// before this feature existed.
+    VerificationThreshold,
+    /// Per-project verification state. Absent = `Unverified` (coherent
+    /// default for projects registered before this feature existed).
+    ProjectVerification(String),
+    /// Ordered list of verifiers that have attested a project. Doubles as
+    /// the distinct-attester count for threshold checks. Deliberately
+    /// holds only addresses — not full attestation records — so reading
+    /// the attester list/count never has to pull evidence data along
+    /// with it; see `ProjectAttestationEvidence` for the per-verifier
+    /// payload. This is the append-only, never-shrinking historical
+    /// record: removing a verifier from `VerifierSet` does not remove
+    /// their past attestations from here (see `remove_verifier` docs).
+    ProjectAttesters(String),
+    /// Evidence hash submitted by one verifier for one project, kept in
+    /// its own key (not inline in `ProjectAttesters`) so reading the
+    /// attester list/count never has to pull evidence data along with it.
+    ProjectAttestationEvidence(String, Address),
+}
+
+#[cfg(feature = "project_verification")]
+fn read_verifier_set(env: &Env) -> Vec<Address> {
+    env.storage()
+        .instance()
+        .get(&ProjectVerificationKey::VerifierSet)
+        .unwrap_or(Vec::new(env))
+}
+
+#[cfg(feature = "project_verification")]
+fn read_verification_threshold(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&ProjectVerificationKey::VerificationThreshold)
+        .unwrap_or(0)
+}
+
+#[cfg(feature = "project_verification")]
+fn read_project_verification_status(env: &Env, project_id: &String) -> VerificationStatus {
+    env.storage()
+        .instance()
+        .get(&ProjectVerificationKey::ProjectVerification(
+            project_id.clone(),
+        ))
+        .unwrap_or(VerificationStatus::Unverified)
+}
+
+#[cfg(feature = "project_verification")]
+fn read_project_attesters(env: &Env, project_id: &String) -> Vec<Address> {
+    env.storage()
+        .instance()
+        .get(&ProjectVerificationKey::ProjectAttesters(
+            project_id.clone(),
+        ))
+        .unwrap_or(Vec::new(env))
+}
+
+/// Pure computation of what a project's verification status *should* be
+/// right now, given the live `VerificationThreshold` and attester count.
+/// Never returns a status "lower" than what's actually stored — an
+/// already-`Verified` project stays `Verified` even if a later admin
+/// action (raising the threshold, removing a verifier) would otherwise
+/// make it look under-attested. See `refresh_verification_status` for the
+/// persisting counterpart used by mutating entry points.
+#[cfg(feature = "project_verification")]
+fn compute_live_status(env: &Env, project_id: &String) -> VerificationStatus {
+    let stored = read_project_verification_status(env, project_id);
+    if stored == VerificationStatus::Verified {
+        return stored;
+    }
+    let threshold = read_verification_threshold(env);
+    let count = read_project_attesters(env, project_id).len();
+    if threshold > 0 && count >= threshold {
+        VerificationStatus::Verified
+    } else if count > 0 {
+        VerificationStatus::Pending(count)
+    } else {
+        VerificationStatus::Unverified
+    }
+}
+
+/// Recompute and, if it changed, persist a project's verification status
+/// against the *current* `VerificationThreshold` — without ever
+/// downgrading an already-`Verified` project. Called from `attest_project`
+/// (so a fresh attestation can cross the threshold) and from the donation
+/// gate (so a project stuck in `Pending` after an admin *lowers* the
+/// threshold doesn't need a fresh attestation to unstick; the very next
+/// `donate*` or `attest_project` call naturally re-evaluates it). This is
+/// the same lazy-recompute principle `submit_impact_report` already uses
+/// for its own threshold above — there is no bounded way to eagerly walk
+/// every registered project when an admin changes the threshold.
+#[cfg(feature = "project_verification")]
+fn refresh_verification_status(env: &Env, project_id: &String) -> VerificationStatus {
+    let stored = read_project_verification_status(env, project_id);
+    let live = compute_live_status(env, project_id);
+    if live != stored {
+        env.storage().instance().set(
+            &ProjectVerificationKey::ProjectVerification(project_id.clone()),
+            &live,
+        );
+        if live == VerificationStatus::Verified {
+            let count = read_project_attesters(env, project_id).len();
+            env.events()
+                .publish((symbol_short!("proj_vfy"), project_id.clone()), count);
+        }
+    }
+    live
+}
+
+/// Reject donations to a project that isn't `Verified`, unless
+/// `VerificationThreshold == 0` (legacy/disabled mode) and the project is
+/// still `Unverified` — the backward-compatible path for every project
+/// registered before this feature existed.
+#[cfg(feature = "project_verification")]
+fn require_project_verified_for_donation(env: &Env, project_id: &String) {
+    let threshold = read_verification_threshold(env);
+    let status = refresh_verification_status(env, project_id);
+    match status {
+        VerificationStatus::Verified => {}
+        VerificationStatus::Unverified if threshold == 0 => {}
+        _ => panic_with_error!(env, VerificationError::ProjectNotVerified),
+    }
+}
+
 /// Read the configured platform fee in basis points.
 /// Returns 0 when the `fees` feature is disabled or no fee has been configured,
 /// preserving backward compatibility.
@@ -946,6 +1144,8 @@ fn process_donation(
     if project.paused {
         panic!("Project is temporarily paused");
     }
+    #[cfg(feature = "project_verification")]
+    require_project_verified_for_donation(env, project_id);
     require_campaign_accepts_donation(&project, env.ledger().sequence());
 
     // Pre-compute CO2 increment with checked multiplication so an attacker
@@ -1920,6 +2120,8 @@ impl IndigoPayContract {
         if project.paused {
             panic!("Project is temporarily paused");
         }
+        #[cfg(feature = "project_verification")]
+        require_project_verified_for_donation(&env, &project_id);
         require_campaign_accepts_donation(&project, env.ledger().sequence());
 
         // Pre-compute CO2 increment using the XLM-equivalent received
@@ -2251,6 +2453,8 @@ impl IndigoPayContract {
         if project.paused {
             panic!("Project is temporarily paused");
         }
+        #[cfg(feature = "project_verification")]
+        require_project_verified_for_donation(&env, &project_id);
         require_campaign_accepts_donation(&project, env.ledger().sequence());
 
         // Pre-compute CO2 increment.
@@ -2800,6 +3004,232 @@ impl IndigoPayContract {
             verifiers,
             project_id,
         }
+    }
+
+    // ─── Off-Chain Multi-Verifier Project Verification Oracle ──────────────
+
+    /// M-of-N admin: authorise an address to submit project attestations.
+    #[cfg(feature = "project_verification")]
+    pub fn add_verifier(env: Env, signers: Vec<Address>, verifier: Address) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        let mut verifiers = read_verifier_set(&env);
+        if verifiers.contains(&verifier) {
+            panic_with_error!(&env, VerificationError::AlreadyVerifier);
+        }
+        verifiers.push_back(verifier.clone());
+        env.storage()
+            .instance()
+            .set(&ProjectVerificationKey::VerifierSet, &verifiers);
+        env.events().publish((symbol_short!("ver_add"),), verifier);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// M-of-N admin: revoke a verifier's ability to submit new
+    /// attestations. Attestations it already submitted — and any project
+    /// that reached `Verified` partly because of them — are left
+    /// untouched: an attestation is a historical fact about a point-in-time
+    /// review, not a live credential that expires when the verifier's
+    /// authorisation does. See `revoke_verification` for the explicit,
+    /// audited way to undo a project's verification.
+    #[cfg(feature = "project_verification")]
+    pub fn remove_verifier(env: Env, signers: Vec<Address>, verifier: Address) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        let verifiers = read_verifier_set(&env);
+        if !verifiers.contains(&verifier) {
+            panic_with_error!(&env, VerificationError::NotAVerifier);
+        }
+        let mut new_set: Vec<Address> = Vec::new(&env);
+        for addr in verifiers.iter() {
+            if addr != verifier {
+                new_set.push_back(addr);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&ProjectVerificationKey::VerifierSet, &new_set);
+        env.events().publish((symbol_short!("ver_rem"),), verifier);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// M-of-N admin: configure how many distinct verifier attestations are
+    /// required before a project auto-transitions to `Verified`. `0`
+    /// disables the gate entirely (legacy mode — see
+    /// `require_project_verified_for_donation`). No upper bound is
+    /// enforced against the current verifier count: setting a threshold
+    /// temporarily out of reach of today's `VerifierSet` just means no
+    /// project can reach `Verified` until more verifiers are added — unlike
+    /// `AdminThreshold`, this can never brick admin control of the
+    /// contract, so there is nothing to guard against.
+    #[cfg(feature = "project_verification")]
+    pub fn set_verification_threshold(env: Env, signers: Vec<Address>, threshold: u32) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        env.storage()
+            .instance()
+            .set(&ProjectVerificationKey::VerificationThreshold, &threshold);
+        env.events().publish((symbol_short!("ver_thr"),), threshold);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Authorised verifier: attest that `project_id` has passed this
+    /// verifier's off-chain due diligence, recording a hash of their
+    /// evidence. A verifier may attest a given project only once; a
+    /// second call panics with `DuplicateAttestation` rather than silently
+    /// updating (unlike `impact_verification`'s reports) — a mistaken
+    /// attestation must go through an admin `revoke_verification` first.
+    ///
+    /// Auto-transitions the project to `Verified` (emitting `proj_vfy`
+    /// right after this call's `proj_att`) the moment the distinct-attester
+    /// count reaches `VerificationThreshold`, in the same invocation.
+    ///
+    /// Returns the project's distinct-attester count after this call.
+    ///
+    /// # Panics
+    /// - If the contract is paused.
+    /// - If `verifier` is not on the authorised `VerifierSet`.
+    /// - If `project_id` does not exist.
+    /// - If `verifier` already attested this project.
+    #[cfg(feature = "project_verification")]
+    pub fn attest_project(
+        env: Env,
+        verifier: Address,
+        project_id: String,
+        evidence_hash: BytesN<32>,
+    ) -> u32 {
+        verifier.require_auth();
+        require_not_paused(&env);
+
+        if !read_verifier_set(&env).contains(&verifier) {
+            panic_with_error!(&env, VerificationError::NotAuthorizedVerifier);
+        }
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Project(project_id.clone()))
+        {
+            panic_with_error!(&env, VerificationError::ProjectNotFound);
+        }
+
+        let mut attesters = read_project_attesters(&env, &project_id);
+        if attesters.contains(&verifier) {
+            panic_with_error!(&env, VerificationError::DuplicateAttestation);
+        }
+        attesters.push_back(verifier.clone());
+        env.storage().instance().set(
+            &ProjectVerificationKey::ProjectAttesters(project_id.clone()),
+            &attesters,
+        );
+        env.storage().instance().set(
+            &ProjectVerificationKey::ProjectAttestationEvidence(
+                project_id.clone(),
+                verifier.clone(),
+            ),
+            &evidence_hash,
+        );
+
+        let count = attesters.len();
+        env.events().publish(
+            (symbol_short!("proj_att"), verifier, project_id.clone()),
+            (count, evidence_hash),
+        );
+
+        // May itself emit `proj_vfy` if this attestation crosses the
+        // configured threshold.
+        refresh_verification_status(&env, &project_id);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        count
+    }
+
+    /// M-of-N admin: clear a project's entire verification state — all
+    /// accumulated attestations, their evidence hashes, and the status
+    /// itself all revert to the coherent `Unverified` default. Used when
+    /// admins no longer trust a verification that already went through
+    /// (e.g. evidence later found to be fraudulent), or want verifiers to
+    /// re-review from scratch.
+    #[cfg(feature = "project_verification")]
+    pub fn revoke_verification(env: Env, signers: Vec<Address>, project_id: String) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Project(project_id.clone()))
+        {
+            panic_with_error!(&env, VerificationError::ProjectNotFound);
+        }
+
+        let attesters = read_project_attesters(&env, &project_id);
+        for verifier in attesters.iter() {
+            env.storage()
+                .instance()
+                .remove(&ProjectVerificationKey::ProjectAttestationEvidence(
+                    project_id.clone(),
+                    verifier,
+                ));
+        }
+        env.storage()
+            .instance()
+            .remove(&ProjectVerificationKey::ProjectAttesters(
+                project_id.clone(),
+            ));
+        env.storage()
+            .instance()
+            .remove(&ProjectVerificationKey::ProjectVerification(
+                project_id.clone(),
+            ));
+
+        env.events().publish(
+            (symbol_short!("proj_rvk"), signers.get(0).unwrap()),
+            project_id,
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    #[cfg(feature = "project_verification")]
+    pub fn is_verifier(env: Env, verifier: Address) -> bool {
+        read_verifier_set(&env).contains(&verifier)
+    }
+
+    #[cfg(feature = "project_verification")]
+    pub fn get_verifier_set(env: Env) -> Vec<Address> {
+        read_verifier_set(&env)
+    }
+
+    #[cfg(feature = "project_verification")]
+    pub fn get_verification_threshold(env: Env) -> u32 {
+        read_verification_threshold(&env)
+    }
+
+    /// Read-only: a project's current verification status, computed live
+    /// against the current `VerificationThreshold` and attester count.
+    /// Never mutates storage — see `refresh_verification_status` for the
+    /// persisting variant used internally by `attest_project` and the
+    /// donation gate.
+    #[cfg(feature = "project_verification")]
+    pub fn get_project_verification_status(env: Env, project_id: String) -> VerificationStatus {
+        compute_live_status(&env, &project_id)
+    }
+
+    #[cfg(feature = "project_verification")]
+    pub fn get_project_verifiers(env: Env, project_id: String) -> Vec<Address> {
+        read_project_attesters(&env, &project_id)
+    }
+
+    /// Read-only: the evidence hash one verifier submitted for one
+    /// project, or `None` if that verifier hasn't attested it.
+    #[cfg(feature = "project_verification")]
+    pub fn get_attestation_evidence(
+        env: Env,
+        project_id: String,
+        verifier: Address,
+    ) -> Option<BytesN<32>> {
+        env.storage()
+            .instance()
+            .get(&ProjectVerificationKey::ProjectAttestationEvidence(
+                project_id, verifier,
+            ))
     }
 
     // ─── Getters ─────────────────────────────────────────────────────────────
@@ -3550,6 +3980,8 @@ impl IndigoPayContract {
         if project.paused {
             panic!("Project is temporarily paused");
         }
+        #[cfg(feature = "project_verification")]
+        require_project_verified_for_donation(&env, &project_id);
         require_campaign_accepts_donation(&project, env.ledger().sequence());
 
         // Pre-compute CO2 increment using XLM-equivalent
@@ -4652,6 +5084,8 @@ impl IndigoPayContract {
         if project.paused {
             panic!("Project is temporarily paused");
         }
+        #[cfg(feature = "project_verification")]
+        require_project_verified_for_donation(&env, &recurring.project_id);
         require_campaign_accepts_donation(&project, env.ledger().sequence());
 
         // Checked arithmetic for CO2 calculations and equivalent XLM amount
@@ -4941,6 +5375,8 @@ impl IndigoPayContract {
         if project.paused {
             panic!("Project is temporarily paused");
         }
+        #[cfg(feature = "project_verification")]
+        require_project_verified_for_donation(&env, &project_id);
 
         let amount_per_installment = total_amount
             .checked_div(installment_count as i128)
@@ -5441,6 +5877,564 @@ mod tests {
                 .instance()
                 .extend_ttl(VOTING_WINDOW_LEDGERS * 4, VOTING_WINDOW_LEDGERS * 4);
         });
+    }
+
+    // ─── Project Verification Oracle tests ─────────────────────────────────
+
+    #[cfg(feature = "project_verification")]
+    mod project_verification_tests {
+        use super::*;
+        use soroban_sdk::testutils::{Events as _, MockAuth, MockAuthInvoke};
+        use soroban_sdk::IntoVal;
+
+        fn evidence(env: &Env, seed: u8) -> BytesN<32> {
+            BytesN::from_array(env, &[seed; 32])
+        }
+
+        #[test]
+        fn test_verifier_management() {
+            let (env, _cid, client, admin, _pid) = setup();
+            let v1 = Address::generate(&env);
+            let v2 = Address::generate(&env);
+
+            assert!(!client.is_verifier(&v1));
+            client.add_verifier(&signers1(&env, &admin), &v1);
+            assert!(client.is_verifier(&v1));
+            assert_eq!(client.get_verifier_set().len(), 1);
+
+            client.add_verifier(&signers1(&env, &admin), &v2);
+            assert_eq!(client.get_verifier_set().len(), 2);
+
+            client.remove_verifier(&signers1(&env, &admin), &v1);
+            assert!(!client.is_verifier(&v1));
+            assert!(client.is_verifier(&v2));
+            assert_eq!(client.get_verifier_set().len(), 1);
+        }
+
+        #[test]
+        #[should_panic(expected = "Error(Contract, #5)")]
+        fn test_add_duplicate_verifier_panics() {
+            let (env, _cid, client, admin, _pid) = setup();
+            let v1 = Address::generate(&env);
+            client.add_verifier(&signers1(&env, &admin), &v1);
+            client.add_verifier(&signers1(&env, &admin), &v1);
+        }
+
+        #[test]
+        #[should_panic(expected = "Error(Contract, #6)")]
+        fn test_remove_unknown_verifier_panics() {
+            let (env, _cid, client, admin, _pid) = setup();
+            let stranger = Address::generate(&env);
+            client.remove_verifier(&signers1(&env, &admin), &stranger);
+        }
+
+        #[test]
+        fn test_attest_project() {
+            let (env, _cid, client, admin, pid) = setup();
+            let verifier = Address::generate(&env);
+            client.add_verifier(&signers1(&env, &admin), &verifier);
+            client.set_verification_threshold(&signers1(&env, &admin), &2u32);
+
+            let ev = evidence(&env, 1);
+            let count = client.attest_project(&verifier, &pid, &ev);
+            assert_eq!(count, 1);
+            assert_eq!(
+                client.get_project_verification_status(&pid),
+                VerificationStatus::Pending(1)
+            );
+            assert_eq!(client.get_attestation_evidence(&pid, &verifier), Some(ev));
+            assert_eq!(client.get_project_verifiers(&pid).len(), 1);
+        }
+
+        #[test]
+        #[should_panic(expected = "Error(Contract, #3)")]
+        fn test_duplicate_attestation_panics() {
+            let (env, _cid, client, admin, pid) = setup();
+            let verifier = Address::generate(&env);
+            client.add_verifier(&signers1(&env, &admin), &verifier);
+            client.attest_project(&verifier, &pid, &evidence(&env, 1));
+            client.attest_project(&verifier, &pid, &evidence(&env, 2));
+        }
+
+        #[test]
+        #[should_panic(expected = "Error(Contract, #1)")]
+        fn test_attest_by_non_verifier_panics() {
+            let (env, _cid, client, _admin, pid) = setup();
+            let outsider = Address::generate(&env);
+            client.attest_project(&outsider, &pid, &evidence(&env, 1));
+        }
+
+        #[test]
+        #[should_panic(expected = "Error(Contract, #2)")]
+        fn test_attest_unknown_project_panics() {
+            let (env, _cid, client, admin, _pid) = setup();
+            let verifier = Address::generate(&env);
+            client.add_verifier(&signers1(&env, &admin), &verifier);
+            let unknown = String::from_str(&env, "does-not-exist");
+            client.attest_project(&verifier, &unknown, &evidence(&env, 1));
+        }
+
+        #[test]
+        fn test_reach_threshold_auto_verify() {
+            let (env, cid, client, admin, pid) = setup();
+            let v1 = Address::generate(&env);
+            let v2 = Address::generate(&env);
+            let v3 = Address::generate(&env);
+            client.add_verifier(&signers1(&env, &admin), &v1);
+            client.add_verifier(&signers1(&env, &admin), &v2);
+            client.add_verifier(&signers1(&env, &admin), &v3);
+            client.set_verification_threshold(&signers1(&env, &admin), &2u32);
+
+            client.attest_project(&v1, &pid, &evidence(&env, 1));
+            assert_eq!(
+                client.get_project_verification_status(&pid),
+                VerificationStatus::Pending(1)
+            );
+
+            client.attest_project(&v2, &pid, &evidence(&env, 2));
+            // Read events immediately: this soroban-sdk version's
+            // `env.events().all()` only ever reflects the *last* top-level
+            // invocation, so even a read-only getter call in between would
+            // reset the view to "no events" before we get to inspect it.
+            let events_at_threshold = env.events().all().filter_by_contract(&cid);
+            let last_event = std::format!("{:?}", events_at_threshold.events().last().unwrap());
+            assert!(
+                last_event.contains("proj_vfy"),
+                "expected proj_vfy in last event, got: {}",
+                last_event
+            );
+            assert_eq!(
+                client.get_project_verification_status(&pid),
+                VerificationStatus::Verified
+            );
+
+            // A third, later attestation from an already-verified project is
+            // accepted (historical record) but must not re-emit proj_vfy.
+            client.attest_project(&v3, &pid, &evidence(&env, 3));
+            let events_after_third = env.events().all().filter_by_contract(&cid);
+            assert_eq!(
+                events_after_third.events().len(),
+                1,
+                "a post-verification attestation must emit only proj_att, not proj_vfy again"
+            );
+            let last_event = std::format!("{:?}", events_after_third.events().last().unwrap());
+            assert!(
+                last_event.contains("proj_att"),
+                "expected proj_att, got: {}",
+                last_event
+            );
+            assert_eq!(
+                client.get_project_verification_status(&pid),
+                VerificationStatus::Verified
+            );
+            assert_eq!(client.get_project_verifiers(&pid).len(), 3);
+        }
+
+        #[test]
+        fn test_revoke_verification() {
+            let (env, _cid, client, admin, pid) = setup();
+            let v1 = Address::generate(&env);
+            let v2 = Address::generate(&env);
+            client.add_verifier(&signers1(&env, &admin), &v1);
+            client.add_verifier(&signers1(&env, &admin), &v2);
+            client.set_verification_threshold(&signers1(&env, &admin), &2u32);
+
+            client.attest_project(&v1, &pid, &evidence(&env, 1));
+            client.attest_project(&v2, &pid, &evidence(&env, 2));
+            assert_eq!(
+                client.get_project_verification_status(&pid),
+                VerificationStatus::Verified
+            );
+
+            client.revoke_verification(&signers1(&env, &admin), &pid);
+            assert_eq!(
+                client.get_project_verification_status(&pid),
+                VerificationStatus::Unverified
+            );
+            assert_eq!(client.get_project_verifiers(&pid).len(), 0);
+            assert_eq!(client.get_attestation_evidence(&pid, &v1), None);
+            assert_eq!(client.get_attestation_evidence(&pid, &v2), None);
+
+            // Verifiers may attest again from a clean slate after revocation.
+            client.attest_project(&v1, &pid, &evidence(&env, 3));
+            assert_eq!(
+                client.get_project_verification_status(&pid),
+                VerificationStatus::Pending(1)
+            );
+        }
+
+        #[test]
+        fn test_removed_verifier_attestation_is_not_retroactively_undone() {
+            // Gotcha #6: removing a verifier who already attested must not
+            // shrink the attester count or demote an already-Verified project.
+            let (env, _cid, client, admin, pid) = setup();
+            let v1 = Address::generate(&env);
+            let v2 = Address::generate(&env);
+            client.add_verifier(&signers1(&env, &admin), &v1);
+            client.add_verifier(&signers1(&env, &admin), &v2);
+            client.set_verification_threshold(&signers1(&env, &admin), &2u32);
+
+            client.attest_project(&v1, &pid, &evidence(&env, 1));
+            client.attest_project(&v2, &pid, &evidence(&env, 2));
+            assert_eq!(
+                client.get_project_verification_status(&pid),
+                VerificationStatus::Verified
+            );
+
+            client.remove_verifier(&signers1(&env, &admin), &v1);
+            assert_eq!(client.get_project_verifiers(&pid).len(), 2);
+            assert_eq!(
+                client.get_project_verification_status(&pid),
+                VerificationStatus::Verified
+            );
+        }
+
+        #[test]
+        fn test_lowering_threshold_unsticks_pending_project_on_next_touch() {
+            // Gotcha #4: lowering VerificationThreshold after attestations have
+            // already accumulated must not leave a project permanently stuck.
+            let (env, _cid, client, admin, pid) = setup();
+            let v1 = Address::generate(&env);
+            client.add_verifier(&signers1(&env, &admin), &v1);
+            client.set_verification_threshold(&signers1(&env, &admin), &5u32);
+
+            client.attest_project(&v1, &pid, &evidence(&env, 1));
+            assert_eq!(
+                client.get_project_verification_status(&pid),
+                VerificationStatus::Pending(1)
+            );
+
+            // Lower the threshold below the existing attester count. The
+            // read-only getter reflects this immediately (it's a live
+            // computation)...
+            client.set_verification_threshold(&signers1(&env, &admin), &1u32);
+            assert_eq!(
+                client.get_project_verification_status(&pid),
+                VerificationStatus::Verified
+            );
+
+            // ...and the next mutating touch (e.g. a donation) persists it.
+            let token_admin = Address::generate(&env);
+            let token = env
+                .register_stellar_asset_contract_v2(token_admin)
+                .address();
+            let donor = Address::generate(&env);
+            StellarAssetClient::new(&env, &token).mint(&donor, &(10 * STROOP));
+            client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32);
+            assert_eq!(
+                client.get_project_verification_status(&pid),
+                VerificationStatus::Verified
+            );
+        }
+
+        #[test]
+        #[should_panic(expected = "Error(Contract, #4)")]
+        fn test_donate_to_unverified_project_panics() {
+            let (env, _cid, client, admin, pid) = setup();
+            client.set_verification_threshold(&signers1(&env, &admin), &1u32);
+
+            let token_admin = Address::generate(&env);
+            let token = env
+                .register_stellar_asset_contract_v2(token_admin)
+                .address();
+            let donor = Address::generate(&env);
+            StellarAssetClient::new(&env, &token).mint(&donor, &(10 * STROOP));
+            client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32);
+        }
+
+        #[test]
+        fn test_donate_to_verified_project_succeeds() {
+            let (env, _cid, client, admin, pid) = setup();
+            let verifier = Address::generate(&env);
+            client.add_verifier(&signers1(&env, &admin), &verifier);
+            client.set_verification_threshold(&signers1(&env, &admin), &1u32);
+            client.attest_project(&verifier, &pid, &evidence(&env, 1));
+            assert_eq!(
+                client.get_project_verification_status(&pid),
+                VerificationStatus::Verified
+            );
+
+            let token_admin = Address::generate(&env);
+            let token = env
+                .register_stellar_asset_contract_v2(token_admin)
+                .address();
+            let donor = Address::generate(&env);
+            let amount = 10 * STROOP;
+            StellarAssetClient::new(&env, &token).mint(&donor, &amount);
+            client.donate(&token, &donor, &pid, &amount, &0u32);
+
+            assert_eq!(client.get_project(&pid).total_raised, amount);
+        }
+
+        #[test]
+        fn test_donate_to_unverified_project_allowed_in_legacy_mode() {
+            // Gotcha #3: threshold == 0 (never configured) must behave exactly
+            // like every project registered before this feature existed.
+            let (env, _cid, client, _admin, pid) = setup();
+            assert_eq!(client.get_verification_threshold(), 0);
+            assert_eq!(
+                client.get_project_verification_status(&pid),
+                VerificationStatus::Unverified
+            );
+
+            let token_admin = Address::generate(&env);
+            let token = env
+                .register_stellar_asset_contract_v2(token_admin)
+                .address();
+            let donor = Address::generate(&env);
+            let amount = 10 * STROOP;
+            StellarAssetClient::new(&env, &token).mint(&donor, &amount);
+            client.donate(&token, &donor, &pid, &amount, &0u32);
+
+            assert_eq!(client.get_project(&pid).total_raised, amount);
+        }
+
+        /// Integration: 3 verifiers, threshold 2 — two attestations auto-verify
+        /// the project in the same call, and the donation that follows succeeds.
+        #[test]
+        fn test_integration_three_verifiers_threshold_two_then_donate() {
+            let (env, _cid, client, admin, pid) = setup();
+            let v1 = Address::generate(&env);
+            let v2 = Address::generate(&env);
+            let v3 = Address::generate(&env);
+            client.add_verifier(&signers1(&env, &admin), &v1);
+            client.add_verifier(&signers1(&env, &admin), &v2);
+            client.add_verifier(&signers1(&env, &admin), &v3);
+            client.set_verification_threshold(&signers1(&env, &admin), &2u32);
+
+            client.attest_project(&v1, &pid, &evidence(&env, 1));
+            assert_eq!(
+                client.get_project_verification_status(&pid),
+                VerificationStatus::Pending(1)
+            );
+            client.attest_project(&v2, &pid, &evidence(&env, 2));
+            assert_eq!(
+                client.get_project_verification_status(&pid),
+                VerificationStatus::Verified
+            );
+
+            let token_admin = Address::generate(&env);
+            let token = env
+                .register_stellar_asset_contract_v2(token_admin)
+                .address();
+            let donor = Address::generate(&env);
+            let amount = 42 * STROOP;
+            StellarAssetClient::new(&env, &token).mint(&donor, &amount);
+            client.donate(&token, &donor, &pid, &amount, &0u32);
+            assert_eq!(client.get_project(&pid).total_raised, amount);
+        }
+
+        /// Real auth enforcement (no `mock_all_auths`): an unauthorised address
+        /// cannot attest, and N-1 of N admins cannot reach a 2-of-N quorum.
+        /// Uses the per-call `client.mock_auths(&[...])` builder (see the
+        /// precedent in escrow-contract) instead of the env-wide
+        /// `mock_all_auths`, so only the specific calls listed below are
+        /// ever authorised — every other `require_auth()` in this test runs
+        /// against real (empty) auth state.
+        #[test]
+        fn test_real_auth_enforcement_without_mocks() {
+            let env = Env::default();
+            let cid = env.register_contract(None, IndigoPayContract);
+            let client = IndigoPayContractClient::new(&env, &cid);
+
+            let admin1 = Address::generate(&env);
+            let admin2 = Address::generate(&env);
+            let mut admins = Vec::new(&env);
+            admins.push_back(admin1.clone());
+            admins.push_back(admin2.clone());
+
+            // initialize() takes no require_auth in this contract, so no
+            // mocked auth is needed to set up the 2-of-2 admin set.
+            client.initialize(&admins, &2u32);
+
+            let pid = String::from_str(&env, "proj-real-auth");
+            let name = String::from_str(&env, "Real Auth Project");
+            let wallet = Address::generate(&env);
+
+            // register_project is a routine (1-of-N) action: only admin1
+            // needs to genuinely sign.
+            client
+                .mock_auths(&[MockAuth {
+                    address: &admin1,
+                    invoke: &MockAuthInvoke {
+                        contract: &cid,
+                        fn_name: "register_project",
+                        args: (
+                            admin1.clone(),
+                            pid.clone(),
+                            name.clone(),
+                            wallet.clone(),
+                            10u32,
+                        )
+                            .into_val(&env),
+                        sub_invokes: &[],
+                    },
+                }])
+                .register_project(&admin1, &pid, &name, &wallet, &10u32);
+
+            // add_verifier is critical (2-of-2): both admins must genuinely
+            // sign for it to succeed.
+            let verifier = Address::generate(&env);
+            client
+                .mock_auths(&[
+                    MockAuth {
+                        address: &admin1,
+                        invoke: &MockAuthInvoke {
+                            contract: &cid,
+                            fn_name: "add_verifier",
+                            args: (admins.clone(), verifier.clone()).into_val(&env),
+                            sub_invokes: &[],
+                        },
+                    },
+                    MockAuth {
+                        address: &admin2,
+                        invoke: &MockAuthInvoke {
+                            contract: &cid,
+                            fn_name: "add_verifier",
+                            args: (admins.clone(), verifier.clone()).into_val(&env),
+                            sub_invokes: &[],
+                        },
+                    },
+                ])
+                .add_verifier(&admins, &verifier);
+
+            // No mock configured for this call at all: an address that never
+            // signs anything must fail `require_auth`, regardless of
+            // `VerifierSet` membership.
+            let outsider = Address::generate(&env);
+            let result = client.try_attest_project(&outsider, &pid, &evidence(&env, 9));
+            assert!(
+                result.is_err(),
+                "unsigned outsider must not be able to attest"
+            );
+
+            // Pre-authorise only admin1's signature for this exact call.
+            // admin2 never signs, so `verify_m_of_n`'s `admin2.require_auth()`
+            // has no matching signature and the 2-of-2 quorum is never
+            // reached, even though admin1's own signature is genuine.
+            let result = client
+                .mock_auths(&[MockAuth {
+                    address: &admin1,
+                    invoke: &MockAuthInvoke {
+                        contract: &cid,
+                        fn_name: "revoke_verification",
+                        args: (admins.clone(), pid.clone()).into_val(&env),
+                        sub_invokes: &[],
+                    },
+                }])
+                .try_revoke_verification(&admins, &pid);
+            assert!(
+                result.is_err(),
+                "1-of-2 admin signatures must not reach a 2-of-2 quorum"
+            );
+        }
+
+        /// Checks that the most recent invocation's last event carries the
+        /// expected topic symbol. Must be called immediately after the
+        /// mutating client call under test: this soroban-sdk version's
+        /// `env.events().all()` only ever reflects the *last* top-level
+        /// invocation (any call in between, even a read-only getter, resets
+        /// the view). `ContractEvents` only exposes raw XDR
+        /// (`.events() -> &[xdr::ContractEvent]`), so content is checked via
+        /// its Debug rendering — the same approach already established by
+        /// oracle-contract's `test_deviation_reject_emits_price_rejected_event`.
+        fn assert_last_event_contains(env: &Env, cid: &Address, needle: &str) {
+            let events = env.events().all().filter_by_contract(cid);
+            let last = std::format!("{:?}", events.events().last().unwrap());
+            assert!(
+                last.contains(needle),
+                "expected `{}` in event, got: {}",
+                needle,
+                last
+            );
+        }
+
+        #[test]
+        fn test_events_have_expected_payloads() {
+            let (env, cid, client, admin, pid) = setup();
+            let verifier = Address::generate(&env);
+
+            client.add_verifier(&signers1(&env, &admin), &verifier);
+            assert_last_event_contains(&env, &cid, "ver_add");
+
+            client.set_verification_threshold(&signers1(&env, &admin), &1u32);
+            assert_last_event_contains(&env, &cid, "ver_thr");
+
+            // attest_project crosses the threshold (1) in the same call, so
+            // two events fire (proj_att then proj_vfy) — check both.
+            let ev = evidence(&env, 7);
+            client.attest_project(&verifier, &pid, &ev);
+            let events = env.events().all().filter_by_contract(&cid);
+            assert_eq!(events.events().len(), 2);
+            let last = std::format!("{:?}", events.events().last().unwrap());
+            assert!(
+                last.contains("proj_vfy"),
+                "expected proj_vfy, got: {}",
+                last
+            );
+
+            client.revoke_verification(&signers1(&env, &admin), &pid);
+            assert_last_event_contains(&env, &cid, "proj_rvk");
+        }
+    }
+
+    #[cfg(all(test, feature = "project_verification", feature = "testutils"))]
+    mod project_verification_fuzz {
+        extern crate std;
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+
+            /// For any number of verifiers (1..=8) and any threshold, a
+            /// project must become Verified if and only if the number of
+            /// distinct attestations reaches the configured threshold —
+            /// never before, and always by the time it does.
+            #[test]
+            fn prop_verification_requires_threshold(
+                verifier_count in 1u32..=8,
+                threshold in 1u32..=8,
+            ) {
+                let env = Env::default();
+                env.mock_all_auths();
+                let cid = env.register_contract(None, IndigoPayContract);
+                let client = IndigoPayContractClient::new(&env, &cid);
+                let admin = Address::generate(&env);
+                let mut admins = Vec::new(&env);
+                admins.push_back(admin.clone());
+                client.initialize(&admins, &1u32);
+
+                let pid = String::from_str(&env, "prop-proj");
+                let wallet = Address::generate(&env);
+                client.register_project(
+                    &admin,
+                    &pid,
+                    &String::from_str(&env, "Prop Project"),
+                    &wallet,
+                    &10u32,
+                );
+                client.set_verification_threshold(&admins, &threshold);
+
+                let mut verifiers: std::vec::Vec<Address> = std::vec::Vec::new();
+                for _ in 0..verifier_count {
+                    let v = Address::generate(&env);
+                    client.add_verifier(&admins, &v);
+                    verifiers.push(v);
+                }
+
+                for (i, v) in verifiers.iter().enumerate() {
+                    let attested_so_far = (i + 1) as u32;
+                    client.attest_project(v, &pid, &BytesN::from_array(&env, &[i as u8; 32]));
+                    let status = client.get_project_verification_status(&pid);
+                    if attested_so_far >= threshold {
+                        prop_assert_eq!(status, VerificationStatus::Verified);
+                    } else {
+                        prop_assert_eq!(status, VerificationStatus::Pending(attested_so_far));
+                    }
+                }
+            }
+        }
     }
 
     #[test]
