@@ -344,9 +344,7 @@ impl SimpleOracle {
         env.storage()
             .instance()
             .set(&DataKey::StakeToken, &stake_token);
-        env.storage()
-            .instance()
-            .set(&DataKey::MinStake, &min_stake);
+        env.storage().instance().set(&DataKey::MinStake, &min_stake);
         env.storage()
             .instance()
             .set(&DataKey::StakeTreasury, &treasury);
@@ -380,7 +378,9 @@ impl SimpleOracle {
             .instance()
             .get(&DataKey::ReporterStake(reporter.clone()))
             .unwrap_or(0);
-        let updated = current.checked_add(amount).expect("Reporter stake overflow");
+        let updated = current
+            .checked_add(amount)
+            .expect("Reporter stake overflow");
         let cooldown: u32 = env
             .storage()
             .instance()
@@ -441,10 +441,8 @@ impl SimpleOracle {
         env.storage()
             .instance()
             .remove(&DataKey::StakeAvailableAt(reporter.clone()));
-        env.events().publish(
-            (symbol_short!("stake_wdr"), reporter.clone()),
-            amount,
-        );
+        env.events()
+            .publish((symbol_short!("stake_wdr"), reporter.clone()), amount);
 
         token::Client::new(&env, &stake_token).transfer(
             &env.current_contract_address(),
@@ -455,13 +453,7 @@ impl SimpleOracle {
 
     /// Slash reporter stake and transfer the slashed amount to the configured
     /// treasury. Slash history is append-only and publicly queryable.
-    pub fn slash(
-        env: Env,
-        admin: Address,
-        reporter: Address,
-        amount: i128,
-        reason: String,
-    ) {
+    pub fn slash(env: Env, admin: Address, reporter: Address, amount: i128, reason: String) {
         admin.require_auth();
         require_admin(&env, &admin);
         if amount <= 0 {
@@ -475,7 +467,9 @@ impl SimpleOracle {
         if amount > current {
             panic!("Slash amount exceeds reporter stake");
         }
-        let remaining = current.checked_sub(amount).expect("Reporter stake underflow");
+        let remaining = current
+            .checked_sub(amount)
+            .expect("Reporter stake underflow");
         let stake_token: Address = env
             .storage()
             .instance()
@@ -593,7 +587,11 @@ impl SimpleOracle {
         if !is_reporter {
             panic!("Not an authorised reporter");
         }
-        let min_stake: i128 = env.storage().instance().get(&DataKey::MinStake).unwrap_or(0);
+        let min_stake: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinStake)
+            .unwrap_or(0);
         let reporter_stake: i128 = env
             .storage()
             .instance()
@@ -1872,8 +1870,7 @@ mod tests {
     fn test_stake() {
         let (env, contract_id, admin, reporter) = setup();
         let client = SimpleOracleClient::new(&env, &contract_id);
-        let (stake_token, _) =
-            setup_staking(&env, &contract_id, &admin, &reporter, 1_000, 10);
+        let (stake_token, _) = setup_staking(&env, &contract_id, &admin, &reporter, 1_000, 10);
 
         client.stake(&reporter, &1_000);
 
@@ -1915,17 +1912,14 @@ mod tests {
             600
         );
         assert_eq!(client.get_slash_history(&reporter).len(), 1);
-        assert!(client
-            .try_report_price(&reporter, &100_000_000)
-            .is_err());
+        assert!(client.try_report_price(&reporter, &100_000_000).is_err());
     }
 
     #[test]
     fn test_unstake_after_cooldown() {
         let (env, contract_id, admin, reporter) = setup();
         let client = SimpleOracleClient::new(&env, &contract_id);
-        let (stake_token, _) =
-            setup_staking(&env, &contract_id, &admin, &reporter, 1_000, 10);
+        let (stake_token, _) = setup_staking(&env, &contract_id, &admin, &reporter, 1_000, 10);
         let starting_balance = token::Client::new(&env, &stake_token).balance(&reporter);
         client.stake(&reporter, &1_000);
         env.ledger().set_sequence_number(10);
@@ -1937,9 +1931,7 @@ mod tests {
             token::Client::new(&env, &stake_token).balance(&reporter),
             starting_balance
         );
-        assert!(client
-            .try_report_price(&reporter, &100_000_000)
-            .is_err());
+        assert!(client.try_report_price(&reporter, &100_000_000).is_err());
     }
 
     #[test]
