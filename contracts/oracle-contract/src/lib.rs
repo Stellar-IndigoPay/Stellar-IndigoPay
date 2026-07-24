@@ -2,7 +2,8 @@
 #![allow(deprecated)]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Env, InvokeError, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, token, Address, Env, InvokeError, String,
+    Symbol, Vec,
 };
 
 const MAX_OBSERVATIONS: u32 = 20;
@@ -10,6 +11,7 @@ const MAX_SOURCE_ORACLES: u32 = 7;
 const DEFAULT_TWAP_WINDOW: u32 = 10;
 const DEFAULT_STALENESS_THRESHOLD: u32 = 720;
 const PRICE_SCALE: i128 = 10_000_000;
+pub const DEFAULT_UNSTAKE_COOLDOWN: u32 = 120_960;
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -17,6 +19,14 @@ pub struct PriceObservation {
     pub price: i128,
     pub reporter: Address,
     /// Ledger sequence when the price was recorded, used as the timestamp for TWAP.
+    pub ledger: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SlashEvent {
+    pub amount: i128,
+    pub reason: String,
     pub ledger: u32,
 }
 
@@ -34,6 +44,13 @@ pub enum DataKey {
     StalenessThreshold,
     SourceOracle(Address),
     SourceOracleList,
+    StakeToken,
+    MinStake,
+    StakeTreasury,
+    UnstakeCooldown,
+    ReporterStake(Address),
+    StakeAvailableAt(Address),
+    SlashHistory(Address),
 }
 
 #[contract]
@@ -306,6 +323,206 @@ impl SimpleOracle {
             .publish((symbol_short!("rep_rem"), admin), reporter);
     }
 
+    /// Configure the asset, minimum stake, slash treasury, and unstake
+    /// cooldown. Existing stake balances are never modified by reconfiguration.
+    pub fn configure_staking(
+        env: Env,
+        admin: Address,
+        stake_token: Address,
+        min_stake: i128,
+        treasury: Address,
+        unstake_cooldown: u32,
+    ) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        if min_stake <= 0 {
+            panic!("Minimum stake must be positive");
+        }
+        if unstake_cooldown == 0 {
+            panic!("Unstake cooldown must be positive");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::StakeToken, &stake_token);
+        env.storage().instance().set(&DataKey::MinStake, &min_stake);
+        env.storage()
+            .instance()
+            .set(&DataKey::StakeTreasury, &treasury);
+        env.storage()
+            .instance()
+            .set(&DataKey::UnstakeCooldown, &unstake_cooldown);
+    }
+
+    /// Deposit reporter stake. Effects are persisted before the token transfer;
+    /// a failed transfer reverts the entire Soroban invocation.
+    pub fn stake(env: Env, reporter: Address, amount: i128) {
+        reporter.require_auth();
+        if amount <= 0 {
+            panic!("Stake amount must be positive");
+        }
+        let is_reporter: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Reporter(reporter.clone()))
+            .unwrap_or(false);
+        if !is_reporter {
+            panic!("Not an authorised reporter");
+        }
+        let stake_token: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::StakeToken)
+            .expect("Staking not configured");
+        let current: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ReporterStake(reporter.clone()))
+            .unwrap_or(0);
+        let updated = current
+            .checked_add(amount)
+            .expect("Reporter stake overflow");
+        let cooldown: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UnstakeCooldown)
+            .unwrap_or(DEFAULT_UNSTAKE_COOLDOWN);
+        let available_at = env
+            .ledger()
+            .sequence()
+            .checked_add(cooldown)
+            .expect("Stake cooldown overflow");
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ReporterStake(reporter.clone()), &updated);
+        env.storage()
+            .instance()
+            .set(&DataKey::StakeAvailableAt(reporter.clone()), &available_at);
+        env.events().publish(
+            (symbol_short!("stake_dep"), reporter.clone()),
+            (amount, updated, available_at),
+        );
+
+        token::Client::new(&env, &stake_token).transfer(
+            &reporter,
+            env.current_contract_address(),
+            &amount,
+        );
+    }
+
+    /// Withdraw the reporter's entire remaining stake after its cooldown.
+    pub fn unstake(env: Env, reporter: Address) {
+        reporter.require_auth();
+        let amount: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ReporterStake(reporter.clone()))
+            .unwrap_or(0);
+        if amount <= 0 {
+            panic!("No reporter stake");
+        }
+        let available_at: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::StakeAvailableAt(reporter.clone()))
+            .expect("Stake cooldown not set");
+        if env.ledger().sequence() < available_at {
+            panic!("Unstake cooldown not reached");
+        }
+        let stake_token: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::StakeToken)
+            .expect("Staking not configured");
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ReporterStake(reporter.clone()), &0_i128);
+        env.storage()
+            .instance()
+            .remove(&DataKey::StakeAvailableAt(reporter.clone()));
+        env.events()
+            .publish((symbol_short!("stake_wdr"), reporter.clone()), amount);
+
+        token::Client::new(&env, &stake_token).transfer(
+            &env.current_contract_address(),
+            &reporter,
+            &amount,
+        );
+    }
+
+    /// Slash reporter stake and transfer the slashed amount to the configured
+    /// treasury. Slash history is append-only and publicly queryable.
+    pub fn slash(env: Env, admin: Address, reporter: Address, amount: i128, reason: String) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        if amount <= 0 {
+            panic!("Slash amount must be positive");
+        }
+        let current: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ReporterStake(reporter.clone()))
+            .unwrap_or(0);
+        if amount > current {
+            panic!("Slash amount exceeds reporter stake");
+        }
+        let remaining = current
+            .checked_sub(amount)
+            .expect("Reporter stake underflow");
+        let stake_token: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::StakeToken)
+            .expect("Staking not configured");
+        let treasury: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::StakeTreasury)
+            .expect("Stake treasury not configured");
+        let mut history: Vec<SlashEvent> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SlashHistory(reporter.clone()))
+            .unwrap_or(Vec::new(&env));
+        history.push_back(SlashEvent {
+            amount,
+            reason: reason.clone(),
+            ledger: env.ledger().sequence(),
+        });
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ReporterStake(reporter.clone()), &remaining);
+        env.storage()
+            .instance()
+            .set(&DataKey::SlashHistory(reporter.clone()), &history);
+        env.events().publish(
+            (Symbol::new(&env, "stake_slash"), reporter.clone()),
+            (amount, remaining, reason),
+        );
+
+        token::Client::new(&env, &stake_token).transfer(
+            &env.current_contract_address(),
+            &treasury,
+            &amount,
+        );
+    }
+
+    pub fn get_reporter_stake(env: Env, reporter: Address) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ReporterStake(reporter))
+            .unwrap_or(0)
+    }
+
+    pub fn get_slash_history(env: Env, reporter: Address) -> Vec<SlashEvent> {
+        env.storage()
+            .instance()
+            .get(&DataKey::SlashHistory(reporter))
+            .unwrap_or(Vec::new(&env))
+    }
+
     pub fn add_source_oracle(env: Env, admin: Address, oracle_address: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
@@ -369,6 +586,19 @@ impl SimpleOracle {
             .unwrap_or(false);
         if !is_reporter {
             panic!("Not an authorised reporter");
+        }
+        let min_stake: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinStake)
+            .unwrap_or(0);
+        let reporter_stake: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ReporterStake(reporter.clone()))
+            .unwrap_or(0);
+        if reporter_stake < min_stake {
+            panic!("Reporter stake below minimum");
         }
         if price <= 0 {
             panic!("Price must be positive");
@@ -572,6 +802,7 @@ mod tests {
     use soroban_sdk::{
         contracterror, panic_with_error,
         testutils::{Address as _, Events as _, Ledger},
+        token::StellarAssetClient,
         Env, IntoVal,
     };
 
@@ -639,6 +870,26 @@ mod tests {
 
     fn add_reporter(env: &Env, contract_id: &Address, admin: &Address, reporter: &Address) {
         SimpleOracleClient::new(env, contract_id).add_reporter(admin, reporter);
+    }
+
+    fn setup_staking(
+        env: &Env,
+        contract_id: &Address,
+        admin: &Address,
+        reporter: &Address,
+        min_stake: i128,
+        cooldown: u32,
+    ) -> (Address, Address) {
+        let token_admin = Address::generate(env);
+        let stake_token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let treasury = Address::generate(env);
+        StellarAssetClient::new(env, &stake_token).mint(reporter, &(min_stake * 3));
+        let client = SimpleOracleClient::new(env, contract_id);
+        client.add_reporter(admin, reporter);
+        client.configure_staking(admin, &stake_token, &min_stake, &treasury, &cooldown);
+        (stake_token, treasury)
     }
 
     fn register_price_source(env: &Env, price: i128) -> Address {
@@ -1615,6 +1866,101 @@ mod tests {
             );
         });
     }
+    #[test]
+    fn test_stake() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        let (stake_token, _) = setup_staking(&env, &contract_id, &admin, &reporter, 1_000, 10);
+
+        client.stake(&reporter, &1_000);
+
+        assert_eq!(client.get_reporter_stake(&reporter), 1_000);
+        assert_eq!(
+            token::Client::new(&env, &stake_token).balance(&contract_id),
+            1_000
+        );
+        client.report_price(&reporter, &100_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "Reporter stake below minimum")]
+    fn test_report_without_stake_panics() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        setup_staking(&env, &contract_id, &admin, &reporter, 1_000, 10);
+        client.report_price(&reporter, &100_000_000);
+    }
+
+    #[test]
+    fn test_slash_reduces_stake() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        let (stake_token, treasury) =
+            setup_staking(&env, &contract_id, &admin, &reporter, 1_000, 10);
+        client.stake(&reporter, &1_500);
+
+        client.slash(
+            &admin,
+            &reporter,
+            &600,
+            &String::from_str(&env, "bad price"),
+        );
+
+        assert_eq!(client.get_reporter_stake(&reporter), 900);
+        assert_eq!(
+            token::Client::new(&env, &stake_token).balance(&treasury),
+            600
+        );
+        assert_eq!(client.get_slash_history(&reporter).len(), 1);
+        assert!(client.try_report_price(&reporter, &100_000_000).is_err());
+    }
+
+    #[test]
+    fn test_unstake_after_cooldown() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        let (stake_token, _) = setup_staking(&env, &contract_id, &admin, &reporter, 1_000, 10);
+        let starting_balance = token::Client::new(&env, &stake_token).balance(&reporter);
+        client.stake(&reporter, &1_000);
+        env.ledger().set_sequence_number(10);
+
+        client.unstake(&reporter);
+
+        assert_eq!(client.get_reporter_stake(&reporter), 0);
+        assert_eq!(
+            token::Client::new(&env, &stake_token).balance(&reporter),
+            starting_balance
+        );
+        assert!(client.try_report_price(&reporter, &100_000_000).is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "Unstake cooldown not reached")]
+    fn test_unstake_before_cooldown_panics() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        setup_staking(&env, &contract_id, &admin, &reporter, 1_000, 10);
+        client.stake(&reporter, &1_000);
+        client.unstake(&reporter);
+    }
+
+    #[test]
+    fn test_slash_event() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        setup_staking(&env, &contract_id, &admin, &reporter, 1_000, 10);
+        client.stake(&reporter, &1_000);
+        client.slash(
+            &admin,
+            &reporter,
+            &100,
+            &String::from_str(&env, "deviation"),
+        );
+
+        let events = env.events().all().filter_by_contract(&contract_id);
+        let latest = std::format!("{:?}", events.events().last().unwrap());
+        assert!(latest.contains("stake_slash"));
+    }
 }
 
 #[cfg(test)]
@@ -1660,6 +2006,22 @@ mod deviation_fuzz {
         #[test]
         fn prop_deviation_never_panics(new in any::<i128>(), current in any::<i128>()) {
             let _ = calculate_deviation_bps(new, current);
+        }
+
+        #[test]
+        fn prop_stake_never_negative(
+            deposits in proptest::collection::vec(1_i128..1_000_000, 0..100),
+            slash_requests in proptest::collection::vec(1_i128..1_000_000, 0..100),
+        ) {
+            let mut stake = deposits
+                .into_iter()
+                .try_fold(0_i128, i128::checked_add)
+                .unwrap_or(i128::MAX);
+            for requested in slash_requests {
+                let slash = requested.min(stake);
+                stake = stake.checked_sub(slash).unwrap();
+                prop_assert!(stake >= 0);
+            }
         }
     }
 }
