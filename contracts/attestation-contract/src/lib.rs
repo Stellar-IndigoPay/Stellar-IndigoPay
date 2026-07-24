@@ -162,11 +162,16 @@ pub enum DataKey {
     DonorAggregate(Address),
     /// Per-chain aggregate — totals + status breakdown.
     ChainAggregate(String),
+    /// Required confirmations for auto-verification per chain.
+    ChainConfirmations(String),
+    /// Reported confirmations for each attestation.
+    AttestationConfirmations(u64),
     /// Mutable upgrade timelock shared with the parent contract family.
     /// See `propose_upgrade` / `execute_upgrade` / `cancel_upgrade`.
     PendingUpgrade,
     UpgradeEffectiveAt,
     LastExecutedUpgrade,
+    CoordinatedUpgrade,
 }
 
 // ─── Default / limit constants ──────────────────────────────────────────────
@@ -201,6 +206,14 @@ fn require_relayer(env: &Env, caller: &Address) {
 }
 
 fn require_not_paused(env: &Env) {
+    let coordinated: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::CoordinatedUpgrade)
+        .unwrap_or(false);
+    if coordinated {
+        panic!("Coordinated upgrade in progress");
+    }
     let paused: bool = env
         .storage()
         .instance()
@@ -208,6 +221,17 @@ fn require_not_paused(env: &Env) {
         .unwrap_or(false);
     if paused {
         panic!("Contract is paused");
+    }
+}
+
+fn require_not_coordinated_upgrade(env: &Env) {
+    let coordinated: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::CoordinatedUpgrade)
+        .unwrap_or(false);
+    if coordinated {
+        panic!("Coordinated upgrade in progress");
     }
 }
 
@@ -416,7 +440,7 @@ fn record_attestations_internal(
 
 fn read_donor_aggregate(env: &Env, donor: &Address) -> DonorAggregate {
     env.storage()
-        .instance()
+        .persistent()
         .get(&DataKey::DonorAggregate(donor.clone()))
         .unwrap_or(DonorAggregate {
             total_attestations: 0,
@@ -431,13 +455,13 @@ fn read_donor_aggregate(env: &Env, donor: &Address) -> DonorAggregate {
 
 fn write_donor_aggregate(env: &Env, donor: &Address, agg: &DonorAggregate) {
     env.storage()
-        .instance()
+        .persistent()
         .set(&DataKey::DonorAggregate(donor.clone()), agg);
 }
 
 fn read_chain_aggregate(env: &Env, chain: &String) -> ChainAggregate {
     env.storage()
-        .instance()
+        .persistent()
         .get(&DataKey::ChainAggregate(chain.clone()))
         .unwrap_or(ChainAggregate {
             total_attestations: 0,
@@ -451,7 +475,7 @@ fn read_chain_aggregate(env: &Env, chain: &String) -> ChainAggregate {
 
 fn write_chain_aggregate(env: &Env, chain: &String, agg: &ChainAggregate) {
     env.storage()
-        .instance()
+        .persistent()
         .set(&DataKey::ChainAggregate(chain.clone()), agg);
 }
 
@@ -636,6 +660,7 @@ impl AttestationContract {
     pub fn clear_relayer(env: Env, admin: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
+        require_not_paused(&env);
         if !env.storage().instance().has(&DataKey::Relayer) {
             panic!("Relayer not configured");
         }
@@ -686,6 +711,7 @@ impl AttestationContract {
     pub fn unpause(env: Env, admin: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
+        require_not_coordinated_upgrade(&env);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events().publish((symbol_short!("unpause"),), ());
     }
@@ -755,6 +781,7 @@ impl AttestationContract {
     /// on an already-verified attestation panics with a clear message so a
     /// buggy double-submit fails loudly.
     pub fn verify_attestation(env: Env, id: u64) {
+        require_not_paused(&env);
         let mut record: Attestation = env
             .storage()
             .instance()
@@ -792,6 +819,101 @@ impl AttestationContract {
         env.events().publish((symbol_short!("att_vfy"),), id);
     }
 
+    /// Admin-only: set the required confirmations for auto-verification per chain.
+    pub fn set_chain_confirmations(env: Env, admin: Address, chain: String, confirmations: u32) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        require_not_paused(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::ChainConfirmations(chain), &confirmations);
+    }
+
+    /// Relayer-only: report confirmations for an attestation. When the reported
+    /// confirmations meet or exceed the chain's requirement, the attestation is
+    /// auto-verified. Idempotent: only the highest reported count matters.
+    pub fn report_confirmation(
+        env: Env,
+        relayer: Address,
+        attestation_id: u64,
+        current_confirmations: u32,
+    ) {
+        relayer.require_auth();
+        require_relayer(&env, &relayer);
+        require_not_paused(&env);
+
+        let mut record: Attestation = env
+            .storage()
+            .instance()
+            .get(&DataKey::Attestation(attestation_id))
+            .expect("Attestation not found");
+
+        // Only Pending attestations can have confirmations reported
+        match record.status {
+            AttestationStatus::Pending => {}
+            AttestationStatus::Verified => panic!("Attestation already verified"),
+            AttestationStatus::Revoked => panic!("Attestation was revoked"),
+        }
+
+        let chain = record.source_chain.clone();
+        let required_confirmations: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ChainConfirmations(chain.clone()))
+            .unwrap_or(0);
+
+        // Store the highest confirmation count reported
+        let existing_confirmations: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AttestationConfirmations(attestation_id))
+            .unwrap_or(0);
+
+        let new_confirmations = if current_confirmations > existing_confirmations {
+            current_confirmations
+        } else {
+            existing_confirmations
+        };
+
+        env.storage().instance().set(
+            &DataKey::AttestationConfirmations(attestation_id),
+            &new_confirmations,
+        );
+
+        env.events().publish(
+            (symbol_short!("att_conf"),),
+            (attestation_id, new_confirmations),
+        );
+
+        // Auto-verify if threshold met
+        if required_confirmations > 0 && new_confirmations >= required_confirmations {
+            record.status = AttestationStatus::Verified;
+            record.verified_at_ledger = env.ledger().sequence();
+            env.storage()
+                .instance()
+                .set(&DataKey::Attestation(attestation_id), &record);
+
+            let donor = record.donor.clone();
+
+            let pending: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::PendingCount)
+                .unwrap_or(0);
+            if pending > 0 {
+                let new_pending = pending - 1;
+                env.storage()
+                    .instance()
+                    .set(&DataKey::PendingCount, &new_pending);
+            }
+
+            update_aggregates_on_verify(&env, &donor, &chain);
+
+            env.events()
+                .publish((symbol_short!("att_vfy"),), attestation_id);
+        }
+    }
+
     /// Admin-only: revoke an attestation. Used when the source-chain tx is
     /// later found to be invalid (e.g. a deep reorg on the source chain
     /// orphaned the block). The record stays in storage so historical
@@ -799,6 +921,7 @@ impl AttestationContract {
     pub fn revoke_attestation(env: Env, admin: Address, id: u64) {
         admin.require_auth();
         require_admin(&env, &admin);
+        require_not_paused(&env);
         let mut record: Attestation = env
             .storage()
             .instance()
@@ -948,6 +1071,7 @@ impl AttestationContract {
     pub fn propose_upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
         require_admin(&env, &admin);
+        require_not_coordinated_upgrade(&env);
         if env.storage().instance().has(&DataKey::PendingUpgrade) {
             panic!("Upgrade already pending");
         }
@@ -996,6 +1120,14 @@ impl AttestationContract {
     pub fn cancel_upgrade(env: Env, admin: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::CoordinatedUpgrade)
+            .unwrap_or(false)
+        {
+            panic!("Cannot cancel individual upgrade during coordinated upgrade");
+        }
         if !env.storage().instance().has(&DataKey::PendingUpgrade) {
             panic!("No pending upgrade");
         }
@@ -1018,6 +1150,84 @@ impl AttestationContract {
 
     pub fn get_last_executed_upgrade(env: Env) -> Option<soroban_sdk::BytesN<32>> {
         env.storage().instance().get(&DataKey::LastExecutedUpgrade)
+    }
+
+    pub fn set_coordinated_pause(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: Option<soroban_sdk::BytesN<32>>,
+    ) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::CoordinatedUpgrade, &true);
+        if let Some(hash) = new_wasm_hash {
+            if env.storage().instance().has(&DataKey::PendingUpgrade) {
+                panic!("Upgrade already pending");
+            }
+            let effective_at = env
+                .ledger()
+                .sequence()
+                .checked_add(UPGRADE_TIMELOCK_LEDGERS)
+                .expect("Upgrade effective-at overflow");
+            env.storage()
+                .instance()
+                .set(&DataKey::PendingUpgrade, &hash);
+            env.storage()
+                .instance()
+                .set(&DataKey::UpgradeEffectiveAt, &effective_at);
+            env.events().publish(
+                (symbol_short!("upg_prop"), env.current_contract_address()),
+                (hash, effective_at),
+            );
+        }
+        env.events().publish((symbol_short!("coord_ps"),), true);
+    }
+
+    pub fn clear_coordinated_pause(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        let coordinated: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::CoordinatedUpgrade)
+            .unwrap_or(false);
+        if !coordinated {
+            panic!("No coordinated upgrade in progress");
+        }
+        if env.storage().instance().has(&DataKey::PendingUpgrade) {
+            panic!("Upgrades not yet completed");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::CoordinatedUpgrade, &false);
+        env.events().publish((symbol_short!("coord_ps"),), false);
+    }
+
+    pub fn cancel_coordinated_pause(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+
+        if !Self::is_coordinated_upgrade_active(env.clone()) {
+            panic!("Not in coordinated state");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::CoordinatedUpgrade, &false);
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.storage()
+            .instance()
+            .remove(&DataKey::UpgradeEffectiveAt);
+        env.events().publish((symbol_short!("coord_ps"),), false);
+        env.events().publish((symbol_short!("coord_cnc"),), ());
+    }
+
+    pub fn is_coordinated_upgrade_active(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::CoordinatedUpgrade)
+            .unwrap_or(false)
     }
 }
 
@@ -2127,5 +2337,163 @@ mod tests {
         assert_eq!(agg_b.total_attestations, 2);
         assert_eq!(agg_b.total_usd, 5_000_000);
         assert_eq!(agg_b.total_xlm, 40_000_000);
+    }
+
+    #[test]
+    fn test_set_chain_confirmations() {
+        let (env, id, admin, _relayer, _donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let chain = String::from_str(&env, "ethereum");
+
+        client.set_chain_confirmations(&admin, &chain, &12);
+    }
+
+    #[test]
+    fn test_report_confirmations() {
+        let (env, id, _admin, relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let chain = String::from_str(&env, "ethereum");
+        let tx_hash = String::from_str(&env, "0xabcdef");
+        let project = String::from_str(&env, "proj-1");
+
+        client.set_chain_confirmations(&client.get_admin(), &chain, &12);
+
+        let attestation_id = client.record_attestation(
+            &relayer,
+            &chain,
+            &tx_hash,
+            &donor,
+            &project,
+            &10_000_000i128,
+            &80_000_000i128,
+            &1u32,
+        );
+
+        client.report_confirmation(&relayer, &attestation_id, &8);
+
+        let rec = client.get_attestation(&attestation_id);
+        assert_eq!(rec.status, AttestationStatus::Pending);
+    }
+
+    #[test]
+    fn test_auto_verify_on_threshold() {
+        let (env, id, _admin, relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let chain = String::from_str(&env, "ethereum");
+        let tx_hash = String::from_str(&env, "0xabcdef");
+        let project = String::from_str(&env, "proj-1");
+
+        client.set_chain_confirmations(&client.get_admin(), &chain, &12);
+
+        let attestation_id = client.record_attestation(
+            &relayer,
+            &chain,
+            &tx_hash,
+            &donor,
+            &project,
+            &10_000_000i128,
+            &80_000_000i128,
+            &1u32,
+        );
+
+        client.report_confirmation(&relayer, &attestation_id, &15);
+
+        let rec = client.get_attestation(&attestation_id);
+        assert_eq!(rec.status, AttestationStatus::Verified);
+    }
+
+    #[test]
+    #[should_panic(expected = "Attestation already verified")]
+    fn test_confirmations_on_verified_panics() {
+        let (env, id, _admin, relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let chain = String::from_str(&env, "ethereum");
+        let tx_hash = String::from_str(&env, "0xabcdef");
+        let project = String::from_str(&env, "proj-1");
+
+        client.set_chain_confirmations(&client.get_admin(), &chain, &12);
+
+        let attestation_id = client.record_attestation(
+            &relayer,
+            &chain,
+            &tx_hash,
+            &donor,
+            &project,
+            &10_000_000i128,
+            &80_000_000i128,
+            &1u32,
+        );
+
+        client.verify_attestation(&attestation_id);
+
+        client.report_confirmation(&relayer, &attestation_id, &15);
+    }
+
+    #[test]
+    fn test_highest_confirmation_count_used() {
+        let (env, id, _admin, relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let chain = String::from_str(&env, "ethereum");
+        let tx_hash = String::from_str(&env, "0xabcdef");
+        let project = String::from_str(&env, "proj-1");
+
+        client.set_chain_confirmations(&client.get_admin(), &chain, &12);
+
+        let attestation_id = client.record_attestation(
+            &relayer,
+            &chain,
+            &tx_hash,
+            &donor,
+            &project,
+            &10_000_000i128,
+            &80_000_000i128,
+            &1u32,
+        );
+
+        client.report_confirmation(&relayer, &attestation_id, &8);
+        client.report_confirmation(&relayer, &attestation_id, &5);
+        client.report_confirmation(&relayer, &attestation_id, &10);
+
+        let rec = client.get_attestation(&attestation_id);
+        assert_eq!(rec.status, AttestationStatus::Pending);
+
+        client.report_confirmation(&relayer, &attestation_id, &15);
+
+        let rec = client.get_attestation(&attestation_id);
+        assert_eq!(rec.status, AttestationStatus::Verified);
+    }
+
+    #[test]
+    fn test_integration_confirmations_flow() {
+        let (env, id, _admin, relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let chain = String::from_str(&env, "ethereum");
+        let tx_hash = String::from_str(&env, "0xabcdef");
+        let project = String::from_str(&env, "proj-1");
+
+        // Set chain confirmations to 12
+        client.set_chain_confirmations(&client.get_admin(), &chain, &12);
+
+        // Record attestation
+        let attestation_id = client.record_attestation(
+            &relayer,
+            &chain,
+            &tx_hash,
+            &donor,
+            &project,
+            &10_000_000i128,
+            &80_000_000i128,
+            &1u32,
+        );
+
+        // Report 8 confirmations - should not verify
+        client.report_confirmation(&relayer, &attestation_id, &8);
+        let rec = client.get_attestation(&attestation_id);
+        assert_eq!(rec.status, AttestationStatus::Pending);
+
+        // Report 15 confirmations - should auto-verify
+        client.report_confirmation(&relayer, &attestation_id, &15);
+        let rec = client.get_attestation(&attestation_id);
+        assert_eq!(rec.status, AttestationStatus::Verified);
     }
 }
