@@ -4205,7 +4205,7 @@ impl IndigoPayContract {
                 env.invoke_contract::<()>(
                     &addr,
                     &Symbol::new(&env, "set_coordinated_pause"),
-                    (Some(hash),).into_val(&env),
+                    (signers.get(0).unwrap(), Some(hash)).into_val(&env),
                 );
             }
         }
@@ -4218,7 +4218,8 @@ impl IndigoPayContract {
     }
 
     /// Complete coordinated upgrade after all participating contract upgrades are executed.
-    pub fn complete_coordinated_upgrade(env: Env) {
+    pub fn complete_coordinated_upgrade(env: Env, admin: Address) {
+        require_admin_for_routine(&env, &admin);
         let coordinated: bool = env
             .storage()
             .instance()
@@ -4260,7 +4261,7 @@ impl IndigoPayContract {
                 env.invoke_contract::<()>(
                     &addr,
                     &Symbol::new(&env, "clear_coordinated_pause"),
-                    ().into_val(&env),
+                    (admin.clone(),).into_val(&env),
                 );
             }
         }
@@ -4306,7 +4307,7 @@ impl IndigoPayContract {
                 env.invoke_contract::<()>(
                     &addr,
                     &Symbol::new(&env, "cancel_coordinated_pause"),
-                    ().into_val(&env),
+                    (signers.get(0).unwrap(),).into_val(&env),
                 );
             }
         }
@@ -4328,11 +4329,15 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
-    pub fn set_coordinated_pause(env: Env, new_wasm_hash: Option<BytesN<32>>) {
+    pub fn set_coordinated_pause(env: Env, admin: Address, new_wasm_hash: Option<BytesN<32>>) {
+        require_admin_for_routine(&env, &admin);
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &true);
         if let Some(hash) = new_wasm_hash {
+            if env.storage().instance().has(&DataKey::PendingUpgrade) {
+                panic!("Upgrade already pending");
+            }
             let effective_at = env
                 .ledger()
                 .sequence()
@@ -4353,7 +4358,8 @@ impl IndigoPayContract {
             .publish((symbol_short!("coord_ps"),), true);
     }
 
-    pub fn clear_coordinated_pause(env: Env) {
+    pub fn clear_coordinated_pause(env: Env, admin: Address) {
+        require_admin_for_routine(&env, &admin);
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &false);
@@ -4361,7 +4367,8 @@ impl IndigoPayContract {
             .publish((symbol_short!("coord_ps"),), false);
     }
 
-    pub fn cancel_coordinated_pause(env: Env) {
+    pub fn cancel_coordinated_pause(env: Env, admin: Address) {
+        require_admin_for_routine(&env, &admin);
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &false);
@@ -10010,7 +10017,7 @@ mod tests {
             env.storage().instance().remove(&DataKey::UpgradeEffectiveAt);
         });
 
-        client.complete_coordinated_upgrade();
+        client.complete_coordinated_upgrade(&admin);
         assert!(!client.is_coordinated_upgrade_active());
 
         let new_pid = String::from_str(&env, "new-project-2");
@@ -10038,6 +10045,31 @@ mod tests {
         let name = String::from_str(&env, "Test Project 3");
         client.register_project(&admin, &new_pid, &name, &owner, &100u32);
         assert_eq!(client.get_project_count(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_set_coordinated_pause_unauthorized_fails() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let attacker = Address::generate(&env);
+        let wasm_hash = Some(BytesN::from_array(&env, &[99u8; 32]));
+        client.set_coordinated_pause(&attacker, &wasm_hash);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_clear_coordinated_pause_unauthorized_fails() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let attacker = Address::generate(&env);
+        client.clear_coordinated_pause(&attacker);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_cancel_coordinated_pause_unauthorized_fails() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let attacker = Address::generate(&env);
+        client.cancel_coordinated_pause(&attacker);
     }
 
     #[test]
@@ -10091,7 +10123,7 @@ mod tests {
             env.storage().instance().remove(&escrow_contract::DataKey::PendingUpgrade);
         });
 
-        indigopay_client.complete_coordinated_upgrade();
+        indigopay_client.complete_coordinated_upgrade(&admin);
 
         assert!(!indigopay_client.is_coordinated_upgrade_active());
         assert!(!attestation_client.is_coordinated_upgrade_active());

@@ -903,11 +903,16 @@ impl EscrowContract {
         env.storage().instance().get(&DataKey::LastExecutedUpgrade)
     }
 
-    pub fn set_coordinated_pause(env: Env, new_wasm_hash: Option<BytesN<32>>) {
+    pub fn set_coordinated_pause(env: Env, admin: Address, new_wasm_hash: Option<BytesN<32>>) {
+        admin.require_auth();
+        require_admin(&env, &admin);
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &true);
         if let Some(hash) = new_wasm_hash {
+            if env.storage().instance().has(&DataKey::PendingUpgrade) {
+                panic!("Upgrade already pending");
+            }
             let effective_at = env
                 .ledger()
                 .sequence()
@@ -928,7 +933,9 @@ impl EscrowContract {
             .publish((symbol_short!("coord_ps"),), true);
     }
 
-    pub fn clear_coordinated_pause(env: Env) {
+    pub fn clear_coordinated_pause(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &false);
@@ -936,7 +943,9 @@ impl EscrowContract {
             .publish((symbol_short!("coord_ps"),), false);
     }
 
-    pub fn cancel_coordinated_pause(env: Env) {
+    pub fn cancel_coordinated_pause(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &false);
