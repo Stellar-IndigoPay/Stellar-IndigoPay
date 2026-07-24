@@ -342,8 +342,6 @@ mod fuzz {
             prop_assert!(donor_stats.co2_offset_grams > 0, "CO₂ offset should be non-zero at max rate");
             prop_assert_eq!(donor_stats.donation_count, 1);
         }
-    }
-}
 
         // ── Receipt commitment uniqueness (#455) ──────────────────────────────
 
@@ -376,3 +374,5 @@ mod fuzz {
             prop_assert_eq!(receipt_a.donor, receipt_b.donor);
             prop_assert_eq!(receipt_a.donor, donor);
         }
+    }
+}
