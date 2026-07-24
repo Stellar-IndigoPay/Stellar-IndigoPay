@@ -1037,7 +1037,6 @@ impl EscrowContract {
     pub fn get_freelancer_reputation(env: Env, freelancer: Address) -> FreelancerReputation {
         read_reputation(&env, &freelancer)
     }
-
 }
 
 #[cfg(all(test, feature = "testutils"))]
