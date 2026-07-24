@@ -1,9 +1,12 @@
 #![no_std]
 #![allow(deprecated)]
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, Address, Env, InvokeError, Symbol, Vec,
+};
 
 const MAX_OBSERVATIONS: u32 = 20;
+const MAX_SOURCE_ORACLES: u32 = 7;
 const DEFAULT_TWAP_WINDOW: u32 = 10;
 const DEFAULT_STALENESS_THRESHOLD: u32 = 720;
 const PRICE_SCALE: i128 = 10_000_000;
@@ -29,6 +32,8 @@ pub enum DataKey {
     MaxPriceDeviationBps,
     TwapWindow,
     StalenessThreshold,
+    SourceOracle(Address),
+    SourceOracleList,
 }
 
 #[contract]
@@ -166,6 +171,100 @@ fn current_price_raw(env: &Env) -> Option<i128> {
     Some(weighted_sum / total_weight)
 }
 
+/// Computes this contract's own configured TWAP price.
+///
+/// This is kept separate from external-source aggregation so the public
+/// `get_price` entry point remains backward compatible and aggregation can
+/// fall back to the exact same internal calculation.
+fn internal_price(env: &Env) -> i128 {
+    let count: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::ObservationCount)
+        .unwrap_or(0);
+    if count == 0 {
+        return env
+            .storage()
+            .instance()
+            .get(&DataKey::FallbackPrice)
+            .expect("Oracle has no observations and no fallback");
+    }
+
+    let next_index: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::ObservationIndex)
+        .unwrap_or(0);
+    let current_ledger = env.ledger().sequence();
+
+    // Check freshness of the newest observation.
+    let latest_index = (next_index + MAX_OBSERVATIONS - 1) % MAX_OBSERVATIONS;
+    let latest: PriceObservation = env
+        .storage()
+        .instance()
+        .get(&DataKey::Observations(latest_index))
+        .expect("Oracle observation missing");
+
+    if current_ledger.saturating_sub(latest.ledger) > read_staleness_threshold(env) {
+        return env
+            .storage()
+            .instance()
+            .get(&DataKey::FallbackPrice)
+            .expect("Oracle price is stale and no fallback configured");
+    }
+
+    let window = read_twap_window(env).min(count);
+
+    // Collect observations from oldest to newest.
+    let mut observations = Vec::new(env);
+    let start_offset = (next_index + MAX_OBSERVATIONS - window) % MAX_OBSERVATIONS;
+    for i in 0..window {
+        let index = (start_offset + i) % MAX_OBSERVATIONS;
+        let obs: PriceObservation = env
+            .storage()
+            .instance()
+            .get(&DataKey::Observations(index))
+            .expect("Oracle observation missing");
+        observations.push_back(obs);
+    }
+
+    // TWAP: Σ(price_i × weight_i) / Σ(weight_i × PRICE_SCALE)
+    let mut weighted_sum = 0_i128;
+    let mut total_weight = 0_i128;
+
+    for i in 0..window {
+        let obs = observations.get(i).unwrap();
+        let next_ledger = if i + 1 < window {
+            observations.get(i + 1).unwrap().ledger
+        } else {
+            current_ledger
+        };
+        let mut weight = next_ledger.saturating_sub(obs.ledger) as i128;
+        // When all observations fall on the same ledger (common in tests),
+        // each observation gets a minimum weight of 1 to avoid division by
+        // zero while preserving the ordering of price contributions.
+        if weight == 0 {
+            weight = 1;
+        }
+        weighted_sum = weighted_sum
+            .checked_add(obs.price.checked_mul(weight).expect("TWAP mul overflow"))
+            .expect("TWAP overflow");
+        total_weight = total_weight
+            .checked_add(weight)
+            .expect("Total weight overflow");
+    }
+
+    if total_weight == 0 {
+        return env
+            .storage()
+            .instance()
+            .get(&DataKey::FallbackPrice)
+            .expect("Zero-weight TWAP — fallback required");
+    }
+
+    weighted_sum / (total_weight * PRICE_SCALE)
+}
+
 #[contractimpl]
 impl SimpleOracle {
     pub fn initialize(env: Env, admin: Address) {
@@ -205,6 +304,59 @@ impl SimpleOracle {
             .remove(&DataKey::Reporter(reporter.clone()));
         env.events()
             .publish((symbol_short!("rep_rem"), admin), reporter);
+    }
+
+    pub fn add_source_oracle(env: Env, admin: Address, oracle_address: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+
+        let source_key = DataKey::SourceOracle(oracle_address.clone());
+        let is_registered: bool = env.storage().instance().get(&source_key).unwrap_or(false);
+        if is_registered {
+            return;
+        }
+        if oracle_address == env.current_contract_address() {
+            panic!("Cannot register oracle as its own source");
+        }
+
+        let mut sources: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SourceOracleList)
+            .unwrap_or(Vec::new(&env));
+        if sources.len() >= MAX_SOURCE_ORACLES {
+            panic!("Source oracle limit exceeded");
+        }
+
+        env.storage().instance().set(&source_key, &true);
+        sources.push_back(oracle_address);
+        env.storage()
+            .instance()
+            .set(&DataKey::SourceOracleList, &sources);
+    }
+
+    pub fn remove_source_oracle(env: Env, admin: Address, oracle_address: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+
+        let source_key = DataKey::SourceOracle(oracle_address.clone());
+        let is_registered: bool = env.storage().instance().get(&source_key).unwrap_or(false);
+        if !is_registered {
+            return;
+        }
+
+        env.storage().instance().remove(&source_key);
+        let mut sources: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SourceOracleList)
+            .unwrap_or(Vec::new(&env));
+        if let Some(index) = sources.first_index_of(&oracle_address) {
+            sources.remove(index);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::SourceOracleList, &sources);
     }
 
     pub fn report_price(env: Env, reporter: Address, price: i128) {
@@ -359,92 +511,56 @@ impl SimpleOracle {
     /// observations or the newest observation exceeds the configured staleness
     /// threshold.
     pub fn get_price(env: Env) -> i128 {
-        let count: u32 = env
+        internal_price(&env)
+    }
+
+    pub fn get_aggregated_price(env: Env) -> i128 {
+        let sources: Vec<Address> = env
             .storage()
             .instance()
-            .get(&DataKey::ObservationCount)
-            .unwrap_or(0);
-        if count == 0 {
-            return env
-                .storage()
-                .instance()
-                .get(&DataKey::FallbackPrice)
-                .expect("Oracle has no observations and no fallback");
+            .get(&DataKey::SourceOracleList)
+            .unwrap_or(Vec::new(&env));
+        if sources.is_empty() {
+            return internal_price(&env);
         }
 
-        let next_index: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::ObservationIndex)
-            .unwrap_or(0);
-        let current_ledger = env.ledger().sequence();
-
-        // Check freshness of the newest observation.
-        let latest_index = (next_index + MAX_OBSERVATIONS - 1) % MAX_OBSERVATIONS;
-        let latest: PriceObservation = env
-            .storage()
-            .instance()
-            .get(&DataKey::Observations(latest_index))
-            .expect("Oracle observation missing");
-
-        if current_ledger.saturating_sub(latest.ledger) > read_staleness_threshold(&env) {
-            return env
-                .storage()
-                .instance()
-                .get(&DataKey::FallbackPrice)
-                .expect("Oracle price is stale and no fallback configured");
-        }
-
-        let window = read_twap_window(&env).min(count);
-
-        // Collect observations from oldest to newest.
-        let mut observations = Vec::new(&env);
-        let start_offset = (next_index + MAX_OBSERVATIONS - window) % MAX_OBSERVATIONS;
-        for i in 0..window {
-            let index = (start_offset + i) % MAX_OBSERVATIONS;
-            let obs: PriceObservation = env
-                .storage()
-                .instance()
-                .get(&DataKey::Observations(index))
-                .expect("Oracle observation missing");
-            observations.push_back(obs);
-        }
-
-        // TWAP: Σ(price_i × weight_i) / Σ(weight_i × PRICE_SCALE)
-        let mut weighted_sum = 0_i128;
-        let mut total_weight = 0_i128;
-
-        for i in 0..window {
-            let obs = observations.get(i).unwrap();
-            let next_ledger = if i + 1 < window {
-                observations.get(i + 1).unwrap().ledger
-            } else {
-                current_ledger
-            };
-            let mut weight = next_ledger.saturating_sub(obs.ledger) as i128;
-            // When all observations fall on the same ledger (common in tests),
-            // each observation gets a minimum weight of 1 to avoid division by
-            // zero while preserving the ordering of price contributions.
-            if weight == 0 {
-                weight = 1;
+        let mut prices: Vec<i128> = Vec::new(&env);
+        for source in sources.iter() {
+            let result = env.try_invoke_contract::<i128, InvokeError>(
+                &source,
+                &symbol_short!("get_price"),
+                Vec::new(&env),
+            );
+            if let Ok(Ok(price)) = result {
+                if price > 0 {
+                    prices.push_back(price);
+                }
             }
-            weighted_sum = weighted_sum
-                .checked_add(obs.price.checked_mul(weight).expect("TWAP mul overflow"))
-                .expect("TWAP overflow");
-            total_weight = total_weight
-                .checked_add(weight)
-                .expect("Total weight overflow");
         }
 
-        if total_weight == 0 {
-            return env
-                .storage()
-                .instance()
-                .get(&DataKey::FallbackPrice)
-                .expect("Zero-weight TWAP — fallback required");
+        if prices.is_empty() {
+            return internal_price(&env);
         }
 
-        weighted_sum / (total_weight * PRICE_SCALE)
+        for i in 1..prices.len() {
+            let price = prices.get_unchecked(i);
+            let mut j = i;
+            while j > 0 && prices.get_unchecked(j - 1) > price {
+                let previous = prices.get_unchecked(j - 1);
+                prices.set(j, previous);
+                j -= 1;
+            }
+            prices.set(j, price);
+        }
+
+        let middle = prices.len() / 2;
+        if prices.len().is_multiple_of(2) {
+            let lower = prices.get_unchecked(middle - 1);
+            let upper = prices.get_unchecked(middle);
+            lower + (upper - lower) / 2
+        } else {
+            prices.get_unchecked(middle)
+        }
     }
 }
 
@@ -454,9 +570,62 @@ mod tests {
 
     use super::*;
     use soroban_sdk::{
+        contracterror, panic_with_error,
         testutils::{Address as _, Events as _, Ledger},
         Env, IntoVal,
     };
+
+    const TEST_PRICE_KEY: Symbol = symbol_short!("price");
+
+    #[contract]
+    struct TestPriceSource;
+
+    #[contractimpl]
+    impl TestPriceSource {
+        pub fn set_price(env: Env, price: i128) {
+            env.storage().instance().set(&TEST_PRICE_KEY, &price);
+        }
+
+        pub fn get_price(env: Env) -> i128 {
+            env.storage().instance().get(&TEST_PRICE_KEY).unwrap()
+        }
+    }
+
+    #[contract]
+    struct PanickingPriceSource;
+
+    #[contractimpl]
+    impl PanickingPriceSource {
+        pub fn get_price(_env: Env) -> i128 {
+            panic!("source unavailable");
+        }
+    }
+
+    #[contracterror]
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    enum TestSourceError {
+        Unavailable = 1,
+    }
+
+    #[contract]
+    struct ErrorPriceSource;
+
+    #[contractimpl]
+    impl ErrorPriceSource {
+        pub fn get_price(env: Env) -> i128 {
+            panic_with_error!(&env, TestSourceError::Unavailable);
+        }
+    }
+
+    #[contract]
+    struct IncompatiblePriceSource;
+
+    #[contractimpl]
+    impl IncompatiblePriceSource {
+        pub fn get_price(_env: Env) -> u32 {
+            42
+        }
+    }
 
     fn setup() -> (Env, Address, Address, Address) {
         let env = Env::default();
@@ -470,6 +639,240 @@ mod tests {
 
     fn add_reporter(env: &Env, contract_id: &Address, admin: &Address, reporter: &Address) {
         SimpleOracleClient::new(env, contract_id).add_reporter(admin, reporter);
+    }
+
+    fn register_price_source(env: &Env, price: i128) -> Address {
+        let source = env.register(TestPriceSource, ());
+        TestPriceSourceClient::new(env, &source).set_price(&price);
+        source
+    }
+
+    fn source_list(env: &Env, contract_id: &Address) -> Vec<Address> {
+        env.as_contract(contract_id, || {
+            env.storage()
+                .instance()
+                .get(&DataKey::SourceOracleList)
+                .unwrap_or(Vec::new(env))
+        })
+    }
+
+    fn is_source_registered(env: &Env, contract_id: &Address, source: &Address) -> bool {
+        env.as_contract(contract_id, || {
+            env.storage()
+                .instance()
+                .get(&DataKey::SourceOracle(source.clone()))
+                .unwrap_or(false)
+        })
+    }
+
+    #[test]
+    fn test_add_remove_source() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        let first = Address::generate(&env);
+        let second = Address::generate(&env);
+
+        client.add_source_oracle(&admin, &first);
+        client.add_source_oracle(&admin, &second);
+        client.add_source_oracle(&admin, &first);
+
+        assert_eq!(
+            source_list(&env, &contract_id),
+            soroban_sdk::vec![&env, first.clone(), second.clone()]
+        );
+        assert!(is_source_registered(&env, &contract_id, &first));
+        assert!(is_source_registered(&env, &contract_id, &second));
+
+        client.remove_source_oracle(&admin, &first);
+        client.remove_source_oracle(&admin, &first);
+        client.remove_source_oracle(&admin, &Address::generate(&env));
+
+        assert_eq!(
+            source_list(&env, &contract_id),
+            soroban_sdk::vec![&env, second.clone()]
+        );
+        assert!(!is_source_registered(&env, &contract_id, &first));
+        assert!(is_source_registered(&env, &contract_id, &second));
+    }
+
+    #[test]
+    fn test_source_limit_enforced() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        let mut sources = Vec::new(&env);
+
+        for _ in 0..MAX_SOURCE_ORACLES {
+            let source = Address::generate(&env);
+            client.add_source_oracle(&admin, &source);
+            sources.push_back(source);
+        }
+        assert_eq!(source_list(&env, &contract_id).len(), MAX_SOURCE_ORACLES);
+
+        let existing = sources.first().unwrap();
+        assert!(client.try_add_source_oracle(&admin, &existing).is_ok());
+        assert_eq!(source_list(&env, &contract_id).len(), MAX_SOURCE_ORACLES);
+
+        let eighth = Address::generate(&env);
+        assert!(client.try_add_source_oracle(&admin, &eighth).is_err());
+        assert!(!is_source_registered(&env, &contract_id, &eighth));
+        assert_eq!(source_list(&env, &contract_id).len(), MAX_SOURCE_ORACLES);
+
+        client.remove_source_oracle(&admin, &existing);
+        client.add_source_oracle(&admin, &eighth);
+        assert_eq!(source_list(&env, &contract_id).len(), MAX_SOURCE_ORACLES);
+        assert!(is_source_registered(&env, &contract_id, &eighth));
+    }
+
+    #[test]
+    fn unauthorized_source_management_does_not_mutate_state() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        let non_admin = Address::generate(&env);
+        let source = Address::generate(&env);
+
+        assert!(client.try_add_source_oracle(&non_admin, &source).is_err());
+        assert!(source_list(&env, &contract_id).is_empty());
+        assert!(!is_source_registered(&env, &contract_id, &source));
+
+        client.add_source_oracle(&admin, &source);
+        assert!(client
+            .try_remove_source_oracle(&non_admin, &source)
+            .is_err());
+        assert_eq!(
+            source_list(&env, &contract_id),
+            soroban_sdk::vec![&env, source.clone()]
+        );
+        assert!(is_source_registered(&env, &contract_id, &source));
+    }
+
+    #[test]
+    fn direct_self_registration_is_rejected() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        assert!(client.try_add_source_oracle(&admin, &contract_id).is_err());
+        assert!(source_list(&env, &contract_id).is_empty());
+        assert!(!is_source_registered(&env, &contract_id, &contract_id));
+    }
+
+    #[test]
+    fn test_aggregate_single_source() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        let source = register_price_source(&env, 17);
+        client.add_source_oracle(&admin, &source);
+
+        assert_eq!(client.get_aggregated_price(), 17);
+    }
+
+    #[test]
+    fn test_aggregate_multiple_sources_median() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        let high = register_price_source(&env, 30);
+        let low = register_price_source(&env, 10);
+        let middle = register_price_source(&env, 20);
+
+        client.add_source_oracle(&admin, &high);
+        client.add_source_oracle(&admin, &low);
+        client.add_source_oracle(&admin, &middle);
+
+        assert_eq!(client.get_aggregated_price(), 20);
+    }
+
+    #[test]
+    fn even_source_median_is_overflow_safe() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        let lower = register_price_source(&env, i128::MAX - 2);
+        let upper = register_price_source(&env, i128::MAX);
+        client.add_source_oracle(&admin, &upper);
+        client.add_source_oracle(&admin, &lower);
+
+        assert_eq!(client.get_aggregated_price(), i128::MAX - 1);
+    }
+
+    #[test]
+    fn duplicate_values_are_retained_in_median() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        for price in [9_i128, 100, 9] {
+            let source = register_price_source(&env, price);
+            client.add_source_oracle(&admin, &source);
+        }
+
+        assert_eq!(client.get_aggregated_price(), 9);
+    }
+
+    #[test]
+    fn invalid_prices_and_failed_sources_are_skipped() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        let zero = register_price_source(&env, 0);
+        let negative = register_price_source(&env, -5);
+        let valid = register_price_source(&env, 25);
+        let panicking = env.register(PanickingPriceSource, ());
+
+        for source in [zero, negative, panicking, valid] {
+            client.add_source_oracle(&admin, &source);
+        }
+
+        assert_eq!(client.get_aggregated_price(), 25);
+    }
+
+    #[test]
+    fn test_aggregate_fallback() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        client.set_fallback_price(&admin, &7);
+
+        assert_eq!(client.get_aggregated_price(), 7);
+
+        let error_source = env.register(ErrorPriceSource, ());
+        let incompatible_source = env.register(IncompatiblePriceSource, ());
+        let missing_source = Address::generate(&env);
+        client.add_source_oracle(&admin, &error_source);
+        client.add_source_oracle(&admin, &incompatible_source);
+        client.add_source_oracle(&admin, &missing_source);
+
+        assert_eq!(client.get_aggregated_price(), 7);
+    }
+
+    #[test]
+    fn aggregation_fallback_preserves_configured_twap_window() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+        client.add_source_oracle(&admin, &Address::generate(&env));
+
+        env.ledger().set_sequence_number(100);
+        client.report_price(&reporter, &100_000_000);
+        env.ledger().set_sequence_number(200);
+        client.report_price(&reporter, &200_000_000);
+        env.ledger().set_sequence_number(300);
+        assert_eq!(client.get_aggregated_price(), 15);
+
+        client.set_twap_window(&admin, &1);
+        assert_eq!(client.get_aggregated_price(), 20);
+        assert_eq!(client.get_price(), 20);
+    }
+
+    #[test]
+    fn aggregation_fallback_preserves_staleness_and_fallback_price() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+        client.add_source_oracle(&admin, &Address::generate(&env));
+        client.set_fallback_price(&admin, &6);
+        client.set_staleness_threshold(&admin, &DEFAULT_TWAP_WINDOW);
+
+        env.ledger().set_sequence_number(100);
+        client.report_price(&reporter, &80_000_000);
+        env.ledger().set_sequence_number(110);
+        assert_eq!(client.get_aggregated_price(), 8);
+        env.ledger().set_sequence_number(111);
+        assert_eq!(client.get_aggregated_price(), 6);
+        assert_eq!(client.get_price(), 6);
     }
 
     #[test]
