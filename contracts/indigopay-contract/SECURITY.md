@@ -251,6 +251,8 @@ Manual admin monitoring cannot react quickly enough to coordinated attacks (e.g.
 
 ### Data model
 
+- An empty `AnomalyRules` set disables anomaly detection for the project and preserves existing donation behavior.
+
 | Key                         | Type                       | Description                                      |
 | --------------------------- | -------------------------- | ------------------------------------------------ |
 | `DataKey::AnomalyRules(String)`    | `Vec<AnomalyRule>`  | Anomaly rules configured for a project           |

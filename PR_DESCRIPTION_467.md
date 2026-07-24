@@ -18,7 +18,7 @@ Implements an atomic batch donation feature for the IndigoPay Soroban contract. 
 | Phase | Description |
 |-------|-------------|
 | **1. Auth** | Authenticates all unique donors via `require_auth()` as they are encountered |
-| **2. Execution** | Calls existing `process_donation()` for each donation, which performs validation, state writes, and token transfers following the CEI (Checks-Effects-Interactions) pattern |
+| **2. Execution** | Calls existing `process_donation()` for each donation, which performs project validation, state writes, rate-limit checks, and token transfers following the CEI (Checks-Effects-Interactions) pattern |
 
 **Key design decisions:**
 - Reuses existing `process_donation()` logic — no duplicate validation or state management
@@ -30,7 +30,7 @@ Implements an atomic batch donation feature for the IndigoPay Soroban contract. 
 
 | Test | Description |
 |------|-------------|
-| `test_batch_donate_basic_flow` | Basic batch with 2 donations, verifies amounts and donor counts |
+| `test_batch_donate_basic_flow` | Single donation via batch, verifies amounts and donor stats |
 | `test_batch_donate_multiple_entries` | Multiple donations to same project |
 | `test_batch_donate_multiple_donors` | Multiple donors in a single batch |
 | `test_batch_donate_zero_amount_fails` | Zero-amount donation panics |
@@ -56,7 +56,7 @@ Implements an atomic batch donation feature for the IndigoPay Soroban contract. 
 
 | File | Change |
 |------|--------|
-| `contracts/indigopay-contract/src/lib.rs` | +MAX_BATCH_SIZE constant, `batch_donate` implementation, 8 unit tests |
+| `contracts/indigopay-contract/src/lib.rs` | `batch_donate` implementation, 8 unit tests |
 | `contracts/indigopay-contract/src/fuzz_tests.rs` | 2 new property-based fuzz tests |
 | `CHANGELOG.md` | +Feature entry under [Unreleased] |
 
@@ -66,7 +66,6 @@ Implements an atomic batch donation feature for the IndigoPay Soroban contract. 
 
 - [x] `batch_donate` function with atomic batch processing
 - [x] `BatchDonation` type (pre-existing, no changes needed)
-- [x] Batch size limit (`MAX_BATCH_SIZE = 20`)
 - [x] Atomicity: entire batch reverts on any validation failure
 - [x] Unit tests covering acceptance criteria
 - [x] Property-based fuzz tests for sum conservation and atomicity
