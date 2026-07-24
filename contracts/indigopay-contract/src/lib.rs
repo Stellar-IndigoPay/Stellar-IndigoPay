@@ -3420,6 +3420,7 @@ impl IndigoPayContract {
     /// Emits proj_ver on approval, prop_rej on rejection.
     #[cfg(feature = "governance")]
     pub fn resolve_proposal(env: Env, project_id: String) {
+        require_not_paused(&env);
         let mut proposal: VoteProposal = env
             .storage()
             .instance()
@@ -3451,6 +3452,7 @@ impl IndigoPayContract {
     #[cfg(feature = "governance")]
     pub fn veto_proposal(env: Env, signers: Vec<Address>, project_id: String) {
         require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
         let mut proposal: VoteProposal = env
             .storage()
             .instance()
@@ -5328,6 +5330,7 @@ impl IndigoPayContract {
     #[cfg(feature = "vesting")]
     pub fn cancel_vesting(env: Env, donor: Address, schedule_id: u32) {
         donor.require_auth();
+        require_not_paused(&env);
 
         let schedule_key = DataKey::VestingSchedule(donor.clone(), schedule_id);
         let schedule: VestingSchedule = env

@@ -417,6 +417,7 @@ impl AttestationContract {
     pub fn clear_relayer(env: Env, admin: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
+        require_not_paused(&env);
         if !env.storage().instance().has(&DataKey::Relayer) {
             panic!("Relayer not configured");
         }
@@ -536,6 +537,7 @@ impl AttestationContract {
     /// on an already-verified attestation panics with a clear message so a
     /// buggy double-submit fails loudly.
     pub fn verify_attestation(env: Env, id: u64) {
+        require_not_paused(&env);
         let mut record: Attestation = env
             .storage()
             .instance()
@@ -575,6 +577,7 @@ impl AttestationContract {
     pub fn revoke_attestation(env: Env, admin: Address, id: u64) {
         admin.require_auth();
         require_admin(&env, &admin);
+        require_not_paused(&env);
         let mut record: Attestation = env
             .storage()
             .instance()
