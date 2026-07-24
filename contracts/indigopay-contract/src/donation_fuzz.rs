@@ -90,7 +90,18 @@ mod fuzz {
     }
 
     fn expected_badge(total_donated: i128) -> crate::BadgeTier {
-        crate::calculate_badge(total_donated)
+        let xlm = total_donated / 10_000_000;
+        if xlm >= 2000 {
+            crate::BadgeTier::EarthGuardian
+        } else if xlm >= 500 {
+            crate::BadgeTier::Forest
+        } else if xlm >= 100 {
+            crate::BadgeTier::Tree
+        } else if xlm >= 10 {
+            crate::BadgeTier::Seedling
+        } else {
+            crate::BadgeTier::None
+        }
     }
 
     fn expected_co2_offset_grams(total_donated: i128) -> i128 {
