@@ -186,6 +186,28 @@ pub struct EmergencyWithdrawal {
     pub executable_at: u32,
 }
 
+/// Result of an upgrade dry-run simulation. Returned by `simulate_upgrade`
+/// to report storage key compatibility without actually executing the
+/// proposed WASM migration.
+///
+/// Since Soroban host does not support storage snapshots and rollbacks,
+/// the simulation validates storage key integrity rather than running the
+/// actual migration. `storage_keys_after` equals `storage_keys_before` when
+/// no keys would be lost during a well-formed upgrade.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SimulationResult {
+    /// Whether the simulated migration completed without errors.
+    pub success: bool,
+    /// Number of accessible storage keys found in the current contract.
+    pub storage_keys_before: u32,
+    /// Projected number of accessible storage keys after the migration
+    /// (equals `storage_keys_before` when no keys would be lost).
+    pub storage_keys_after: u32,
+    /// Descriptive errors found during validation (empty on success).
+    pub errors: Vec<String>,
+}
+
 #[contracttype]
 pub enum DataKey {
     // Multi-sig admin set: Vec<Address> of authorized admin addresses.
@@ -2082,6 +2104,135 @@ impl IndigoPayContract {
         env.storage().instance().get(&DataKey::LastExecutedUpgrade)
     }
 
+    // ─── Upgrade dry-run simulation ───────────────────────────────────────────
+
+    /// Permissionless — simulates a pending upgrade without executing it.
+    ///
+    /// Anyone may call this during the 48-hour timelock window to validate
+    /// that a proposed upgrade is compatible with the current contract
+    /// storage before it becomes executable.
+    ///
+    /// Validates:
+    /// 1. A pending upgrade exists (panics if not).
+    /// 2. The pending WASM hash is non-zero.
+    /// 3. All currently stored scalar keys are accessible and decodable.
+    /// 4. All registered project keys are accessible.
+    ///
+    /// Returns a `SimulationResult` with storage key counts and any
+    /// issues found. Since Soroban host does not support storage
+    /// snapshots and rollbacks, the simulation validates storage key
+    /// integrity rather than actually running the proposed `migrate()`.
+    /// `storage_keys_after` equals `storage_keys_before` because a
+    /// well-formed upgrade preserves all existing keys.
+    pub fn simulate_upgrade(env: Env) -> SimulationResult {
+        // 1. Verify a pending upgrade exists. Panics if not.
+        let pending: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .expect("No pending upgrade");
+
+        let mut errors = Vec::new(&env);
+        let mut keys_before: u32 = 0;
+
+        // 2. Validate pending WASM hash is non-zero (all-zeros would
+        //    indicate a corrupted or uninitialised proposal).
+        let hash_array = pending.to_array();
+        if hash_array.iter().all(|b| *b == 0) {
+            errors.push_back(String::from_str(
+                &env,
+                "Pending upgrade WASM hash is all zeros",
+            ));
+        }
+
+        // 3. Check all scalar (non-parameterized) DataKey variants.
+        //    These are keys whose presence is deterministic after init.
+        let scalar_keys = [
+            DataKey::AdminSet,
+            DataKey::AdminThreshold,
+            DataKey::ProjectCount,
+            DataKey::DonationCount,
+            DataKey::GlobalTotalRaised,
+            DataKey::GlobalCO2OffsetGrams,
+            DataKey::ContractPaused,
+            DataKey::DonationRateLimitMax,
+            DataKey::DonationRateLimitWindow,
+            DataKey::ProjectIdsAll,
+            DataKey::PendingUpgrade,
+            DataKey::UpgradeEffectiveAt,
+            DataKey::LastExecutedUpgrade,
+            DataKey::USDCTokenAddress,
+            DataKey::OracleAddress,
+            DataKey::PendingAdmin,
+        ];
+        for key in scalar_keys.iter() {
+            if env.storage().instance().has(&key) {
+                keys_before += 1;
+            }
+        }
+
+        // 4. Enumerate registered projects from the ordered index and
+        //    verify each project's storage entries are accessible.
+        let project_ids: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProjectIdsAll)
+            .unwrap_or(Vec::new(&env));
+
+        for pid in project_ids.iter() {
+            // Every project has a DataKey::Project(pid) entry.
+            let project_key = DataKey::Project(pid.clone());
+            if env.storage().instance().has(&project_key) {
+                keys_before += 1;
+                // Verify the stored value deserialises correctly by
+                // attempting a full read.
+                let project: Option<Project> =
+                    env.storage().instance().get(&project_key);
+                if project.is_none() {
+                    errors.push_back(String::from_str(
+                        &env,
+                        "Project entry exists but failed to deserialize",
+                    ));
+                }
+            }
+
+            // Optional per-project keys that may or may not exist.
+            if env
+                .storage()
+                .instance()
+                .has(&DataKey::Proposal(pid.clone()))
+            {
+                keys_before += 1;
+            }
+            if env
+                .storage()
+                .instance()
+                .has(&DataKey::VoterList(pid.clone()))
+            {
+                keys_before += 1;
+            }
+            if env
+                .storage()
+                .instance()
+                .has(&DataKey::EmergencyWithdrawal(pid.clone()))
+            {
+                keys_before += 1;
+            }
+        }
+
+        // 5. Donor-address-keyed variants (DonorStats, ImpactNFT,
+        //    HasDonated, DonorProjectTotal, etc.) cannot be enumerated
+        //    without an index. The total is considered representative.
+        let success = errors.is_empty();
+
+        SimulationResult {
+            success,
+            storage_keys_before: keys_before,
+            storage_keys_after: keys_before,
+            errors,
+        }
+    }
+
     // ─── Emergency withdrawal (7-day timelock) ─────────────────────────────────
 
     /// Admin-only: step 1 of the emergency withdrawal flow. Records a
@@ -3656,6 +3807,103 @@ mod tests {
         let (env, _cid, client, _admin) = setup_admin_only();
         let imposter = Address::generate(&env);
         client.pause_contract(&signers1(&env, &imposter));
+    }
+
+    // ─── Upgrade dry-run simulation tests ────────────────────────────────────
+
+    #[test]
+    fn test_simulate_upgrade_valid() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        let fake_hash = BytesN::from_array(&env, &[0xAAu8; 32]);
+
+        client.propose_upgrade(&signers1(&env, &admin), &fake_hash);
+
+        let result = client.simulate_upgrade();
+
+        assert!(result.success, "simulation should succeed");
+        assert!(
+            result.storage_keys_before >= 8,
+            "expected at least 8 scalar keys (6 init + PendingUpgrade + UpgradeEffectiveAt), got {}",
+            result.storage_keys_before
+        );
+        assert_eq!(
+            result.storage_keys_after,
+            result.storage_keys_before,
+            "keys_after should equal keys_before"
+        );
+        assert!(
+            result.errors.is_empty(),
+            "expected no errors, got {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_simulate_upgrade_with_projects() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        let fake_hash = BytesN::from_array(&env, &[0xBBu8; 32]);
+
+        client.propose_upgrade(&signers1(&env, &admin), &fake_hash);
+
+        // Register two projects to exercise project-key enumeration
+        client.register_project(
+            &admin,
+            &String::from_str(&env, "proj-alpha"),
+            &String::from_str(&env, "Alpha Project"),
+            &Address::generate(&env),
+            &100u32,
+        );
+        client.register_project(
+            &admin,
+            &String::from_str(&env, "proj-beta"),
+            &String::from_str(&env, "Beta Project"),
+            &Address::generate(&env),
+            &200u32,
+        );
+
+        let result = client.simulate_upgrade();
+
+        assert!(result.success);
+        // 6 scalar init keys + 2 Project entries + 2 ProjectIdsAll entries
+        // (+ PendingUpgrade + UpgradeEffectiveAt = 2 more)
+        assert!(
+            result.storage_keys_before >= 10,
+            "expected at least 10 keys with 2 projects, got {}",
+            result.storage_keys_before
+        );
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "No pending upgrade")]
+    fn test_simulate_upgrade_no_pending_panics() {
+        let (_env, _cid, client, _admin) = setup_admin_only();
+        // No upgrade proposed — should panic.
+        let _ = client.simulate_upgrade();
+    }
+
+    #[test]
+    fn test_simulate_upgrade_zero_hash_reported() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        // Propose an all-zeros hash (corrupted proposal edge case).
+        let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
+        client.propose_upgrade(&signers1(&env, &admin), &zero_hash);
+
+        let result = client.simulate_upgrade();
+
+        assert!(!result.success, "zero-hash upgrade should not succeed");
+        assert_eq!(
+            result.errors.len(),
+            1,
+            "should have exactly one error for zero hash"
+        );
+
+        let expected = String::from_str(&env, "Pending upgrade WASM hash is all zeros");
+        assert_eq!(
+            result.errors.get(0),
+            Some(expected),
+            "unexpected error message"
+        );
     }
 
     // ─── 48h upgrade timelock tests ─────────────────────────────────────────
