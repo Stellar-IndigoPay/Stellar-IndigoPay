@@ -87,6 +87,9 @@ pub struct Project {
     pub deadline_ledger: u32,
     /// Lifecycle of the project's optional time-bound campaign.
     pub campaign_status: CampaignStatus,
+    /// Optional distribution schedule for escrow-based campaigns.
+    /// Empty means funds are sent directly to the project wallet.
+    pub distribution_schedule: Vec<DistributionStep>,
 }
 
 /// Lifecycle of a project's optional time-bound fundraising campaign.
@@ -103,6 +106,23 @@ pub enum CampaignStatus {
     Expired,
     /// Manually closed by admin before or after the goal.
     Closed,
+}
+
+/// One step in an escrow campaign's release schedule.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DistributionStep {
+    pub percentage: u32,
+    pub delay_ledgers: u32,
+}
+
+/// Runtime state for an escrow campaign after its goal has been reached.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CampaignDistribution {
+    pub steps: Vec<DistributionStep>,
+    pub claimed: Vec<bool>,
+    pub goal_reached_at: u32,
 }
 
 /// Input for registering a project via `batch_register_projects`.
@@ -275,6 +295,8 @@ pub enum DataKey {
     // Governance
     Proposal(String),
     HasVoted(String, Address),
+    VoteDelegation(Address),
+    DelegatedWeight(Address),
     // Per-donor per-project cumulative donation total for milestone NFT gating
     DonorProjectTotal(String, Address),
     // Per-donor per-project sliding-window donation rate limit
@@ -284,6 +306,8 @@ pub enum DataKey {
     DonationRateLimitWindow,
     // Per-project milestone NFT: one per (project_id, donor) pair
     ProjectMilestoneNFT(String, Address),
+    // Escrow campaign distribution state keyed by project id.
+    CampaignDistribution(String),
     // Contract upgrade and multi-currency support
     // ContractWasmHash is intentionally kept in the enum for backward
     // compatibility with v1 storage layouts. The single-step `upgrade`
@@ -504,14 +528,84 @@ fn require_campaign_accepts_donation(project: &Project, current_ledger: u32) {
     }
 }
 
+fn validate_distribution_schedule(schedule: &Vec<DistributionStep>) {
+    let mut total: u32 = 0;
+    for step in schedule.iter() {
+        if step.percentage == 0 {
+            panic!("Distribution step percentage must be positive");
+        }
+        total = total
+            .checked_add(step.percentage)
+            .expect("Distribution schedule percentage overflow");
+    }
+    if total != 100 {
+        panic!("Distribution steps must sum to 100%");
+    }
+}
+
+fn is_escrow_campaign(project: &Project) -> bool {
+    !project.distribution_schedule.is_empty()
+}
+
+fn init_campaign_distribution(env: &Env, project_id: &String, project: &Project) {
+    if project.distribution_schedule.is_empty() {
+        return;
+    }
+
+    let mut claimed = Vec::new(env);
+    for _ in project.distribution_schedule.iter() {
+        claimed.push_back(false);
+    }
+
+    let distribution = CampaignDistribution {
+        steps: project.distribution_schedule.clone(),
+        claimed,
+        goal_reached_at: env.ledger().sequence(),
+    };
+    env.storage().instance().set(
+        &DataKey::CampaignDistribution(project_id.clone()),
+        &distribution,
+    );
+}
+
+fn get_campaign_distribution_step_amount(
+    _project: &Project,
+    distribution: &CampaignDistribution,
+    step_index: u32,
+    total_raised: i128,
+    balance: i128,
+) -> i128 {
+    let last_index = distribution.steps.len().saturating_sub(1) as u32;
+    if step_index == last_index {
+        balance
+    } else {
+        let step = distribution
+            .steps
+            .get(step_index)
+            .expect("Distribution step not found");
+        total_raised
+            .checked_mul(step.percentage as i128)
+            .expect("Distribution amount overflow")
+            / 100
+    }
+}
+
+fn queue_campaign_distribution_if_needed(env: &Env, project_id: &String, project: &Project) {
+    if project.distribution_schedule.is_empty() {
+        return;
+    }
+    init_campaign_distribution(env, project_id, project);
+}
+
 /// After `total_raised` is updated, flip `Active` → `GoalReached` when the
 /// campaign goal is met. Returns `true` when the transition happened.
-fn apply_campaign_goal_progress(project: &mut Project) -> bool {
+fn apply_campaign_goal_progress(env: &Env, project_id: &String, project: &mut Project) -> bool {
     if project.campaign_status == CampaignStatus::Active
         && project.goal > 0
         && project.total_raised >= project.goal
     {
         project.campaign_status = CampaignStatus::GoalReached;
+        queue_campaign_distribution_if_needed(env, project_id, project);
         true
     } else {
         false
@@ -623,6 +717,7 @@ impl IndigoPayContract {
             goal: 0,
             deadline_ledger: 0,
             campaign_status: CampaignStatus::None,
+            distribution_schedule: Vec::new(&env),
         };
         env.storage()
             .instance()
@@ -685,6 +780,7 @@ impl IndigoPayContract {
                 goal: 0,
                 deadline_ledger: 0,
                 campaign_status: CampaignStatus::None,
+                distribution_schedule: Vec::new(&env),
             };
             env.storage()
                 .instance()
@@ -849,6 +945,7 @@ impl IndigoPayContract {
         project_id: String,
         goal: i128,
         deadline_ledger: u32,
+        distribution_schedule: Vec<DistributionStep>,
     ) {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
@@ -858,6 +955,9 @@ impl IndigoPayContract {
         let current = env.ledger().sequence();
         if deadline_ledger <= current {
             panic!("Campaign deadline must be in the future");
+        }
+        if !distribution_schedule.is_empty() {
+            validate_distribution_schedule(&distribution_schedule);
         }
 
         let mut project: Project = env
@@ -881,6 +981,7 @@ impl IndigoPayContract {
         project.goal = goal;
         project.deadline_ledger = deadline_ledger;
         project.campaign_status = CampaignStatus::Active;
+        project.distribution_schedule = distribution_schedule;
         env.storage()
             .instance()
             .set(&DataKey::Project(project_id.clone()), &project);
@@ -954,6 +1055,118 @@ impl IndigoPayContract {
         env.events().publish(
             (symbol_short!("camp_cls"), admin, project_id),
             project.campaign_status.clone(),
+        );
+    }
+
+    /// Claim the next available distribution step for an escrow campaign.
+    /// The project wallet must authorize and the campaign must have already
+    /// reached its goal.
+    pub fn claim_distribution(env: Env, project_wallet: Address, project_id: String) {
+        project_wallet.require_auth();
+        require_not_paused(&env);
+
+        let project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        if project.wallet != project_wallet {
+            panic!("Invalid project wallet");
+        }
+        if project.campaign_status != CampaignStatus::GoalReached
+            && project.campaign_status != CampaignStatus::Closed
+        {
+            panic!("Campaign distribution not available");
+        }
+
+        let balance_key = {
+            let native_token: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::NativeTokenAddress)
+                .expect("Native token not configured");
+            DataKey::ProjectContractBalance(project_id.clone(), native_token)
+        };
+
+        let mut distribution: CampaignDistribution = env
+            .storage()
+            .instance()
+            .get(&DataKey::CampaignDistribution(project_id.clone()))
+            .expect("No distribution queued");
+
+        let mut step_index: Option<u32> = None;
+        for (idx, claimed) in distribution.claimed.iter().enumerate() {
+            if !claimed {
+                step_index = Some(idx as u32);
+                break;
+            }
+        }
+
+        let step_index = step_index.expect("All distribution steps already claimed");
+        let step = distribution
+            .steps
+            .get(step_index)
+            .expect("Distribution step not found");
+
+        let current = env.ledger().sequence();
+        let available_at = distribution
+            .goal_reached_at
+            .checked_add(step.delay_ledgers)
+            .expect("Distribution availability overflow");
+        if current < available_at {
+            panic!("Distribution timelock not yet elapsed");
+        }
+
+        let balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
+        if balance <= 0 {
+            panic!("Insufficient contract balance for project");
+        }
+        let amount = get_campaign_distribution_step_amount(
+            &project,
+            &distribution,
+            step_index,
+            project.total_raised,
+            balance,
+        );
+        if amount <= 0 {
+            panic!("Distribution amount must be positive");
+        }
+        if amount > balance {
+            panic!("Insufficient contract balance for project");
+        }
+
+        distribution
+            .claimed
+            .set(step_index, true);
+
+        let remaining_balance = balance - amount;
+        env.storage().instance().set(&balance_key, &remaining_balance);
+        if distribution.claimed.iter().all(|claimed| claimed) {
+            env.storage()
+                .instance()
+                .remove(&DataKey::CampaignDistribution(project_id.clone()));
+            let mut closed_project = project.clone();
+            closed_project.campaign_status = CampaignStatus::Closed;
+            env.storage()
+                .instance()
+                .set(&DataKey::Project(project_id.clone()), &closed_project);
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::CampaignDistribution(project_id.clone()), &distribution);
+        }
+
+        let token = env
+            .storage()
+            .instance()
+            .get(&DataKey::NativeTokenAddress)
+            .expect("Native token not configured");
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&env.current_contract_address(), &project_wallet, &amount);
+
+        env.events().publish(
+            (symbol_short!("camp_dist"), project_id.clone()),
+            (step_index, amount, project_wallet),
         );
     }
 
@@ -1046,7 +1259,7 @@ impl IndigoPayContract {
             .total_raised
             .checked_add(amount)
             .expect("Project total_raised overflow");
-        let goal_reached = apply_campaign_goal_progress(&mut project);
+        let goal_reached = apply_campaign_goal_progress(&env, &project_id, &mut project);
         let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
         if !env.storage().instance().has(&donated_key) {
             env.storage().instance().set(&donated_key, &true);
@@ -1058,6 +1271,24 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::Project(project_id.clone()), &project);
+        let mut escrowed = false;
+        if is_escrow_campaign(&project) {
+            let native_token: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::NativeTokenAddress)
+                .expect("Native token not configured");
+            if token != native_token {
+                panic!("Escrow campaigns only support native token donations");
+            }
+            let balance_key = DataKey::ProjectContractBalance(project_id.clone(), token.clone());
+            let balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
+            let new_balance = balance
+                .checked_add(amount)
+                .expect("ProjectContractBalance overflow");
+            env.storage().instance().set(&balance_key, &new_balance);
+            escrowed = true;
+        }
         if goal_reached {
             env.events().publish(
                 (symbol_short!("camp_goal"), project_id.clone()),
@@ -1159,7 +1390,11 @@ impl IndigoPayContract {
 
         // ── Interaction: external call happens after every effect is durable.
         let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&donor, &project.wallet, &amount);
+        if escrowed {
+            token_client.transfer(&donor, &env.current_contract_address(), &amount);
+        } else {
+            token_client.transfer(&donor, &project.wallet, &amount);
+        }
 
         env.events().publish(
             (symbol_short!("donated"), donor.clone(), project_id.clone()),
@@ -1231,11 +1466,15 @@ impl IndigoPayContract {
 
         // ── Effects: all state writes happen here (no external interaction
         //    needed because the path payment already transferred XLM).
+        if is_escrow_campaign(&project) {
+            panic!("Escrow campaigns only support native token donations");
+        }
+
         project.total_raised = project
             .total_raised
             .checked_add(xlm_amount)
             .expect("Project total_raised overflow");
-        let goal_reached = apply_campaign_goal_progress(&mut project);
+        let goal_reached = apply_campaign_goal_progress(&env, &project_id, &mut project);
         let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
         if !env.storage().instance().has(&donated_key) {
             env.storage().instance().set(&donated_key, &true);
@@ -1366,6 +1605,15 @@ impl IndigoPayContract {
             .instance()
             .get(&DataKey::Project(project_id))
             .expect("Project not found")
+    }
+
+    pub fn get_campaign_distribution(
+        env: Env,
+        project_id: String,
+    ) -> Option<CampaignDistribution> {
+        env.storage()
+            .instance()
+            .get(&DataKey::CampaignDistribution(project_id))
     }
 
     pub fn get_donor_stats(env: Env, donor: Address) -> DonorStats {
@@ -2004,11 +2252,15 @@ impl IndigoPayContract {
         let prev_badge = donor_stats.badge.clone();
 
         // Update project and donor stats using XLM-equivalent
+        if is_escrow_campaign(&project) {
+            panic!("Escrow campaigns only support native token donations");
+        }
+
         project.total_raised = project
             .total_raised
             .checked_add(xlm_equivalent)
             .expect("Project total_raised overflow");
-        let goal_reached = apply_campaign_goal_progress(&mut project);
+        let goal_reached = apply_campaign_goal_progress(&env, &project_id, &mut project);
         let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
         if !env.storage().instance().has(&donated_key) {
             env.storage().instance().set(&donated_key, &true);
@@ -3030,13 +3282,17 @@ impl IndigoPayContract {
             .checked_mul(project.co2_per_xlm as i128)
             .expect("CO2 calculation overflow");
 
+        if is_escrow_campaign(&project) {
+            panic!("Escrow campaigns only support native token donations");
+        }
+
         // Checks-Effects-Interactions (CEI) Pattern: State changes before token transfers.
         // Update Project
         project.total_raised = project
             .total_raised
             .checked_add(xlm_equivalent)
             .expect("Project total_raised overflow");
-        let goal_reached = apply_campaign_goal_progress(&mut project);
+        let goal_reached = apply_campaign_goal_progress(&env, &recurring.project_id, &mut project);
         let donated_key = DataKey::HasDonated(recurring.project_id.clone(), donor.clone());
         if !env.storage().instance().has(&donated_key) {
             env.storage().instance().set(&donated_key, &true);
@@ -4403,7 +4659,7 @@ mod tests {
         let (env, _cid, client, admin, pid) = setup();
         let deadline = env.ledger().sequence() + 1_000;
         let goal = 5_000 * STROOP;
-        client.create_campaign(&admin, &pid, &goal, &deadline);
+        client.create_campaign(&admin, &pid, &goal, &deadline, &Vec::new(&env));
         let p = client.get_project(&pid);
         assert_eq!(p.campaign_status, CampaignStatus::Active);
         assert_eq!(p.goal, goal);
@@ -4420,6 +4676,7 @@ mod tests {
             &pid,
             &(100 * STROOP),
             &(env.ledger().sequence() + 10),
+            &Vec::new(&env),
         );
     }
 
@@ -4427,14 +4684,26 @@ mod tests {
     #[should_panic(expected = "Campaign goal must be positive")]
     fn test_create_campaign_zero_goal_fails() {
         let (env, _cid, client, admin, pid) = setup();
-        client.create_campaign(&admin, &pid, &0i128, &(env.ledger().sequence() + 10));
+        client.create_campaign(
+            &admin,
+            &pid,
+            &0i128,
+            &(env.ledger().sequence() + 10),
+            &Vec::new(&env),
+        );
     }
 
     #[test]
     #[should_panic(expected = "Campaign deadline must be in the future")]
     fn test_create_campaign_past_deadline_fails() {
         let (env, _cid, client, admin, pid) = setup();
-        client.create_campaign(&admin, &pid, &(100 * STROOP), &env.ledger().sequence());
+        client.create_campaign(
+            &admin,
+            &pid,
+            &(100 * STROOP),
+            &env.ledger().sequence(),
+            &Vec::new(&env),
+        );
     }
 
     #[test]
@@ -4442,15 +4711,27 @@ mod tests {
     fn test_create_campaign_while_active_fails() {
         let (env, _cid, client, admin, pid) = setup();
         let deadline = env.ledger().sequence() + 100;
-        client.create_campaign(&admin, &pid, &(100 * STROOP), &deadline);
-        client.create_campaign(&admin, &pid, &(200 * STROOP), &(deadline + 100));
+        client.create_campaign(&admin, &pid, &(100 * STROOP), &deadline, &Vec::new(&env));
+        client.create_campaign(
+            &admin,
+            &pid,
+            &(200 * STROOP),
+            &(deadline + 100),
+            &Vec::new(&env),
+        );
     }
 
     #[test]
     fn test_donate_under_goal_keeps_campaign_active() {
         let (env, _cid, client, admin, pid) = setup();
         let goal = 100 * STROOP;
-        client.create_campaign(&admin, &pid, &goal, &(env.ledger().sequence() + 1_000));
+        client.create_campaign(
+            &admin,
+            &pid,
+            &goal,
+            &(env.ledger().sequence() + 1_000),
+            &Vec::new(&env),
+        );
 
         let donor = Address::generate(&env);
         let token_admin = Address::generate(&env);
@@ -4469,7 +4750,13 @@ mod tests {
     fn test_donate_reaching_goal_sets_goal_reached() {
         let (env, _cid, client, admin, pid) = setup();
         let goal = 100 * STROOP;
-        client.create_campaign(&admin, &pid, &goal, &(env.ledger().sequence() + 1_000));
+        client.create_campaign(
+            &admin,
+            &pid,
+            &goal,
+            &(env.ledger().sequence() + 1_000),
+            &Vec::new(&env),
+        );
 
         let donor = Address::generate(&env);
         let token_admin = Address::generate(&env);
@@ -4489,7 +4776,13 @@ mod tests {
     fn test_donate_after_goal_reached_fails() {
         let (env, _cid, client, admin, pid) = setup();
         let goal = 50 * STROOP;
-        client.create_campaign(&admin, &pid, &goal, &(env.ledger().sequence() + 1_000));
+        client.create_campaign(
+            &admin,
+            &pid,
+            &goal,
+            &(env.ledger().sequence() + 1_000),
+            &Vec::new(&env),
+        );
 
         let donor = Address::generate(&env);
         let token_admin = Address::generate(&env);
@@ -4507,7 +4800,13 @@ mod tests {
         let (env, cid, client, admin, pid) = setup();
         let start = env.ledger().sequence();
         let deadline = start + 50;
-        client.create_campaign(&admin, &pid, &(1_000 * STROOP), &deadline);
+        client.create_campaign(
+            &admin,
+            &pid,
+            &(1_000 * STROOP),
+            &deadline,
+            &Vec::new(&env),
+        );
 
         extend_ttl(&env, &cid);
         env.ledger().set_sequence_number(deadline + 1);
@@ -4525,7 +4824,13 @@ mod tests {
     fn test_extend_campaign_updates_deadline() {
         let (env, _cid, client, admin, pid) = setup();
         let start = env.ledger().sequence();
-        client.create_campaign(&admin, &pid, &(100 * STROOP), &(start + 100));
+        client.create_campaign(
+            &admin,
+            &pid,
+            &(100 * STROOP),
+            &(start + 100),
+            &Vec::new(&env),
+        );
         client.extend_campaign(&admin, &pid, &(start + 500));
         assert_eq!(client.get_project(&pid).deadline_ledger, start + 500);
     }
@@ -4535,7 +4840,13 @@ mod tests {
     fn test_extend_campaign_non_admin_fails() {
         let (env, _cid, client, admin, pid) = setup();
         let start = env.ledger().sequence();
-        client.create_campaign(&admin, &pid, &(100 * STROOP), &(start + 100));
+        client.create_campaign(
+            &admin,
+            &pid,
+            &(100 * STROOP),
+            &(start + 100),
+            &Vec::new(&env),
+        );
         let imposter = Address::generate(&env);
         client.extend_campaign(&imposter, &pid, &(start + 200));
     }
@@ -4548,6 +4859,7 @@ mod tests {
             &pid,
             &(100 * STROOP),
             &(env.ledger().sequence() + 1_000),
+            &Vec::new(&env),
         );
         client.close_campaign(&admin, &pid);
         assert_eq!(
@@ -4565,6 +4877,7 @@ mod tests {
             &pid,
             &(100 * STROOP),
             &(env.ledger().sequence() + 1_000),
+            &Vec::new(&env),
         );
         client.close_campaign(&admin, &pid);
 
@@ -4582,7 +4895,13 @@ mod tests {
         let (env, cid, client, admin, pid) = setup();
         let start = env.ledger().sequence();
         let deadline = start + 40;
-        client.create_campaign(&admin, &pid, &(1_000 * STROOP), &deadline);
+        client.create_campaign(
+            &admin,
+            &pid,
+            &(1_000 * STROOP),
+            &deadline,
+            &Vec::new(&env),
+        );
         extend_ttl(&env, &cid);
         env.ledger().set_sequence_number(deadline + 1);
         client.close_campaign(&admin, &pid);
@@ -4600,6 +4919,7 @@ mod tests {
             &pid,
             &(30 * STROOP),
             &(env.ledger().sequence() + 1_000),
+            &Vec::new(&env),
         );
         let donor = Address::generate(&env);
         client.donate_asset(&donor, &pid, &(30 * STROOP), &symbol_short!("yXLM"), &0u32);
@@ -4623,7 +4943,13 @@ mod tests {
         let start = env.ledger().sequence();
         let deadline = start + 30;
         // MockOracle rate = 8 XLM per USDC stroop; 1 USDC stroop → 8 XLM stroops.
-        client.create_campaign(&admin, &pid, &(1_000 * STROOP), &deadline);
+        client.create_campaign(
+            &admin,
+            &pid,
+            &(1_000 * STROOP),
+            &deadline,
+            &Vec::new(&env),
+        );
 
         extend_ttl(&env, &cid);
         env.ledger().set_sequence_number(deadline + 1);
@@ -4653,6 +4979,231 @@ mod tests {
         let p = client.get_project(&pid);
         assert_eq!(p.campaign_status, CampaignStatus::None);
         assert_eq!(p.total_raised, 10 * STROOP);
+    }
+
+    #[test]
+    #[should_panic(expected = "Distribution steps must sum to 100%")]
+    fn test_distribution_schedule_validation() {
+        let (env, _cid, client, admin, pid) = setup();
+        let deadline = env.ledger().sequence() + 1_000;
+        let mut schedule = Vec::new(&env);
+        schedule.push_back(DistributionStep {
+            percentage: 60,
+            delay_ledgers: 0,
+        });
+        schedule.push_back(DistributionStep {
+            percentage: 30,
+            delay_ledgers: 50,
+        });
+        client.create_campaign(&admin, &pid, &(100 * STROOP), &deadline, &schedule);
+    }
+
+    #[test]
+    fn test_auto_queue_on_goal() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let native_token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.set_native_token(&admin, &native_token);
+
+        let mut schedule = Vec::new(&env);
+        schedule.push_back(DistributionStep {
+            percentage: 50,
+            delay_ledgers: 0,
+        });
+        schedule.push_back(DistributionStep {
+            percentage: 50,
+            delay_ledgers: 20,
+        });
+
+        let goal = 100 * STROOP;
+        client.create_campaign(
+            &admin,
+            &pid,
+            &goal,
+            &(env.ledger().sequence() + 1_000),
+            &schedule,
+        );
+
+        let donor = Address::generate(&env);
+        StellarAssetClient::new(&env, &native_token).mint(&donor, &goal);
+        client.donate(&native_token, &donor, &pid, &goal, &0u32);
+
+        let queued = client
+            .get_campaign_distribution(&pid)
+            .expect("distribution should be queued");
+        assert_eq!(queued.steps.len(), 2);
+        assert_eq!(queued.claimed.len(), 2);
+        assert!(!queued.claimed.get(0).unwrap());
+        assert_eq!(queued.goal_reached_at, env.ledger().sequence());
+    }
+
+    #[test]
+    #[should_panic(expected = "Distribution timelock not yet elapsed")]
+    fn test_claim_before_delay_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let native_token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.set_native_token(&admin, &native_token);
+
+        let mut schedule = Vec::new(&env);
+        schedule.push_back(DistributionStep {
+            percentage: 100,
+            delay_ledgers: 25,
+        });
+
+        let goal = 75 * STROOP;
+        client.create_campaign(
+            &admin,
+            &pid,
+            &goal,
+            &(env.ledger().sequence() + 1_000),
+            &schedule,
+        );
+
+        let donor = Address::generate(&env);
+        StellarAssetClient::new(&env, &native_token).mint(&donor, &goal);
+        client.donate(&native_token, &donor, &pid, &goal, &0u32);
+
+        let project = client.get_project(&pid);
+        client.claim_distribution(&project.wallet, &pid);
+    }
+
+    #[test]
+    fn test_claim_distribution() {
+        let (env, cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let native_token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.set_native_token(&admin, &native_token);
+
+        let mut schedule = Vec::new(&env);
+        schedule.push_back(DistributionStep {
+            percentage: 40,
+            delay_ledgers: 0,
+        });
+        schedule.push_back(DistributionStep {
+            percentage: 60,
+            delay_ledgers: 30,
+        });
+
+        let goal = 100 * STROOP;
+        client.create_campaign(
+            &admin,
+            &pid,
+            &goal,
+            &(env.ledger().sequence() + 1_000),
+            &schedule,
+        );
+
+        let donor = Address::generate(&env);
+        StellarAssetClient::new(&env, &native_token).mint(&donor, &goal);
+        client.donate(&native_token, &donor, &pid, &goal, &0u32);
+
+        let project = client.get_project(&pid);
+        let wallet = project.wallet.clone();
+        let token_client = StellarAssetClient::new(&env, &native_token);
+        let before_balance = token_client.balance(&wallet);
+        assert_eq!(before_balance, 0);
+
+        client.claim_distribution(&wallet, &pid);
+
+        let after_balance = token_client.balance(&wallet);
+        assert_eq!(after_balance, 40 * STROOP);
+
+        let remaining_balance = env.as_contract(&cid, || {
+            env.storage().instance().get::<DataKey, i128>(&DataKey::ProjectContractBalance(
+                pid.clone(),
+                native_token.clone(),
+            ))
+        });
+        assert_eq!(remaining_balance.unwrap(), 60 * STROOP);
+
+        let queued = client.get_campaign_distribution(&pid).expect("still queued");
+        assert!(queued.claimed.get(0).unwrap());
+        assert!(!queued.claimed.get(1).unwrap());
+    }
+
+    #[test]
+    fn test_claim_all_steps() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let native_token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.set_native_token(&admin, &native_token);
+
+        let mut schedule = Vec::new(&env);
+        schedule.push_back(DistributionStep {
+            percentage: 50,
+            delay_ledgers: 0,
+        });
+        schedule.push_back(DistributionStep {
+            percentage: 50,
+            delay_ledgers: 10,
+        });
+
+        let goal = 200 * STROOP;
+        client.create_campaign(
+            &admin,
+            &pid,
+            &goal,
+            &(env.ledger().sequence() + 1_000),
+            &schedule,
+        );
+
+        let donor = Address::generate(&env);
+        StellarAssetClient::new(&env, &native_token).mint(&donor, &goal);
+        client.donate(&native_token, &donor, &pid, &goal, &0u32);
+
+        let wallet = client.get_project(&pid).wallet;
+        client.claim_distribution(&wallet, &pid);
+
+        let seq = env.ledger().sequence();
+        env.ledger().set_sequence_number(seq + 10);
+        client.claim_distribution(&wallet, &pid);
+
+        assert_eq!(client.get_campaign_distribution(&pid), None);
+        assert_eq!(client.get_project(&pid).campaign_status, CampaignStatus::Closed);
+        assert_eq!(StellarAssetClient::new(&env, &native_token).balance(&wallet), goal);
+    }
+
+    #[test]
+    #[should_panic(expected = "No distribution queued")]
+    fn test_double_claim_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let native_token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.set_native_token(&admin, &native_token);
+
+        let mut schedule = Vec::new(&env);
+        schedule.push_back(DistributionStep {
+            percentage: 100,
+            delay_ledgers: 0,
+        });
+
+        let goal = 50 * STROOP;
+        client.create_campaign(
+            &admin,
+            &pid,
+            &goal,
+            &(env.ledger().sequence() + 1_000),
+            &schedule,
+        );
+
+        let donor = Address::generate(&env);
+        StellarAssetClient::new(&env, &native_token).mint(&donor, &goal);
+        client.donate(&native_token, &donor, &pid, &goal, &0u32);
+
+        let wallet = client.get_project(&pid).wallet;
+        client.claim_distribution(&wallet, &pid);
+        client.claim_distribution(&wallet, &pid);
     }
 
     // ─── Contract-level pause tests ─────────────────────────────────────────
@@ -5977,8 +6528,8 @@ mod tests {
         client.set_native_token(&admin, &native_token);
 
         let native_client = StellarAssetClient::new(&env, &native_token);
-        native_client.mint(&donor, &(1500 * STROOP));
-        native_client.approve(&donor, &client.address, &(1500 * STROOP), &9999u32);
+        native_client.mint(&donor, &(1600 * STROOP));
+        native_client.approve(&donor, &client.address, &(1600 * STROOP), &9999u32);
 
         // 500 XLM intervals
         let recurring_id = client.create_recurring(
