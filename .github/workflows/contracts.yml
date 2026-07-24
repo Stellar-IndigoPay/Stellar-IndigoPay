@@ -22,7 +22,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.91.0
+          toolchain: stable
           targets: wasm32v1-none
           components: rustfmt, clippy
 
@@ -37,8 +37,10 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace -- -D warnings
 
-      - name: Run tests
-        run: "cargo test --features testutils --workspace -- --skip fuzz"
+      - name: Run tests (skip duplicate fuzz run -- handled by dedicated fuzz job)
+        run: "cargo test --features testutils --workspace -- --skip fuzz::"
+        env:
+          RUST_MIN_STACK: 16777216
 
       - name: Build WASM (slim)
         run: cargo build --workspace --target wasm32v1-none --release --no-default-features
@@ -57,6 +59,92 @@ jobs:
             exit 1
           fi
 
+  fuzz:
+    name: Fuzz Tests (256 cases each)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: wasm32v1-none
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+
+      - name: Run fuzz tests
+        run: cargo test --features testutils -- fuzz
+        env:
+          FUZZ_ITERATIONS: 256
+          RUST_MIN_STACK: 16777216
+
+  deep-fuzz:
+    name: Deep Fuzz (2k cases each -- nightly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: wasm32v1-none
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+
+      - name: Run deep fuzz tests
+        run: cargo test --features testutils -- fuzz
+        env:
+          FUZZ_ITERATIONS: 2000
+          RUST_MIN_STACK: 16777216
+
+  deep-fuzz-pr:
+    name: Deep Fuzz (500 cases each -- PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: wasm32v1-none
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+
+      - name: Run deep fuzz tests
+        run: cargo test --features testutils -- fuzz
+        env:
+          FUZZ_ITERATIONS: 500
+          RUST_MIN_STACK: 16777216
+
   coverage:
     name: Coverage
     if: github.event_name == 'pull_request'
@@ -71,7 +159,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.91.0
+          toolchain: stable
           components: llvm-tools-preview
 
       - name: Install cargo-tarpaulin
@@ -84,9 +172,39 @@ jobs:
 
       - name: Run coverage
         run: cargo tarpaulin --config indigopay-contract/.tarpaulin.toml --features testutils --out Html --out Lcov -- --skip fuzz
+        env:
+          RUST_MIN_STACK: 16777216
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: contracts/indigopay-contract/coverage/
+  verification:
+    name: Formal Verification (Kani)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts/indigopay-contract/verification/kani
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts/indigopay-contract/verification/kani
+
+      - name: Run Kani verification
+        run: cargo kani --release
+
+      - name: Upload verification report
+        uses: actions/upload-artifact@v4
+        with:
+          name: kani-verification-report
+          path: ./target/kani

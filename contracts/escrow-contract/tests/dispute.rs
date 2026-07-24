@@ -9,9 +9,9 @@
 ///   - Non-admin cannot resolve (new)
 ///   - Dispute on non-existent job panics (new)
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{Address, Env, String as SorobanString, Vec};
+use soroban_sdk::{Address, BytesN, Env, String as SorobanString, Vec};
 
-use escrow_contract::JobStatus;
+use escrow_contract::{DisputeStatus, EscrowContractClient, JobStatus};
 
 mod common;
 
@@ -110,18 +110,12 @@ fn test_resolve_dispute_refund_client() {
         percentage: 50,
         released: false,
         disputed: false,
-        oracle: None,
-        verified: false,
-        proof_hash: None,
     });
     milestones.push_back(escrow_contract::Milestone {
         name: SorobanString::from_str(&env, "M2"),
         percentage: 50,
         released: false,
         disputed: false,
-        oracle: None,
-        verified: false,
-        proof_hash: None,
     });
 
     client.create_job(
@@ -151,6 +145,95 @@ fn test_resolve_dispute_refund_client() {
     assert_eq!(common::token_balance(&env, &token, &freelancer), 500i128);
     // Client should have 500 refunded
     assert_eq!(common::token_balance(&env, &token, &client_addr), 500i128);
+}
+
+#[test]
+fn test_resolve_after_two_rounds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = common::setup(&env);
+
+    let client_addr = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let token = common::create_token(&env);
+    common::fund(&env, &token, &client_addr, 1000i128);
+    let job_id = SorobanString::from_str(&env, "job-resolve-two-rounds");
+
+    common::create_simple_job(
+        &env,
+        &client,
+        &client_addr,
+        &freelancer,
+        &token,
+        "job-resolve-two-rounds",
+        1000i128,
+    );
+
+    let initiator_hash = BytesN::from_array(&env, &[11u8; 32]);
+    let response_hash = BytesN::from_array(&env, &[22u8; 32]);
+
+    client.initiate_dispute(&client_addr, &job_id, &0u32, &initiator_hash);
+    client.respond_to_dispute(&freelancer, &job_id, &0u32, &response_hash);
+
+    let dispute = client.get_dispute(&job_id, &0u32).unwrap();
+    assert_eq!(dispute.rounds.len(), 2);
+    assert_eq!(dispute.rounds.get(0).unwrap().evidence_hash, initiator_hash);
+    assert_eq!(dispute.rounds.get(1).unwrap().evidence_hash, response_hash);
+    assert_eq!(dispute.status, DisputeStatus::AwaitingResponse);
+
+    client.resolve_milestone_dispute(&admin, &job_id, &0u32, &true);
+
+    let resolved_job = client.get_job(&job_id).unwrap();
+    assert!(resolved_job.milestones.get(0).unwrap().released);
+    assert_eq!(
+        client.get_dispute(&job_id, &0u32).unwrap().status,
+        DisputeStatus::Resolved
+    );
+}
+
+#[test]
+fn test_full_three_round_dispute_flow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = common::setup(&env);
+
+    let client_addr = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let token = common::create_token(&env);
+    common::fund(&env, &token, &client_addr, 1000i128);
+    let job_id = SorobanString::from_str(&env, "job-three-round-flow");
+
+    common::create_simple_job(
+        &env,
+        &client,
+        &client_addr,
+        &freelancer,
+        &token,
+        "job-three-round-flow",
+        1000i128,
+    );
+
+    let h1 = BytesN::from_array(&env, &[1u8; 32]);
+    let h2 = BytesN::from_array(&env, &[2u8; 32]);
+    let h3 = BytesN::from_array(&env, &[3u8; 32]);
+
+    client.initiate_dispute(&client_addr, &job_id, &0u32, &h1);
+    client.respond_to_dispute(&freelancer, &job_id, &0u32, &h2);
+    client.respond_to_dispute(&client_addr, &job_id, &0u32, &h3);
+
+    let dispute = client.get_dispute(&job_id, &0u32).unwrap();
+    assert_eq!(dispute.rounds.len(), 3);
+    assert_eq!(dispute.rounds.get(0).unwrap().evidence_hash, h1);
+    assert_eq!(dispute.rounds.get(1).unwrap().evidence_hash, h2);
+    assert_eq!(dispute.rounds.get(2).unwrap().evidence_hash, h3);
+    assert_eq!(dispute.status, DisputeStatus::UnderReview);
+
+    client.resolve_milestone_dispute(&admin, &job_id, &0u32, &false);
+
+    let job = client.get_job(&job_id).unwrap();
+    assert_eq!(job.status, JobStatus::Completed);
+    assert!(!job.milestones.get(0).unwrap().disputed);
+    assert!(job.milestones.get(0).unwrap().released);
 }
 
 #[test]
