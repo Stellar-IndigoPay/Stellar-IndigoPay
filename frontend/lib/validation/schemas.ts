@@ -62,9 +62,12 @@ export const donationSchema = z.object({
         const n = Number.parseFloat(val);
         return Number.isFinite(n) && n >= 1;
       },
-      { message: "Minimum donation is 1" }
+      { message: "Minimum donation is 1" },
     ),
-  message: z.string().max(100, "Message must be at most 100 characters").optional(),
+  message: z
+    .string()
+    .max(100, "Message must be at most 100 characters")
+    .optional(),
 });
 
 // ── Verification request schema ──────────────────────────────────────────────
@@ -126,7 +129,10 @@ export const profileSchema = z.object({
     .string()
     .min(2, "Display name must be between 2 and 30 characters")
     .max(30, "Display name must be between 2 and 30 characters")
-    .regex(/^[a-zA-Z0-9_ ]+$/, "Only letters, numbers, underscores, and spaces allowed")
+    .regex(
+      /^[a-zA-Z0-9_ ]+$/,
+      "Only letters, numbers, underscores, and spaces allowed",
+    )
     .optional()
     .or(z.literal("")),
   bio: z
@@ -178,3 +184,10 @@ export const projectSubmissionSchema = z.object({
   }),
   impactMetrics: z.array(z.string()).optional().default([]),
 });
+
+// ── Inferred form data types ──────────────────────────────────────────────────
+
+export type VerificationRequestFormData = z.infer<
+  typeof verificationRequestSchema
+>;
+export type SubmitProjectFormData = z.infer<typeof projectSubmissionSchema>;
