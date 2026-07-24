@@ -236,6 +236,17 @@ Badge tiers and minted NFTs are **never** downgraded or burned on refund. The re
 
 All counter decrements on refund use `checked_sub(...).expect("...underflow on refund")`, consistent with the `checked_add` convention used for donations. If a refund would drive any counter negative, the transaction panics and reverts.
 
+## Stealth Address Donation Integration (#458)
+
+### Privacy model
+
+`donate_stealth_integrated` integrates the standalone stealth address infrastructure (`DonationContract`) into `IndigoPayContract` while preserving donor privacy guarantees:
+
+1. **Unlinkable stealth addresses**: Stealth address generation uses diffie-hellman ephemeral keys (`generate_stealth_address`), ensuring on-chain indexers cannot correlate stealth donations to a single donor wallet address.
+2. **Donor stats decoupling**: `donate_stealth_integrated` updates project `total_raised`, `GlobalTotalRaised`, and `GlobalCO2OffsetGrams`, but explicitly **bypasses** `DonorStats`, `DonorProjectTotal`, `HasDonated`, and `project.donor_count` updates. No cumulative donor record or badge progress is assigned to the sender address.
+3. **Zero-address record indexing**: The `DonationRecord` on `IndigoPayContract` records `donor` as a dedicated zero-address (`0x00...00`), and emits `stlth_don` event topic with the zero-address as donor.
+4. **Cross-contract authorization**: The `sender.require_auth()` authorization gates the invocation at the `IndigoPayContract` boundary and propagates to `DonationContract.donate_stealth` for atomic token transfer from sender to stealth escrow contract.
+
 ## Off-Chain Oracle Attestation for Project Impact Verification (#459)
 
 Gated behind the `impact_verification` Cargo feature (on by default; excluded from the size-checked `--no-default-features` CI build). Lets admin-authorised verifiers submit independent measurements of a project's actual CO₂ impact, which the contract compares against the project's self-reported (claimed) rate.

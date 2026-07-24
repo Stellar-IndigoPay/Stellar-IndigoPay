@@ -313,6 +313,16 @@ pub struct ImpactLeaf {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DonationChallenge {
+    pub challenged: bool,
+    pub challenger: Address,
+    pub challenged_at: u32,
+    pub resolved: bool,
+    pub approved: bool,
+}
+
+#[contracttype]
 pub enum DataKey {
     // Multi-sig admin set: Vec<Address> of authorized admin addresses.
     // Replaces the former single-admin `Admin` variant.
@@ -428,6 +438,11 @@ pub enum DataKey {
     PlatformFeeBps,
     /// Designated wallet that receives the platform fee.
     PlatformTreasury,
+    // Time-Locked Donation Challenge/Response Protocol (#457)
+    ChallengeThreshold,
+    DonationChallenge(u32),
+    // Stealth Address Donation Integration (#458)
+    StealthDonationContract,
     /// Quadratic voting: credits spent by a voter on a project proposal.
     VoteCredits(String, Address),
 }
@@ -472,6 +487,10 @@ const EMERGENCY_WITHDRAWAL_TIMELOCK: u32 = 120_960;
 // donation during which the donor may request a refund (subject to admin +
 // project wallet approval).
 const REFUND_COOLDOWN_LEDGERS: u32 = 17_280;
+
+// 24 hours × 3600 s / 5 s per ledger = 17 280 ledgers. The challenge window
+// for high-value donations.
+const CHALLENGE_WINDOW_LEDGERS: u32 = 17_280;
 
 /// Current storage schema version. Bump this and add a migration step in
 /// `migrate()` whenever a struct layout, DataKey variant, or stored value
@@ -2442,6 +2461,164 @@ impl IndigoPayContract {
     #[cfg(feature = "zk")]
     pub fn is_nullifier_spent(env: Env, nullifier: BytesN<32>) -> bool {
         env.storage().instance().has(&DataKey::Nullifier(nullifier))
+    }
+
+    // ─── Integrated Stealth Address Donation (#458) ───────────────────────────
+
+    /// Admin-only: configure the deployed DonationContract address for stealth donation integration (#458).
+    #[cfg(feature = "donation")]
+    pub fn set_stealth_donation_contract(env: Env, admin: Address, contract_address: Address) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::StealthDonationContract, &contract_address);
+        env.events()
+            .publish((symbol_short!("stlth_set"), admin), contract_address);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Query the configured stealth donation contract address.
+    #[cfg(feature = "donation")]
+    pub fn get_stealth_donation_contract(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::StealthDonationContract)
+            .expect("Stealth donation contract not configured")
+    }
+
+    /// Integrated stealth address donation (#458).
+    ///
+    /// Cross-calls `DonationContract.donate_stealth(...)` to record the stealth donation,
+    /// and updates main contract global and project statistics without updating donor-specific stats,
+    /// preserving donor privacy.
+    #[cfg(feature = "donation")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn donate_stealth_integrated(
+        env: Env,
+        sender: Address,
+        token: Address,
+        ephemeral_pubkey: BytesN<33>,
+        project_id: String,
+        amount: i128,
+        msg_hash: BytesN<32>,
+    ) -> u64 {
+        sender.require_auth();
+        require_not_paused(&env);
+        if amount <= 0 {
+            panic!("Donation amount must be positive");
+        }
+
+        let mut project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        if !project.active {
+            panic!("Project is not accepting donations");
+        }
+        if project.paused {
+            panic!("Project is temporarily paused");
+        }
+        require_campaign_accepts_donation(&project, env.ledger().sequence());
+
+        let stealth_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::StealthDonationContract)
+            .expect("Stealth donation contract not configured");
+
+        let stealth_client = crate::donation::contract::DonationContractClient::new(&env, &stealth_contract);
+        let donation_id = stealth_client.donate_stealth(
+            &sender,
+            &token,
+            &ephemeral_pubkey,
+            &project.wallet,
+            &amount,
+            &msg_hash,
+        );
+
+        // Pre-compute CO2 increment
+        let xlm_units = amount / STROOP;
+        let co2_increment = xlm_units
+            .checked_mul(project.co2_per_xlm as i128)
+            .expect("CO2 calculation overflow");
+
+        // Update project total_raised (donor_count is NOT updated to preserve donor anonymity)
+        project.total_raised = project
+            .total_raised
+            .checked_add(amount)
+            .expect("Project total_raised overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::Project(project_id.clone()), &project);
+
+        // Update global accumulators
+        let gr: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalTotalRaised)
+            .unwrap_or(0);
+        let new_gr = gr.checked_add(amount).expect("GlobalTotalRaised overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::GlobalTotalRaised, &new_gr);
+
+        let gc: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalCO2OffsetGrams)
+            .unwrap_or(0);
+        let new_gc = gc.checked_add(co2_increment).expect("GlobalCO2 overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::GlobalCO2OffsetGrams, &new_gc);
+
+        // Record donation in DonationRecord with zero address for privacy
+        let dc: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationCount)
+            .unwrap_or(0);
+        let new_dc = dc.checked_add(1).expect("DonationCount overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationCount, &new_dc);
+
+        let stealth_pool_donor = env.current_contract_address();
+        let msg_hash_u32 = u32::from_be_bytes([
+            msg_hash.to_array()[0],
+            msg_hash.to_array()[1],
+            msg_hash.to_array()[2],
+            msg_hash.to_array()[3],
+        ]);
+
+        let donation_record = DonationRecord {
+            donor: stealth_pool_donor.clone(),
+            project: project_id.clone(),
+            amount,
+            ledger: env.ledger().sequence(),
+            message_hash: msg_hash_u32,
+            currency: symbol_short!("XLM"),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationRecord(dc), &donation_record);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+
+        env.events().publish(
+            (
+                symbol_short!("stlth_don"),
+                stealth_pool_donor,
+                project_id,
+            ),
+            (donation_id, amount, msg_hash_u32),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+
+        donation_id
     }
 
     // ─── On-chain Impact Certificates (#382) ────────────────────────────────
@@ -4522,6 +4699,282 @@ impl IndigoPayContract {
             .instance()
             .get(&DataKey::RefundRequest(refund_id))
             .expect("Refund request not found")
+    }
+
+    // ─── Time-Locked Donation Challenge/Response Protocol (#457) ──────────────
+
+    /// Admin-only (M-of-N): set the minimum donation threshold that triggers a challenge period.
+    /// Setting threshold to 0 disables the challenge system (backward compatible).
+    pub fn set_challenge_threshold(env: Env, signers: Vec<Address>, threshold: i128) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        if threshold < 0 {
+            panic!("Threshold cannot be negative");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ChallengeThreshold, &threshold);
+        env.events().publish(
+            (symbol_short!("chg_thrsh"), signers.get(0).unwrap()),
+            threshold,
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Read-only: get the configured challenge threshold in stroops (0 if disabled).
+    pub fn get_challenge_threshold(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ChallengeThreshold)
+            .unwrap_or(0i128)
+    }
+
+    /// Badge holders (≥ Seedling) can challenge a donation exceeding the threshold within the 24h window.
+    pub fn challenge_donation(
+        env: Env,
+        challenger: Address,
+        donation_index: u32,
+        reason: String,
+    ) {
+        challenger.require_auth();
+        require_not_paused(&env);
+
+        let donor_stats: DonorStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonorStats(challenger.clone()))
+            .unwrap_or(DonorStats {
+                total_donated: 0,
+                donation_count: 0,
+                badge: BadgeTier::None,
+                co2_offset_grams: 0,
+            });
+        if donor_stats.badge == BadgeTier::None {
+            panic!("Only badge holders can challenge donations");
+        }
+
+        let donation: DonationRecord = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationRecord(donation_index))
+            .expect("Donation record not found");
+
+        let threshold = Self::get_challenge_threshold(env.clone());
+        if threshold == 0 || donation.amount < threshold {
+            panic!("Donation is below challenge threshold");
+        }
+
+        let current_ledger = env.ledger().sequence();
+        if current_ledger > donation.ledger + CHALLENGE_WINDOW_LEDGERS {
+            panic!("Challenge window has expired");
+        }
+
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::DonationChallenge(donation_index))
+        {
+            panic!("Donation already challenged");
+        }
+
+        let challenge = DonationChallenge {
+            challenged: true,
+            challenger: challenger.clone(),
+            challenged_at: current_ledger,
+            resolved: false,
+            approved: false,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationChallenge(donation_index), &challenge);
+
+        env.events().publish(
+            (symbol_short!("chg_sub"), donation_index, challenger),
+            (donation.amount, reason),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Admin-only: resolve a pending challenge by either approving or rejecting (refunding) the donation.
+    pub fn resolve_challenge(
+        env: Env,
+        admin: Address,
+        donation_index: u32,
+        approve: bool,
+    ) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+
+        let mut challenge: DonationChallenge = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationChallenge(donation_index))
+            .expect("Challenge not found");
+
+        if !challenge.challenged || challenge.resolved {
+            panic!("Challenge is not active or already resolved");
+        }
+
+        challenge.resolved = true;
+        challenge.approved = approve;
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationChallenge(donation_index), &challenge);
+
+        if approve {
+            env.events().publish(
+                (symbol_short!("chg_res"), donation_index, admin),
+                true,
+            );
+        } else {
+            let record: DonationRecord = env
+                .storage()
+                .instance()
+                .get(&DataKey::DonationRecord(donation_index))
+                .expect("Donation record not found");
+
+            let co2_offset: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::DonationCO2Offset(donation_index))
+                .unwrap_or(0);
+
+            let mut project: Project = env
+                .storage()
+                .instance()
+                .get(&DataKey::Project(record.project.clone()))
+                .expect("Project not found");
+
+            project.total_raised = project
+                .total_raised
+                .checked_sub(record.amount)
+                .expect("Project total_raised underflow on refund");
+            env.storage()
+                .instance()
+                .set(&DataKey::Project(record.project.clone()), &project);
+
+            let mut donor_stats: DonorStats = env
+                .storage()
+                .instance()
+                .get(&DataKey::DonorStats(record.donor.clone()))
+                .unwrap_or(DonorStats {
+                    total_donated: 0,
+                    donation_count: 0,
+                    badge: BadgeTier::None,
+                    co2_offset_grams: 0,
+                });
+            donor_stats.total_donated = donor_stats
+                .total_donated
+                .checked_sub(record.amount)
+                .expect("Donor total_donated underflow on refund");
+            donor_stats.co2_offset_grams = donor_stats
+                .co2_offset_grams
+                .checked_sub(co2_offset)
+                .expect("Donor co2_offset underflow on refund");
+            env.storage()
+                .instance()
+                .set(&DataKey::DonorStats(record.donor.clone()), &donor_stats);
+
+            let proj_total_key =
+                DataKey::DonorProjectTotal(record.project.clone(), record.donor.clone());
+            let prev_proj_total: i128 = env
+                .storage()
+                .instance()
+                .get(&proj_total_key)
+                .unwrap_or(0);
+            env.storage().instance().set(
+                &proj_total_key,
+                &prev_proj_total
+                    .checked_sub(record.amount)
+                    .expect("DonorProjectTotal underflow on refund"),
+            );
+
+            let gr: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::GlobalTotalRaised)
+                .unwrap_or(0);
+            env.storage().instance().set(
+                &DataKey::GlobalTotalRaised,
+                &gr.checked_sub(record.amount)
+                    .expect("GlobalTotalRaised underflow on refund"),
+            );
+
+            let gc: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::GlobalCO2OffsetGrams)
+                .unwrap_or(0);
+            env.storage().instance().set(
+                &DataKey::GlobalCO2OffsetGrams,
+                &gc.checked_sub(co2_offset)
+                    .expect("GlobalCO2OffsetGrams underflow on refund"),
+            );
+
+            if record.currency == symbol_short!("USDC") {
+                if let Some(usdc_token) = Self::get_usdc_token(env.clone()) {
+                    let token_client = token::Client::new(&env, &usdc_token);
+                    token_client.transfer(&project.wallet, &record.donor, &record.amount);
+                }
+            }
+
+            env.events().publish(
+                (symbol_short!("chg_res"), donation_index, admin),
+                false,
+            );
+        }
+
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Read-only: get the challenge status for a donation index.
+    pub fn get_donation_challenge(
+        env: Env,
+        donation_index: u32,
+    ) -> Option<DonationChallenge> {
+        env.storage()
+            .instance()
+            .get(&DataKey::DonationChallenge(donation_index))
+    }
+
+    /// Read-only: check whether a donation is finalized.
+    pub fn is_donation_finalized(env: Env, donation_index: u32) -> bool {
+        let record: DonationRecord = match env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationRecord(donation_index))
+        {
+            Some(rec) => rec,
+            None => return false,
+        };
+
+        let threshold = Self::get_challenge_threshold(env.clone());
+        if threshold == 0 || record.amount < threshold {
+            return true;
+        }
+
+        if let Some(challenge) = Self::get_donation_challenge(env.clone(), donation_index) {
+            if challenge.resolved {
+                return challenge.approved;
+            } else {
+                return false;
+            }
+        }
+
+        let current_ledger = env.ledger().sequence();
+        current_ledger > record.ledger + CHALLENGE_WINDOW_LEDGERS
+    }
+
+    /// Auto-finalize an unchallenged donation after the challenge window elapses.
+    pub fn auto_finalize(env: Env, donation_index: u32) -> bool {
+        let finalized = Self::is_donation_finalized(env.clone(), donation_index);
+        if finalized {
+            env.events().publish(
+                (symbol_short!("chg_fin"), donation_index),
+                (),
+            );
+        }
+        finalized
     }
 
     // ─── Recurring Donations ──────────────────────────────────────────────────
@@ -9233,6 +9686,319 @@ mod tests {
         assert!(!result);
     }
 
+    // ─── Time-Locked Donation Challenge Protocol Tests (#457) ───────────
+
+    #[test]
+    fn test_challenge_donation() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        let challenger = donor.clone();
+        let reason = String::from_str(&env, "Suspicious activity");
+        client.challenge_donation(&challenger, &donation_index, &reason);
+
+        let challenge = client.get_donation_challenge(&donation_index).unwrap();
+        assert!(challenge.challenged);
+        assert_eq!(challenge.challenger, challenger);
+        assert!(!challenge.resolved);
+        assert!(!challenge.approved);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only badge holders can challenge donations")]
+    fn test_challenge_non_badge_holder_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        let non_badge_holder = Address::generate(&env);
+        let reason = String::from_str(&env, "Flagging donation");
+        client.challenge_donation(&non_badge_holder, &donation_index, &reason);
+    }
+
+    #[test]
+    #[should_panic(expected = "Donation is below challenge threshold")]
+    fn test_challenge_below_threshold_not_triggered() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(500 * STROOP));
+
+        let reason = String::from_str(&env, "Flagging low donation");
+        client.challenge_donation(&donor, &donation_index, &reason);
+    }
+
+    #[test]
+    fn test_resolve_challenge_approve() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        let reason = String::from_str(&env, "Review requested");
+        client.challenge_donation(&donor, &donation_index, &reason);
+
+        client.resolve_challenge(&admin, &donation_index, &true);
+
+        let challenge = client.get_donation_challenge(&donation_index).unwrap();
+        assert!(challenge.resolved);
+        assert!(challenge.approved);
+
+        assert!(client.is_donation_finalized(&donation_index));
+    }
+
+    #[test]
+    fn test_resolve_challenge_reject() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let project_before = client.get_project(&pid);
+        let stats_before = client.get_donor_stats(&donor);
+        let global_before = client.get_global_stats();
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        let reason = String::from_str(&env, "Illicit source");
+        client.challenge_donation(&donor, &donation_index, &reason);
+
+        client.resolve_challenge(&admin, &donation_index, &false);
+
+        let challenge = client.get_donation_challenge(&donation_index).unwrap();
+        assert!(challenge.resolved);
+        assert!(!challenge.approved);
+
+        let project_after = client.get_project(&pid);
+        assert_eq!(project_after.total_raised, project_before.total_raised - 25 * STROOP);
+
+        let stats_after = client.get_donor_stats(&donor);
+        assert_eq!(stats_after.total_donated, stats_before.total_donated - 25 * STROOP);
+
+        let global_after = client.get_global_stats();
+        assert_eq!(global_after.total_raised, global_before.total_raised - 25 * STROOP);
+    }
+
+    #[test]
+    fn test_auto_finalize() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        assert!(!client.is_donation_finalized(&donation_index));
+
+        env.ledger().set_sequence_number(env.ledger().sequence() + CHALLENGE_WINDOW_LEDGERS + 1);
+
+        assert!(client.is_donation_finalized(&donation_index));
+        assert!(client.auto_finalize(&donation_index));
+    }
+
+    #[test]
+    fn test_threshold_zero_disables() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &0);
+        assert_eq!(client.get_challenge_threshold(), 0);
+
+        assert!(client.is_donation_finalized(&donation_index));
+    }
+
+    #[test]
+    fn test_challenge_integration() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        assert_eq!(client.get_challenge_threshold(), 10 * STROOP);
+        assert!(!client.is_donation_finalized(&donation_index));
+
+        let reason = String::from_str(&env, "Audit requested");
+        client.challenge_donation(&donor, &donation_index, &reason);
+
+        let challenge = client.get_donation_challenge(&donation_index).unwrap();
+        assert!(challenge.challenged);
+        assert!(!challenge.resolved);
+
+        client.resolve_challenge(&admin, &donation_index, &false);
+
+        let resolved_challenge = client.get_donation_challenge(&donation_index).unwrap();
+        assert!(resolved_challenge.resolved);
+        assert!(!resolved_challenge.approved);
+    }
+
+    #[test]
+    fn prop_challenge_only_badge_holders() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        let reason = String::from_str(&env, "Valid challenger");
+        client.challenge_donation(&donor, &donation_index, &reason);
+
+        let challenge = client.get_donation_challenge(&donation_index).unwrap();
+        assert!(challenge.challenged);
+    }
+
+    // ─── Stealth Address Donation Integration Tests (#458) ───────────────
+
+    fn create_token_helper(env: &Env, donor: &Address, amount: i128) -> Address {
+        let token_admin = Address::generate(env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        soroban_sdk::token::StellarAssetClient::new(env, &token).mint(donor, &amount);
+        token
+    }
+
+    #[test]
+    fn test_stealth_integrated_stats() {
+        let (env, _cid, client, admin, pid) = setup();
+
+        let stealth_cid = env.register_contract(None, crate::donation::contract::DonationContract);
+        client.set_stealth_donation_contract(&admin, &stealth_cid);
+        assert_eq!(client.get_stealth_donation_contract(), stealth_cid);
+
+        let sender = Address::generate(&env);
+        let amount: i128 = 50 * STROOP;
+        let token = create_token_helper(&env, &sender, amount);
+        let ephem = BytesN::from_array(&env, &[7u8; 33]);
+        let msg_hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        let donation_id = client.donate_stealth_integrated(
+            &sender,
+            &token,
+            &ephem,
+            &pid,
+            &amount,
+            &msg_hash,
+        );
+
+        assert_eq!(donation_id, 1u64);
+
+        let project = client.get_project(&pid);
+        assert_eq!(project.total_raised, amount);
+
+        let global = client.get_global_stats();
+        assert_eq!(global.total_raised, amount);
+        // Project co2_per_xlm is 100 in setup(). 50 XLM * 100 = 5000 grams
+        assert_eq!(global.co2_offset_grams, 5000);
+    }
+
+    #[test]
+    fn test_stealth_integrated_donor_stats_not_updated() {
+        let (env, _cid, client, admin, pid) = setup();
+
+        let stealth_cid = env.register_contract(None, crate::donation::contract::DonationContract);
+        client.set_stealth_donation_contract(&admin, &stealth_cid);
+
+        let sender = Address::generate(&env);
+        let amount: i128 = 100 * STROOP;
+        let token = create_token_helper(&env, &sender, amount);
+        let ephem = BytesN::from_array(&env, &[12u8; 33]);
+        let msg_hash = BytesN::from_array(&env, &[2u8; 32]);
+
+        client.donate_stealth_integrated(
+            &sender,
+            &token,
+            &ephem,
+            &pid,
+            &amount,
+            &msg_hash,
+        );
+
+        // Donor-specific stats must NOT be updated (privacy preserved)
+        let stats = client.get_donor_stats(&sender);
+        assert_eq!(stats.total_donated, 0);
+        assert_eq!(stats.donation_count, 0);
+        assert_eq!(stats.badge, BadgeTier::None);
+
+        let project = client.get_project(&pid);
+        assert_eq!(project.donor_count, 0);
+    }
+
+    #[test]
+    fn test_stealth_integrated_project_total() {
+        let (env, _cid, client, admin, pid) = setup();
+
+        let stealth_cid = env.register_contract(None, crate::donation::contract::DonationContract);
+        client.set_stealth_donation_contract(&admin, &stealth_cid);
+
+        let sender1 = Address::generate(&env);
+        let sender2 = Address::generate(&env);
+        let amount1: i128 = 30 * STROOP;
+        let amount2: i128 = 70 * STROOP;
+
+        let token = create_token_helper(&env, &sender1, amount1);
+        soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&sender2, &amount2);
+
+        let ephem1 = BytesN::from_array(&env, &[1u8; 33]);
+        let ephem2 = BytesN::from_array(&env, &[2u8; 33]);
+        let msg_hash = BytesN::from_array(&env, &[0u8; 32]);
+
+        client.donate_stealth_integrated(&sender1, &token, &ephem1, &pid, &amount1, &msg_hash);
+        client.donate_stealth_integrated(&sender2, &token, &ephem2, &pid, &amount2, &msg_hash);
+
+        let project = client.get_project(&pid);
+        assert_eq!(project.total_raised, 100 * STROOP);
+
+        let global = client.get_global_stats();
+        assert_eq!(global.total_raised, 100 * STROOP);
+    }
+
+    #[test]
+    fn test_stealth_integrated_end_to_end() {
+        let (env, _cid, client, admin, pid) = setup();
+
+        let stealth_cid = env.register_contract(None, crate::donation::contract::DonationContract);
+        let stealth_client = crate::donation::contract::DonationContractClient::new(&env, &stealth_cid);
+
+        client.set_stealth_donation_contract(&admin, &stealth_cid);
+
+        let sender = Address::generate(&env);
+        let amount: i128 = 200 * STROOP;
+        let token = create_token_helper(&env, &sender, amount);
+        let ephem = BytesN::from_array(&env, &[99u8; 33]);
+        let msg_hash = BytesN::from_array(&env, &[5u8; 32]);
+
+        let donation_id = client.donate_stealth_integrated(
+            &sender,
+            &token,
+            &ephem,
+            &pid,
+            &amount,
+            &msg_hash,
+        );
+
+        assert_eq!(donation_id, 1u64);
+
+        // Verify DonationContract state
+        let project_wallet = client.get_project(&pid).wallet;
+        let viewing_key = BytesN::from_array(&env, &[0u8; 32]);
+        let stealth_donations = stealth_client.scan_stealth_donations(&project_wallet, &viewing_key);
+
+        assert_eq!(stealth_donations.len(), 1);
+        let sd = stealth_donations.get(0).unwrap();
+        assert_eq!(sd.amount, amount);
+        assert_eq!(sd.project_wallet, project_wallet);
+        assert_eq!(sd.ephemeral_pubkey, ephem);
+
+        // Verify IndigoPayContract state
+        assert_eq!(client.get_project(&pid).total_raised, amount);
+        assert_eq!(client.get_global_stats().total_raised, amount);
     // ─── batch_donate tests ───────────────────────────────────────────────────
 
     #[test]
@@ -9718,3 +10484,5 @@ mod tests {
         client.submit_impact_report(&verifier, &unknown, &105u32, &evidence(&env, 1));
     }
 }
+
+
