@@ -21,10 +21,13 @@ reporters, the fallback, and the global TWAP configuration:
 ```text
 add_reporter(admin, reporter)
 remove_reporter(admin, reporter)
+add_source_oracle(admin, oracle_address)
+remove_source_oracle(admin, oracle_address)
 set_fallback_price(admin, price)
 set_max_price_deviation(admin, deviation_bps)
 set_twap_window(admin, window)
 set_staleness_threshold(admin, threshold)
+get_aggregated_price()
 get_twap_window()
 get_staleness_threshold()
 ```
@@ -54,6 +57,33 @@ circuit breaker is not stored and instead emits `price_rejected`.
 
 The oracle stores at most 20 observations in a circular buffer. Once full, a new
 report overwrites the oldest entry.
+
+### External Source Aggregation
+
+The admin can register up to seven external oracle addresses with
+`add_source_oracle` and remove them with `remove_source_oracle`. Adding an
+already-registered address and removing an absent address are both idempotent.
+The oracle rejects registration of its own contract address. Removing a source
+frees capacity for another source.
+
+`get_aggregated_price()` calls each registered source's zero-argument
+`get_price()` entry point and collects successful positive `i128` responses.
+Failed calls, contract errors, incompatible return values, zero prices, and
+negative prices are skipped without preventing other sources from contributing.
+With an odd number of valid responses, the middle sorted value is returned. With
+an even number, the result is the overflow-safe arithmetic mean of the two middle
+values.
+
+Every source must return the same scaled-down XLM-stroops-per-USDC-stroop value
+documented above. The external interface exposes no timestamp or freshness
+metadata, so each source is responsible for enforcing its own staleness policy.
+The source count is bounded, but the execution cost of an individual source is
+not. Admins must also avoid cycles between aggregator contracts because only
+direct self-registration can be rejected locally.
+
+If no sources are registered, or no source returns a successful positive price,
+`get_aggregated_price()` falls back to the unchanged internal TWAP calculation,
+including the configured TWAP window, staleness threshold, and fallback price.
 
 ### Time-Weighted Average Price (TWAP)
 
@@ -121,3 +151,8 @@ After deployment, the IndigoPay admin registers the oracle contract with
 `set_oracle(admin, oracle_address)`. `donate_usdc` then calls `get_price()` during
 conversion; stale data without a fallback causes the donation transaction to
 fail instead of silently using an invalid rate.
+
+`get_price()` remains the existing internal-oracle endpoint and does not
+automatically query registered external sources. Current IndigoPay callers
+continue to use `get_price()`; adopting `get_aggregated_price()` there requires a
+separate explicit interface change in a future issue.
