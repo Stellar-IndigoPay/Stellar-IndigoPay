@@ -4,8 +4,10 @@
 //! Escrow contract with milestone-based fund release.
 //! Client locks funds with `create_job`, then releases them per milestone.
 
+#[cfg(feature = "oracle-escrow")]
+use soroban_sdk::BytesN;
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Env, String, Vec,
+    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, String, Vec,
 };
 
 #[contracttype]
@@ -17,6 +19,7 @@ pub enum JobStatus {
     Disputed,
 }
 
+#[cfg(not(feature = "oracle-escrow"))]
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Milestone {
@@ -24,6 +27,22 @@ pub struct Milestone {
     pub percentage: u32, // 0-100
     pub released: bool,
     pub disputed: bool,
+    pub oracle: Option<Address>,
+    pub verified: bool,
+    pub proof_hash: Option<BytesN<32>>,
+}
+
+#[cfg(feature = "oracle-escrow")]
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Milestone {
+    pub name: String,
+    pub percentage: u32, // 0-100
+    pub released: bool,
+    pub disputed: bool,
+    pub oracle: Option<Address>,
+    pub verified: bool,
+    pub proof_hash: Option<BytesN<32>>,
 }
 
 #[contracttype]
@@ -47,6 +66,7 @@ pub enum DataKey {
     Admin,
     JobCount,
     JobIds,
+    AmendmentCount(String),
 }
 
 pub const RELEASE_AFTER_LEDGERS: u32 = 10;
@@ -166,6 +186,89 @@ impl EscrowContract {
         token_client.transfer(&client, &contract_addr, &amount);
     }
 
+    /// Client and freelancer jointly amend a job's milestones before any release.
+    /// Milestones may be added, removed, or reordered as long as the new set sums
+    /// to 100%; the total escrowed amount never changes. Requires auth from both
+    /// the client and the freelancer, and is only permitted while the job is still
+    /// fully `Escrowed` (no milestone released or disputed).
+    pub fn amend_job_milestones(
+        env: Env,
+        client: Address,
+        freelancer: Address,
+        job_id: String,
+        new_milestones: Vec<Milestone>,
+    ) {
+        client.require_auth();
+        freelancer.require_auth();
+
+        let mut job: Job = env
+            .storage()
+            .instance()
+            .get(&DataKey::Job(job_id.clone()))
+            .expect("Job not found");
+
+        if job.client != client {
+            panic!("Only the job's client can amend");
+        }
+        if job.freelancer != freelancer {
+            panic!("Only the job's freelancer can amend");
+        }
+        if job.status != JobStatus::Escrowed {
+            panic!("Amendment only allowed before any milestone is released");
+        }
+
+        let mut total_percentage: u32 = 0;
+        for milestone in new_milestones.iter() {
+            if milestone.released || milestone.disputed {
+                panic!("New milestones must not be released or disputed");
+            }
+            total_percentage = total_percentage
+                .checked_add(milestone.percentage)
+                .expect("Milestone percentage overflow");
+        }
+        if total_percentage != 100 {
+            panic!("Milestones must sum to 100%");
+        }
+
+        let old_milestone_count = job.milestones.len();
+        let new_milestone_count = new_milestones.len();
+        job.milestones = new_milestones;
+        env.storage()
+            .instance()
+            .set(&DataKey::Job(job_id.clone()), &job);
+
+        let amendment_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AmendmentCount(job_id.clone()))
+            .unwrap_or(0);
+        let next_amendment_count = amendment_count
+            .checked_add(1)
+            .expect("AmendmentCount overflow");
+        env.storage().instance().set(
+            &DataKey::AmendmentCount(job_id.clone()),
+            &next_amendment_count,
+        );
+
+        env.events().publish(
+            (symbol_short!("job_amend"), client),
+            (
+                job_id,
+                old_milestone_count,
+                new_milestone_count,
+                next_amendment_count,
+            ),
+        );
+    }
+
+    /// Number of times a job's milestones have been amended via `amend_job_milestones`.
+    pub fn get_job_amendment_count(env: Env, job_id: String) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::AmendmentCount(job_id))
+            .unwrap_or(0)
+    }
+
     /// Client releases a specific milestone. Pays proportional XLM to freelancer.
     pub fn release_milestone(env: Env, client: Address, job_id: String, milestone_index: u32) {
         client.require_auth();
@@ -191,6 +294,11 @@ impl EscrowContract {
         }
         if milestone.released {
             panic!("Milestone already released");
+        }
+
+        #[cfg(feature = "oracle-escrow")]
+        if milestone.oracle.is_some() && !milestone.verified {
+            panic!("Milestone not verified by oracle");
         }
 
         let proportion = milestone.percentage as i128;
@@ -235,6 +343,95 @@ impl EscrowContract {
         let token_client = token::Client::new(&env, &job.token);
         let contract_addr = env.current_contract_address();
         token_client.transfer(&contract_addr, &job.freelancer, &release_amount);
+    }
+
+    /// Freelancer submits an off-chain proof hash for oracle-verified milestones.
+    /// Resets `verified` to `false` so the oracle must re-verify after a new proof.
+    #[cfg(feature = "oracle-escrow")]
+    pub fn submit_milestone_proof(
+        env: Env,
+        freelancer: Address,
+        job_id: String,
+        milestone_index: u32,
+        proof_hash: BytesN<32>,
+    ) {
+        freelancer.require_auth();
+
+        let mut job: Job = env
+            .storage()
+            .instance()
+            .get(&DataKey::Job(job_id.clone()))
+            .expect("Job not found");
+
+        if job.freelancer != freelancer {
+            panic!("Only the assigned freelancer can submit proof");
+        }
+        if milestone_index >= job.milestones.len() {
+            panic!("Invalid milestone index");
+        }
+
+        let mut milestones = job.milestones.clone();
+        let mut milestone = milestones.get(milestone_index).unwrap().clone();
+        if milestone.released {
+            panic!("Milestone already completed");
+        }
+
+        milestone.proof_hash = Some(proof_hash);
+        milestone.verified = false;
+        milestones.set(milestone_index, milestone);
+        job.milestones = milestones;
+        env.storage()
+            .instance()
+            .set(&DataKey::Job(job_id.clone()), &job);
+
+        env.events().publish(
+            (symbol_short!("ms_proof"), freelancer),
+            (job_id, milestone_index),
+        );
+    }
+
+    /// Oracle verifies a milestone proof and marks it as verified.
+    /// Only the oracle configured on the milestone can call this.
+    #[cfg(feature = "oracle-escrow")]
+    pub fn verify_milestone(env: Env, oracle: Address, job_id: String, milestone_index: u32) {
+        oracle.require_auth();
+
+        let mut job: Job = env
+            .storage()
+            .instance()
+            .get(&DataKey::Job(job_id.clone()))
+            .expect("Job not found");
+
+        if milestone_index >= job.milestones.len() {
+            panic!("Invalid milestone index");
+        }
+
+        let mut milestones = job.milestones.clone();
+        let mut milestone = milestones.get(milestone_index).unwrap().clone();
+        if milestone.oracle.is_none() {
+            panic!("Milestone has no oracle configured");
+        }
+        if milestone.oracle.as_ref().unwrap() != &oracle {
+            panic!("Only the configured oracle can verify");
+        }
+        if milestone.proof_hash.is_none() {
+            panic!("No proof submitted yet");
+        }
+        if milestone.released {
+            panic!("Milestone already completed");
+        }
+
+        milestone.verified = true;
+        milestones.set(milestone_index, milestone);
+        job.milestones = milestones;
+        env.storage()
+            .instance()
+            .set(&DataKey::Job(job_id.clone()), &job);
+
+        env.events().publish(
+            (symbol_short!("ms_verif"), oracle),
+            (job_id, milestone_index),
+        );
     }
 
     /// Admin-only (deprecated): Mark a job as disputed, freezing remaining releases.
@@ -352,6 +549,11 @@ impl EscrowContract {
             panic!("Milestone already disputed");
         }
         milestone.disputed = true;
+        #[cfg(feature = "oracle-escrow")]
+        {
+            milestone.verified = false;
+            milestone.proof_hash = None;
+        }
         milestones.set(milestone_index, milestone);
         job.milestones = milestones;
         job.status = JobStatus::Disputed;
@@ -558,12 +760,15 @@ impl EscrowContract {
     }
 }
 
+#[cfg(all(test, feature = "testutils"))]
+mod escrow_fuzz;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Ledger as _};
     use soroban_sdk::token::StellarAssetClient;
-    use soroban_sdk::{Address, Env, String, Vec};
+    use soroban_sdk::{Address, Env, IntoVal, String, Vec};
 
     fn setup(env: &Env) -> (Address, EscrowContractClient<'_>) {
         let cid = env.register_contract(None, EscrowContract);
@@ -594,18 +799,27 @@ mod tests {
             percentage: 50,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
         milestones.push_back(Milestone {
             name: String::from_str(&env, "Development"),
             percentage: 30,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
         milestones.push_back(Milestone {
             name: String::from_str(&env, "Testing"),
             percentage: 20,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         client.create_job(
@@ -647,12 +861,18 @@ mod tests {
             percentage: 60,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
         milestones.push_back(Milestone {
             name: String::from_str(&env, "M2"),
             percentage: 40,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         client.create_job(
@@ -698,6 +918,9 @@ mod tests {
             percentage: 100,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         client.create_job(
@@ -730,12 +953,18 @@ mod tests {
             percentage: 50,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
         milestones.push_back(Milestone {
             name: String::from_str(&env, "M2"),
             percentage: 40,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         client.create_job(
@@ -779,6 +1008,9 @@ mod tests {
             percentage: 100,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         client.create_job(
@@ -818,6 +1050,9 @@ mod tests {
             percentage: 100,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         client.create_job(
@@ -857,12 +1092,18 @@ mod tests {
             percentage: 50,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
         milestones.push_back(Milestone {
             name: String::from_str(&env, "M2"),
             percentage: 50,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         client.create_job(
@@ -916,6 +1157,9 @@ mod tests {
             percentage: 100,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         client.create_job(
@@ -956,6 +1200,9 @@ mod tests {
             percentage: 100,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         client.create_job(
@@ -992,6 +1239,9 @@ mod tests {
             percentage: 100,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         client.create_job(
@@ -1028,6 +1278,9 @@ mod tests {
             percentage: 100,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         client.create_job(
@@ -1062,6 +1315,9 @@ mod tests {
             percentage: 100,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         client.create_job(
@@ -1105,6 +1361,9 @@ mod tests {
             percentage: 100,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         client.create_job(
@@ -1139,6 +1398,9 @@ mod tests {
             percentage: 100,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         client.create_job(
@@ -1182,6 +1444,9 @@ mod tests {
             percentage: 100,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         client.create_job(
@@ -1217,6 +1482,9 @@ mod tests {
             percentage: 100,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         client.create_job(
@@ -1256,12 +1524,18 @@ mod tests {
             percentage: 50,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
         milestones.push_back(Milestone {
             name: String::from_str(&env, "M2"),
             percentage: 50,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         client.create_job(
@@ -1302,6 +1576,9 @@ mod tests {
             percentage: 100,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         let job_1 = String::from_str(&env, "job-enum-1");
@@ -1353,18 +1630,27 @@ mod tests {
             percentage: 30,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
         milestones.push_back(Milestone {
             name: String::from_str(&env, "M2-Implementation"),
             percentage: 40,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
         milestones.push_back(Milestone {
             name: String::from_str(&env, "M3-Deployment"),
             percentage: 30,
             released: false,
             disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
         });
 
         client.create_job(
@@ -1399,5 +1685,425 @@ mod tests {
         client.release_milestone(&client_addr, &job_id, &2u32);
         let job_final = client.get_job(&job_id).unwrap();
         assert_eq!(job_final.status, JobStatus::Completed);
+    }
+
+    fn make_milestone(env: &Env, name: &str, percentage: u32) -> Milestone {
+        Milestone {
+            name: String::from_str(env, name),
+            percentage,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        }
+    }
+
+    #[test]
+    fn test_amend_unreleased_job() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-amend");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 50));
+        milestones.push_back(make_milestone(&env, "M2", 50));
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+        );
+
+        let mut new_milestones = Vec::new(&env);
+        new_milestones.push_back(make_milestone(&env, "M1-Split-A", 20));
+        new_milestones.push_back(make_milestone(&env, "M1-Split-B", 30));
+        new_milestones.push_back(make_milestone(&env, "M2", 50));
+
+        client.amend_job_milestones(&client_addr, &freelancer, &job_id, &new_milestones);
+
+        let job = client.get_job(&job_id).unwrap();
+        assert_eq!(job.status, JobStatus::Escrowed);
+        assert_eq!(job.amount, 1000i128);
+        assert_eq!(job.milestones.len(), 3);
+        assert_eq!(
+            job.milestones.get(0).unwrap().name,
+            String::from_str(&env, "M1-Split-A")
+        );
+        assert_eq!(client.get_job_amendment_count(&job_id), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Amendment only allowed before any milestone is released")]
+    fn test_amend_released_job_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-amend-released");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 50));
+        milestones.push_back(make_milestone(&env, "M2", 50));
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+        );
+        client.release_milestone(&client_addr, &job_id, &0u32);
+
+        let mut new_milestones = Vec::new(&env);
+        new_milestones.push_back(make_milestone(&env, "M1", 100));
+        client.amend_job_milestones(&client_addr, &freelancer, &job_id, &new_milestones);
+    }
+
+    #[test]
+    #[should_panic(expected = "Milestones must sum to 100%")]
+    fn test_amend_wrong_sum_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-amend-badsum");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 100));
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+        );
+
+        let mut new_milestones = Vec::new(&env);
+        new_milestones.push_back(make_milestone(&env, "M1", 40));
+        new_milestones.push_back(make_milestone(&env, "M2", 40));
+        client.amend_job_milestones(&client_addr, &freelancer, &job_id, &new_milestones);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_amend_only_client_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-amend-only-client");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 100));
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+        );
+
+        let mut new_milestones = Vec::new(&env);
+        new_milestones.push_back(make_milestone(&env, "M1-A", 50));
+        new_milestones.push_back(make_milestone(&env, "M1-B", 50));
+
+        client
+            .mock_auths(&[soroban_sdk::testutils::MockAuth {
+                address: &client_addr,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &client.address,
+                    fn_name: "amend_job_milestones",
+                    args: (
+                        client_addr.clone(),
+                        freelancer.clone(),
+                        job_id.clone(),
+                        new_milestones.clone(),
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .amend_job_milestones(&client_addr, &freelancer, &job_id, &new_milestones);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_amend_only_freelancer_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-amend-only-freelancer");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 100));
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+        );
+
+        let mut new_milestones = Vec::new(&env);
+        new_milestones.push_back(make_milestone(&env, "M1-A", 50));
+        new_milestones.push_back(make_milestone(&env, "M1-B", 50));
+
+        client
+            .mock_auths(&[soroban_sdk::testutils::MockAuth {
+                address: &freelancer,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &client.address,
+                    fn_name: "amend_job_milestones",
+                    args: (
+                        client_addr.clone(),
+                        freelancer.clone(),
+                        job_id.clone(),
+                        new_milestones.clone(),
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .amend_job_milestones(&client_addr, &freelancer, &job_id, &new_milestones);
+    }
+
+    #[test]
+    fn test_amend_count_increments() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-amend-count");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 100));
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+        );
+        assert_eq!(client.get_job_amendment_count(&job_id), 0);
+
+        let mut amend_1 = Vec::new(&env);
+        amend_1.push_back(make_milestone(&env, "M1-A", 60));
+        amend_1.push_back(make_milestone(&env, "M1-B", 40));
+        client.amend_job_milestones(&client_addr, &freelancer, &job_id, &amend_1);
+        assert_eq!(client.get_job_amendment_count(&job_id), 1);
+
+        let mut amend_2 = Vec::new(&env);
+        amend_2.push_back(make_milestone(&env, "M1-Only", 100));
+        client.amend_job_milestones(&client_addr, &freelancer, &job_id, &amend_2);
+        assert_eq!(client.get_job_amendment_count(&job_id), 2);
+    }
+
+    #[cfg(feature = "oracle-escrow")]
+    mod oracle_escrow_tests {
+        use super::*;
+        use soroban_sdk::testutils::Address as _;
+
+        fn setup_oracle_job(
+            env: &Env,
+            client: &EscrowContractClient<'_>,
+            client_addr: &Address,
+            freelancer: &Address,
+            oracle: Option<Address>,
+        ) -> (String, Address) {
+            let token_admin = Address::generate(env);
+            let token = env
+                .register_stellar_asset_contract_v2(token_admin)
+                .address();
+            StellarAssetClient::new(env, &token).mint(client_addr, &1000i128);
+            let job_id = String::from_str(env, "oracle-job");
+
+            let mut milestones = Vec::new(env);
+            milestones.push_back(Milestone {
+                name: String::from_str(env, "Oracle Milestone"),
+                percentage: 100,
+                released: false,
+                disputed: false,
+                oracle: oracle.clone(),
+                verified: false,
+                proof_hash: None,
+            });
+
+            client.create_job(
+                client_addr,
+                freelancer,
+                &job_id,
+                &token,
+                &1000i128,
+                &milestones,
+            );
+            (job_id, token)
+        }
+
+        #[test]
+        fn test_oracle_verified_milestone_release() {
+            let env = Env::default();
+            env.mock_all_auths();
+            let (_admin, client) = setup(&env);
+
+            let client_addr = Address::generate(&env);
+            let freelancer = Address::generate(&env);
+            let oracle = Address::generate(&env);
+
+            let (job_id, _token) = setup_oracle_job(
+                &env,
+                &client,
+                &client_addr,
+                &freelancer,
+                Some(oracle.clone()),
+            );
+
+            let proof = BytesN::from_array(&env, &[42u8; 32]);
+
+            client.submit_milestone_proof(&freelancer, &job_id, &0u32, &proof);
+            client.verify_milestone(&oracle, &job_id, &0u32);
+            client.release_milestone(&client_addr, &job_id, &0u32);
+
+            let job = client.get_job(&job_id).unwrap();
+            assert_eq!(job.status, JobStatus::Completed);
+            assert!(job.milestones.get(0).unwrap().released);
+        }
+
+        #[test]
+        #[should_panic(expected = "Milestone not verified by oracle")]
+        fn test_release_unverified_oracle_milestone_fails() {
+            let env = Env::default();
+            env.mock_all_auths();
+            let (_admin, client) = setup(&env);
+
+            let client_addr = Address::generate(&env);
+            let freelancer = Address::generate(&env);
+            let oracle = Address::generate(&env);
+
+            let (job_id, _token) = setup_oracle_job(
+                &env,
+                &client,
+                &client_addr,
+                &freelancer,
+                Some(oracle.clone()),
+            );
+
+            let proof = BytesN::from_array(&env, &[1u8; 32]);
+            client.submit_milestone_proof(&freelancer, &job_id, &0u32, &proof);
+            // Do NOT verify → release should panic
+            client.release_milestone(&client_addr, &job_id, &0u32);
+        }
+
+        #[test]
+        fn test_milestone_without_oracle_works_as_before() {
+            let env = Env::default();
+            env.mock_all_auths();
+            let (_admin, client) = setup(&env);
+
+            let client_addr = Address::generate(&env);
+            let freelancer = Address::generate(&env);
+
+            let (job_id, _token) = setup_oracle_job(&env, &client, &client_addr, &freelancer, None);
+
+            // No proof, no verification — release should succeed as before
+            client.release_milestone(&client_addr, &job_id, &0u32);
+
+            let job = client.get_job(&job_id).unwrap();
+            assert_eq!(job.status, JobStatus::Completed);
+            assert!(job.milestones.get(0).unwrap().released);
+        }
+
+        #[test]
+        fn test_dispute_voids_verification() {
+            let env = Env::default();
+            env.mock_all_auths();
+            let (_admin, client) = setup(&env);
+
+            let client_addr = Address::generate(&env);
+            let freelancer = Address::generate(&env);
+            let oracle = Address::generate(&env);
+
+            let (job_id, _token) = setup_oracle_job(
+                &env,
+                &client,
+                &client_addr,
+                &freelancer,
+                Some(oracle.clone()),
+            );
+
+            let proof = BytesN::from_array(&env, &[99u8; 32]);
+            client.submit_milestone_proof(&freelancer, &job_id, &0u32, &proof);
+            client.verify_milestone(&oracle, &job_id, &0u32);
+
+            // Verify it's verified before dispute
+            let job_before = client.get_job(&job_id).unwrap();
+            assert!(job_before.milestones.get(0).unwrap().verified);
+
+            // Dispute the milestone
+            client.dispute_milestone(&_admin, &job_id, &0u32);
+
+            // After dispute, verified must be false and proof_hash cleared
+            let job_after = client.get_job(&job_id).unwrap();
+            let m = job_after.milestones.get(0).unwrap();
+            assert!(!m.verified);
+            assert!(m.proof_hash.is_none());
+        }
     }
 }

@@ -1,11 +1,11 @@
 #![no_std]
 #![allow(deprecated)]
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec};
 
 const MAX_OBSERVATIONS: u32 = 20;
-const TWAP_WINDOW: u32 = 10;
-const STALENESS_THRESHOLD: u32 = 720;
+const DEFAULT_TWAP_WINDOW: u32 = 10;
+const DEFAULT_STALENESS_THRESHOLD: u32 = 720;
 const PRICE_SCALE: i128 = 10_000_000;
 
 #[contracttype]
@@ -13,7 +13,8 @@ const PRICE_SCALE: i128 = 10_000_000;
 pub struct PriceObservation {
     pub price: i128,
     pub reporter: Address,
-    pub recorded_at: u32,
+    /// Ledger sequence when the price was recorded, used as the timestamp for TWAP.
+    pub ledger: u32,
 }
 
 #[contracttype]
@@ -25,6 +26,9 @@ pub enum DataKey {
     ObservationIndex,
     Reporter(Address),
     FallbackPrice,
+    MaxPriceDeviationBps,
+    TwapWindow,
+    StalenessThreshold,
 }
 
 #[contract]
@@ -41,6 +45,127 @@ fn require_admin(env: &Env, admin: &Address) {
     }
 }
 
+/// Computes the absolute deviation between `new_price` and `current_price`
+/// in basis points (1 bps = 0.01%): `|new_price - current_price| * 10_000
+/// / current_price`.
+///
+/// Pure integer arithmetic, panic-free for any `i128` input pair — every
+/// overflow or non-positive-baseline case saturates to `u32::MAX` ("treat
+/// as exceeding any configured threshold") rather than panicking, since
+/// this helper also backs the deviation check inside `report_price`, where
+/// a malformed comparison must never itself become a way to brick the
+/// contract.
+fn calculate_deviation_bps(new_price: i128, current_price: i128) -> u32 {
+    if current_price <= 0 {
+        return u32::MAX;
+    }
+    let diff = new_price
+        .checked_sub(current_price)
+        .and_then(i128::checked_abs)
+        .unwrap_or(i128::MAX);
+    match diff
+        .checked_mul(10_000)
+        .and_then(|scaled| scaled.checked_div(current_price))
+    {
+        Some(bps) => u32::try_from(bps).unwrap_or(u32::MAX),
+        None => u32::MAX,
+    }
+}
+
+fn read_twap_window(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::TwapWindow)
+        .unwrap_or(DEFAULT_TWAP_WINDOW)
+}
+
+fn read_staleness_threshold(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::StalenessThreshold)
+        .unwrap_or(DEFAULT_STALENESS_THRESHOLD)
+}
+
+/// Time-weighted current price in the same raw scale as `PriceObservation
+/// ::price` / `report_price`'s `price` argument (i.e. *not* divided by
+/// `PRICE_SCALE`, unlike the public `get_price`). Used exclusively as the
+/// deviation-check baseline in `report_price`.
+///
+/// Returns `None` when there is no observation history to weight (no
+/// observations, the latest one is stale, or the weighted window sums to
+/// zero) — in every such case there is no reliable baseline, so the
+/// deviation check is skipped rather than falling back to a configured
+/// fallback price (a fallback price is a display/consumption concern for
+/// `get_price`, not a valid deviation baseline for a fresh report).
+fn current_price_raw(env: &Env) -> Option<i128> {
+    let count: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::ObservationCount)
+        .unwrap_or(0);
+    if count == 0 {
+        return None;
+    }
+
+    let next_index: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::ObservationIndex)
+        .unwrap_or(0);
+    let current_ledger = env.ledger().sequence();
+
+    let latest_index = (next_index + MAX_OBSERVATIONS - 1) % MAX_OBSERVATIONS;
+    let latest: PriceObservation = env
+        .storage()
+        .instance()
+        .get(&DataKey::Observations(latest_index))
+        .expect("Oracle observation missing");
+
+    if current_ledger.saturating_sub(latest.ledger) > read_staleness_threshold(env) {
+        return None;
+    }
+
+    let window = read_twap_window(env).min(count);
+    let mut observations = Vec::new(env);
+    let start_offset = (next_index + MAX_OBSERVATIONS - window) % MAX_OBSERVATIONS;
+    for i in 0..window {
+        let index = (start_offset + i) % MAX_OBSERVATIONS;
+        let obs: PriceObservation = env
+            .storage()
+            .instance()
+            .get(&DataKey::Observations(index))
+            .expect("Oracle observation missing");
+        observations.push_back(obs);
+    }
+
+    let mut weighted_sum = 0_i128;
+    let mut total_weight = 0_i128;
+    for i in 0..window {
+        let obs = observations.get(i).unwrap();
+        let next_ledger = if i + 1 < window {
+            observations.get(i + 1).unwrap().ledger
+        } else {
+            current_ledger
+        };
+        let mut weight = next_ledger.saturating_sub(obs.ledger) as i128;
+        if weight == 0 {
+            weight = 1;
+        }
+        weighted_sum = weighted_sum
+            .checked_add(obs.price.checked_mul(weight).expect("TWAP mul overflow"))
+            .expect("TWAP overflow");
+        total_weight = total_weight
+            .checked_add(weight)
+            .expect("Total weight overflow");
+    }
+
+    if total_weight == 0 {
+        return None;
+    }
+
+    Some(weighted_sum / total_weight)
+}
+
 #[contractimpl]
 impl SimpleOracle {
     pub fn initialize(env: Env, admin: Address) {
@@ -54,6 +179,12 @@ impl SimpleOracle {
         env.storage()
             .instance()
             .set(&DataKey::ObservationIndex, &0_u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::TwapWindow, &DEFAULT_TWAP_WINDOW);
+        env.storage()
+            .instance()
+            .set(&DataKey::StalenessThreshold, &DEFAULT_STALENESS_THRESHOLD);
     }
 
     pub fn add_reporter(env: Env, admin: Address, reporter: Address) {
@@ -96,6 +227,38 @@ impl SimpleOracle {
             .instance()
             .get(&DataKey::ObservationCount)
             .unwrap_or(0);
+
+        // Price deviation circuit breaker: reject a new observation that
+        // deviates too far from the current TWAP, capping the per-report
+        // impact a compromised reporter can have even before TWAP
+        // averaging kicks in. Disabled when the threshold is 0 (backward
+        // compatible) or when there are fewer than 2 prior observations
+        // (no reliable baseline yet).
+        let max_deviation_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxPriceDeviationBps)
+            .unwrap_or(0);
+        if max_deviation_bps > 0 && count >= 2 {
+            if let Some(current_price) = current_price_raw(&env) {
+                let deviation_bps = calculate_deviation_bps(price, current_price);
+                if deviation_bps > max_deviation_bps {
+                    // Reject by dropping the observation rather than panicking:
+                    // Soroban reverts *all* effects of an invocation — storage
+                    // writes and published events alike — when it traps, so a
+                    // panic here would also erase the `price_rejected` event
+                    // this check exists to leave behind. Returning normally
+                    // (without recording the observation) is what lets the
+                    // event actually reach an indexer/monitor.
+                    env.events().publish(
+                        (Symbol::new(&env, "price_rejected"), reporter.clone()),
+                        (price, current_price, deviation_bps),
+                    );
+                    return;
+                }
+            }
+        }
+
         let index: u32 = env
             .storage()
             .instance()
@@ -104,7 +267,7 @@ impl SimpleOracle {
         let observation = PriceObservation {
             price,
             reporter: reporter.clone(),
-            recorded_at: env.ledger().sequence(),
+            ledger: env.ledger().sequence(),
         };
 
         env.storage()
@@ -135,6 +298,66 @@ impl SimpleOracle {
             .set(&DataKey::FallbackPrice, &price);
     }
 
+    /// Configures the price deviation circuit breaker threshold, in basis
+    /// points (e.g. 500 = 5%). A value of 0 disables the check entirely,
+    /// preserving the pre-circuit-breaker behaviour.
+    pub fn set_max_price_deviation(env: Env, admin: Address, deviation_bps: u32) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxPriceDeviationBps, &deviation_bps);
+    }
+
+    pub fn set_twap_window(env: Env, admin: Address, window: u32) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        if window == 0 {
+            panic!("TWAP window must be at least 1");
+        }
+        if window > MAX_OBSERVATIONS {
+            panic!("TWAP window exceeds maximum");
+        }
+        if window > read_staleness_threshold(&env) {
+            panic!("TWAP window exceeds staleness threshold");
+        }
+        env.storage().instance().set(&DataKey::TwapWindow, &window);
+        env.events()
+            .publish((symbol_short!("twap_win"), admin), window);
+    }
+
+    pub fn set_staleness_threshold(env: Env, admin: Address, threshold: u32) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        if threshold < read_twap_window(&env) {
+            panic!("Staleness threshold must be at least TWAP window");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::StalenessThreshold, &threshold);
+        env.events()
+            .publish((symbol_short!("stale_th"), admin), threshold);
+    }
+
+    pub fn get_twap_window(env: Env) -> u32 {
+        read_twap_window(&env)
+    }
+
+    pub fn get_staleness_threshold(env: Env) -> u32 {
+        read_staleness_threshold(&env)
+    }
+
+    /// Compute the Time-Weighted Average Price (TWAP) from recent observations.
+    ///
+    /// Each observation is weighted by the number of ledgers it persisted before
+    /// the next observation or the current ledger. This makes flash-loan and
+    /// single-block price manipulation economically infeasible: an extreme value
+    /// submitted at the current ledger has weight ≈ 1, so its effect on the TWAP
+    /// is negligible.
+    ///
+    /// Falls back to the configured `FallbackPrice` when there are no
+    /// observations or the newest observation exceeds the configured staleness
+    /// threshold.
     pub fn get_price(env: Env) -> i128 {
         let count: u32 = env
             .storage()
@@ -154,6 +377,9 @@ impl SimpleOracle {
             .instance()
             .get(&DataKey::ObservationIndex)
             .unwrap_or(0);
+        let current_ledger = env.ledger().sequence();
+
+        // Check freshness of the newest observation.
         let latest_index = (next_index + MAX_OBSERVATIONS - 1) % MAX_OBSERVATIONS;
         let latest: PriceObservation = env
             .storage()
@@ -161,7 +387,7 @@ impl SimpleOracle {
             .get(&DataKey::Observations(latest_index))
             .expect("Oracle observation missing");
 
-        if env.ledger().sequence().saturating_sub(latest.recorded_at) > STALENESS_THRESHOLD {
+        if current_ledger.saturating_sub(latest.ledger) > read_staleness_threshold(&env) {
             return env
                 .storage()
                 .instance()
@@ -169,28 +395,67 @@ impl SimpleOracle {
                 .expect("Oracle price is stale and no fallback configured");
         }
 
-        let window = TWAP_WINDOW.min(count);
-        let mut sum = 0_i128;
-        for offset in 0..window {
-            let index = (next_index + MAX_OBSERVATIONS - 1 - offset) % MAX_OBSERVATIONS;
-            let observation: PriceObservation = env
+        let window = read_twap_window(&env).min(count);
+
+        // Collect observations from oldest to newest.
+        let mut observations = Vec::new(&env);
+        let start_offset = (next_index + MAX_OBSERVATIONS - window) % MAX_OBSERVATIONS;
+        for i in 0..window {
+            let index = (start_offset + i) % MAX_OBSERVATIONS;
+            let obs: PriceObservation = env
                 .storage()
                 .instance()
                 .get(&DataKey::Observations(index))
                 .expect("Oracle observation missing");
-            sum = sum.checked_add(observation.price).expect("TWAP overflow");
+            observations.push_back(obs);
         }
 
-        sum / i128::from(window) / PRICE_SCALE
+        // TWAP: Σ(price_i × weight_i) / Σ(weight_i × PRICE_SCALE)
+        let mut weighted_sum = 0_i128;
+        let mut total_weight = 0_i128;
+
+        for i in 0..window {
+            let obs = observations.get(i).unwrap();
+            let next_ledger = if i + 1 < window {
+                observations.get(i + 1).unwrap().ledger
+            } else {
+                current_ledger
+            };
+            let mut weight = next_ledger.saturating_sub(obs.ledger) as i128;
+            // When all observations fall on the same ledger (common in tests),
+            // each observation gets a minimum weight of 1 to avoid division by
+            // zero while preserving the ordering of price contributions.
+            if weight == 0 {
+                weight = 1;
+            }
+            weighted_sum = weighted_sum
+                .checked_add(obs.price.checked_mul(weight).expect("TWAP mul overflow"))
+                .expect("TWAP overflow");
+            total_weight = total_weight
+                .checked_add(weight)
+                .expect("Total weight overflow");
+        }
+
+        if total_weight == 0 {
+            return env
+                .storage()
+                .instance()
+                .get(&DataKey::FallbackPrice)
+                .expect("Zero-weight TWAP — fallback required");
+        }
+
+        weighted_sum / (total_weight * PRICE_SCALE)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Ledger},
-        Env,
+        testutils::{Address as _, Events as _, Ledger},
+        Env, IntoVal,
     };
 
     fn setup() -> (Env, Address, Address, Address) {
@@ -227,6 +492,196 @@ mod tests {
     fn initialize_only_once() {
         let (env, contract_id, admin, _) = setup();
         SimpleOracleClient::new(&env, &contract_id).initialize(&admin);
+    }
+
+    #[test]
+    fn configuration_defaults_are_stored_and_returned() {
+        let (env, contract_id, _, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        assert_eq!(client.get_twap_window(), DEFAULT_TWAP_WINDOW);
+        assert_eq!(
+            client.get_staleness_threshold(),
+            DEFAULT_STALENESS_THRESHOLD
+        );
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                env.storage().instance().get::<_, u32>(&DataKey::TwapWindow),
+                Some(DEFAULT_TWAP_WINDOW)
+            );
+            assert_eq!(
+                env.storage()
+                    .instance()
+                    .get::<_, u32>(&DataKey::StalenessThreshold),
+                Some(DEFAULT_STALENESS_THRESHOLD)
+            );
+        });
+    }
+
+    #[test]
+    fn admin_can_set_configuration() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        client.set_twap_window(&admin, &5);
+        client.set_staleness_threshold(&admin, &100);
+
+        assert_eq!(client.get_twap_window(), 5);
+        assert_eq!(client.get_staleness_threshold(), 100);
+    }
+
+    #[test]
+    fn twap_window_bounds_are_enforced() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        assert!(client.try_set_twap_window(&admin, &0).is_err());
+        client.set_twap_window(&admin, &1);
+        assert_eq!(client.get_twap_window(), 1);
+        client.set_twap_window(&admin, &MAX_OBSERVATIONS);
+        assert_eq!(client.get_twap_window(), MAX_OBSERVATIONS);
+        assert!(client
+            .try_set_twap_window(&admin, &(MAX_OBSERVATIONS + 1))
+            .is_err());
+    }
+
+    #[test]
+    fn staleness_threshold_bounds_are_enforced() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        assert!(client
+            .try_set_staleness_threshold(&admin, &(DEFAULT_TWAP_WINDOW - 1))
+            .is_err());
+        client.set_staleness_threshold(&admin, &DEFAULT_TWAP_WINDOW);
+        assert_eq!(client.get_staleness_threshold(), DEFAULT_TWAP_WINDOW);
+        client.set_staleness_threshold(&admin, &u32::MAX);
+        assert_eq!(client.get_staleness_threshold(), u32::MAX);
+    }
+
+    #[test]
+    fn non_admin_cannot_set_configuration() {
+        let (env, contract_id, _, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        let non_admin = Address::generate(&env);
+
+        assert!(client.try_set_twap_window(&non_admin, &5).is_err());
+        assert!(client
+            .try_set_staleness_threshold(&non_admin, &100)
+            .is_err());
+        assert_eq!(client.get_twap_window(), DEFAULT_TWAP_WINDOW);
+        assert_eq!(
+            client.get_staleness_threshold(),
+            DEFAULT_STALENESS_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn configuration_setters_emit_events() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        client.set_twap_window(&admin, &5);
+        assert_eq!(
+            env.events().all().filter_by_contract(&contract_id),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    (symbol_short!("twap_win"), admin.clone()).into_val(&env),
+                    5_u32.into_val(&env),
+                )
+            ]
+        );
+
+        client.set_staleness_threshold(&admin, &100);
+        assert_eq!(
+            env.events().all().filter_by_contract(&contract_id),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    (symbol_short!("stale_th"), admin).into_val(&env),
+                    100_u32.into_val(&env),
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn changing_twap_window_applies_to_existing_observations() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+
+        env.ledger().set_sequence_number(100);
+        client.report_price(&reporter, &100_000_000);
+        env.ledger().set_sequence_number(200);
+        client.report_price(&reporter, &200_000_000);
+        env.ledger().set_sequence_number(300);
+        assert_eq!(client.get_price(), 15);
+
+        client.set_twap_window(&admin, &1);
+        assert_eq!(client.get_price(), 20);
+    }
+
+    #[test]
+    fn changing_staleness_threshold_applies_immediately() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+        client.set_fallback_price(&admin, &5);
+
+        env.ledger().set_sequence_number(100);
+        client.report_price(&reporter, &80_000_000);
+        env.ledger().set_sequence_number(111);
+        assert_eq!(client.get_price(), 8);
+
+        client.set_staleness_threshold(&admin, &DEFAULT_TWAP_WINDOW);
+        assert_eq!(client.get_price(), 5);
+    }
+
+    #[test]
+    fn missing_configuration_keys_use_legacy_defaults() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+        client.set_fallback_price(&admin, &7);
+
+        client.report_price(&reporter, &1_000_000_000);
+        for _ in 0..DEFAULT_TWAP_WINDOW {
+            client.report_price(&reporter, &100_000_000);
+        }
+        env.as_contract(&contract_id, || {
+            env.storage().instance().remove(&DataKey::TwapWindow);
+            env.storage()
+                .instance()
+                .remove(&DataKey::StalenessThreshold);
+        });
+
+        assert_eq!(client.get_twap_window(), DEFAULT_TWAP_WINDOW);
+        assert_eq!(
+            client.get_staleness_threshold(),
+            DEFAULT_STALENESS_THRESHOLD
+        );
+        env.ledger()
+            .set_sequence_number(DEFAULT_STALENESS_THRESHOLD);
+        assert_eq!(client.get_price(), 10);
+        env.ledger()
+            .set_sequence_number(DEFAULT_STALENESS_THRESHOLD + 1);
+        assert_eq!(client.get_price(), 7);
+    }
+
+    #[test]
+    fn twap_window_cannot_exceed_staleness_threshold() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        client.set_staleness_threshold(&admin, &DEFAULT_TWAP_WINDOW);
+        assert!(client
+            .try_set_twap_window(&admin, &(DEFAULT_TWAP_WINDOW + 1))
+            .is_err());
+        assert_eq!(client.get_twap_window(), DEFAULT_TWAP_WINDOW);
     }
 
     #[test]
@@ -336,7 +791,8 @@ mod tests {
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter);
         client.report_price(&reporter, &80_000_000);
-        env.ledger().set_sequence_number(100 + STALENESS_THRESHOLD);
+        env.ledger()
+            .set_sequence_number(100 + DEFAULT_STALENESS_THRESHOLD);
         assert_eq!(client.get_price(), 8);
     }
 
@@ -348,7 +804,8 @@ mod tests {
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter);
         client.report_price(&reporter, &80_000_000);
-        env.ledger().set_sequence_number(101 + STALENESS_THRESHOLD);
+        env.ledger()
+            .set_sequence_number(101 + DEFAULT_STALENESS_THRESHOLD);
         client.get_price();
     }
 
@@ -360,7 +817,8 @@ mod tests {
         add_reporter(&env, &contract_id, &admin, &reporter);
         client.set_fallback_price(&admin, &7);
         client.report_price(&reporter, &80_000_000);
-        env.ledger().set_sequence_number(101 + STALENESS_THRESHOLD);
+        env.ledger()
+            .set_sequence_number(101 + DEFAULT_STALENESS_THRESHOLD);
         assert_eq!(client.get_price(), 7);
     }
 
@@ -373,7 +831,9 @@ mod tests {
         client.report_price(&reporter, &20_000_000);
         env.ledger().set_sequence_number(1_000);
         client.report_price(&reporter, &100_000_000);
-        assert_eq!(client.get_price(), 6);
+        // TWAP: price 2 at ledger 1 (weight 999) + price 10 at ledger 1000
+        // (weight 1). TWAP ≈ (2×999 + 10×1) / 1000 = 2008/1000 ≈ 2.
+        assert_eq!(client.get_price(), 2);
     }
 
     #[test]
@@ -418,7 +878,7 @@ mod tests {
             let (env, contract_id, admin, reporter) = setup();
             let client = SimpleOracleClient::new(&env, &contract_id);
             add_reporter(&env, &contract_id, &admin, &reporter);
-            let mut recent = [0_i128; TWAP_WINDOW as usize];
+            let mut recent = [0_i128; DEFAULT_TWAP_WINDOW as usize];
             for index in 0..25_usize {
                 state = state
                     .wrapping_mul(6_364_136_223_846_793_005)
@@ -433,6 +893,370 @@ mod tests {
             let min = recent.iter().copied().min().unwrap();
             let max = recent.iter().copied().max().unwrap();
             assert!(twap >= min && twap <= max);
+        }
+    }
+
+    // ─── TWAP-specific tests (#377) ─────────────────────────────────────────
+
+    #[test]
+    fn test_twap_single_observation() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+
+        // Report one observation at price 10 XLM/USDC.
+        env.ledger().set_sequence_number(0);
+        client.report_price(&reporter, &100_000_000);
+
+        // Advance 100 ledgers — weight = 100, TWAP = (10×100) / 100 = 10.
+        env.ledger().set_sequence_number(100);
+        assert_eq!(client.get_price(), 10);
+    }
+
+    #[test]
+    fn test_twap_multiple_observations() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+
+        // Two observations spread across ledgers.
+        env.ledger().set_sequence_number(100);
+        client.report_price(&reporter, &100_000_000); // price 10
+
+        env.ledger().set_sequence_number(150);
+        client.report_price(&reporter, &200_000_000); // price 20
+
+        // Current ledger 200.
+        //  weight_100 = 150 - 100 = 50
+        //  weight_150 = 200 - 150 = 50
+        //  TWAP = (10×50 + 20×50) / 100 = 15
+        env.ledger().set_sequence_number(200);
+        assert_eq!(client.get_price(), 15);
+    }
+
+    #[test]
+    fn test_twap_freshness_expiry() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+
+        env.ledger().set_sequence_number(100);
+        client.report_price(&reporter, &80_000_000);
+
+        // Set a fallback so stale observations don't panic.
+        client.set_fallback_price(&admin, &5);
+
+        // Advance past staleness threshold (720 ledgers).
+        env.ledger()
+            .set_sequence_number(100 + DEFAULT_STALENESS_THRESHOLD + 1);
+        assert_eq!(client.get_price(), 5);
+    }
+
+    #[test]
+    fn test_twap_flash_loan_resistance() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+
+        // Normal price at ledger 100.
+        env.ledger().set_sequence_number(100);
+        client.report_price(&reporter, &100_000_000); // price 10
+
+        // Attacker submits extreme price at ledger 200.
+        env.ledger().set_sequence_number(200);
+        client.report_price(&reporter, &10_000_000_000); // price 1000
+
+        // Advance 1 ledger — attacker's price has weight ≈ 1.
+        //  weight_normal = 200 - 100 = 100
+        //  weight_attack = 201 - 200 = 1
+        //  TWAP ≈ (10×100 + 1000×1) / 101 = 2000/101 ≈ 19
+        env.ledger().set_sequence_number(201);
+        let twap = client.get_price();
+        // (10×100 + 1000×1) / 101 = 2000 / 101 = 19 — attack negligible.
+        assert_eq!(twap, 19);
+    }
+
+    // ─── Price deviation circuit breaker (#464) ────────────────────────────
+
+    /// Seeds two same-ledger observations at `base_price`, giving a clean,
+    /// exactly-computable TWAP baseline of `base_price` (see `current_price_raw`
+    /// doc comment: same-ledger observations each get weight 1).
+    fn seed_baseline(
+        env: &Env,
+        contract_id: &Address,
+        admin: &Address,
+        reporter: &Address,
+        base_price: i128,
+    ) {
+        let client = SimpleOracleClient::new(env, contract_id);
+        add_reporter(env, contract_id, admin, reporter);
+        client.report_price(reporter, &base_price);
+        client.report_price(reporter, &base_price);
+    }
+
+    #[test]
+    fn test_set_deviation_threshold() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        client.set_max_price_deviation(&admin, &500);
+        env.as_contract(&contract_id, || {
+            let stored: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::MaxPriceDeviationBps)
+                .unwrap();
+            assert_eq!(stored, 500);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn only_admin_can_set_deviation_threshold() {
+        let (env, contract_id, _, _) = setup();
+        let non_admin = Address::generate(&env);
+        SimpleOracleClient::new(&env, &contract_id).set_max_price_deviation(&non_admin, &500);
+    }
+
+    #[test]
+    fn test_deviation_accept_within_bounds() {
+        let (env, contract_id, admin, reporter) = setup();
+        seed_baseline(&env, &contract_id, &admin, &reporter, 80_000_000);
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        client.set_max_price_deviation(&admin, &500); // 5%
+
+        // 82_000_000 vs baseline 80_000_000 → 2.5% deviation, within 5%.
+        client.report_price(&reporter, &82_000_000);
+
+        env.as_contract(&contract_id, || {
+            let count: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::ObservationCount)
+                .unwrap();
+            assert_eq!(count, 3);
+        });
+    }
+
+    #[test]
+    fn test_deviation_reject() {
+        let (env, contract_id, admin, reporter) = setup();
+        seed_baseline(&env, &contract_id, &admin, &reporter, 80_000_000);
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        client.set_max_price_deviation(&admin, &500); // 5%
+
+        // 90_000_000 vs baseline 80_000_000 → 12.5% deviation, exceeds 5%.
+        // Rejected observations are dropped, not panicked (see comment in
+        // report_price: a panic would also erase the price_rejected event).
+        client.report_price(&reporter, &90_000_000);
+
+        env.as_contract(&contract_id, || {
+            let count: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::ObservationCount)
+                .unwrap();
+            assert_eq!(count, 2, "rejected observation must not be stored");
+        });
+    }
+
+    #[test]
+    fn test_deviation_reject_emits_price_rejected_event() {
+        use std::format;
+
+        let (env, contract_id, admin, reporter) = setup();
+        seed_baseline(&env, &contract_id, &admin, &reporter, 80_000_000);
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        client.set_max_price_deviation(&admin, &500);
+
+        let events_before = env.events().all().events().len();
+        client.report_price(&reporter, &90_000_000);
+
+        let events_after = env.events().all();
+        assert_eq!(
+            events_after.events().len(),
+            events_before + 1,
+            "expected exactly one additional event to have been published on rejection"
+        );
+
+        let latest = format!("{:?}", events_after.events().last().unwrap());
+        assert!(
+            latest.contains("price_rejected"),
+            "expected the new event to reference price_rejected, got: {}",
+            latest
+        );
+    }
+
+    #[test]
+    fn test_deviation_disabled_zero() {
+        let (env, contract_id, admin, reporter) = setup();
+        // max_price_deviation_bps defaults to 0 (never configured) — the
+        // circuit breaker must be fully bypassed regardless of magnitude.
+        seed_baseline(&env, &contract_id, &admin, &reporter, 80_000_000);
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        client.report_price(&reporter, &800_000_000); // 10x the baseline
+
+        env.as_contract(&contract_id, || {
+            let count: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::ObservationCount)
+                .unwrap();
+            assert_eq!(count, 3);
+        });
+    }
+
+    #[test]
+    fn test_deviation_skip_few_observations() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+        client.set_max_price_deviation(&admin, &500);
+
+        // First observation: 0 prior observations — check must be skipped.
+        client.report_price(&reporter, &80_000_000);
+        // Second observation: only 1 prior observation — check must still
+        // be skipped, even though this "deviates" wildly from the first.
+        client.report_price(&reporter, &8_000_000_000);
+
+        env.as_contract(&contract_id, || {
+            let count: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::ObservationCount)
+                .unwrap();
+            assert_eq!(count, 2);
+        });
+    }
+
+    #[test]
+    fn configured_twap_window_affects_deviation_baseline() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+
+        client.report_price(&reporter, &100);
+        client.report_price(&reporter, &200);
+        client.set_twap_window(&admin, &1);
+        client.set_max_price_deviation(&admin, &3_000);
+        client.report_price(&reporter, &260);
+
+        assert_eq!(
+            env.events().all().filter_by_contract(&contract_id),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    (symbol_short!("price_upd"), reporter).into_val(&env),
+                    (260_i128, env.ledger().sequence()).into_val(&env),
+                )
+            ]
+        );
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                env.storage()
+                    .instance()
+                    .get::<_, u32>(&DataKey::ObservationCount),
+                Some(3)
+            );
+            assert_eq!(
+                env.storage()
+                    .instance()
+                    .get::<_, PriceObservation>(&DataKey::Observations(2))
+                    .unwrap()
+                    .price,
+                260
+            );
+        });
+    }
+
+    #[test]
+    fn configured_staleness_affects_deviation_baseline_availability() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+
+        env.ledger().set_sequence_number(100);
+        client.report_price(&reporter, &100);
+        client.report_price(&reporter, &100);
+        client.set_staleness_threshold(&admin, &10);
+        client.set_max_price_deviation(&admin, &500);
+        env.ledger().set_sequence_number(111);
+        client.report_price(&reporter, &1_000);
+
+        assert_eq!(
+            env.events().all().filter_by_contract(&contract_id),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    (symbol_short!("price_upd"), reporter).into_val(&env),
+                    (1_000_i128, 111_u32).into_val(&env),
+                )
+            ]
+        );
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                env.storage()
+                    .instance()
+                    .get::<_, u32>(&DataKey::ObservationCount),
+                Some(3)
+            );
+            assert_eq!(
+                env.storage()
+                    .instance()
+                    .get::<_, PriceObservation>(&DataKey::Observations(2))
+                    .unwrap()
+                    .price,
+                1_000
+            );
+        });
+    }
+}
+
+#[cfg(test)]
+mod deviation_fuzz {
+    extern crate std;
+
+    use super::calculate_deviation_bps;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2048))]
+
+        /// `calculate_deviation_bps` must match an independently-derived
+        /// reference computation (via `u128::abs_diff` instead of the
+        /// implementation's `i128` checked-arithmetic path) for any pair of
+        /// positive prices within a range that does not overflow either path.
+        #[test]
+        fn prop_deviation_calculation_correct(
+            current in 1_i128..1_000_000_000_000_i128,
+            new in 1_i128..1_000_000_000_000_i128,
+        ) {
+            let bps = calculate_deviation_bps(new, current);
+
+            let diff = new.abs_diff(current);
+            let expected = diff
+                .checked_mul(10_000)
+                .map(|scaled| scaled / (current as u128))
+                .and_then(|v| u32::try_from(v).ok())
+                .unwrap_or(u32::MAX);
+
+            prop_assert_eq!(bps, expected);
+        }
+
+        /// Identical prices must always report zero deviation.
+        #[test]
+        fn prop_deviation_is_zero_when_prices_match(price in 1_i128..1_000_000_000_000_i128) {
+            prop_assert_eq!(calculate_deviation_bps(price, price), 0);
+        }
+
+        /// The helper must never panic, for any `i128` input pair — it backs
+        /// a security check inside `report_price` and must degrade to
+        /// "treat as exceeding any threshold" rather than trap the contract.
+        #[test]
+        fn prop_deviation_never_panics(new in any::<i128>(), current in any::<i128>()) {
+            let _ = calculate_deviation_bps(new, current);
         }
     }
 }

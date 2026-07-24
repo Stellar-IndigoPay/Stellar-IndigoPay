@@ -31,7 +31,12 @@
  * Build:
  *   cargo build --target wasm32v1-none --release
  */
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, Address, Env, Map, String, Vec,
+};
+
+#[cfg(all(test, feature = "testutils"))]
+mod fuzz_tests;
 
 // ─── Source chains that this contract understands ───────────────────────────
 //
@@ -40,6 +45,7 @@ use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, E
 const MAX_SOURCE_CHAIN_LEN: u32 = 32;
 const MAX_TX_HASH_LEN: u32 = 128;
 const MAX_PROJECT_ID_LEN: u32 = 64;
+pub const MAX_BATCH_SIZE: u32 = 50;
 
 // ─── Status enum ────────────────────────────────────────────────────────────
 //
@@ -57,6 +63,18 @@ pub enum AttestationStatus {
 }
 
 // ─── Storage types ──────────────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BatchAttestationInput {
+    pub source_chain: String,
+    pub source_tx_hash: String,
+    pub donor: Address,
+    pub project_id: String,
+    pub amount_usd: i128,
+    pub amount_xlm: i128,
+    pub message_hash: u32,
+}
 
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -91,8 +109,8 @@ pub enum DataKey {
     /// source keeps forging attestations.
     AllowedChain(String),
     AllowedChainInit,
-    /// Monotonic attestation id. Starts at 0, incremented before each write
-    /// so the first id is 0.
+    /// Last assigned attestation id. Starts at 0 and is incremented before
+    /// allocation, so the first id is 1.
     NextAttestationId,
     Attestation(u64),
     /// (source_chain, source_tx_hash) presence flag — replay defence.
@@ -157,6 +175,189 @@ fn require_positive(amount: i128, label: &str) {
         panic!("Amount must be positive");
     }
     let _ = label; // currently unused; reserved for richer error messages.
+}
+
+fn validate_source_chain(source_chain: &String) {
+    if source_chain.is_empty() || source_chain.len() > MAX_SOURCE_CHAIN_LEN {
+        panic!("Invalid source_chain length");
+    }
+}
+
+fn validate_attestation_input(input: &BatchAttestationInput) {
+    if input.source_tx_hash.is_empty() || input.source_tx_hash.len() > MAX_TX_HASH_LEN {
+        panic!("Invalid source_tx_hash length");
+    }
+    if input.project_id.is_empty() || input.project_id.len() > MAX_PROJECT_ID_LEN {
+        panic!("Invalid project_id length");
+    }
+    require_positive(input.amount_usd, "amount_usd");
+    require_positive(input.amount_xlm, "amount_xlm");
+}
+
+fn require_source_chain_allowed(env: &Env, source_chain: &String) {
+    let allowlist_inited: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::AllowedChainInit)
+        .unwrap_or(false);
+    if allowlist_inited {
+        let allowed: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::AllowedChain(source_chain.clone()))
+            .unwrap_or(false);
+        if !allowed {
+            panic!("Source chain not allowed");
+        }
+    }
+}
+
+fn emit_attestation_new(env: &Env, relayer: &Address, record: &Attestation) {
+    env.events().publish(
+        (
+            symbol_short!("att_new"),
+            relayer.clone(),
+            record.donor.clone(),
+            record.source_chain.clone(),
+        ),
+        (
+            record.id,
+            record.project_id.clone(),
+            record.amount_usd,
+            record.amount_xlm,
+        ),
+    );
+}
+
+fn record_attestations_internal(
+    env: &Env,
+    relayer: &Address,
+    attestations: Vec<BatchAttestationInput>,
+    emit_batch_event: bool,
+) -> Vec<u64> {
+    let count = attestations.len();
+    let first_input = attestations.get(0).expect("Batch must not be empty");
+    let source_chain = first_input.source_chain.clone();
+
+    validate_source_chain(&source_chain);
+    for input in attestations.iter() {
+        if input.source_chain != source_chain {
+            panic!("Batch source chains must match");
+        }
+        validate_attestation_input(&input);
+    }
+    require_source_chain_allowed(env, &source_chain);
+
+    let mut batch_hashes: Map<String, bool> = Map::new(env);
+    for input in attestations.iter() {
+        let seen_key = DataKey::SourceTxSeen(source_chain.clone(), input.source_tx_hash.clone());
+        if batch_hashes.contains_key(input.source_tx_hash.clone())
+            || env.storage().instance().has(&seen_key)
+        {
+            panic!("Source transaction already attested");
+        }
+        batch_hashes.set(input.source_tx_hash, true);
+    }
+
+    let current_last: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::NextAttestationId)
+        .unwrap_or(0);
+    let count_u64 = u64::from(count);
+    let first_id = current_last
+        .checked_add(1)
+        .expect("Attestation id overflow");
+    let last_id = current_last
+        .checked_add(count_u64)
+        .expect("Attestation id overflow");
+
+    let total: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::TotalCount)
+        .unwrap_or(0);
+    let new_total = total.checked_add(count_u64).expect("total overflow");
+    let pending: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::PendingCount)
+        .unwrap_or(0);
+    let new_pending = pending.checked_add(count_u64).expect("pending overflow");
+
+    let now = env.ledger().sequence();
+    let mut ids = Vec::new(env);
+    let mut donor_indexes: Map<Address, Vec<u64>> = Map::new(env);
+    let mut donor_order: Vec<Address> = Vec::new(env);
+
+    for index in 0..count {
+        let input = attestations.get(index).unwrap();
+        let id = first_id
+            .checked_add(u64::from(index))
+            .expect("Attestation id overflow");
+        ids.push_back(id);
+
+        let seen_key = DataKey::SourceTxSeen(source_chain.clone(), input.source_tx_hash.clone());
+        env.storage().instance().set(&seen_key, &true);
+
+        let record = Attestation {
+            id,
+            source_chain: source_chain.clone(),
+            source_tx_hash: input.source_tx_hash,
+            donor: input.donor.clone(),
+            project_id: input.project_id,
+            amount_usd: input.amount_usd,
+            amount_xlm: input.amount_xlm,
+            message_hash: input.message_hash,
+            status: AttestationStatus::Pending,
+            created_at_ledger: now,
+            verified_at_ledger: 0,
+            created_by: relayer.clone(),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::Attestation(id), &record);
+
+        let mut donor_ids = if let Some(cached) = donor_indexes.get(input.donor.clone()) {
+            cached
+        } else {
+            donor_order.push_back(input.donor.clone());
+            env.storage()
+                .instance()
+                .get(&DataKey::DonorAttestations(input.donor.clone()))
+                .unwrap_or(Vec::new(env))
+        };
+        donor_ids.push_back(id);
+        donor_indexes.set(input.donor, donor_ids);
+
+        emit_attestation_new(env, relayer, &record);
+    }
+
+    for donor in donor_order.iter() {
+        let donor_ids = donor_indexes.get(donor.clone()).unwrap();
+        env.storage()
+            .instance()
+            .set(&DataKey::DonorAttestations(donor), &donor_ids);
+    }
+
+    env.storage()
+        .instance()
+        .set(&DataKey::NextAttestationId, &last_id);
+    env.storage()
+        .instance()
+        .set(&DataKey::TotalCount, &new_total);
+    env.storage()
+        .instance()
+        .set(&DataKey::PendingCount, &new_pending);
+
+    if emit_batch_event {
+        env.events().publish(
+            (symbol_short!("att_batch"), relayer.clone(), source_chain),
+            (count, first_id, last_id),
+        );
+    }
+
+    ids
 }
 
 // ─── Contract ───────────────────────────────────────────────────────────────
@@ -285,119 +486,41 @@ impl AttestationContract {
         require_relayer(&env, &relayer);
         require_not_paused(&env);
 
-        // Length guards — Soroban Strings are unbounded on size so we add
-        // explicit upper bounds to keep storage predictable.
-        if source_chain.is_empty() || source_chain.len() > MAX_SOURCE_CHAIN_LEN {
-            panic!("Invalid source_chain length");
-        }
-        if source_tx_hash.is_empty() || source_tx_hash.len() > MAX_TX_HASH_LEN {
-            panic!("Invalid source_tx_hash length");
-        }
-        if project_id.is_empty() || project_id.len() > MAX_PROJECT_ID_LEN {
-            panic!("Invalid project_id length");
-        }
-        // Donor is a Soroban Address (protocol-bounded, ~56 chars public key).
-        require_positive(amount_usd, "amount_usd");
-        require_positive(amount_xlm, "amount_xlm");
-
-        // Allow-list enforcement when the admin has populated one.
-        let allowlist_inited: bool = env
-            .storage()
-            .instance()
-            .get(&DataKey::AllowedChainInit)
-            .unwrap_or(false);
-        if allowlist_inited {
-            let allowed: bool = env
-                .storage()
-                .instance()
-                .get(&DataKey::AllowedChain(source_chain.clone()))
-                .unwrap_or(false);
-            if !allowed {
-                panic!("Source chain not allowed");
-            }
-        }
-
-        // ─── Replay protection (Checks-Effects-Interactions) ──────────────
-        let seen_key = DataKey::SourceTxSeen(source_chain.clone(), source_tx_hash.clone());
-        if env.storage().instance().has(&seen_key) {
-            panic!("Source transaction already attested");
-        }
-        env.storage().instance().set(&seen_key, &true);
-
-        // Persist donor → attestation index BEFORE allocating the id so a
-        // crash mid-write can't orphan the index. Idempotent re-records
-        // can't happen because we already panicked above.
-        let id: u64 = {
-            let next: u64 = env
-                .storage()
-                .instance()
-                .get(&DataKey::NextAttestationId)
-                .unwrap_or(0);
-            let new_id = next.checked_add(1).expect("Attestation id overflow");
-            env.storage()
-                .instance()
-                .set(&DataKey::NextAttestationId, &new_id);
-            new_id
-        };
-
-        let now = env.ledger().sequence();
-        let record = Attestation {
-            id,
-            source_chain: source_chain.clone(),
-            source_tx_hash: source_tx_hash.clone(),
-            donor: donor.clone(),
-            project_id: project_id.clone(),
+        let mut attestations = Vec::new(&env);
+        attestations.push_back(BatchAttestationInput {
+            source_chain,
+            source_tx_hash,
+            donor,
+            project_id,
             amount_usd,
             amount_xlm,
             message_hash,
-            status: AttestationStatus::Pending,
-            created_at_ledger: now,
-            verified_at_ledger: 0,
-            created_by: relayer.clone(),
-        };
-        env.storage()
-            .instance()
-            .set(&DataKey::Attestation(id), &record);
+        });
 
-        let total: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::TotalCount)
-            .unwrap_or(0);
-        env.storage().instance().set(
-            &DataKey::TotalCount,
-            &total.checked_add(1).expect("total overflow"),
-        );
-        let pending: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::PendingCount)
-            .unwrap_or(0);
-        env.storage().instance().set(
-            &DataKey::PendingCount,
-            &pending.checked_add(1).expect("pending overflow"),
-        );
+        record_attestations_internal(&env, &relayer, attestations, false)
+            .get(0)
+            .unwrap()
+    }
 
-        let donor_key = DataKey::DonorAttestations(donor.clone());
-        let mut list: Vec<u64> = env
-            .storage()
-            .instance()
-            .get(&donor_key)
-            .unwrap_or(Vec::new(&env));
-        list.push_back(id);
-        env.storage().instance().set(&donor_key, &list);
+    /// Relayer-only — atomically record up to `MAX_BATCH_SIZE` attestations
+    /// from one source chain while amortizing shared validation and counters.
+    pub fn record_attestation_batch(
+        env: Env,
+        relayer: Address,
+        attestations: Vec<BatchAttestationInput>,
+    ) -> Vec<u64> {
+        relayer.require_auth();
+        require_relayer(&env, &relayer);
+        require_not_paused(&env);
 
-        env.events().publish(
-            (
-                symbol_short!("att_new"),
-                relayer.clone(),
-                donor.clone(),
-                source_chain.clone(),
-            ),
-            (id, project_id, amount_usd, amount_xlm),
-        );
+        if attestations.is_empty() {
+            panic!("Batch must not be empty");
+        }
+        if attestations.len() > MAX_BATCH_SIZE {
+            panic!("Batch size exceeds maximum");
+        }
 
-        id
+        record_attestations_internal(&env, &relayer, attestations, true)
     }
 
     /// Anyone may call `verify_attestation(id)`. Idempotent: a second call
@@ -500,7 +623,7 @@ impl AttestationContract {
         }
         // See note below: the on-chain replay flag doesn't carry the id, so
         // we fall back to scanning from the most recent id down to 1.
-        // next is the next available slot; the actual ids are 1..=next.
+        // next is the last assigned id; the actual ids are 1..=next.
         let next: u64 = env
             .storage()
             .instance()
@@ -658,8 +781,8 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::String;
+    use soroban_sdk::testutils::{Address as _, Events as _};
+    use soroban_sdk::{IntoVal, String, Val};
 
     fn init_and_relayer() -> (Env, Address, Address, Address, Address) {
         let env = Env::default();
@@ -674,6 +797,23 @@ mod tests {
         client.initialize(&admin);
         client.set_relayer(&admin, &relayer);
         (env, id, admin, relayer, donor)
+    }
+
+    fn batch_input(
+        env: &Env,
+        donor: &Address,
+        chain: &str,
+        tx_hash: &str,
+    ) -> BatchAttestationInput {
+        BatchAttestationInput {
+            source_chain: String::from_str(env, chain),
+            source_tx_hash: String::from_str(env, tx_hash),
+            donor: donor.clone(),
+            project_id: String::from_str(env, "proj-batch"),
+            amount_usd: 1_000_000,
+            amount_xlm: 8_000_000,
+            message_hash: 42,
+        }
     }
 
     #[test]
@@ -958,5 +1098,370 @@ mod tests {
         );
         let found = client.get_attestation_by_source(&chain, &tx_hash);
         assert_eq!(found, Some(new_id));
+    }
+
+    #[test]
+    fn test_batch_recording_success() {
+        let (env, id, _admin, relayer, donor_a) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let donor_b = Address::generate(&env);
+        let mut inputs = Vec::new(&env);
+        inputs.push_back(batch_input(&env, &donor_a, "ethereum", "0xbatch-1"));
+        inputs.push_back(batch_input(&env, &donor_b, "ethereum", "0xbatch-2"));
+        inputs.push_back(batch_input(&env, &donor_a, "ethereum", "0xbatch-3"));
+
+        let ids = client.record_attestation_batch(&relayer, &inputs);
+
+        assert_eq!(ids, soroban_sdk::vec![&env, 1u64, 2u64, 3u64]);
+        assert_eq!(client.get_total_count(), 3);
+        assert_eq!(client.get_pending_count(), 3);
+        for index in 0..inputs.len() {
+            let input = inputs.get(index).unwrap();
+            let record = client.get_attestation(&ids.get(index).unwrap());
+            assert_eq!(record.id, ids.get(index).unwrap());
+            assert_eq!(record.source_chain, input.source_chain);
+            assert_eq!(record.source_tx_hash, input.source_tx_hash);
+            assert_eq!(record.donor, input.donor);
+            assert_eq!(record.project_id, input.project_id);
+            assert_eq!(record.amount_usd, input.amount_usd);
+            assert_eq!(record.amount_xlm, input.amount_xlm);
+            assert_eq!(record.message_hash, input.message_hash);
+            assert_eq!(record.status, AttestationStatus::Pending);
+            assert_eq!(record.created_by, relayer);
+        }
+        let donor_a_records = client.get_by_donor(&donor_a);
+        assert_eq!(donor_a_records.len(), 2);
+        assert_eq!(donor_a_records.get(0).unwrap().id, 1);
+        assert_eq!(donor_a_records.get(1).unwrap().id, 3);
+        let donor_b_records = client.get_by_donor(&donor_b);
+        assert_eq!(donor_b_records.len(), 1);
+        assert_eq!(donor_b_records.get(0).unwrap().id, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Source transaction already attested")]
+    fn test_batch_replay_panics() {
+        let (env, id, _admin, relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        client.record_attestation(
+            &relayer,
+            &String::from_str(&env, "ethereum"),
+            &String::from_str(&env, "0xreplayed"),
+            &donor,
+            &String::from_str(&env, "proj"),
+            &1i128,
+            &1i128,
+            &0u32,
+        );
+        let mut inputs = Vec::new(&env);
+        inputs.push_back(batch_input(&env, &donor, "ethereum", "0xnew"));
+        inputs.push_back(batch_input(&env, &donor, "ethereum", "0xreplayed"));
+
+        client.record_attestation_batch(&relayer, &inputs);
+    }
+
+    #[test]
+    #[should_panic(expected = "Batch size exceeds maximum")]
+    fn test_batch_size_limit() {
+        let (env, id, _admin, relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let mut inputs = Vec::new(&env);
+        for index in 0..=MAX_BATCH_SIZE {
+            let tx_hash = std::format!("0xlimit-{index}");
+            inputs.push_back(batch_input(&env, &donor, "ethereum", &tx_hash));
+        }
+
+        client.record_attestation_batch(&relayer, &inputs);
+    }
+
+    #[test]
+    #[should_panic(expected = "Amount must be positive")]
+    fn test_batch_invalid_amount_panics() {
+        let (env, id, _admin, relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let mut inputs = Vec::new(&env);
+        inputs.push_back(batch_input(&env, &donor, "ethereum", "0xvalid"));
+        let mut invalid = batch_input(&env, &donor, "ethereum", "0xinvalid");
+        invalid.amount_xlm = 0;
+        inputs.push_back(invalid);
+
+        client.record_attestation_batch(&relayer, &inputs);
+    }
+
+    #[test]
+    fn test_batch_atomicity() {
+        let (env, id, _admin, relayer, existing_donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let existing_id = client.record_attestation(
+            &relayer,
+            &String::from_str(&env, "ethereum"),
+            &String::from_str(&env, "0xexisting"),
+            &existing_donor,
+            &String::from_str(&env, "existing-project"),
+            &5i128,
+            &6i128,
+            &7u32,
+        );
+        let existing_before = client.get_attestation(&existing_id);
+        let donor_before = client.get_by_donor(&existing_donor);
+        let total_before = client.get_total_count();
+        let pending_before = client.get_pending_count();
+
+        let new_donor = Address::generate(&env);
+        let batch_source_chain = String::from_str(&env, "ethereum");
+        let batch_tx_hashes = ["0xatomic-1", "0xatomic-2", "0xatomic-3"];
+        let mut inputs = Vec::new(&env);
+        inputs.push_back(batch_input(
+            &env,
+            &existing_donor,
+            "ethereum",
+            batch_tx_hashes[0],
+        ));
+        inputs.push_back(batch_input(
+            &env,
+            &new_donor,
+            "ethereum",
+            batch_tx_hashes[1],
+        ));
+        let mut invalid = batch_input(&env, &new_donor, "ethereum", batch_tx_hashes[2]);
+        invalid.amount_usd = -1;
+        inputs.push_back(invalid);
+
+        let result = client.try_record_attestation_batch(&relayer, &inputs);
+        assert!(result.is_err());
+
+        // SDK 27 exposes only successful contract events from the last
+        // invocation. Inspect immediately so later getter calls cannot replace
+        // the failed batch's event view.
+        let successful_events = env.events().all().filter_by_contract(&id);
+        assert!(
+            successful_events.events().is_empty(),
+            "failed batch retained a successful att_new or att_batch event"
+        );
+
+        env.as_contract(&id, || {
+            assert_eq!(
+                env.storage()
+                    .instance()
+                    .get::<_, u64>(&DataKey::NextAttestationId),
+                Some(existing_id),
+            );
+            for tx_hash in batch_tx_hashes {
+                assert!(!env.storage().instance().has(&DataKey::SourceTxSeen(
+                    batch_source_chain.clone(),
+                    String::from_str(&env, tx_hash),
+                )));
+            }
+        });
+
+        assert_eq!(client.get_total_count(), total_before);
+        assert_eq!(client.get_pending_count(), pending_before);
+        assert!(client.try_get_attestation(&(existing_id + 1)).is_err());
+        assert!(client.try_get_attestation(&(existing_id + 2)).is_err());
+        assert!(client.try_get_attestation(&(existing_id + 3)).is_err());
+        for tx_hash in batch_tx_hashes {
+            assert_eq!(
+                client.get_attestation_by_source(
+                    &batch_source_chain,
+                    &String::from_str(&env, tx_hash),
+                ),
+                None
+            );
+        }
+        assert_eq!(client.get_by_donor(&existing_donor), donor_before);
+        assert!(client.get_by_donor(&new_donor).is_empty());
+        let existing_after = client.get_attestation(&existing_id);
+        assert_eq!(existing_after.id, existing_before.id);
+        assert_eq!(
+            existing_after.source_tx_hash,
+            existing_before.source_tx_hash
+        );
+        assert_eq!(existing_after.source_chain, existing_before.source_chain);
+        assert_eq!(existing_after.donor, existing_before.donor);
+        assert_eq!(existing_after.project_id, existing_before.project_id);
+        assert_eq!(existing_after.amount_usd, existing_before.amount_usd);
+        assert_eq!(existing_after.amount_xlm, existing_before.amount_xlm);
+        assert_eq!(existing_after.message_hash, existing_before.message_hash);
+        assert_eq!(existing_after.status, existing_before.status);
+        assert_eq!(
+            existing_after.created_at_ledger,
+            existing_before.created_at_ledger
+        );
+        assert_eq!(
+            existing_after.verified_at_ledger,
+            existing_before.verified_at_ledger
+        );
+        assert_eq!(existing_after.created_by, existing_before.created_by);
+    }
+
+    #[test]
+    fn test_batch_events() {
+        let (env, id, _admin, relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let mut inputs = Vec::new(&env);
+        inputs.push_back(batch_input(&env, &donor, "ethereum", "0xevent-1"));
+        inputs.push_back(batch_input(&env, &donor, "ethereum", "0xevent-2"));
+
+        let ids = client.record_attestation_batch(&relayer, &inputs);
+
+        let expected: Vec<(Address, Vec<Val>, Val)> = soroban_sdk::vec![
+            &env,
+            (
+                id.clone(),
+                (
+                    symbol_short!("att_new"),
+                    relayer.clone(),
+                    donor.clone(),
+                    String::from_str(&env, "ethereum"),
+                )
+                    .into_val(&env),
+                (
+                    ids.get(0).unwrap(),
+                    String::from_str(&env, "proj-batch"),
+                    1_000_000i128,
+                    8_000_000i128,
+                )
+                    .into_val(&env),
+            ),
+            (
+                id.clone(),
+                (
+                    symbol_short!("att_new"),
+                    relayer.clone(),
+                    donor.clone(),
+                    String::from_str(&env, "ethereum"),
+                )
+                    .into_val(&env),
+                (
+                    ids.get(1).unwrap(),
+                    String::from_str(&env, "proj-batch"),
+                    1_000_000i128,
+                    8_000_000i128,
+                )
+                    .into_val(&env),
+            ),
+            (
+                id.clone(),
+                (
+                    symbol_short!("att_batch"),
+                    relayer,
+                    String::from_str(&env, "ethereum"),
+                )
+                    .into_val(&env),
+                (2u32, 1u64, 2u64).into_val(&env),
+            ),
+        ];
+        assert_eq!(env.events().all().filter_by_contract(&id), expected);
+    }
+
+    #[test]
+    fn test_batch_of_50_all_records_queryable() {
+        let (env, id, _admin, relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let mut inputs = Vec::new(&env);
+        for index in 0..MAX_BATCH_SIZE {
+            let tx_hash = std::format!("0xmax-{index}");
+            inputs.push_back(batch_input(&env, &donor, "ethereum", &tx_hash));
+        }
+
+        let ids = client.record_attestation_batch(&relayer, &inputs);
+
+        assert_eq!(ids.len(), MAX_BATCH_SIZE);
+        assert_eq!(client.get_total_count(), u64::from(MAX_BATCH_SIZE));
+        assert_eq!(client.get_pending_count(), u64::from(MAX_BATCH_SIZE));
+        for index in 0..MAX_BATCH_SIZE {
+            let expected_id = u64::from(index) + 1;
+            assert_eq!(ids.get(index).unwrap(), expected_id);
+            let record = client.get_attestation(&expected_id);
+            assert_eq!(record.id, expected_id);
+            assert_eq!(
+                record.source_tx_hash,
+                inputs.get(index).unwrap().source_tx_hash
+            );
+        }
+        assert_eq!(client.get_by_donor(&donor).len(), MAX_BATCH_SIZE);
+    }
+
+    #[test]
+    #[should_panic(expected = "Batch must not be empty")]
+    fn test_batch_empty_panics() {
+        let (env, id, _admin, relayer, _donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        client.record_attestation_batch(&relayer, &Vec::new(&env));
+    }
+
+    #[test]
+    #[should_panic(expected = "Batch source chains must match")]
+    fn test_batch_mixed_source_chains_panics() {
+        let (env, id, _admin, relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let inputs = soroban_sdk::vec![
+            &env,
+            batch_input(&env, &donor, "ethereum", "0xmixed-1"),
+            batch_input(&env, &donor, "polygon", "0xmixed-2"),
+        ];
+        client.record_attestation_batch(&relayer, &inputs);
+    }
+
+    #[test]
+    #[should_panic(expected = "Source transaction already attested")]
+    fn test_batch_duplicate_hash_panics() {
+        let (env, id, _admin, relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let inputs = soroban_sdk::vec![
+            &env,
+            batch_input(&env, &donor, "ethereum", "0xduplicate"),
+            batch_input(&env, &donor, "ethereum", "0xduplicate"),
+        ];
+        client.record_attestation_batch(&relayer, &inputs);
+    }
+
+    #[test]
+    #[should_panic(expected = "Contract is paused")]
+    fn test_batch_paused_panics() {
+        let (env, id, admin, relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        client.pause(&admin);
+        let inputs = soroban_sdk::vec![&env, batch_input(&env, &donor, "ethereum", "0xpaused"),];
+        client.record_attestation_batch(&relayer, &inputs);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only relayer can perform this action")]
+    fn test_batch_unauthorized_relayer_panics() {
+        let (env, id, _admin, _relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let attacker = Address::generate(&env);
+        let inputs = soroban_sdk::vec![
+            &env,
+            batch_input(&env, &donor, "ethereum", "0xunauthorized"),
+        ];
+        client.record_attestation_batch(&attacker, &inputs);
+    }
+
+    #[test]
+    fn test_batch_allowlisted_source_chain() {
+        let (env, id, admin, relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        client.add_allowed_chain(&admin, &String::from_str(&env, "ethereum"));
+        let inputs = soroban_sdk::vec![
+            &env,
+            batch_input(&env, &donor, "ethereum", "0xallowed-1"),
+            batch_input(&env, &donor, "ethereum", "0xallowed-2"),
+        ];
+
+        let ids = client.record_attestation_batch(&relayer, &inputs);
+
+        assert_eq!(ids, soroban_sdk::vec![&env, 1u64, 2u64]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Source chain not allowed")]
+    fn test_batch_unlisted_source_chain_panics() {
+        let (env, id, admin, relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        client.add_allowed_chain(&admin, &String::from_str(&env, "ethereum"));
+        let inputs = soroban_sdk::vec![&env, batch_input(&env, &donor, "polygon", "0xunlisted"),];
+        client.record_attestation_batch(&relayer, &inputs);
     }
 }

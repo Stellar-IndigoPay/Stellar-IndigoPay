@@ -19,6 +19,10 @@ jest.mock("../services/stellar", () => ({
   NETWORK_PASSPHRASE: "Test SDF Network ; September 2015",
 }));
 
+jest.mock("../services/oracleService", () => ({
+  getCurrentPrice: jest.fn(() => null),
+}));
+
 const pool = require("../db/pool");
 const redis = require("../services/redis");
 const express = require("express");

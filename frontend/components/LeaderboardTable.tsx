@@ -8,6 +8,7 @@ import type { LeaderboardEntry } from "@/utils/types";
 import { SkeletonList } from "./Skeleton";
 import { useLeaderboard } from "@/hooks/queries";
 import { QueryErrorFallback } from "@/components/QueryErrorFallback";
+import { useI18n } from "@/lib/i18n";
 
 const AVATAR_COLORS = [
   "#4F46E5",
@@ -77,6 +78,8 @@ export default function LeaderboardTable({
     isRefetching,
   } = useLeaderboard(limit, period);
 
+  const { t } = useI18n();
+
   if (isLoading) return <LeaderboardTableSkeleton />;
 
   if (isError || isRefetching)
@@ -86,7 +89,7 @@ export default function LeaderboardTable({
         onRetry={() => refetch()}
         isRetrying={isRefetching}
         retryCount={0}
-        title="Couldn't load the leaderboard"
+        title={t("leaderboard.failedToLoad")}
       />
     );
 
@@ -97,7 +100,7 @@ export default function LeaderboardTable({
       <div className="text-center py-12">
         <p className="text-3xl mb-3">🌱</p>
         <p className="text-[#475569] dark:text-[#94A3B8] font-body">
-          No donors yet — be the first!
+          {t("leaderboard.noDonors")}
         </p>
       </div>
     );

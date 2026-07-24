@@ -121,6 +121,9 @@ export default function WorldMap({
   donations = [],
   projectCoordinates,
 }: WorldMapProps) {
+  // Track active donation marker IDs for deduplication (avoids stale closure over state)
+  const activeMarkerIdsRef = useRef<Set<string>>(new Set());
+
   // Track active donation markers with their animation state
   const [activeDonationMarkers, setActiveDonationMarkers] = useState<
     Array<{
@@ -166,17 +169,20 @@ export default function WorldMap({
           timestamp: Date.now(),
         };
       })
-      .filter(
-        (m) => !activeDonationMarkers.some((existing) => existing.id === m.id),
-      );
+      .filter((m) => !activeMarkerIdsRef.current.has(m.id));
 
     if (newMarkers.length === 0) return;
+    newMarkers.forEach((m) => activeMarkerIdsRef.current.add(m.id));
     setActiveDonationMarkers((prev) => [...newMarkers, ...prev].slice(0, 20));
 
     // Remove markers older than 3 seconds
     const cleanupTimer = setTimeout(() => {
       setActiveDonationMarkers((prev) =>
-        prev.filter((m) => Date.now() - m.timestamp < 3000),
+        prev.filter((m) => {
+          if (Date.now() - m.timestamp < 3000) return true;
+          activeMarkerIdsRef.current.delete(m.id);
+          return false;
+        }),
       );
     }, 3000);
 

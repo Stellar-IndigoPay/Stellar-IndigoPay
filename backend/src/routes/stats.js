@@ -25,27 +25,14 @@ function mapGlobalStatsRow(row = {}) {
 router.get("/global", cacheResponse(300, () => GLOBAL_STATS_CACHE_KEY), async (req, res, next) => {
   try {
     const result = await pool.query(`
-      WITH project_totals AS (
-        SELECT
-          COALESCE(SUM(raised_xlm), 0)      AS total_xlm_raised,
-          COALESCE(SUM(co2_offset_kg), 0)::int AS total_co2_offset_kg,
-          COUNT(*)::int                    AS total_projects,
-          COALESCE(SUM(donor_count), 0)::int AS total_donors
-        FROM projects
-      ),
-      donation_totals AS (
-        SELECT
-          COUNT(*)::int AS total_donations
-        FROM donations
-      )
       SELECT
-        p.total_xlm_raised     AS "totalXLMRaised",
-        p.total_co2_offset_kg  AS "totalCO2OffsetKg",
-        d.total_donations      AS "totalDonations",
-        p.total_projects       AS "totalProjects",
-        p.total_donors         AS "totalDonors"
-      FROM project_totals p
-      CROSS JOIN donation_totals d
+        g.total_xlm_raised::text                                                   AS "totalXLMRaised",
+        g.total_co2_offset_kg::int                                                 AS "totalCO2OffsetKg",
+        g.total_donations::int                                                     AS "totalDonations",
+        (SELECT COUNT(*)::int FROM projects)                                       AS "totalProjects",
+        g.total_donors::int                                                        AS "totalDonors"
+      FROM projection_global_stats g
+      WHERE g.id = 1
     `);
 
     const stats = mapGlobalStatsRow(result.rows[0]);
