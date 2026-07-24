@@ -3097,7 +3097,11 @@ impl IndigoPayContract {
     /// - The `contract_signature` has been tampered with.
     pub fn verify_receipt(env: Env, receipt: DonationReceipt) -> bool {
         // Check the donation exists on-chain
-        let record: DonationRecord = match env.storage().instance().get(&DataKey::DonationRecord(receipt.donation_index)) {
+        let record: DonationRecord = match env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationRecord(receipt.donation_index))
+        {
             Some(r) => r,
             None => return false,
         };
@@ -9910,7 +9914,11 @@ mod tests {
         // CO2 offset for 50 XLM at 100g/XLM (from setup): 50 * 100 = 5000g
         assert_eq!(receipt.co2_offset, 50 * 100);
         // contract_signature must be non-zero (32 bytes)
-        assert!(receipt.contract_signature.to_array().iter().any(|&b| b != 0));
+        assert!(receipt
+            .contract_signature
+            .to_array()
+            .iter()
+            .any(|&b| b != 0));
     }
 
     #[test]
@@ -9956,7 +9964,10 @@ mod tests {
         let receipt = client.generate_receipt(&donor, &0u32);
         let valid = client.verify_receipt(&receipt);
 
-        assert!(valid, "verify_receipt should return true for a valid receipt");
+        assert!(
+            valid,
+            "verify_receipt should return true for a valid receipt"
+        );
     }
 
     #[test]
@@ -9977,7 +9988,10 @@ mod tests {
         receipt.amount = 999_999_999;
         let valid = client.verify_receipt(&receipt);
 
-        assert!(!valid, "verify_receipt should return false for a tampered receipt");
+        assert!(
+            !valid,
+            "verify_receipt should return false for a tampered receipt"
+        );
     }
 
     #[test]

@@ -370,9 +370,12 @@ mod fuzz {
                 "Different donations must produce unique receipt signatures"
             );
 
-            // Both donors should be the same
-            prop_assert_eq!(receipt_a.donor, receipt_b.donor);
-            prop_assert_eq!(receipt_a.donor, donor);
+            // Both donors should be the same.
+            // Borrow through `&` because `soroban_sdk::Address` is not `Copy`
+            // — passing the owned field twice would move it on the first use
+            // and trip an `E0382` on the second.
+            prop_assert_eq!(&receipt_a.donor, &receipt_b.donor);
+            prop_assert_eq!(&receipt_a.donor, &donor);
         }
     }
 }
