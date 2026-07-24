@@ -52,4 +52,40 @@ describe("expand-contract migration policy", () => {
     const result = validateMigrationText(source, "example.js");
     expect(result).toEqual([]);
   });
+
+  it("ignores destructive operations in the rollback function", () => {
+    const source = `
+      module.exports = {
+        phase: "expand",
+        async up(client) {
+          await client.query("ALTER TABLE credits ADD COLUMN status TEXT");
+        },
+        async down(client) {
+          await client.query("ALTER TABLE credits DROP COLUMN status");
+        }
+      };
+    `;
+
+    expect(validateMigrationText(source, "example.js")).toEqual([]);
+  });
+
+  it("checks NOT NULL and DEFAULT within the same added column", () => {
+    const source = `
+      module.exports = {
+        phase: "expand",
+        async up(client) {
+          await client.query(\`
+            ALTER TABLE credits
+              ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT FALSE,
+              ADD COLUMN note TEXT
+          \`);
+          await client.query(\`
+            CREATE INDEX idx_note ON credits(note) WHERE note IS NOT NULL
+          \`);
+        }
+      };
+    `;
+
+    expect(validateMigrationText(source, "example.js")).toEqual([]);
+  });
 });

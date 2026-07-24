@@ -8,15 +8,25 @@ const MIGRATIONS_DIR = path.join(__dirname, "..", "src", "db", "migrations");
 
 function validateMigrationText(source, fileName) {
   const issues = [];
-  const normalized = source.replace(/\s+/g, " ").toLowerCase();
+  // Rollback operations are intentionally destructive. Expand-contract
+  // policy applies to the forward migration only, so exclude `down()` from
+  // the SQL inspected below.
+  const forwardSource = source
+    .split(/\n\s*async\s+down\s*\(/, 1)[0]
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+  const normalized = forwardSource.replace(/\s+/g, " ").toLowerCase();
   const hasContractPhase = /phase:\s*"contract"|phase:\s*'contract'|phase:\s*contract/.test(source);
 
-  if (/add column/.test(normalized) && /not null/.test(normalized) && !/default/.test(normalized)) {
-    issues.push({
-      rule: "not-null-without-default",
-      message: "Adding a NOT NULL column without a default breaks expand-contract safety.",
-      file: fileName,
-    });
+  const addedColumns = normalized.match(/add column\b[^,;`"]*/g) || [];
+  for (const clause of addedColumns) {
+    if (/\bnot null\b/.test(clause) && !/\bdefault\b/.test(clause)) {
+      issues.push({
+        rule: "not-null-without-default",
+        message: "Adding a NOT NULL column without a default breaks expand-contract safety.",
+        file: fileName,
+      });
+    }
   }
 
   if (/rename column/.test(normalized)) {

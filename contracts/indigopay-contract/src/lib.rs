@@ -2265,7 +2265,9 @@ impl IndigoPayContract {
             .unwrap_or(0);
         env.storage().instance().set(
             &DataKey::GlobalTotalRaised,
-            &total.checked_add(amount).expect("GlobalTotalRaised overflow"),
+            &total
+                .checked_add(amount)
+                .expect("GlobalTotalRaised overflow"),
         );
         let co2 = amount
             .checked_mul(project.co2_per_xlm as i128)
@@ -2290,9 +2292,7 @@ impl IndigoPayContract {
 
     #[cfg(feature = "zk")]
     pub fn is_zk_nullifier_used(env: Env, nullifier: BytesN<32>) -> bool {
-        env.storage()
-            .instance()
-            .has(&DataKey::Nullifier(nullifier))
+        env.storage().instance().has(&DataKey::Nullifier(nullifier))
     }
 
     #[cfg(feature = "zk")]
