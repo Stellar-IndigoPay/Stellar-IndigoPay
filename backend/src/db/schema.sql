@@ -35,6 +35,7 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS ai_summary_source_hash  TEXT;
 -- signed POSTs when donation milestones are reached.
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS webhook_url    TEXT;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS webhook_secret TEXT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS verification_request_id UUID;
 
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS webhook_url    TEXT;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS webhook_secret TEXT;

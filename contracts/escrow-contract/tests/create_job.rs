@@ -9,7 +9,7 @@
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, Env, String as SorobanString, Vec};
 
-use escrow_contract::{EscrowContractClient, JobStatus, Milestone};
+use escrow_contract::{JobStatus, Milestone};
 
 mod common;
 
@@ -39,6 +39,7 @@ fn test_milestone_based_release() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
     let job = client.get_job(&job_id).expect("Job should exist");
@@ -65,12 +66,18 @@ fn test_milestone_validation() {
         percentage: 50,
         released: false,
         disputed: false,
+        oracle: None,
+        verified: false,
+        proof_hash: None,
     });
     milestones.push_back(Milestone {
         name: SorobanString::from_str(&env, "M2"),
         percentage: 40,
         released: false,
         disputed: false,
+        oracle: None,
+        verified: false,
+        proof_hash: None,
     });
 
     client.create_job(
@@ -80,6 +87,7 @@ fn test_milestone_validation() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 }
 
@@ -142,6 +150,7 @@ fn test_zero_amount_panics() {
         &token,
         &0i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 }
 
@@ -165,6 +174,7 @@ fn test_negative_amount_panics() {
         &token,
         &(-100i128),
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 }
 
@@ -189,12 +199,18 @@ fn test_zero_percentage_milestone() {
         percentage: 0,
         released: false,
         disputed: false,
+        oracle: None,
+        verified: false,
+        proof_hash: None,
     });
     milestones.push_back(Milestone {
         name: SorobanString::from_str(&env, "Full"),
         percentage: 100,
         released: false,
         disputed: false,
+        oracle: None,
+        verified: false,
+        proof_hash: None,
     });
 
     client.create_job(
@@ -204,9 +220,64 @@ fn test_zero_percentage_milestone() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
     let job = client.get_job(&job_id).expect("Job should exist");
     assert_eq!(job.status, JobStatus::Escrowed);
     assert_eq!(job.milestones.len(), 2);
+}
+
+#[test]
+#[should_panic(expected = "release_after must be at least the minimum")]
+fn test_release_after_below_minimum_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = common::setup(&env);
+
+    let client_addr = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let token = common::create_token(&env);
+    common::fund(&env, &token, &client_addr, 1000i128);
+    let job_id = SorobanString::from_str(&env, "release-after-too-low");
+    let milestones = common::three_milestones(&env);
+
+    client.create_job(
+        &client_addr,
+        &freelancer,
+        &job_id,
+        &token,
+        &1000i128,
+        &milestones,
+        &(escrow_contract::RELEASE_AFTER_LEDGERS - 1),
+    );
+}
+
+#[test]
+fn test_create_job_with_custom_release_after() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = common::setup(&env);
+
+    let client_addr = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let token = common::create_token(&env);
+    common::fund(&env, &token, &client_addr, 1000i128);
+    let job_id = SorobanString::from_str(&env, "job-custom-release-after");
+    let milestones = common::three_milestones(&env);
+
+    let custom_release_after = escrow_contract::RELEASE_AFTER_LEDGERS * 3;
+    let created_at = env.ledger().sequence();
+    client.create_job(
+        &client_addr,
+        &freelancer,
+        &job_id,
+        &token,
+        &1000i128,
+        &milestones,
+        &custom_release_after,
+    );
+
+    let job = client.get_job(&job_id).expect("Job should exist");
+    assert_eq!(job.release_after, created_at + custom_release_after);
 }

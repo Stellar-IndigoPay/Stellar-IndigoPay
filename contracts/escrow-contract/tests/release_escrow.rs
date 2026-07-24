@@ -9,9 +9,9 @@
 ///   - Releasing an already-released milestone panics (new)
 ///   - Releasing on a disputed job panics (new)
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{Address, Env, String as SorobanString, Vec};
+use soroban_sdk::{Address, Env, String as SorobanString};
 
-use escrow_contract::{EscrowContractClient, JobStatus};
+use escrow_contract::JobStatus;
 
 mod common;
 
@@ -53,6 +53,7 @@ fn test_milestone_release_pays_proportional_amount() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
     // Release milestone 0 (50 %)
@@ -101,6 +102,7 @@ fn test_partial_release_updates_status() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
     assert_eq!(client.get_job(&job_id).unwrap().status, JobStatus::Escrowed);
 
@@ -132,6 +134,7 @@ fn test_full_release_completes_job() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
     // Release all three milestones
@@ -167,6 +170,7 @@ fn test_only_client_can_release() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
     // Impersonator tries to release — should panic
@@ -194,6 +198,7 @@ fn test_release_already_released_milestone_panics() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
     // First release succeeds
@@ -223,6 +228,7 @@ fn test_invalid_milestone_index_panics() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
     // Index 3 is out of bounds (0..=2 are valid)
@@ -250,9 +256,10 @@ fn test_release_disputed_job_panics() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
-    client.dispute_job(&admin, &job_id);
+    client.dispute_job(&common::signers1(&env, &admin), &job_id);
 
     // Attempt release while disputed → should panic
     client.release_milestone(&client_addr, &job_id, &0u32);

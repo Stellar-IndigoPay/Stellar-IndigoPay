@@ -197,6 +197,25 @@ A pg-boss cron job (configurable via `CO2_VERIFICATION_CRON`, default: weekly Su
 - **Admin CO₂ Flags Dashboard** (`/admin/co2-flags`): shows confidence bands, deviation %, reference source, and severity. Admins can trigger re-verification per project or for all projects.
 - **Project Detail Page**: shows a "CO₂ Rate Verification" badge (✅ verified / 🚩 flagged / ⚠️ under review) with the verification notes
 
+## On-Chain Impact Verification (#459)
+
+The pipeline above is fully automated and off-chain — it cross-checks a project's *claimed* rate against reference databases and satellite estimates, but it never touches on-chain state. The `impact_verification` contract feature is a complementary, on-chain mechanism for a different trust model: independent human verifiers attesting to a project's *actual* measured impact.
+
+```
+Admin authorises verifier ──► add_impact_verifier(admin, verifier)
+                                        │
+Verifier measures impact off-chain     ▼
+                        submit_impact_report(verifier, project_id,
+                                              verified_co2_rate, evidence_hash)
+                                        │
+                    ┌───────────────────┴───────────────────┐
+                    ▼                                       ▼
+        deviation ≥50% from claimed rate?          N distinct verifiers reported?
+        (ImpactFlagged sticky flag set)             (co2_per_xlm ← median of reports)
+```
+
+Unlike the automated pipeline (which flags for admin review), reaching the configured verifier threshold **auto-adjusts `co2_per_xlm` on-chain** to the median verified rate — no admin action required. The two mechanisms can run side by side: the automated pipeline catches statistically implausible rates at scale, while on-chain verifiers provide an auditable, adversarial-resistant check that doesn't depend on any single off-chain data source. See `contracts/indigopay-contract/SECURITY.md` for the trust model (who can become a verifier, how the deviation flag and threshold are administered).
+
 ## Security
 
 | Concern                 | Mitigation                                                 |

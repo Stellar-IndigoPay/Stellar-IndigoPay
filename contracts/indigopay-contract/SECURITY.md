@@ -235,28 +235,54 @@ Badge tiers and minted NFTs are **never** downgraded or burned on refund. The re
 ### Underflow protection
 
 All counter decrements on refund use `checked_sub(...).expect("...underflow on refund")`, consistent with the `checked_add` convention used for donations. If a refund would drive any counter negative, the transaction panics and reverts.
+
+## Off-Chain Oracle Attestation for Project Impact Verification (#459)
+
+Gated behind the `impact_verification` Cargo feature (on by default; excluded from the size-checked `--no-default-features` CI build). Lets admin-authorised verifiers submit independent measurements of a project's actual CO₂ impact, which the contract compares against the project's self-reported (claimed) rate.
+
+### Trust model
+
+- **Verifiers are admin-appointed**, not permissionless. `add_impact_verifier` / `remove_impact_verifier` require `require_admin_for_routine`, so the same trust assumption as every other routine admin action (single admin signature, or 1-of-N under the Phase B multi-sig model) applies here too. A compromised admin key can add an adversarial verifier; this is not a new SPOF beyond what Phase B already accepts for routine operations.
+- **Reports are not adversarially aggregated.** `submit_impact_report` does not require multiple verifiers to agree before storage — each report is stored independently. Manipulation resistance comes from the *median* of all distinct verifiers' reports once the threshold is reached, not from any single report being authoritative. A minority of colluding verifiers cannot move the median unless they control a majority of the authorised verifier set.
+- **The deviation flag is sticky by design.** Once `ImpactFlagged` is set it stays set until an admin explicitly calls `clear_impact_flag` — a later report that happens to fall back within tolerance does not silently clear it. This forces a human admin decision rather than letting a flag disappear on its own.
+- **Duplicate submissions cannot inflate the verifier count.** Reports are keyed by `(project_id, verifier)`; a verifier resubmitting updates their existing record and does not add a second entry to the distinct-verifier list used for both the threshold check and the median.
+- **The threshold is admin-configurable** (`set_impact_report_threshold`, falls back to `DEFAULT_IMPACT_REPORT_THRESHOLD = 3` when unset) so operators can tune how many independent verifiers are required before the contract trusts their consensus enough to overwrite `co2_per_xlm` without further admin sign-off.
+
+### Bounds and overflow
+
+`verified_co2_rate` is checked against the same `MAX_CO2_PER_XLM` bound used at project registration and by `update_project_co2_rate`, so an auto-adjustment can never push a project's rate above the platform-wide ceiling. The median itself is additionally clamped to `[1, MAX_CO2_PER_XLM]` before being written, guarding against a `co2_per_xlm = 0` write (which `update_project_co2_rate` treats as invalid) even in a degenerate single-verifier case.
+
+### Event audit trail
+
+| Event topic | Trigger                                                        |
+| ----------- | --------------------------------------------------------------- |
+| `impv_add`  | `add_impact_verifier` authorised a new verifier                 |
+| `impv_rem`  | `remove_impact_verifier` revoked a verifier                      |
+| `impv_thr`  | `set_impact_report_threshold` changed the auto-adjust threshold  |
+| `impv_sub`  | `submit_impact_report` recorded or updated a report              |
+| `impv_flg`  | A submission deviated ≥50% from the claimed rate                |
+| `impv_adj`  | `co2_per_xlm` was auto-adjusted to the new median                |
+| `impv_clr`  | `clear_impact_flag` cleared a project's deviation flag           |
 ## Anonymous donation proof trust model (#432)
 
 The optional `zk` feature adds `donate_anonymous_zk`. To keep the deployed
-WASM below Soroban's size limit, the contract uses a verifier-attestation
-model: an off-chain prover verifies the circuit and signs the ordered public
-inputs with Ed25519; the contract stores the 32-byte public verification key.
-Changing that key requires the configured M-of-N admin threshold.
+WASM compact, the contract uses a verifier-attestation model: an off-chain
+prover verifies the circuit and signs the ordered public inputs with Ed25519.
+Changing the 32-byte verification key requires the configured M-of-N admin
+threshold.
 
-The signed statement is exactly:
+The signed statement is:
 
 `project_id_hash || amount_commitment || nullifier`
 
-where each component is 32 bytes. `project_id_hash` is SHA-256 of the Soroban
-XDR encoding of the project ID. The first 16 bytes of `amount_commitment` are
-the positive, big-endian `i128` amount used for public project/global
-accounting, and the remaining bytes are circuit-defined blinding material.
-The nullifier is stored after successful verification and can never be reused.
+Each component is 32 bytes. `project_id_hash` is SHA-256 of the Soroban XDR
+encoding of the project ID. The first 16 bytes of `amount_commitment` are the
+positive, big-endian `i128` amount used for public project/global accounting;
+the remaining bytes are circuit-defined blinding material. A successfully
+verified nullifier is stored and cannot be reused.
 
-This design hides the donor identity from contract storage and donor-specific
-statistics, but it is not a trustless in-WASM Groth16 verifier: privacy and
-soundness depend on the off-chain circuit, prover service, and protection of
-the corresponding signing key. The transaction submitter can still be visible
-to ledger observers unless submission is relayed. The amount is also
-recoverable from its public commitment because exact public totals cannot be
-updated while keeping each increment secret.
+This design hides donor identity from contract storage and donor-specific
+statistics, but it is not an in-WASM Groth16 verifier. Soundness depends on the
+off-chain circuit, prover, and signing-key custody. Ledger observers may still
+identify a transaction submitter unless a relayer is used. Exact public totals
+also mean the donation amount is recoverable from the public commitment.

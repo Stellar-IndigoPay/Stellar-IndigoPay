@@ -1,6 +1,6 @@
-/**
+﻿/**
  * components/DonationFeed.tsx
- * Recent donations for a project — live community feed with real-time SSE streaming.
+ * Recent donations for a project â€” live community feed with real-time SSE streaming.
  */
 import { useState, useEffect, useRef, useCallback } from "react";
 import { fetchProjectDonations } from "@/lib/api";
@@ -130,11 +130,11 @@ export default function DonationFeed({
         {walletAddress && (
           <div className="flex items-center gap-2 mb-3 text-xs text-[#4F46E5] dark:text-[#818CF8] font-body">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            Listening for live donations…
+            Listening for live donationsâ€¦
           </div>
         )}
         <p className="text-center text-[#475569] dark:text-[#94A3B8] text-sm py-6 font-body">
-          No donations yet — be the first! 🌱
+          No donations yet â€” be the first! ðŸŒ±
         </p>
       </div>
     );
@@ -147,7 +147,7 @@ export default function DonationFeed({
             className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"
             aria-hidden="true"
           />
-          Live — new donations appear automatically
+          Live â€” new donations appear automatically
         </div>
       )}
       {/* Hidden aggregate live region so each new donation is announced. The
@@ -182,12 +182,15 @@ export default function DonationFeed({
             className="w-9 h-9 rounded-full bg-[rgba(99,102,241,0.10)] dark:bg-[rgba(129,140,248,0.12)] flex items-center justify-center flex-shrink-0 text-base"
             aria-hidden="true"
           >
-            {newIds.has(d.id) ? "✨" : "🌱"}
+            {newIds.has(d.id) ? "âœ¨" : "ðŸŒ±"}
           </div>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
               <span className="font-semibold text-[#0F172A] dark:text-[#E2E8F0] text-sm font-body">
-                {shortenAddress(d.donorAddress, 5)}
+                {d.anonymous || !d.donorAddress
+                  ? "Anonymous"
+                  : shortenAddress(d.donorAddress, 5)}
+                {d.donorAddress ? shortenAddress(d.donorAddress, 5) : "Anonymous"}
               </span>
               <span className="font-mono font-bold text-[#4F46E5] dark:text-[#818CF8] text-sm">
                 {d.currency === "USDC"
@@ -220,7 +223,7 @@ export default function DonationFeed({
                 rel="noopener noreferrer"
                 className="text-xs text-[#4F46E5] dark:text-[#818CF8] hover:text-[#6366F1] transition-colors font-body"
               >
-                View tx ↗
+                View tx â†—
               </a>
             </div>
           </div>
@@ -254,3 +257,4 @@ export default function DonationFeed({
     </div>
   );
 }
+
