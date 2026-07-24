@@ -60,6 +60,18 @@ pub struct Job {
     pub deadline: u32,
 }
 
+/// Append-only aggregate of a freelancer's escrow history.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FreelancerReputation {
+    pub total_jobs: u32,
+    pub completed_jobs: u32,
+    pub disputed_jobs: u32,
+    pub total_value_completed: i128,
+    pub on_time_completions: u32,
+    pub created_at: u32,
+}
+
 #[contracttype]
 pub enum DataKey {
     Job(String),
@@ -72,6 +84,9 @@ pub enum DataKey {
     JobCount,
     JobIds,
     AmendmentCount(String),
+    FreelancerReputation(Address),
+    // Ensures multiple milestone disputes on one job count only once.
+    ReputationDisputeCounted(String),
 }
 
 /// Minimum number of ledgers a job's release period may specify. Jobs
@@ -92,6 +107,84 @@ fn compute_remaining_funds(job: &Job) -> i128 {
         }
     }
     remaining_amount
+}
+
+fn read_reputation(env: &Env, freelancer: &Address) -> FreelancerReputation {
+    env.storage()
+        .instance()
+        .get(&DataKey::FreelancerReputation(freelancer.clone()))
+        .unwrap_or(FreelancerReputation {
+            total_jobs: 0,
+            completed_jobs: 0,
+            disputed_jobs: 0,
+            total_value_completed: 0,
+            on_time_completions: 0,
+            created_at: 0,
+        })
+}
+
+fn store_reputation(env: &Env, freelancer: &Address, reputation: &FreelancerReputation) {
+    env.storage().instance().set(
+        &DataKey::FreelancerReputation(freelancer.clone()),
+        reputation,
+    );
+}
+
+fn reputation_job_created(env: &Env, freelancer: &Address) {
+    let is_new = !env
+        .storage()
+        .instance()
+        .has(&DataKey::FreelancerReputation(freelancer.clone()));
+    let mut reputation = read_reputation(env, freelancer);
+    if is_new {
+        reputation.created_at = env.ledger().sequence();
+    }
+    reputation.total_jobs = reputation
+        .total_jobs
+        .checked_add(1)
+        .expect("Freelancer total_jobs overflow");
+    store_reputation(env, freelancer, &reputation);
+}
+
+fn reputation_job_disputed(env: &Env, job: &Job) {
+    let counted_key = DataKey::ReputationDisputeCounted(job.id.clone());
+    if env.storage().instance().has(&counted_key) {
+        return;
+    }
+    let mut reputation = read_reputation(env, &job.freelancer);
+    reputation.disputed_jobs = reputation
+        .disputed_jobs
+        .checked_add(1)
+        .expect("Freelancer disputed_jobs overflow");
+    store_reputation(env, &job.freelancer, &reputation);
+    env.storage().instance().set(&counted_key, &true);
+}
+
+fn reputation_job_completed(env: &Env, job: &Job) {
+    let mut reputation = read_reputation(env, &job.freelancer);
+    reputation.completed_jobs = reputation
+        .completed_jobs
+        .checked_add(1)
+        .expect("Freelancer completed_jobs overflow");
+    reputation.total_value_completed = reputation
+        .total_value_completed
+        .checked_add(job.amount)
+        .expect("Freelancer total_value_completed overflow");
+    if env.ledger().sequence() <= job.deadline {
+        reputation.on_time_completions = reputation
+            .on_time_completions
+            .checked_add(1)
+            .expect("Freelancer on_time_completions overflow");
+    }
+    store_reputation(env, &job.freelancer, &reputation);
+    env.events().publish(
+        (symbol_short!("rep_upd"), job.freelancer.clone()),
+        (
+            reputation.completed_jobs,
+            reputation.disputed_jobs,
+            reputation.total_value_completed,
+        ),
+    );
 }
 
 /// Read the stored admin set. Panics if not initialized.
@@ -246,6 +339,7 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Job(job_id.clone()), &job);
+        reputation_job_created(&env, &freelancer);
 
         let count: u32 = env
             .storage()
@@ -423,6 +517,9 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Job(job_id.clone()), &job);
+        if job.status == JobStatus::Completed {
+            reputation_job_completed(&env, &job);
+        }
 
         // Event emission
         env.events().publish(
@@ -537,6 +634,7 @@ impl EscrowContract {
             .expect("Job not found");
         job.disputed = true;
         job.status = JobStatus::Disputed;
+        reputation_job_disputed(&env, &job);
         env.storage()
             .instance()
             .set(&DataKey::Job(job_id.clone()), &job);
@@ -579,6 +677,7 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Job(job_id.clone()), &job);
+        reputation_job_completed(&env, &job);
 
         env.events().publish(
             (symbol_short!("job_reslv"),),
@@ -633,6 +732,7 @@ impl EscrowContract {
         milestones.set(milestone_index, milestone);
         job.milestones = milestones;
         job.status = JobStatus::Disputed;
+        reputation_job_disputed(&env, &job);
 
         env.storage()
             .instance()
@@ -691,6 +791,9 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Job(job_id.clone()), &job);
+        if job.status == JobStatus::Completed {
+            reputation_job_completed(&env, &job);
+        }
 
         env.events().publish(
             (symbol_short!("ms_reslv"),),
@@ -796,6 +899,9 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Job(job_id.clone()), &job);
+        if job.status == JobStatus::Completed {
+            reputation_job_completed(&env, &job);
+        }
 
         // Event emission
         env.events().publish(
@@ -926,6 +1032,11 @@ impl EscrowContract {
             .get(&DataKey::JobIds)
             .unwrap_or_else(|| Vec::new(&env))
     }
+
+    /// Return the immutable aggregate history for `freelancer`.
+    pub fn get_freelancer_reputation(env: Env, freelancer: Address) -> FreelancerReputation {
+        read_reputation(&env, &freelancer)
+    }
 }
 
 #[cfg(all(test, feature = "testutils"))]
@@ -951,6 +1062,40 @@ mod tests {
         let admin = Address::generate(env);
         client.initialize(&signers1(env, &admin), &1u32);
         (admin, client)
+    }
+
+    fn create_reputation_job(
+        env: &Env,
+        client: &EscrowContractClient<'_>,
+        client_addr: &Address,
+        freelancer: &Address,
+        job_id: &String,
+        amount: i128,
+    ) {
+        let token_admin = Address::generate(env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(env, &token).mint(client_addr, &amount);
+        let mut milestones = Vec::new(env);
+        milestones.push_back(Milestone {
+            name: String::from_str(env, "Delivery"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+        client.create_job(
+            client_addr,
+            freelancer,
+            job_id,
+            &token,
+            &amount,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
     }
 
     #[test]
@@ -2534,6 +2679,87 @@ mod tests {
         env.mock_all_auths();
         let (admin, client) = setup(&env);
         client.remove_admin(&signers1(&env, &admin), &admin);
+    }
+
+    #[test]
+    fn test_reputation_on_completion() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, contract) = setup(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = String::from_str(&env, "rep-complete");
+        create_reputation_job(&env, &contract, &client, &freelancer, &job_id, 1_000);
+
+        let created = contract.get_freelancer_reputation(&freelancer);
+        assert_eq!(created.total_jobs, 1);
+        assert_eq!(created.completed_jobs, 0);
+
+        contract.release_milestone(&client, &job_id, &0);
+        let completed = contract.get_freelancer_reputation(&freelancer);
+        assert_eq!(completed.completed_jobs, 1);
+        assert_eq!(completed.total_value_completed, 1_000);
+        assert_eq!(completed.on_time_completions, 1);
+    }
+
+    #[test]
+    fn test_reputation_on_dispute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, contract) = setup(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = String::from_str(&env, "rep-dispute");
+        create_reputation_job(&env, &contract, &client, &freelancer, &job_id, 500);
+
+        contract.dispute_milestone(&signers1(&env, &admin), &job_id, &0);
+        let disputed = contract.get_freelancer_reputation(&freelancer);
+        assert_eq!(disputed.total_jobs, 1);
+        assert_eq!(disputed.disputed_jobs, 1);
+        assert_eq!(disputed.completed_jobs, 0);
+
+        contract.resolve_milestone_dispute(&signers1(&env, &admin), &job_id, &0, &true);
+        let resolved = contract.get_freelancer_reputation(&freelancer);
+        assert_eq!(resolved.disputed_jobs, 1);
+        assert_eq!(resolved.completed_jobs, 1);
+    }
+
+    #[test]
+    fn test_reputation_on_refund() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, contract) = setup(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = String::from_str(&env, "rep-refund");
+        create_reputation_job(&env, &contract, &client, &freelancer, &job_id, 750);
+        let deadline = contract.get_job(&job_id).unwrap().deadline;
+        env.ledger().set_sequence_number(deadline);
+
+        contract.refund_expired_job(&client, &job_id);
+        let reputation = contract.get_freelancer_reputation(&freelancer);
+        assert_eq!(reputation.total_jobs, 1);
+        assert_eq!(reputation.completed_jobs, 0);
+        assert_eq!(reputation.total_value_completed, 0);
+        assert_eq!(reputation.on_time_completions, 0);
+    }
+
+    #[test]
+    fn test_reputation_query() {
+        let env = Env::default();
+        let (_admin, contract) = setup(&env);
+        let reputation = contract.get_freelancer_reputation(&Address::generate(&env));
+        assert_eq!(
+            reputation,
+            FreelancerReputation {
+                total_jobs: 0,
+                completed_jobs: 0,
+                disputed_jobs: 0,
+                total_value_completed: 0,
+                on_time_completions: 0,
+                created_at: 0,
+            }
+        );
     }
 
     #[cfg(feature = "oracle-escrow")]
