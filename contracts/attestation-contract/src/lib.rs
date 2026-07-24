@@ -126,6 +126,7 @@ pub enum DataKey {
     PendingUpgrade,
     UpgradeEffectiveAt,
     LastExecutedUpgrade,
+    CoordinatedUpgrade,
 }
 
 // ─── Default / limit constants ──────────────────────────────────────────────
@@ -160,6 +161,14 @@ fn require_relayer(env: &Env, caller: &Address) {
 }
 
 fn require_not_paused(env: &Env) {
+    let coordinated: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::CoordinatedUpgrade)
+        .unwrap_or(false);
+    if coordinated {
+        panic!("Coordinated upgrade in progress");
+    }
     let paused: bool = env
         .storage()
         .instance()
@@ -771,6 +780,58 @@ impl AttestationContract {
 
     pub fn get_last_executed_upgrade(env: Env) -> Option<soroban_sdk::BytesN<32>> {
         env.storage().instance().get(&DataKey::LastExecutedUpgrade)
+    }
+
+    pub fn set_coordinated_pause(env: Env, new_wasm_hash: Option<soroban_sdk::BytesN<32>>) {
+        env.storage()
+            .instance()
+            .set(&DataKey::CoordinatedUpgrade, &true);
+        if let Some(hash) = new_wasm_hash {
+            let effective_at = env
+                .ledger()
+                .sequence()
+                .checked_add(UPGRADE_TIMELOCK_LEDGERS)
+                .expect("Upgrade effective-at overflow");
+            env.storage()
+                .instance()
+                .set(&DataKey::PendingUpgrade, &hash);
+            env.storage()
+                .instance()
+                .set(&DataKey::UpgradeEffectiveAt, &effective_at);
+            env.events().publish(
+                (symbol_short!("upg_prop"), env.current_contract_address()),
+                (hash, effective_at),
+            );
+        }
+        env.events()
+            .publish((symbol_short!("coord_ps"),), true);
+    }
+
+    pub fn clear_coordinated_pause(env: Env) {
+        env.storage()
+            .instance()
+            .set(&DataKey::CoordinatedUpgrade, &false);
+        env.events()
+            .publish((symbol_short!("coord_ps"),), false);
+    }
+
+    pub fn cancel_coordinated_pause(env: Env) {
+        env.storage()
+            .instance()
+            .set(&DataKey::CoordinatedUpgrade, &false);
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.storage()
+            .instance()
+            .remove(&DataKey::UpgradeEffectiveAt);
+        env.events()
+            .publish((symbol_short!("coord_cnc"),), ());
+    }
+
+    pub fn is_coordinated_upgrade_active(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::CoordinatedUpgrade)
+            .unwrap_or(false)
     }
 }
 
