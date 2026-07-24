@@ -3,23 +3,13 @@
 mod fuzz {
     extern crate std;
     use crate::{BatchDonation, IndigoPayContract, IndigoPayContractClient};
+    use crate::MockOracle;
     use proptest::prelude::*;
     use soroban_sdk::{
         testutils::Address as _,
         token::StellarAssetClient,
         Address, Env, String as SorobanString, Symbol, Vec,
     };
-    
-    // We can use a simple mock oracle
-    soroban_sdk::contract!(
-        pub struct MockOracle;
-    );
-    #[soroban_sdk::contractimpl]
-    impl MockOracle {
-        pub fn get_price(_env: Env) -> i128 {
-            8 // 1 USDC = 8 XLM stroops
-        }
-    }
 
     const MAX_DONATION: i128 = 1_000_000_000 * 10_000_000; // 10^16
 
@@ -99,6 +89,14 @@ mod fuzz {
         token_client.mint(donor, &amount);
     }
 
+    fn expected_badge(total_donated: i128) -> crate::BadgeTier {
+        crate::calculate_badge(total_donated)
+    }
+
+    fn expected_co2_offset_grams(total_donated: i128) -> i128 {
+        (total_donated / 10_000_000) * 100
+    }
+
     fn valid_project_id() -> impl Strategy<Value = std::string::String> {
         "[a-zA-Z0-9]{5,15}".prop_map(|s| std::format!("proj-{}", s))
     }
@@ -134,7 +132,9 @@ mod fuzz {
             
             let stats = client.get_donor_stats(test_donor);
             prop_assert_eq!(stats.total_donated, amount);
-            prop_assert!(stats.co2_offset_grams >= 0);
+            prop_assert_eq!(stats.donation_count, 1);
+            prop_assert_eq!(stats.badge, expected_badge(amount));
+            prop_assert_eq!(stats.co2_offset_grams, expected_co2_offset_grams(amount));
         }
 
         #[test]
@@ -161,6 +161,12 @@ mod fuzz {
 
             let project = client.get_project(&project_id);
             prop_assert_eq!(project.total_raised, amount);
+
+            let stats = client.get_donor_stats(test_donor);
+            prop_assert_eq!(stats.total_donated, amount);
+            prop_assert_eq!(stats.donation_count, 1);
+            prop_assert_eq!(stats.badge, expected_badge(amount));
+            prop_assert_eq!(stats.co2_offset_grams, expected_co2_offset_grams(amount));
         }
 
         #[test]
@@ -184,6 +190,15 @@ mod fuzz {
             let project = client.get_project(&project_id);
             let expected_xlm = usdc_amount.checked_mul(8).unwrap();
             prop_assert_eq!(project.total_raised, expected_xlm);
+
+            let stats = client.get_donor_stats(test_donor);
+            prop_assert_eq!(stats.total_donated, expected_xlm);
+            prop_assert_eq!(stats.donation_count, 1);
+            prop_assert_eq!(stats.badge, expected_badge(expected_xlm));
+            prop_assert_eq!(
+                stats.co2_offset_grams,
+                expected_co2_offset_grams(expected_xlm)
+            );
         }
 
         #[test]
@@ -218,6 +233,17 @@ mod fuzz {
             let project = client.get_project(&project_id);
             prop_assert_eq!(project.total_raised, expected_total);
             prop_assert_eq!(project.donor_count, amounts.len() as u32);
+
+            for donation in donations.iter() {
+                let stats = client.get_donor_stats(&donation.donor);
+                prop_assert_eq!(stats.total_donated, donation.amount);
+                prop_assert_eq!(stats.donation_count, 1);
+                prop_assert_eq!(stats.badge, expected_badge(donation.amount));
+                prop_assert_eq!(
+                    stats.co2_offset_grams,
+                    expected_co2_offset_grams(donation.amount)
+                );
+            }
         }
     }
 }
