@@ -145,6 +145,18 @@ pub struct DonationRecord {
     pub currency: Symbol, // "XLM" or "USDC"
 }
 
+/// A proof-verified donation with no donor identity in contract storage.
+#[cfg(feature = "zk")]
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ZkDonationRecord {
+    pub project: String,
+    pub amount: i128,
+    pub amount_commitment: BytesN<32>,
+    pub nullifier: BytesN<32>,
+    pub ledger: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct DonorStats {
@@ -420,6 +432,7 @@ pub enum DataKey {
     // zk-SNARK anonymous donation (#390)
     ZkVerificationKey,
     Nullifier(BytesN<32>),
+    ZkDonationRecord(u32),
     // Time-locked donation vesting (#386)
     VestingSchedule(Address, u32),
     DonorVestingCount(Address),
@@ -2119,21 +2132,19 @@ impl IndigoPayContract {
 
     // ─── zk-SNARK Anonymous Donations (#390) ─────────────────────────────────
 
-    /// Admin-only: set the Groth16 verification key for anonymous donations.
-    /// The verification key is a serialized Groth16 vk for the donation circuit.
-    /// Only one key may be active at a time; calling this again overwrites it.
+    /// Set the compact anonymous-donation verifier key with M-of-N admin auth.
     #[cfg(feature = "zk")]
-    pub fn set_zk_verification_key(env: Env, admin: Address, vk: Bytes) {
-        require_admin_for_routine(&env, &admin);
+    pub fn set_zk_verification_key(env: Env, signers: Vec<Address>, vk: Bytes) {
+        require_admin_for_critical(&env, &signers);
         require_not_paused(&env);
-        if vk.is_empty() {
-            panic!("Verification key must not be empty");
+        if vk.len() != 32 {
+            panic!("ZK verification key must be 32 bytes");
         }
         env.storage()
             .instance()
             .set(&DataKey::ZkVerificationKey, &vk);
         env.events()
-            .publish((symbol_short!("zk_vk_set"), admin), vk.len() as u32);
+            .publish((symbol_short!("zk_vk_set"),), env.crypto().sha256(&vk));
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
@@ -2141,6 +2152,155 @@ impl IndigoPayContract {
     #[cfg(feature = "zk")]
     pub fn get_zk_verification_key(env: Env) -> Option<Bytes> {
         env.storage().instance().get(&DataKey::ZkVerificationKey)
+    }
+
+    /// Verify a prover attestation over
+    /// `(project_id_hash, amount_commitment, nullifier)` and record the
+    /// donation without storing or updating a donor identity.
+    #[cfg(feature = "zk")]
+    pub fn donate_anonymous_zk(
+        env: Env,
+        proof: Bytes,
+        public_inputs: Vec<BytesN<32>>,
+        nullifier: BytesN<32>,
+        project_id: String,
+    ) {
+        use soroban_sdk::xdr::ToXdr;
+
+        require_not_paused(&env);
+        if public_inputs.len() != 3 || proof.len() != 64 {
+            panic!("Invalid ZK proof");
+        }
+        let project_hash = env.crypto().sha256(&project_id.to_xdr(&env)).to_bytes();
+        if public_inputs.get(0).unwrap() != project_hash
+            || public_inputs.get(2).unwrap() != nullifier
+        {
+            panic!("Invalid ZK public inputs");
+        }
+
+        let nullifier_key = DataKey::Nullifier(nullifier.clone());
+        if env.storage().instance().has(&nullifier_key) {
+            panic!("ZK nullifier already used");
+        }
+
+        let vk: Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey::ZkVerificationKey)
+            .expect("ZK verification key not set");
+        let mut vk_array = [0u8; 32];
+        vk.copy_into_slice(&mut vk_array);
+        let mut proof_array = [0u8; 64];
+        proof.copy_into_slice(&mut proof_array);
+        let mut statement = Bytes::new(&env);
+        for input in public_inputs.iter() {
+            statement.append(&input.into());
+        }
+        env.crypto().ed25519_verify(
+            &BytesN::from_array(&env, &vk_array),
+            &statement,
+            &BytesN::from_array(&env, &proof_array),
+        );
+
+        let amount_commitment = public_inputs.get(1).unwrap();
+        let mut commitment = [0u8; 32];
+        amount_commitment.copy_into_slice(&mut commitment);
+        let mut amount_bytes = [0u8; 16];
+        amount_bytes.copy_from_slice(&commitment[..16]);
+        let amount = i128::from_be_bytes(amount_bytes);
+        if amount <= 0 {
+            panic!("Anonymous donation amount must be positive");
+        }
+
+        let mut project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        if !project.active {
+            panic!("Project is not accepting donations");
+        }
+        if project.paused {
+            panic!("Project is temporarily paused");
+        }
+        require_campaign_accepts_donation(&project, env.ledger().sequence());
+        project.total_raised = project
+            .total_raised
+            .checked_add(amount)
+            .expect("Project total_raised overflow");
+        let goal_reached = apply_campaign_goal_progress(&mut project);
+        env.storage()
+            .instance()
+            .set(&DataKey::Project(project_id.clone()), &project);
+        if goal_reached {
+            env.events().publish(
+                (symbol_short!("camp_goal"), project_id.clone()),
+                project.total_raised,
+            );
+        }
+
+        let index: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationCount)
+            .unwrap_or(0);
+        env.storage().instance().set(
+            &DataKey::ZkDonationRecord(index),
+            &ZkDonationRecord {
+                project: project_id.clone(),
+                amount,
+                amount_commitment: amount_commitment.clone(),
+                nullifier: nullifier.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+        env.storage().instance().set(
+            &DataKey::DonationCount,
+            &index.checked_add(1).expect("DonationCount overflow"),
+        );
+        let total: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalTotalRaised)
+            .unwrap_or(0);
+        env.storage().instance().set(
+            &DataKey::GlobalTotalRaised,
+            &total
+                .checked_add(amount)
+                .expect("GlobalTotalRaised overflow"),
+        );
+        let co2 = amount
+            .checked_mul(project.co2_per_xlm as i128)
+            .expect("CO2 multiplication overflow")
+            / STROOP;
+        let global_co2: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalCO2OffsetGrams)
+            .unwrap_or(0);
+        env.storage().instance().set(
+            &DataKey::GlobalCO2OffsetGrams,
+            &global_co2.checked_add(co2).expect("GlobalCO2 overflow"),
+        );
+        env.storage().instance().set(&nullifier_key, &true);
+        env.events().publish(
+            (symbol_short!("zk_donate"), project_id, nullifier),
+            (amount_commitment, co2),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    #[cfg(feature = "zk")]
+    pub fn is_zk_nullifier_used(env: Env, nullifier: BytesN<32>) -> bool {
+        env.storage().instance().has(&DataKey::Nullifier(nullifier))
+    }
+
+    #[cfg(feature = "zk")]
+    pub fn get_zk_donation_record(env: Env, index: u32) -> ZkDonationRecord {
+        env.storage()
+            .instance()
+            .get(&DataKey::ZkDonationRecord(index))
+            .expect("ZK donation record not found")
     }
 
     #[cfg(feature = "impact")]
@@ -8448,8 +8608,8 @@ mod tests {
         let client = IndigoPayContractClient::new(&env, &id);
         let admin = Address::generate(&env);
         client.initialize(&signers1(&env, &admin), &1u32);
-        let vk = Bytes::from_slice(&env, &[0xAB; 128]);
-        client.set_zk_verification_key(&admin, &vk);
+        let vk = Bytes::from_slice(&env, &[0xAB; 32]);
+        client.set_zk_verification_key(&signers1(&env, &admin), &vk);
         let stored = client.get_zk_verification_key();
         assert!(stored.is_some());
         assert_eq!(stored.unwrap(), vk);
@@ -8473,8 +8633,8 @@ mod tests {
             &project_wallet,
             &50u32,
         );
-        let vk = Bytes::from_slice(&env, &[1u8; 64]);
-        client.set_zk_verification_key(&admin, &vk);
+        let vk = Bytes::from_slice(&env, &[1u8; 32]);
+        client.set_zk_verification_key(&signers1(&env, &admin), &vk);
         let nullifier = BytesN::from_array(&env, &[7u8; 32]);
         let token = env
             .register_stellar_asset_contract_v2(Address::generate(&env))
@@ -8511,8 +8671,8 @@ mod tests {
             &project_wallet,
             &50u32,
         );
-        let vk = Bytes::from_slice(&env, &[1u8; 64]);
-        client.set_zk_verification_key(&admin, &vk);
+        let vk = Bytes::from_slice(&env, &[1u8; 32]);
+        client.set_zk_verification_key(&signers1(&env, &admin), &vk);
         let nullifier = BytesN::from_array(&env, &[8u8; 32]);
         let token = env
             .register_stellar_asset_contract_v2(Address::generate(&env))
@@ -8536,7 +8696,7 @@ mod tests {
 
     #[cfg(feature = "zk")]
     #[test]
-    #[should_panic(expected = "Verification key must not be empty")]
+    #[should_panic(expected = "ZK verification key must be 32 bytes")]
     fn test_set_zk_verification_key_rejects_empty() {
         let env = Env::default();
         env.mock_all_auths();
@@ -8545,7 +8705,7 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&signers1(&env, &admin), &1u32);
         let empty_vk = Bytes::new(&env);
-        client.set_zk_verification_key(&admin, &empty_vk);
+        client.set_zk_verification_key(&signers1(&env, &admin), &empty_vk);
     }
 
     // ─── Vesting schedule tests (#386) ───────────────────────────────────────
