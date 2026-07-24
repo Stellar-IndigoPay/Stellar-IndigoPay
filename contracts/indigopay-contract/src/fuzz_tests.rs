@@ -29,8 +29,10 @@ mod fuzz {
     use proptest::prelude::*;
     use soroban_sdk::Vec;
     use soroban_sdk::{
-        testutils::Address as _, token::StellarAssetClient, Address, Env, String as SorobanString,
+        testutils::{Address as _, Ledger as _}, token::StellarAssetClient, Address, BytesN, Env,
+        String as SorobanString,
     };
+    use std::string::String;
 
     /// Helper: create a single-element signer Vec for admin calls.
     fn signers1(env: &Env, a: &Address) -> Vec<Address> {
@@ -366,6 +368,35 @@ mod fuzz {
             result.is_err(),
             "register_project with duplicate ID should panic"
         );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        #[test]
+        fn prop_archive_index_sequential(periods_count in 1u32..=5u32) {
+            let (env, _cid, client, admin, project_id) = setup_with_admin();
+
+            for i in 0u32..periods_count {
+                let root = BytesN::from_array(&env, &[i as u8; 32]);
+                client.publish_impact_root(
+                    &signers1(&env, &admin),
+                    &project_id,
+                    &root,
+                    &(i * 10 + 1),
+                    &(i * 10 + 10),
+                    &((i + 1) * 10),
+                    &((i + 1) * 2),
+                    &((i + 1) * 3),
+                );
+
+                let count = client.get_impact_root_count(&project_id);
+                prop_assert_eq!(count, i + 1);
+                let periods = client.get_impact_periods(&project_id);
+                prop_assert_eq!(periods.len(), i + 1);
+                prop_assert_eq!(periods.get(i).unwrap().period_index, i);
+            }
+        }
     }
 
     #[test]
@@ -1139,22 +1170,20 @@ mod fuzz {
     ) -> impl Strategy<Value = ContractAction> {
         let project_idx = 0..num_projects;
         let donor_idx = 0..num_donors;
-        let amount = donation_amount_strategy();
-        let co2_rate = co2_rate_strategy();
 
         prop_oneof![
             // Donate XLM: weighted higher since it's the most common operation
-            8 => (project_idx.clone(), donor_idx.clone(), amount.clone())
+            8 => (project_idx.clone(), donor_idx.clone(), donation_amount_strategy())
                 .prop_map(|(pi, di, a)| ContractAction::Donate {
                     project_idx: pi, donor_idx: di, amount: a
                 }),
             // Donate USDC: moderate weight for multi-currency path coverage
-            2 => (project_idx.clone(), donor_idx.clone(), amount.clone())
+            2 => (project_idx.clone(), donor_idx.clone(), donation_amount_strategy())
                 .prop_map(|(pi, di, a)| ContractAction::DonateUsdc {
                     project_idx: pi, donor_idx: di, usdc_amount: a
                 }),
             // Register project (less frequent)
-            1 => ("[a-z]{3,10}", co2_rate.clone())
+            1 => ("[a-z]{3,10}", co2_rate_strategy())
                 .prop_map(|(name, cr)| ContractAction::RegisterProject {
                     name, co2_rate: cr
                 }),
@@ -1170,7 +1199,7 @@ mod fuzz {
                 }),
             2 => (project_idx.clone(), donor_idx.clone(), proptest::bool::ANY)
                 .prop_map(|(pi, di, a)| ContractAction::Vote {
-                    project_idx: pi, donor_idx: di, approve: a
+                    project_idx: pi, voter_idx: di, approve: a
                 }),
             1 => project_idx.clone()
                 .prop_map(|pi| ContractAction::ResolveProposal { project_idx: pi }),

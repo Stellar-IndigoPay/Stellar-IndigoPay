@@ -31,9 +31,10 @@ mod fuzz_tests;
  *     --source alice --network testnet
  */
 use soroban_sdk::{
-    contract, contractclient, contractimpl, contracttype, symbol_short, token, Address, BytesN,
-    Env, String, Symbol, Vec,
+    contract, contractclient, contractimpl, contracttype, symbol_short, token, Address, Bytes,
+    BytesN, Env, String, Symbol, Vec,
 };
+use soroban_sdk::xdr::ToXdr;
 
 // ─── Oracle interface ─────────────────────────────────────────────────────────
 
@@ -184,6 +185,42 @@ pub struct ProjectMilestoneNFT {
     pub minted_at_ledger: u32,
 }
 
+/// Leaf payload used when hashing impact-certificate Merkle trees.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImpactLeaf {
+    pub recipient: Address,
+    pub period_index: u32,
+    pub co2_kg: u32,
+    pub trees: u32,
+    pub hectares: u32,
+}
+
+/// Immutable record of a published impact reporting period.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImpactRoot {
+    pub root: BytesN<32>,
+    pub period_start: u32,
+    pub period_end: u32,
+    pub total_co2_kg: u32,
+    pub total_trees: u32,
+    pub total_hectares: u32,
+}
+
+/// User-facing summary returned by `get_impact_periods`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImpactPeriodSummary {
+    pub period_index: u32,
+    pub root: BytesN<32>,
+    pub period_start: u32,
+    pub period_end: u32,
+    pub total_co2_kg: u32,
+    pub total_trees: u32,
+    pub total_hectares: u32,
+}
+
 /// A community voting proposal to verify a project.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -308,6 +345,13 @@ pub enum DataKey {
     ProjectMilestoneNFT(String, Address),
     // Escrow campaign distribution state keyed by project id.
     CampaignDistribution(String),
+    // Archived impact-reporting period root, keyed by project + absolute
+    // period index so historical roots remain addressable even after
+    // the retention window rolls forward.
+    ImpactRootArchive(String, u32),
+    // Total number of published impact roots for a project. This is an
+    // ever-increasing counter, not the number of still-retained archives.
+    ImpactRootCount(String),
     // Contract upgrade and multi-currency support
     // ContractWasmHash is intentionally kept in the enum for backward
     // compatibility with v1 storage layouts. The single-step `upgrade`
@@ -417,6 +461,8 @@ const EMERGENCY_WITHDRAWAL_TIMELOCK: u32 = 120_960;
 // donation during which the donor may request a refund (subject to admin +
 // project wallet approval).
 const REFUND_COOLDOWN_LEDGERS: u32 = 17_280;
+const MAX_ARCHIVED_PERIODS: u32 = 48;
+const IMPACT_ARCHIVE_TTL_LEDGERS: u32 = VOTING_WINDOW_LEDGERS * 4 * MAX_ARCHIVED_PERIODS;
 
 /// Read the stored admin set. Panics if not initialized.
 fn read_admin_set(env: &Env) -> Vec<Address> {
@@ -610,6 +656,36 @@ fn apply_campaign_goal_progress(env: &Env, project_id: &String, project: &mut Pr
     } else {
         false
     }
+}
+
+fn hash_impact_leaf(env: &Env, leaf: &ImpactLeaf) -> BytesN<32> {
+    let encoded = leaf.clone().to_xdr(env);
+    env.crypto().sha256(&encoded).to_bytes()
+}
+
+fn hash_merkle_pair(env: &Env, left: &BytesN<32>, right: &BytesN<32>) -> BytesN<32> {
+    let mut combined = Bytes::from(left);
+    combined.append(&Bytes::from(right));
+    env.crypto().sha256(&combined).to_bytes()
+}
+
+fn verify_merkle_proof(
+    env: &Env,
+    root: &BytesN<32>,
+    leaf_hash: &BytesN<32>,
+    proof: &Vec<BytesN<32>>,
+    leaf_index: u32,
+) -> bool {
+    let mut current = leaf_hash.clone();
+    for (idx, sibling) in proof.iter().enumerate() {
+        let bit = (leaf_index >> (idx as u32)) & 1;
+        current = if bit == 0 {
+            hash_merkle_pair(env, &current, &sibling)
+        } else {
+            hash_merkle_pair(env, &sibling, &current)
+        };
+    }
+    current == *root
 }
 
 fn voting_weight_from_badge(badge: &BadgeTier) -> u32 {
@@ -1843,6 +1919,150 @@ impl IndigoPayContract {
             .instance()
             .get(&DataKey::ProjectMilestoneNFT(project_id, donor))
             .expect("Project milestone NFT not found")
+    }
+
+    // ─── Impact certificates ─────────────────────────────────────────────────
+
+    /// Publish a new immutable impact reporting root for a project.
+    /// Each publication increments the archive index and retains the
+    /// previous periods up to `MAX_ARCHIVED_PERIODS`.
+    pub fn publish_impact_root(
+        env: Env,
+        signers: Vec<Address>,
+        project_id: String,
+        root: BytesN<32>,
+        period_start: u32,
+        period_end: u32,
+        total_co2_kg: u32,
+        total_trees: u32,
+        total_hectares: u32,
+    ) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        if period_end <= period_start {
+            panic!("Impact period end must be after period start");
+        }
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Project(project_id.clone()))
+        {
+            panic!("Project not found");
+        }
+
+        let count_key = DataKey::ImpactRootCount(project_id.clone());
+        let period_index: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
+        if period_index > 0 {
+            let prev_key = DataKey::ImpactRootArchive(project_id.clone(), period_index - 1);
+            let prev_root: Option<ImpactRoot> = env.storage().instance().get(&prev_key);
+            if let Some(prev) = prev_root {
+                if period_start <= prev.period_end {
+                    panic!("Impact reporting periods must be chronological");
+                }
+            }
+        }
+
+        if period_index >= MAX_ARCHIVED_PERIODS {
+            let stale_index = period_index - MAX_ARCHIVED_PERIODS;
+            env.storage()
+                .instance()
+                .remove(&DataKey::ImpactRootArchive(project_id.clone(), stale_index));
+        }
+
+        let archived = ImpactRoot {
+            root: root.clone(),
+            period_start,
+            period_end,
+            total_co2_kg,
+            total_trees,
+            total_hectares,
+        };
+        env.storage().instance().set(
+            &DataKey::ImpactRootArchive(project_id.clone(), period_index),
+            &archived,
+        );
+        let next_count = period_index
+            .checked_add(1)
+            .expect("Impact root count overflow");
+        env.storage().instance().set(&count_key, &next_count);
+
+        env.events().publish(
+            (symbol_short!("imp_rt"), signers.get(0).unwrap(), project_id),
+            (period_index, root),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Verify a leaf against a specific archived impact reporting period.
+    pub fn verify_impact_inclusion(
+        env: Env,
+        project_id: String,
+        period_index: u32,
+        leaf: ImpactLeaf,
+        proof: Vec<BytesN<32>>,
+        leaf_index: u32,
+    ) -> bool {
+        if leaf.period_index != period_index {
+            return false;
+        }
+
+        let archived: Option<ImpactRoot> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ImpactRootArchive(project_id, period_index));
+        let archived = match archived {
+            Some(archived) => archived,
+            None => return false,
+        };
+
+        let leaf_hash = hash_impact_leaf(&env, &leaf);
+        verify_merkle_proof(&env, &archived.root, &leaf_hash, &proof, leaf_index)
+    }
+
+    /// Return archived impact periods from oldest retained to newest.
+    pub fn get_impact_periods(env: Env, project_id: String) -> Vec<ImpactPeriodSummary> {
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ImpactRootCount(project_id.clone()))
+            .unwrap_or(0);
+        let start = count.saturating_sub(MAX_ARCHIVED_PERIODS);
+        let mut periods = Vec::new(&env);
+        let mut idx = start;
+        while idx < count {
+            if let Some(archived) = env.storage().instance().get::<_, ImpactRoot>(
+                &DataKey::ImpactRootArchive(project_id.clone(), idx),
+            ) {
+                periods.push_back(ImpactPeriodSummary {
+                    period_index: idx,
+                    root: archived.root,
+                    period_start: archived.period_start,
+                    period_end: archived.period_end,
+                    total_co2_kg: archived.total_co2_kg,
+                    total_trees: archived.total_trees,
+                    total_hectares: archived.total_hectares,
+                });
+            }
+            idx = idx.checked_add(1).expect("Impact period index overflow");
+        }
+        periods
+    }
+
+    pub fn get_impact_root_count(env: Env, project_id: String) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ImpactRootCount(project_id))
+            .unwrap_or(0)
+    }
+
+    pub fn get_impact_root(
+        env: Env,
+        project_id: String,
+        period_index: u32,
+    ) -> Option<ImpactRoot> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ImpactRootArchive(project_id, period_index))
     }
 
     // ─── Governance ───────────────────────────────────────────────────────────
@@ -3518,6 +3738,24 @@ mod tests {
         v
     }
 
+    fn impact_leaf(
+        env: &Env,
+        recipient: &Address,
+        period_index: u32,
+        co2_kg: u32,
+        trees: u32,
+        hectares: u32,
+    ) -> ImpactLeaf {
+        let _ = env;
+        ImpactLeaf {
+            recipient: recipient.clone(),
+            period_index,
+            co2_kg,
+            trees,
+            hectares,
+        }
+    }
+
     // ─── Existing tests ───────────────────────────────────────────────────────
 
     #[test]
@@ -4321,6 +4559,179 @@ mod tests {
 
         let nft = client.get_project_nft(&donor, &pid);
         assert_eq!(nft.amount_donated, 120 * STROOP);
+    }
+
+    // ─── Impact certificate root archiving tests ────────────────────────────
+
+    #[test]
+    fn test_publish_root_archives_previous() {
+        let (env, _cid, client, admin, pid) = setup();
+        let root_0 = BytesN::from_array(&env, &[1u8; 32]);
+        let root_1 = BytesN::from_array(&env, &[2u8; 32]);
+
+        client.publish_impact_root(
+            &signers1(&env, &admin),
+            &pid,
+            &root_0,
+            &1u32,
+            &10u32,
+            &100u32,
+            &5u32,
+            &2u32,
+        );
+        client.publish_impact_root(
+            &signers1(&env, &admin),
+            &pid,
+            &root_1,
+            &11u32,
+            &20u32,
+            &200u32,
+            &7u32,
+            &3u32,
+        );
+
+        assert_eq!(client.get_impact_root_count(&pid), 2);
+        let first = client.get_impact_root(&pid, &0u32).expect("first root");
+        let second = client.get_impact_root(&pid, &1u32).expect("second root");
+        assert_eq!(first.root, root_0);
+        assert_eq!(first.period_start, 1);
+        assert_eq!(first.period_end, 10);
+        assert_eq!(second.root, root_1);
+        assert_eq!(second.period_start, 11);
+        assert_eq!(second.period_end, 20);
+    }
+
+    #[test]
+    fn test_verify_against_archived_period() {
+        let (env, _cid, client, admin, pid) = setup();
+        let recipient_a = Address::generate(&env);
+        let recipient_b = Address::generate(&env);
+        let leaf_a = impact_leaf(&env, &recipient_a, 0, 12, 3, 1);
+        let leaf_b = impact_leaf(&env, &recipient_b, 0, 8, 2, 1);
+        let hash_a = hash_impact_leaf(&env, &leaf_a);
+        let hash_b = hash_impact_leaf(&env, &leaf_b);
+        let root = hash_merkle_pair(&env, &hash_a, &hash_b);
+
+        client.publish_impact_root(
+            &signers1(&env, &admin),
+            &pid,
+            &root,
+            &1u32,
+            &31u32,
+            &20u32,
+            &5u32,
+            &2u32,
+        );
+
+        let mut proof = Vec::new(&env);
+        proof.push_back(hash_b);
+        assert!(client.verify_impact_inclusion(&pid, &0u32, &leaf_a, &proof, &0u32));
+    }
+
+    #[test]
+    fn test_get_impact_periods() {
+        let (env, _cid, client, admin, pid) = setup();
+        let root_0 = BytesN::from_array(&env, &[11u8; 32]);
+        let root_1 = BytesN::from_array(&env, &[22u8; 32]);
+        let root_2 = BytesN::from_array(&env, &[33u8; 32]);
+
+        client.publish_impact_root(
+            &signers1(&env, &admin),
+            &pid,
+            &root_0,
+            &100u32,
+            &110u32,
+            &10u32,
+            &1u32,
+            &2u32,
+        );
+        client.publish_impact_root(
+            &signers1(&env, &admin),
+            &pid,
+            &root_1,
+            &111u32,
+            &120u32,
+            &20u32,
+            &3u32,
+            &4u32,
+        );
+        client.publish_impact_root(
+            &signers1(&env, &admin),
+            &pid,
+            &root_2,
+            &121u32,
+            &130u32,
+            &30u32,
+            &5u32,
+            &6u32,
+        );
+
+        let periods = client.get_impact_periods(&pid);
+        assert_eq!(periods.len(), 3);
+        let p0 = periods.get(0).unwrap();
+        let p1 = periods.get(1).unwrap();
+        let p2 = periods.get(2).unwrap();
+        assert_eq!(p0.period_index, 0);
+        assert_eq!(p0.root, root_0);
+        assert_eq!(p0.period_start, 100);
+        assert_eq!(p1.period_index, 1);
+        assert_eq!(p1.root, root_1);
+        assert_eq!(p1.total_trees, 3);
+        assert_eq!(p2.period_index, 2);
+        assert_eq!(p2.root, root_2);
+        assert_eq!(p2.total_hectares, 6);
+    }
+
+    #[test]
+    fn test_archive_rotation() {
+        let (env, _cid, client, admin, pid) = setup();
+        let mut expected_last = BytesN::from_array(&env, &[0u8; 32]);
+
+        for i in 0u32..3 {
+            let root = BytesN::from_array(&env, &[i as u8; 32]);
+            expected_last = root.clone();
+            client.publish_impact_root(
+                &signers1(&env, &admin),
+                &pid,
+                &root,
+                &(i * 10 + 1),
+                &(i * 10 + 10),
+                &((i + 1) * 10),
+                &((i + 1) * 2),
+                &((i + 1) * 3),
+            );
+        }
+
+        let periods = client.get_impact_periods(&pid);
+        assert_eq!(periods.len(), 3);
+        assert_eq!(periods.get(0).unwrap().period_index, 0);
+        assert_eq!(periods.get(2).unwrap().root, expected_last);
+        assert_eq!(client.get_impact_root_count(&pid), 3);
+    }
+
+    #[test]
+    fn test_max_periods_enforced() {
+        let (env, _cid, client, admin, pid) = setup();
+
+        for i in 0u32..49 {
+            let root = BytesN::from_array(&env, &[i as u8; 32]);
+            client.publish_impact_root(
+                &signers1(&env, &admin),
+                &pid,
+                &root,
+                &(i * 10 + 1),
+                &(i * 10 + 10),
+                &((i + 1) * 10),
+                &((i + 1) * 2),
+                &((i + 1) * 3),
+            );
+        }
+
+        let periods = client.get_impact_periods(&pid);
+        assert_eq!(periods.len(), MAX_ARCHIVED_PERIODS);
+        assert_eq!(periods.get(0).unwrap().period_index, 1);
+        assert!(client.get_impact_root(&pid, &0u32).is_none());
+        assert_eq!(client.get_impact_root_count(&pid), 49);
     }
 
     // ─── Pause / resume tests (#213) ──────────────────────────────────────────
