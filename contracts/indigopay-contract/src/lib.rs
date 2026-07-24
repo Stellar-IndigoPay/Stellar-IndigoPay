@@ -36,6 +36,7 @@ use soroban_sdk::{
     contract, contractclient, contractimpl, contracttype, symbol_short, token, Address, Bytes,
     BytesN, Env, String, Symbol, Vec,
 };
+use soroban_sdk::xdr::ToXdr;
 
 // ─── Oracle interface ─────────────────────────────────────────────────────────
 
@@ -89,11 +90,9 @@ pub struct Project {
     pub deadline_ledger: u32,
     /// Lifecycle of the project's optional time-bound campaign.
     pub campaign_status: CampaignStatus,
-    /// Optional parent project ID for hierarchical project structure.
-    /// When set, this project is a sub-project of the specified parent.
-    /// Sub-projects inherit active status from parent (deactivating parent
-    /// deactivates children). Appended for backward compatibility.
-    pub parent_project_id: Option<String>,
+    /// Optional distribution schedule for escrow-based campaigns.
+    /// Empty means funds are sent directly to the project wallet.
+    pub distribution_schedule: Vec<DistributionStep>,
 }
 
 /// Lifecycle of a project's optional time-bound fundraising campaign.
@@ -110,6 +109,23 @@ pub enum CampaignStatus {
     Expired,
     /// Manually closed by admin before or after the goal.
     Closed,
+}
+
+/// One step in an escrow campaign's release schedule.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DistributionStep {
+    pub percentage: u32,
+    pub delay_ledgers: u32,
+}
+
+/// Runtime state for an escrow campaign after its goal has been reached.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CampaignDistribution {
+    pub steps: Vec<DistributionStep>,
+    pub claimed: Vec<bool>,
+    pub goal_reached_at: u32,
 }
 
 /// Input for registering a project via `batch_register_projects`.
@@ -181,6 +197,42 @@ pub struct ProjectMilestoneNFT {
     pub amount_donated: i128,
     pub co2_offset_grams: i128,
     pub minted_at_ledger: u32,
+}
+
+/// Leaf payload used when hashing impact-certificate Merkle trees.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImpactLeaf {
+    pub recipient: Address,
+    pub period_index: u32,
+    pub co2_kg: u32,
+    pub trees: u32,
+    pub hectares: u32,
+}
+
+/// Immutable record of a published impact reporting period.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImpactRoot {
+    pub root: BytesN<32>,
+    pub period_start: u32,
+    pub period_end: u32,
+    pub total_co2_kg: u32,
+    pub total_trees: u32,
+    pub total_hectares: u32,
+}
+
+/// User-facing summary returned by `get_impact_periods`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImpactPeriodSummary {
+    pub period_index: u32,
+    pub root: BytesN<32>,
+    pub period_start: u32,
+    pub period_end: u32,
+    pub total_co2_kg: u32,
+    pub total_trees: u32,
+    pub total_hectares: u32,
 }
 
 /// A community voting proposal to verify a project.
@@ -336,6 +388,8 @@ pub enum DataKey {
     // Governance
     Proposal(String),
     HasVoted(String, Address),
+    VoteDelegation(Address),
+    DelegatedWeight(Address),
     // Per-donor per-project cumulative donation total for milestone NFT gating
     DonorProjectTotal(String, Address),
     // Per-donor per-project sliding-window donation rate limit
@@ -345,6 +399,15 @@ pub enum DataKey {
     DonationRateLimitWindow,
     // Per-project milestone NFT: one per (project_id, donor) pair
     ProjectMilestoneNFT(String, Address),
+    // Escrow campaign distribution state keyed by project id.
+    CampaignDistribution(String),
+    // Archived impact-reporting period root, keyed by project + absolute
+    // period index so historical roots remain addressable even after
+    // the retention window rolls forward.
+    ImpactRootArchive(String, u32),
+    // Total number of published impact roots for a project. This is an
+    // ever-increasing counter, not the number of still-retained archives.
+    ImpactRootCount(String),
     // Contract upgrade and multi-currency support
     // ContractWasmHash is intentionally kept in the enum for backward
     // compatibility with v1 storage layouts. The single-step `upgrade`
@@ -472,6 +535,8 @@ const EMERGENCY_WITHDRAWAL_TIMELOCK: u32 = 120_960;
 // donation during which the donor may request a refund (subject to admin +
 // project wallet approval).
 const REFUND_COOLDOWN_LEDGERS: u32 = 17_280;
+const MAX_ARCHIVED_PERIODS: u32 = 48;
+const IMPACT_ARCHIVE_TTL_LEDGERS: u32 = VOTING_WINDOW_LEDGERS * 4 * MAX_ARCHIVED_PERIODS;
 
 /// Current storage schema version. Bump this and add a migration step in
 /// `migrate()` whenever a struct layout, DataKey variant, or stored value
@@ -887,275 +952,121 @@ fn require_campaign_accepts_donation(project: &Project, current_ledger: u32) {
     }
 }
 
-/// Process a single donation's core logic: rate limiting, project validation,
-/// state updates (project, donor, NFT, globals), token transfers, and events.
-/// Does NOT handle auth, paused-check, or ensure_min_ttl — the caller is
-/// responsible for those.
-#[allow(clippy::too_many_arguments)]
-fn process_donation(
-    env: &Env,
-    token: &Address,
-    donor: &Address,
-    project_id: &String,
-    amount: i128,
-    msg_hash: u32,
-    anonymous: bool,
-) {
-    let current_ledger = env.ledger().sequence();
-    let max_donations: u32 = env
-        .storage()
-        .instance()
-        .get(&DataKey::DonationRateLimitMax)
-        .unwrap_or(DEFAULT_DONATION_RATE_LIMIT_MAX);
-    let window_ledgers: u32 = env
-        .storage()
-        .instance()
-        .get(&DataKey::DonationRateLimitWindow)
-        .unwrap_or(DEFAULT_DONATION_RATE_LIMIT_WINDOW);
-
-    let rate_key = DataKey::DonorRateLimit(donor.clone(), project_id.clone());
-    let mut window: RateLimitWindow =
-        env.storage()
-            .instance()
-            .get(&rate_key)
-            .unwrap_or(RateLimitWindow {
-                window_start: current_ledger,
-                count: 0,
-            });
-    if current_ledger - window.window_start >= window_ledgers {
-        window.window_start = current_ledger;
-        window.count = 0;
-    }
-    if window.count >= max_donations {
-        panic!("Donation rate limit exceeded");
-    }
-    window.count = window
-        .count
-        .checked_add(1)
-        .expect("RateLimitWindow count overflow");
-    env.storage().instance().set(&rate_key, &window);
-
-    let mut project: Project = env
-        .storage()
-        .instance()
-        .get(&DataKey::Project(project_id.clone()))
-        .expect("Project not found");
-    if !project.active {
-        panic!("Project is not accepting donations");
-    }
-    if project.paused {
-        panic!("Project is temporarily paused");
-    }
-    require_campaign_accepts_donation(&project, env.ledger().sequence());
-
-    // Pre-compute CO2 increment with checked multiplication so an attacker
-    // can't trigger a silent wrap via a project with a huge co2_per_xlm.
-    let xlm_units = amount / STROOP;
-    let co2_increment = xlm_units
-        .checked_mul(project.co2_per_xlm as i128)
-        .expect("CO2 calculation overflow");
-
-    let stats_donor = if anonymous {
-        Address::from_string(&String::from_str(
-            env,
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-        ))
-    } else {
-        donor.clone()
-    };
-    let mut donor_stats: DonorStats = env
-        .storage()
-        .instance()
-        .get(&DataKey::DonorStats(stats_donor.clone()))
-        .unwrap_or(DonorStats {
-            total_donated: 0,
-            donation_count: 0,
-            badge: BadgeTier::None,
-            co2_offset_grams: 0,
-        });
-    let prev_badge = donor_stats.badge.clone();
-
-    // ── Effects: all state writes BEFORE the external token transfer
-    //    (Checks-Effects-Interactions to defend against reentrancy from a
-    //    malicious token contract passed via `token`).
-    project.total_raised = project
-        .total_raised
-        .checked_add(amount)
-        .expect("Project total_raised overflow");
-    let goal_reached = apply_campaign_goal_progress(&mut project);
-    let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
-    if !env.storage().instance().has(&donated_key) {
-        env.storage().instance().set(&donated_key, &true);
-        project.donor_count = project
-            .donor_count
-            .checked_add(1)
-            .expect("Project donor_count overflow");
-    }
-    env.storage()
-        .instance()
-        .set(&DataKey::Project(project_id.clone()), &project);
-    if goal_reached {
-        env.events().publish(
-            (symbol_short!("camp_goal"), project_id.clone()),
-            project.total_raised,
-        );
-    }
-
-    donor_stats.total_donated = donor_stats
-        .total_donated
-        .checked_add(amount)
-        .expect("Donor total_donated overflow");
-    donor_stats.donation_count = donor_stats
-        .donation_count
-        .checked_add(1)
-        .expect("Donor donation_count overflow");
-    donor_stats.co2_offset_grams = donor_stats
-        .co2_offset_grams
-        .checked_add(co2_increment)
-        .expect("Donor co2_offset overflow");
-    donor_stats.badge = calculate_badge(donor_stats.total_donated);
-    #[cfg(feature = "delegation")]
-    update_delegated_weight_if_needed(env, donor, &prev_badge, &donor_stats.badge);
-    env.storage()
-        .instance()
-        .set(&DataKey::DonorStats(stats_donor), &donor_stats);
-
-    // Track per-project cumulative donations for milestone NFT eligibility.
-    let proj_total_key = DataKey::DonorProjectTotal(project_id.clone(), donor.clone());
-    let prev_proj_total: i128 = env.storage().instance().get(&proj_total_key).unwrap_or(0);
-    env.storage().instance().set(
-        &proj_total_key,
-        &prev_proj_total
-            .checked_add(amount)
-            .expect("DonorProjectTotal overflow"),
-    );
-
-    // Auto-mint an Impact NFT when a donor reaches a new badge tier.
-    if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
-        let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
-        if !env.storage().instance().has(&nft_key) {
-            let nft = ImpactNFT {
-                owner: donor.clone(),
-                tier: donor_stats.badge.clone(),
-                total_donated: donor_stats.total_donated,
-                minted_at_ledger: env.ledger().sequence(),
-            };
-            env.storage().instance().set(&nft_key, &nft);
-            env.events().publish(
-                (symbol_short!("nft_mint"), donor.clone()),
-                donor_stats.badge.clone(),
-            );
+fn validate_distribution_schedule(schedule: &Vec<DistributionStep>) {
+    let mut total: u32 = 0;
+    for step in schedule.iter() {
+        if step.percentage == 0 {
+            panic!("Distribution step percentage must be positive");
         }
+        total = total
+            .checked_add(step.percentage)
+            .expect("Distribution schedule percentage overflow");
+    }
+    if total != 100 {
+        panic!("Distribution steps must sum to 100%");
+    }
+}
+
+fn is_escrow_campaign(project: &Project) -> bool {
+    !project.distribution_schedule.is_empty()
+}
+
+fn init_campaign_distribution(env: &Env, project_id: &String, project: &Project) {
+    if project.distribution_schedule.is_empty() {
+        return;
     }
 
-    let dc: u32 = env
-        .storage()
-        .instance()
-        .get(&DataKey::DonationCount)
-        .unwrap_or(0);
-    let new_dc = dc.checked_add(1).expect("DonationCount overflow");
-    env.storage()
-        .instance()
-        .set(&DataKey::DonationCount, &new_dc);
-    // Store donation record for trustless enumeration
-    let donation_record = DonationRecord {
-        donor: donor.clone(),
-        anonymous,
-        project: project_id.clone(),
-        amount,
-        ledger: env.ledger().sequence(),
-        message_hash: msg_hash,
-        currency: symbol_short!("XLM"),
+    let mut claimed = Vec::new(env);
+    for _ in project.distribution_schedule.iter() {
+        claimed.push_back(false);
+    }
+
+    let distribution = CampaignDistribution {
+        steps: project.distribution_schedule.clone(),
+        claimed,
+        goal_reached_at: env.ledger().sequence(),
     };
-    env.storage()
-        .instance()
-        .set(&DataKey::DonationRecord(dc), &donation_record);
-    if anonymous {
-        let count: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::AnonymousDonationCount)
-            .unwrap_or(0);
-        env.storage().instance().set(
-            &DataKey::AnonymousDonationCount,
-            &count
-                .checked_add(1)
-                .expect("AnonymousDonationCount overflow"),
-        );
-    }
-    // Snapshot CO₂ offset for exact reversal on refund (#290).
-    env.storage()
-        .instance()
-        .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
-
-    let gr: i128 = env
-        .storage()
-        .instance()
-        .get(&DataKey::GlobalTotalRaised)
-        .unwrap_or(0);
-    let new_gr = gr.checked_add(amount).expect("GlobalTotalRaised overflow");
-    env.storage()
-        .instance()
-        .set(&DataKey::GlobalTotalRaised, &new_gr);
-
-    let gc: i128 = env
-        .storage()
-        .instance()
-        .get(&DataKey::GlobalCO2OffsetGrams)
-        .unwrap_or(0);
-    let new_gc = gc.checked_add(co2_increment).expect("GlobalCO2 overflow");
-    env.storage()
-        .instance()
-        .set(&DataKey::GlobalCO2OffsetGrams, &new_gc);
-
-    // ── Interaction: external call happens after every effect is durable.
-    let fee_bps = read_platform_fee_bps(env);
-    #[allow(unused_variables)]
-    let (project_amount, fee_amount) = split_fee(amount, fee_bps);
-
-    let token_client = token::Client::new(env, token);
-
-    // Transfer platform fee to treasury (if configured and feature enabled).
-    #[cfg(feature = "fees")]
-    if fee_amount > 0 {
-        let treasury: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::PlatformTreasury)
-            .expect("Platform treasury not configured");
-        token_client.transfer(donor, &treasury, &fee_amount);
-    }
-
-    // Transfer remainder to project wallet.
-    token_client.transfer(donor, &project.wallet, &project_amount);
-
-    #[cfg(feature = "fees")]
-    env.events().publish(
-        (symbol_short!("donated"), donor.clone(), project_id.clone()),
-        (amount, donor_stats.badge.clone(), msg_hash, fee_amount),
+    env.storage().instance().set(
+        &DataKey::CampaignDistribution(project_id.clone()),
+        &distribution,
     );
-    #[cfg(not(feature = "fees"))]
-    env.events().publish(
-        (symbol_short!("donated"), donor.clone(), project_id.clone()),
-        (amount, donor_stats.badge.clone(), msg_hash),
-    );
+}
+
+fn get_campaign_distribution_step_amount(
+    _project: &Project,
+    distribution: &CampaignDistribution,
+    step_index: u32,
+    total_raised: i128,
+    balance: i128,
+) -> i128 {
+    let last_index = distribution.steps.len().saturating_sub(1) as u32;
+    if step_index == last_index {
+        balance
+    } else {
+        let step = distribution
+            .steps
+            .get(step_index)
+            .expect("Distribution step not found");
+        total_raised
+            .checked_mul(step.percentage as i128)
+            .expect("Distribution amount overflow")
+            / 100
+    }
+}
+
+fn queue_campaign_distribution_if_needed(env: &Env, project_id: &String, project: &Project) {
+    if project.distribution_schedule.is_empty() {
+        return;
+    }
+    init_campaign_distribution(env, project_id, project);
 }
 
 /// After `total_raised` is updated, flip `Active` → `GoalReached` when the
 /// campaign goal is met. Returns `true` when the transition happened.
-fn apply_campaign_goal_progress(project: &mut Project) -> bool {
+fn apply_campaign_goal_progress(env: &Env, project_id: &String, project: &mut Project) -> bool {
     if project.campaign_status == CampaignStatus::Active
         && project.goal > 0
         && project.total_raised >= project.goal
     {
         project.campaign_status = CampaignStatus::GoalReached;
+        queue_campaign_distribution_if_needed(env, project_id, project);
         true
     } else {
         false
     }
 }
 
-pub fn voting_weight_from_badge(badge: &BadgeTier) -> u32 {
+fn hash_impact_leaf(env: &Env, leaf: &ImpactLeaf) -> BytesN<32> {
+    let encoded = leaf.clone().to_xdr(env);
+    env.crypto().sha256(&encoded).to_bytes()
+}
+
+fn hash_merkle_pair(env: &Env, left: &BytesN<32>, right: &BytesN<32>) -> BytesN<32> {
+    let mut combined = Bytes::from(left);
+    combined.append(&Bytes::from(right));
+    env.crypto().sha256(&combined).to_bytes()
+}
+
+fn verify_merkle_proof(
+    env: &Env,
+    root: &BytesN<32>,
+    leaf_hash: &BytesN<32>,
+    proof: &Vec<BytesN<32>>,
+    leaf_index: u32,
+) -> bool {
+    let mut current = leaf_hash.clone();
+    for (idx, sibling) in proof.iter().enumerate() {
+        let bit = (leaf_index >> (idx as u32)) & 1;
+        current = if bit == 0 {
+            hash_merkle_pair(env, &current, &sibling)
+        } else {
+            hash_merkle_pair(env, &sibling, &current)
+        };
+    }
+    current == *root
+}
+
+fn voting_weight_from_badge(badge: &BadgeTier) -> u32 {
     match badge {
         BadgeTier::None => 0,
         BadgeTier::Seedling => 100,
@@ -1293,7 +1204,7 @@ impl IndigoPayContract {
             goal: 0,
             deadline_ledger: 0,
             campaign_status: CampaignStatus::None,
-            parent_project_id: None,
+            distribution_schedule: Vec::new(&env),
         };
         env.storage()
             .instance()
@@ -1443,7 +1354,7 @@ impl IndigoPayContract {
                 goal: 0,
                 deadline_ledger: 0,
                 campaign_status: CampaignStatus::None,
-                parent_project_id: None,
+                distribution_schedule: Vec::new(&env),
             };
             env.storage()
                 .instance()
@@ -1628,6 +1539,7 @@ impl IndigoPayContract {
         project_id: String,
         goal: i128,
         deadline_ledger: u32,
+        distribution_schedule: Vec<DistributionStep>,
     ) {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
@@ -1637,6 +1549,9 @@ impl IndigoPayContract {
         let current = env.ledger().sequence();
         if deadline_ledger <= current {
             panic!("Campaign deadline must be in the future");
+        }
+        if !distribution_schedule.is_empty() {
+            validate_distribution_schedule(&distribution_schedule);
         }
 
         let mut project: Project = env
@@ -1660,6 +1575,7 @@ impl IndigoPayContract {
         project.goal = goal;
         project.deadline_ledger = deadline_ledger;
         project.campaign_status = CampaignStatus::Active;
+        project.distribution_schedule = distribution_schedule;
         env.storage()
             .instance()
             .set(&DataKey::Project(project_id.clone()), &project);
@@ -1738,7 +1654,119 @@ impl IndigoPayContract {
         );
     }
 
-    // ─── Platform Fee Configuration (#385) ────────────────────────────────────
+    /// Claim the next available distribution step for an escrow campaign.
+    /// The project wallet must authorize and the campaign must have already
+    /// reached its goal.
+    pub fn claim_distribution(env: Env, project_wallet: Address, project_id: String) {
+        project_wallet.require_auth();
+        require_not_paused(&env);
+
+        let project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        if project.wallet != project_wallet {
+            panic!("Invalid project wallet");
+        }
+        if project.campaign_status != CampaignStatus::GoalReached
+            && project.campaign_status != CampaignStatus::Closed
+        {
+            panic!("Campaign distribution not available");
+        }
+
+        let balance_key = {
+            let native_token: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::NativeTokenAddress)
+                .expect("Native token not configured");
+            DataKey::ProjectContractBalance(project_id.clone(), native_token)
+        };
+
+        let mut distribution: CampaignDistribution = env
+            .storage()
+            .instance()
+            .get(&DataKey::CampaignDistribution(project_id.clone()))
+            .expect("No distribution queued");
+
+        let mut step_index: Option<u32> = None;
+        for (idx, claimed) in distribution.claimed.iter().enumerate() {
+            if !claimed {
+                step_index = Some(idx as u32);
+                break;
+            }
+        }
+
+        let step_index = step_index.expect("All distribution steps already claimed");
+        let step = distribution
+            .steps
+            .get(step_index)
+            .expect("Distribution step not found");
+
+        let current = env.ledger().sequence();
+        let available_at = distribution
+            .goal_reached_at
+            .checked_add(step.delay_ledgers)
+            .expect("Distribution availability overflow");
+        if current < available_at {
+            panic!("Distribution timelock not yet elapsed");
+        }
+
+        let balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
+        if balance <= 0 {
+            panic!("Insufficient contract balance for project");
+        }
+        let amount = get_campaign_distribution_step_amount(
+            &project,
+            &distribution,
+            step_index,
+            project.total_raised,
+            balance,
+        );
+        if amount <= 0 {
+            panic!("Distribution amount must be positive");
+        }
+        if amount > balance {
+            panic!("Insufficient contract balance for project");
+        }
+
+        distribution
+            .claimed
+            .set(step_index, true);
+
+        let remaining_balance = balance - amount;
+        env.storage().instance().set(&balance_key, &remaining_balance);
+        if distribution.claimed.iter().all(|claimed| claimed) {
+            env.storage()
+                .instance()
+                .remove(&DataKey::CampaignDistribution(project_id.clone()));
+            let mut closed_project = project.clone();
+            closed_project.campaign_status = CampaignStatus::Closed;
+            env.storage()
+                .instance()
+                .set(&DataKey::Project(project_id.clone()), &closed_project);
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::CampaignDistribution(project_id.clone()), &distribution);
+        }
+
+        let token = env
+            .storage()
+            .instance()
+            .get(&DataKey::NativeTokenAddress)
+            .expect("Native token not configured");
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&env.current_contract_address(), &project_wallet, &amount);
+
+        env.events().publish(
+            (symbol_short!("camp_dist"), project_id.clone()),
+            (step_index, amount, project_wallet),
+        );
+    }
+
+    // ─── Donations ────────────────────────────────────────────────────────────
 
     /// Admin-only (M-of-N): set the platform fee in basis points.
     ///
@@ -1954,7 +1982,7 @@ impl IndigoPayContract {
             .total_raised
             .checked_add(xlm_amount)
             .expect("Project total_raised overflow");
-        let goal_reached = apply_campaign_goal_progress(&mut project);
+        let goal_reached = apply_campaign_goal_progress(&env, &project_id, &mut project);
         let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
         if !env.storage().instance().has(&donated_key) {
             env.storage().instance().set(&donated_key, &true);
@@ -1966,6 +1994,24 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::Project(project_id.clone()), &project);
+        let mut escrowed = false;
+        if is_escrow_campaign(&project) {
+            let native_token: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::NativeTokenAddress)
+                .expect("Native token not configured");
+            if token != native_token {
+                panic!("Escrow campaigns only support native token donations");
+            }
+            let balance_key = DataKey::ProjectContractBalance(project_id.clone(), token.clone());
+            let balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
+            let new_balance = balance
+                .checked_add(amount)
+                .expect("ProjectContractBalance overflow");
+            env.storage().instance().set(&balance_key, &new_balance);
+            escrowed = true;
+        }
         if goal_reached {
             env.events().publish(
                 (symbol_short!("camp_goal"), project_id.clone()),
@@ -2082,8 +2128,13 @@ impl IndigoPayContract {
             .instance()
             .set(&DataKey::GlobalCO2OffsetGrams, &new_gc);
 
-        // No token transfer — the path payment already delivered XLM to the
-        // project wallet in the same Stellar transaction.
+        // ── Interaction: external call happens after every effect is durable.
+        let token_client = token::Client::new(&env, &token);
+        if escrowed {
+            token_client.transfer(&donor, &env.current_contract_address(), &amount);
+        } else {
+            token_client.transfer(&donor, &project.wallet, &amount);
+        }
 
         #[cfg(feature = "fees")]
         {
@@ -2271,19 +2322,18 @@ impl IndigoPayContract {
             });
         let prev_badge = donor_stats.badge.clone();
 
-        // ── Effects (Checks-Effects-Interactions) ────────────────────────────
-
-        // Mark nullifier as spent AFTER all checks pass, as part of the
-        // Effects step. Prevents griefing where a valid proof for a
-        // deactivated project permanently consumes the nullifier.
-        env.storage().instance().set(&nullifier_key, &true);
+        // ── Effects: all state writes happen here (no external interaction
+        //    needed because the path payment already transferred XLM).
+        if is_escrow_campaign(&project) {
+            panic!("Escrow campaigns only support native token donations");
+        }
 
         project.total_raised = project
             .total_raised
             .checked_add(amount)
             .expect("Project total_raised overflow");
-        let goal_reached = apply_campaign_goal_progress(&mut project);
-        let donated_key = DataKey::HasDonated(project_id.clone(), anon_donor.clone());
+        let goal_reached = apply_campaign_goal_progress(&env, &project_id, &mut project);
+        let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
         if !env.storage().instance().has(&donated_key) {
             env.storage().instance().set(&donated_key, &true);
             project.donor_count = project
@@ -2865,6 +2915,15 @@ impl IndigoPayContract {
         (total_raised, total_co2, total_donors)
     }
 
+    pub fn get_campaign_distribution(
+        env: Env,
+        project_id: String,
+    ) -> Option<CampaignDistribution> {
+        env.storage()
+            .instance()
+            .get(&DataKey::CampaignDistribution(project_id))
+    }
+
     pub fn get_donor_stats(env: Env, donor: Address) -> DonorStats {
         env.storage()
             .instance()
@@ -3100,6 +3159,150 @@ impl IndigoPayContract {
             .instance()
             .get(&DataKey::ProjectMilestoneNFT(project_id, donor))
             .expect("Project milestone NFT not found")
+    }
+
+    // ─── Impact certificates ─────────────────────────────────────────────────
+
+    /// Publish a new immutable impact reporting root for a project.
+    /// Each publication increments the archive index and retains the
+    /// previous periods up to `MAX_ARCHIVED_PERIODS`.
+    pub fn publish_impact_root(
+        env: Env,
+        signers: Vec<Address>,
+        project_id: String,
+        root: BytesN<32>,
+        period_start: u32,
+        period_end: u32,
+        total_co2_kg: u32,
+        total_trees: u32,
+        total_hectares: u32,
+    ) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        if period_end <= period_start {
+            panic!("Impact period end must be after period start");
+        }
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Project(project_id.clone()))
+        {
+            panic!("Project not found");
+        }
+
+        let count_key = DataKey::ImpactRootCount(project_id.clone());
+        let period_index: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
+        if period_index > 0 {
+            let prev_key = DataKey::ImpactRootArchive(project_id.clone(), period_index - 1);
+            let prev_root: Option<ImpactRoot> = env.storage().instance().get(&prev_key);
+            if let Some(prev) = prev_root {
+                if period_start <= prev.period_end {
+                    panic!("Impact reporting periods must be chronological");
+                }
+            }
+        }
+
+        if period_index >= MAX_ARCHIVED_PERIODS {
+            let stale_index = period_index - MAX_ARCHIVED_PERIODS;
+            env.storage()
+                .instance()
+                .remove(&DataKey::ImpactRootArchive(project_id.clone(), stale_index));
+        }
+
+        let archived = ImpactRoot {
+            root: root.clone(),
+            period_start,
+            period_end,
+            total_co2_kg,
+            total_trees,
+            total_hectares,
+        };
+        env.storage().instance().set(
+            &DataKey::ImpactRootArchive(project_id.clone(), period_index),
+            &archived,
+        );
+        let next_count = period_index
+            .checked_add(1)
+            .expect("Impact root count overflow");
+        env.storage().instance().set(&count_key, &next_count);
+
+        env.events().publish(
+            (symbol_short!("imp_rt"), signers.get(0).unwrap(), project_id),
+            (period_index, root),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Verify a leaf against a specific archived impact reporting period.
+    pub fn verify_impact_inclusion(
+        env: Env,
+        project_id: String,
+        period_index: u32,
+        leaf: ImpactLeaf,
+        proof: Vec<BytesN<32>>,
+        leaf_index: u32,
+    ) -> bool {
+        if leaf.period_index != period_index {
+            return false;
+        }
+
+        let archived: Option<ImpactRoot> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ImpactRootArchive(project_id, period_index));
+        let archived = match archived {
+            Some(archived) => archived,
+            None => return false,
+        };
+
+        let leaf_hash = hash_impact_leaf(&env, &leaf);
+        verify_merkle_proof(&env, &archived.root, &leaf_hash, &proof, leaf_index)
+    }
+
+    /// Return archived impact periods from oldest retained to newest.
+    pub fn get_impact_periods(env: Env, project_id: String) -> Vec<ImpactPeriodSummary> {
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ImpactRootCount(project_id.clone()))
+            .unwrap_or(0);
+        let start = count.saturating_sub(MAX_ARCHIVED_PERIODS);
+        let mut periods = Vec::new(&env);
+        let mut idx = start;
+        while idx < count {
+            if let Some(archived) = env.storage().instance().get::<_, ImpactRoot>(
+                &DataKey::ImpactRootArchive(project_id.clone(), idx),
+            ) {
+                periods.push_back(ImpactPeriodSummary {
+                    period_index: idx,
+                    root: archived.root,
+                    period_start: archived.period_start,
+                    period_end: archived.period_end,
+                    total_co2_kg: archived.total_co2_kg,
+                    total_trees: archived.total_trees,
+                    total_hectares: archived.total_hectares,
+                });
+            }
+            idx = idx.checked_add(1).expect("Impact period index overflow");
+        }
+        periods
+    }
+
+    pub fn get_impact_root_count(env: Env, project_id: String) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ImpactRootCount(project_id))
+            .unwrap_or(0)
+    }
+
+    pub fn get_impact_root(
+        env: Env,
+        project_id: String,
+        period_index: u32,
+    ) -> Option<ImpactRoot> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ImpactRootArchive(project_id, period_index))
     }
 
     // ─── Governance ───────────────────────────────────────────────────────────
@@ -3579,11 +3782,15 @@ impl IndigoPayContract {
         let prev_badge = donor_stats.badge.clone();
 
         // Update project and donor stats using XLM-equivalent
+        if is_escrow_campaign(&project) {
+            panic!("Escrow campaigns only support native token donations");
+        }
+
         project.total_raised = project
             .total_raised
             .checked_add(xlm_equivalent)
             .expect("Project total_raised overflow");
-        let goal_reached = apply_campaign_goal_progress(&mut project);
+        let goal_reached = apply_campaign_goal_progress(&env, &project_id, &mut project);
         let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
         if !env.storage().instance().has(&donated_key) {
             env.storage().instance().set(&donated_key, &true);
@@ -4694,13 +4901,17 @@ impl IndigoPayContract {
             .checked_mul(project.co2_per_xlm as i128)
             .expect("CO2 calculation overflow");
 
+        if is_escrow_campaign(&project) {
+            panic!("Escrow campaigns only support native token donations");
+        }
+
         // Checks-Effects-Interactions (CEI) Pattern: State changes before token transfers.
         // Update Project
         project.total_raised = project
             .total_raised
             .checked_add(xlm_equivalent)
             .expect("Project total_raised overflow");
-        let goal_reached = apply_campaign_goal_progress(&mut project);
+        let goal_reached = apply_campaign_goal_progress(&env, &recurring.project_id, &mut project);
         let donated_key = DataKey::HasDonated(recurring.project_id.clone(), donor.clone());
         if !env.storage().instance().has(&donated_key) {
             env.storage().instance().set(&donated_key, &true);
@@ -5176,6 +5387,24 @@ mod tests {
         let mut v = Vec::new(env);
         v.push_back(a.clone());
         v
+    }
+
+    fn impact_leaf(
+        env: &Env,
+        recipient: &Address,
+        period_index: u32,
+        co2_kg: u32,
+        trees: u32,
+        hectares: u32,
+    ) -> ImpactLeaf {
+        let _ = env;
+        ImpactLeaf {
+            recipient: recipient.clone(),
+            period_index,
+            co2_kg,
+            trees,
+            hectares,
+        }
     }
 
     // ─── Existing tests ───────────────────────────────────────────────────────
@@ -6047,6 +6276,179 @@ mod tests {
         assert_eq!(nft.amount_donated, 120 * STROOP);
     }
 
+    // ─── Impact certificate root archiving tests ────────────────────────────
+
+    #[test]
+    fn test_publish_root_archives_previous() {
+        let (env, _cid, client, admin, pid) = setup();
+        let root_0 = BytesN::from_array(&env, &[1u8; 32]);
+        let root_1 = BytesN::from_array(&env, &[2u8; 32]);
+
+        client.publish_impact_root(
+            &signers1(&env, &admin),
+            &pid,
+            &root_0,
+            &1u32,
+            &10u32,
+            &100u32,
+            &5u32,
+            &2u32,
+        );
+        client.publish_impact_root(
+            &signers1(&env, &admin),
+            &pid,
+            &root_1,
+            &11u32,
+            &20u32,
+            &200u32,
+            &7u32,
+            &3u32,
+        );
+
+        assert_eq!(client.get_impact_root_count(&pid), 2);
+        let first = client.get_impact_root(&pid, &0u32).expect("first root");
+        let second = client.get_impact_root(&pid, &1u32).expect("second root");
+        assert_eq!(first.root, root_0);
+        assert_eq!(first.period_start, 1);
+        assert_eq!(first.period_end, 10);
+        assert_eq!(second.root, root_1);
+        assert_eq!(second.period_start, 11);
+        assert_eq!(second.period_end, 20);
+    }
+
+    #[test]
+    fn test_verify_against_archived_period() {
+        let (env, _cid, client, admin, pid) = setup();
+        let recipient_a = Address::generate(&env);
+        let recipient_b = Address::generate(&env);
+        let leaf_a = impact_leaf(&env, &recipient_a, 0, 12, 3, 1);
+        let leaf_b = impact_leaf(&env, &recipient_b, 0, 8, 2, 1);
+        let hash_a = hash_impact_leaf(&env, &leaf_a);
+        let hash_b = hash_impact_leaf(&env, &leaf_b);
+        let root = hash_merkle_pair(&env, &hash_a, &hash_b);
+
+        client.publish_impact_root(
+            &signers1(&env, &admin),
+            &pid,
+            &root,
+            &1u32,
+            &31u32,
+            &20u32,
+            &5u32,
+            &2u32,
+        );
+
+        let mut proof = Vec::new(&env);
+        proof.push_back(hash_b);
+        assert!(client.verify_impact_inclusion(&pid, &0u32, &leaf_a, &proof, &0u32));
+    }
+
+    #[test]
+    fn test_get_impact_periods() {
+        let (env, _cid, client, admin, pid) = setup();
+        let root_0 = BytesN::from_array(&env, &[11u8; 32]);
+        let root_1 = BytesN::from_array(&env, &[22u8; 32]);
+        let root_2 = BytesN::from_array(&env, &[33u8; 32]);
+
+        client.publish_impact_root(
+            &signers1(&env, &admin),
+            &pid,
+            &root_0,
+            &100u32,
+            &110u32,
+            &10u32,
+            &1u32,
+            &2u32,
+        );
+        client.publish_impact_root(
+            &signers1(&env, &admin),
+            &pid,
+            &root_1,
+            &111u32,
+            &120u32,
+            &20u32,
+            &3u32,
+            &4u32,
+        );
+        client.publish_impact_root(
+            &signers1(&env, &admin),
+            &pid,
+            &root_2,
+            &121u32,
+            &130u32,
+            &30u32,
+            &5u32,
+            &6u32,
+        );
+
+        let periods = client.get_impact_periods(&pid);
+        assert_eq!(periods.len(), 3);
+        let p0 = periods.get(0).unwrap();
+        let p1 = periods.get(1).unwrap();
+        let p2 = periods.get(2).unwrap();
+        assert_eq!(p0.period_index, 0);
+        assert_eq!(p0.root, root_0);
+        assert_eq!(p0.period_start, 100);
+        assert_eq!(p1.period_index, 1);
+        assert_eq!(p1.root, root_1);
+        assert_eq!(p1.total_trees, 3);
+        assert_eq!(p2.period_index, 2);
+        assert_eq!(p2.root, root_2);
+        assert_eq!(p2.total_hectares, 6);
+    }
+
+    #[test]
+    fn test_archive_rotation() {
+        let (env, _cid, client, admin, pid) = setup();
+        let mut expected_last = BytesN::from_array(&env, &[0u8; 32]);
+
+        for i in 0u32..3 {
+            let root = BytesN::from_array(&env, &[i as u8; 32]);
+            expected_last = root.clone();
+            client.publish_impact_root(
+                &signers1(&env, &admin),
+                &pid,
+                &root,
+                &(i * 10 + 1),
+                &(i * 10 + 10),
+                &((i + 1) * 10),
+                &((i + 1) * 2),
+                &((i + 1) * 3),
+            );
+        }
+
+        let periods = client.get_impact_periods(&pid);
+        assert_eq!(periods.len(), 3);
+        assert_eq!(periods.get(0).unwrap().period_index, 0);
+        assert_eq!(periods.get(2).unwrap().root, expected_last);
+        assert_eq!(client.get_impact_root_count(&pid), 3);
+    }
+
+    #[test]
+    fn test_max_periods_enforced() {
+        let (env, _cid, client, admin, pid) = setup();
+
+        for i in 0u32..49 {
+            let root = BytesN::from_array(&env, &[i as u8; 32]);
+            client.publish_impact_root(
+                &signers1(&env, &admin),
+                &pid,
+                &root,
+                &(i * 10 + 1),
+                &(i * 10 + 10),
+                &((i + 1) * 10),
+                &((i + 1) * 2),
+                &((i + 1) * 3),
+            );
+        }
+
+        let periods = client.get_impact_periods(&pid);
+        assert_eq!(periods.len(), MAX_ARCHIVED_PERIODS);
+        assert_eq!(periods.get(0).unwrap().period_index, 1);
+        assert!(client.get_impact_root(&pid, &0u32).is_none());
+        assert_eq!(client.get_impact_root_count(&pid), 49);
+    }
+
     // ─── Pause / resume tests (#213) ──────────────────────────────────────────
 
     #[test]
@@ -6493,7 +6895,7 @@ mod tests {
         let (env, _cid, client, admin, pid) = setup();
         let deadline = env.ledger().sequence() + 1_000;
         let goal = 5_000 * STROOP;
-        client.create_campaign(&admin, &pid, &goal, &deadline);
+        client.create_campaign(&admin, &pid, &goal, &deadline, &Vec::new(&env));
         let p = client.get_project(&pid);
         assert_eq!(p.campaign_status, CampaignStatus::Active);
         assert_eq!(p.goal, goal);
@@ -6510,6 +6912,7 @@ mod tests {
             &pid,
             &(100 * STROOP),
             &(env.ledger().sequence() + 10),
+            &Vec::new(&env),
         );
     }
 
@@ -6517,14 +6920,26 @@ mod tests {
     #[should_panic(expected = "Campaign goal must be positive")]
     fn test_create_campaign_zero_goal_fails() {
         let (env, _cid, client, admin, pid) = setup();
-        client.create_campaign(&admin, &pid, &0i128, &(env.ledger().sequence() + 10));
+        client.create_campaign(
+            &admin,
+            &pid,
+            &0i128,
+            &(env.ledger().sequence() + 10),
+            &Vec::new(&env),
+        );
     }
 
     #[test]
     #[should_panic(expected = "Campaign deadline must be in the future")]
     fn test_create_campaign_past_deadline_fails() {
         let (env, _cid, client, admin, pid) = setup();
-        client.create_campaign(&admin, &pid, &(100 * STROOP), &env.ledger().sequence());
+        client.create_campaign(
+            &admin,
+            &pid,
+            &(100 * STROOP),
+            &env.ledger().sequence(),
+            &Vec::new(&env),
+        );
     }
 
     #[test]
@@ -6532,15 +6947,27 @@ mod tests {
     fn test_create_campaign_while_active_fails() {
         let (env, _cid, client, admin, pid) = setup();
         let deadline = env.ledger().sequence() + 100;
-        client.create_campaign(&admin, &pid, &(100 * STROOP), &deadline);
-        client.create_campaign(&admin, &pid, &(200 * STROOP), &(deadline + 100));
+        client.create_campaign(&admin, &pid, &(100 * STROOP), &deadline, &Vec::new(&env));
+        client.create_campaign(
+            &admin,
+            &pid,
+            &(200 * STROOP),
+            &(deadline + 100),
+            &Vec::new(&env),
+        );
     }
 
     #[test]
     fn test_donate_under_goal_keeps_campaign_active() {
         let (env, _cid, client, admin, pid) = setup();
         let goal = 100 * STROOP;
-        client.create_campaign(&admin, &pid, &goal, &(env.ledger().sequence() + 1_000));
+        client.create_campaign(
+            &admin,
+            &pid,
+            &goal,
+            &(env.ledger().sequence() + 1_000),
+            &Vec::new(&env),
+        );
 
         let donor = Address::generate(&env);
         let token_admin = Address::generate(&env);
@@ -6559,7 +6986,13 @@ mod tests {
     fn test_donate_reaching_goal_sets_goal_reached() {
         let (env, _cid, client, admin, pid) = setup();
         let goal = 100 * STROOP;
-        client.create_campaign(&admin, &pid, &goal, &(env.ledger().sequence() + 1_000));
+        client.create_campaign(
+            &admin,
+            &pid,
+            &goal,
+            &(env.ledger().sequence() + 1_000),
+            &Vec::new(&env),
+        );
 
         let donor = Address::generate(&env);
         let token_admin = Address::generate(&env);
@@ -6579,7 +7012,13 @@ mod tests {
     fn test_donate_after_goal_reached_fails() {
         let (env, _cid, client, admin, pid) = setup();
         let goal = 50 * STROOP;
-        client.create_campaign(&admin, &pid, &goal, &(env.ledger().sequence() + 1_000));
+        client.create_campaign(
+            &admin,
+            &pid,
+            &goal,
+            &(env.ledger().sequence() + 1_000),
+            &Vec::new(&env),
+        );
 
         let donor = Address::generate(&env);
         let token_admin = Address::generate(&env);
@@ -6597,7 +7036,13 @@ mod tests {
         let (env, cid, client, admin, pid) = setup();
         let start = env.ledger().sequence();
         let deadline = start + 50;
-        client.create_campaign(&admin, &pid, &(1_000 * STROOP), &deadline);
+        client.create_campaign(
+            &admin,
+            &pid,
+            &(1_000 * STROOP),
+            &deadline,
+            &Vec::new(&env),
+        );
 
         extend_ttl(&env, &cid);
         env.ledger().set_sequence_number(deadline + 1);
@@ -6615,7 +7060,13 @@ mod tests {
     fn test_extend_campaign_updates_deadline() {
         let (env, _cid, client, admin, pid) = setup();
         let start = env.ledger().sequence();
-        client.create_campaign(&admin, &pid, &(100 * STROOP), &(start + 100));
+        client.create_campaign(
+            &admin,
+            &pid,
+            &(100 * STROOP),
+            &(start + 100),
+            &Vec::new(&env),
+        );
         client.extend_campaign(&admin, &pid, &(start + 500));
         assert_eq!(client.get_project(&pid).deadline_ledger, start + 500);
     }
@@ -6625,7 +7076,13 @@ mod tests {
     fn test_extend_campaign_non_admin_fails() {
         let (env, _cid, client, admin, pid) = setup();
         let start = env.ledger().sequence();
-        client.create_campaign(&admin, &pid, &(100 * STROOP), &(start + 100));
+        client.create_campaign(
+            &admin,
+            &pid,
+            &(100 * STROOP),
+            &(start + 100),
+            &Vec::new(&env),
+        );
         let imposter = Address::generate(&env);
         client.extend_campaign(&imposter, &pid, &(start + 200));
     }
@@ -6638,6 +7095,7 @@ mod tests {
             &pid,
             &(100 * STROOP),
             &(env.ledger().sequence() + 1_000),
+            &Vec::new(&env),
         );
         client.close_campaign(&admin, &pid);
         assert_eq!(
@@ -6655,6 +7113,7 @@ mod tests {
             &pid,
             &(100 * STROOP),
             &(env.ledger().sequence() + 1_000),
+            &Vec::new(&env),
         );
         client.close_campaign(&admin, &pid);
 
@@ -6672,7 +7131,13 @@ mod tests {
         let (env, cid, client, admin, pid) = setup();
         let start = env.ledger().sequence();
         let deadline = start + 40;
-        client.create_campaign(&admin, &pid, &(1_000 * STROOP), &deadline);
+        client.create_campaign(
+            &admin,
+            &pid,
+            &(1_000 * STROOP),
+            &deadline,
+            &Vec::new(&env),
+        );
         extend_ttl(&env, &cid);
         env.ledger().set_sequence_number(deadline + 1);
         client.close_campaign(&admin, &pid);
@@ -6690,6 +7155,7 @@ mod tests {
             &pid,
             &(30 * STROOP),
             &(env.ledger().sequence() + 1_000),
+            &Vec::new(&env),
         );
         let donor = Address::generate(&env);
         client.donate_asset(&donor, &pid, &(30 * STROOP), &symbol_short!("yXLM"), &0u32);
@@ -6713,7 +7179,13 @@ mod tests {
         let start = env.ledger().sequence();
         let deadline = start + 30;
         // MockOracle rate = 8 XLM per USDC stroop; 1 USDC stroop → 8 XLM stroops.
-        client.create_campaign(&admin, &pid, &(1_000 * STROOP), &deadline);
+        client.create_campaign(
+            &admin,
+            &pid,
+            &(1_000 * STROOP),
+            &deadline,
+            &Vec::new(&env),
+        );
 
         extend_ttl(&env, &cid);
         env.ledger().set_sequence_number(deadline + 1);
@@ -6743,6 +7215,231 @@ mod tests {
         let p = client.get_project(&pid);
         assert_eq!(p.campaign_status, CampaignStatus::None);
         assert_eq!(p.total_raised, 10 * STROOP);
+    }
+
+    #[test]
+    #[should_panic(expected = "Distribution steps must sum to 100%")]
+    fn test_distribution_schedule_validation() {
+        let (env, _cid, client, admin, pid) = setup();
+        let deadline = env.ledger().sequence() + 1_000;
+        let mut schedule = Vec::new(&env);
+        schedule.push_back(DistributionStep {
+            percentage: 60,
+            delay_ledgers: 0,
+        });
+        schedule.push_back(DistributionStep {
+            percentage: 30,
+            delay_ledgers: 50,
+        });
+        client.create_campaign(&admin, &pid, &(100 * STROOP), &deadline, &schedule);
+    }
+
+    #[test]
+    fn test_auto_queue_on_goal() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let native_token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.set_native_token(&admin, &native_token);
+
+        let mut schedule = Vec::new(&env);
+        schedule.push_back(DistributionStep {
+            percentage: 50,
+            delay_ledgers: 0,
+        });
+        schedule.push_back(DistributionStep {
+            percentage: 50,
+            delay_ledgers: 20,
+        });
+
+        let goal = 100 * STROOP;
+        client.create_campaign(
+            &admin,
+            &pid,
+            &goal,
+            &(env.ledger().sequence() + 1_000),
+            &schedule,
+        );
+
+        let donor = Address::generate(&env);
+        StellarAssetClient::new(&env, &native_token).mint(&donor, &goal);
+        client.donate(&native_token, &donor, &pid, &goal, &0u32);
+
+        let queued = client
+            .get_campaign_distribution(&pid)
+            .expect("distribution should be queued");
+        assert_eq!(queued.steps.len(), 2);
+        assert_eq!(queued.claimed.len(), 2);
+        assert!(!queued.claimed.get(0).unwrap());
+        assert_eq!(queued.goal_reached_at, env.ledger().sequence());
+    }
+
+    #[test]
+    #[should_panic(expected = "Distribution timelock not yet elapsed")]
+    fn test_claim_before_delay_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let native_token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.set_native_token(&admin, &native_token);
+
+        let mut schedule = Vec::new(&env);
+        schedule.push_back(DistributionStep {
+            percentage: 100,
+            delay_ledgers: 25,
+        });
+
+        let goal = 75 * STROOP;
+        client.create_campaign(
+            &admin,
+            &pid,
+            &goal,
+            &(env.ledger().sequence() + 1_000),
+            &schedule,
+        );
+
+        let donor = Address::generate(&env);
+        StellarAssetClient::new(&env, &native_token).mint(&donor, &goal);
+        client.donate(&native_token, &donor, &pid, &goal, &0u32);
+
+        let project = client.get_project(&pid);
+        client.claim_distribution(&project.wallet, &pid);
+    }
+
+    #[test]
+    fn test_claim_distribution() {
+        let (env, cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let native_token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.set_native_token(&admin, &native_token);
+
+        let mut schedule = Vec::new(&env);
+        schedule.push_back(DistributionStep {
+            percentage: 40,
+            delay_ledgers: 0,
+        });
+        schedule.push_back(DistributionStep {
+            percentage: 60,
+            delay_ledgers: 30,
+        });
+
+        let goal = 100 * STROOP;
+        client.create_campaign(
+            &admin,
+            &pid,
+            &goal,
+            &(env.ledger().sequence() + 1_000),
+            &schedule,
+        );
+
+        let donor = Address::generate(&env);
+        StellarAssetClient::new(&env, &native_token).mint(&donor, &goal);
+        client.donate(&native_token, &donor, &pid, &goal, &0u32);
+
+        let project = client.get_project(&pid);
+        let wallet = project.wallet.clone();
+        let token_client = StellarAssetClient::new(&env, &native_token);
+        let before_balance = token_client.balance(&wallet);
+        assert_eq!(before_balance, 0);
+
+        client.claim_distribution(&wallet, &pid);
+
+        let after_balance = token_client.balance(&wallet);
+        assert_eq!(after_balance, 40 * STROOP);
+
+        let remaining_balance = env.as_contract(&cid, || {
+            env.storage().instance().get::<DataKey, i128>(&DataKey::ProjectContractBalance(
+                pid.clone(),
+                native_token.clone(),
+            ))
+        });
+        assert_eq!(remaining_balance.unwrap(), 60 * STROOP);
+
+        let queued = client.get_campaign_distribution(&pid).expect("still queued");
+        assert!(queued.claimed.get(0).unwrap());
+        assert!(!queued.claimed.get(1).unwrap());
+    }
+
+    #[test]
+    fn test_claim_all_steps() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let native_token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.set_native_token(&admin, &native_token);
+
+        let mut schedule = Vec::new(&env);
+        schedule.push_back(DistributionStep {
+            percentage: 50,
+            delay_ledgers: 0,
+        });
+        schedule.push_back(DistributionStep {
+            percentage: 50,
+            delay_ledgers: 10,
+        });
+
+        let goal = 200 * STROOP;
+        client.create_campaign(
+            &admin,
+            &pid,
+            &goal,
+            &(env.ledger().sequence() + 1_000),
+            &schedule,
+        );
+
+        let donor = Address::generate(&env);
+        StellarAssetClient::new(&env, &native_token).mint(&donor, &goal);
+        client.donate(&native_token, &donor, &pid, &goal, &0u32);
+
+        let wallet = client.get_project(&pid).wallet;
+        client.claim_distribution(&wallet, &pid);
+
+        let seq = env.ledger().sequence();
+        env.ledger().set_sequence_number(seq + 10);
+        client.claim_distribution(&wallet, &pid);
+
+        assert_eq!(client.get_campaign_distribution(&pid), None);
+        assert_eq!(client.get_project(&pid).campaign_status, CampaignStatus::Closed);
+        assert_eq!(StellarAssetClient::new(&env, &native_token).balance(&wallet), goal);
+    }
+
+    #[test]
+    #[should_panic(expected = "No distribution queued")]
+    fn test_double_claim_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let native_token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.set_native_token(&admin, &native_token);
+
+        let mut schedule = Vec::new(&env);
+        schedule.push_back(DistributionStep {
+            percentage: 100,
+            delay_ledgers: 0,
+        });
+
+        let goal = 50 * STROOP;
+        client.create_campaign(
+            &admin,
+            &pid,
+            &goal,
+            &(env.ledger().sequence() + 1_000),
+            &schedule,
+        );
+
+        let donor = Address::generate(&env);
+        StellarAssetClient::new(&env, &native_token).mint(&donor, &goal);
+        client.donate(&native_token, &donor, &pid, &goal, &0u32);
+
+        let wallet = client.get_project(&pid).wallet;
+        client.claim_distribution(&wallet, &pid);
+        client.claim_distribution(&wallet, &pid);
     }
 
     // ─── Contract-level pause tests ─────────────────────────────────────────
@@ -8073,10 +8770,8 @@ mod tests {
         client.set_native_token(&admin, &native_token);
 
         let native_client = StellarAssetClient::new(&env, &native_token);
-        // 500 XLM × 3 executions = 1 500 XLM donation + 1 XLM × 3 = 3 XLM keeper
-        // incentives = 1 503 XLM total to cover all transfer_from calls.
-        native_client.mint(&donor, &(1503 * STROOP));
-        native_client.approve(&donor, &client.address, &(1503 * STROOP), &9999u32);
+        native_client.mint(&donor, &(1600 * STROOP));
+        native_client.approve(&donor, &client.address, &(1600 * STROOP), &9999u32);
 
         // 500 XLM intervals
         let recurring_id = client.create_recurring(
