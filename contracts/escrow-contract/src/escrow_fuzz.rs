@@ -397,6 +397,7 @@ mod fuzz {
                 name: SorobanString::from_str(env, &std::format!("M{}", i)),
                 percentage: pct,
                 released: false,
+                partial_release_percentage: 0,
                 disputed: false,
                 oracle: None,
                 verified: false,
@@ -503,6 +504,7 @@ mod fuzz {
                                 &client_addr,
                                 &s_job_id,
                                 &(*milestone_idx as u32),
+                                &100u32,
                             );
                         }));
 
@@ -819,6 +821,73 @@ mod fuzz {
             }
             let doubled = crate::count_distinct_admins(&admin_set, &doubled_signers);
             prop_assert_eq!(doubled, actual, "duplicating signers must not change the distinct admin count");
+        }
+    }
+
+    // ─── Partial milestone release fuzz test (#441) ────────────────────────────
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
+
+        /// **prop_partial_release_sum_equals_full**: releasing a milestone in
+        /// an arbitrary sequence of partial steps (each step's `release_pct`
+        /// summing to exactly 100) must transfer, in total, exactly the same
+        /// amount as a single full release would — no matter how the 100% is
+        /// split across steps — and the milestone must be marked released
+        /// (and the job Completed) only once the cumulative percentage
+        /// reaches 100.
+        #[test]
+        fn prop_partial_release_sum_equals_full(
+            amount in job_amount(),
+            release_steps in milestone_set(),
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let contract_id = env.register_contract(None, EscrowContract);
+            let client = EscrowContractClient::new(&env, &contract_id);
+
+            let admin = Address::generate(&env);
+            client.initialize(&signers1(&env, &admin), &1u32);
+
+            let client_addr = Address::generate(&env);
+            let freelancer_addr = Address::generate(&env);
+            let token_admin = Address::generate(&env);
+            let token = env
+                .register_stellar_asset_contract_v2(token_admin)
+                .address();
+            StellarAssetClient::new(&env, &token).mint(&client_addr, &amount);
+
+            let job_id = SorobanString::from_str(&env, "partial-release-job");
+            let single_milestone = build_milestones(&env, &[100u32]);
+            client.create_job(
+                &client_addr,
+                &freelancer_addr,
+                &job_id,
+                &token,
+                &amount,
+                &single_milestone,
+                &RELEASE_AFTER,
+            );
+
+            let token_client = soroban_sdk::token::Client::new(&env, &token);
+            let mut cumulative_pct: u32 = 0;
+            let step_count = release_steps.len();
+            for (i, &pct) in release_steps.iter().enumerate() {
+                client.release_milestone(&client_addr, &job_id, &0u32, &pct);
+                cumulative_pct += pct;
+
+                let job = client.get_job(&job_id).unwrap();
+                let m0 = job.milestones.get(0).unwrap();
+                prop_assert_eq!(m0.partial_release_percentage, cumulative_pct);
+
+                let is_last = i + 1 == step_count;
+                prop_assert_eq!(m0.released, is_last, "milestone must be released iff this was the final step (cumulative == 100)");
+                prop_assert_eq!(job.status.clone(), if is_last { JobStatus::Completed } else { JobStatus::PartiallyReleased });
+            }
+
+            prop_assert_eq!(cumulative_pct, 100u32);
+            prop_assert_eq!(token_client.balance(&freelancer_addr), amount, "sum of partial releases must equal a full release");
         }
     }
 }

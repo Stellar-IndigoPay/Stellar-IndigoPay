@@ -98,3 +98,81 @@ extend the current period panics with
 | `admin_rmv` | `remove_admin` removed an admin from the set             |
 | `thresh_up` | `update_threshold` changed the threshold                 |
 | `rel_upd`   | `update_release_after` extended a job's release period   |
+
+## Partial milestone release (#441)
+
+`Milestone` gains a `partial_release_percentage: u32` field tracking the
+cumulative percentage of that milestone released so far (0-100).
+`released` is always kept in sync with `partial_release_percentage == 100`,
+so every other function that reads `milestone.released` (dispute checks,
+oracle proof/verify, `amend_job_milestones` validation, job-completion
+checks) continues to work unchanged.
+
+### `release_milestone` / `release_milestone_partial`
+
+```rust
+pub fn release_milestone(env: Env, client: Address, job_id: String, milestone_index: u32, release_pct: u32)
+pub fn release_milestone_partial(env: Env, client: Address, job_id: String, milestone_index: u32, release_pct: u32)
+```
+
+`release_milestone_partial` is a thin alias that forwards to
+`release_milestone` — both accept the same `release_pct`, the percentage of
+*that milestone* (not of the total job) to release now. `release_pct` is
+added to the milestone's existing `partial_release_percentage`; the
+milestone becomes fully released once the cumulative total reaches 100.
+
+- `release_pct == 0` panics with `"release_pct must be greater than 0"`.
+- A `release_pct` that would push the cumulative total above 100 panics
+  with `"release_pct exceeds remaining milestone percentage"`.
+- The paid amount is computed as the difference between the milestone's
+  proportional amount at the new cumulative percentage and at the old one
+  (`released_after - released_before`), not `release_pct` applied to the
+  milestone amount directly. This ensures a final partial release that
+  reaches 100% always pays out exactly whatever integer-division dust is
+  left, so the sum of all partial releases equals a single full release to
+  the stroop.
+
+### Interaction with claim, dispute, and refund
+
+- **`claim_milestone`** now claims only the outstanding (unreleased)
+  portion of a milestone, so a freelancer can auto-claim the remainder of a
+  milestone the client had already partially released.
+- **`dispute_milestone`** is unchanged: it still guards against disputing
+  an already-fully-released milestone, but a *partially* released
+  milestone can still be disputed — the dispute freezes only what has not
+  yet been paid out.
+- **`resolve_milestone_dispute`** settles only the remaining unpaid portion
+  of a disputed milestone (`full_amount - released_before`), so a milestone
+  that had some percentage released before being disputed is never
+  double-paid on resolution.
+- **`resolve_dispute`** (deprecated, job-level) and **`refund_expired_job`**
+  both route through `compute_remaining_funds`, which now sums each
+  milestone's unreleased portion (`full_amount - released_amount`) instead
+  of an all-or-nothing `released` check. `refund_expired_job` also now
+  rejects if *any* milestone has a nonzero `partial_release_percentage`
+  (previously only checked `released`), since a partial payout means a full
+  refund would double-pay the client.
+- **`amend_job_milestones`** rejects any new milestone with a nonzero
+  `partial_release_percentage`, matching the existing rejection of
+  `released`/`disputed` milestones.
+
+### Job status
+
+A job reaches `JobStatus::Completed` only when every milestone's
+`partial_release_percentage` is 100 — a job with any milestone still
+partially released stays `PartiallyReleased`, regardless of how many
+individual partial-release calls have succeeded.
+
+### Event change
+
+The `ms_rel` event (emitted by `release_milestone` /
+`release_milestone_partial`) now carries the `release_pct` applied in that
+call in addition to the incremental `release_amount`:
+
+| Event topic | Payload                                                    |
+| ----------- | ----------------------------------------------------------- |
+| `ms_rel`    | `(job_id, milestone_index, release_pct, release_amount)`     |
+
+`release_amount` is the incremental amount paid in *this* call (not the
+milestone's full amount), consistent with the partial-release semantics
+above.

@@ -26,6 +26,9 @@ pub struct Milestone {
     pub name: String,
     pub percentage: u32, // 0-100
     pub released: bool,
+    // Cumulative percentage of THIS milestone released so far (0-100).
+    // `released` is always kept in sync with `partial_release_percentage == 100`.
+    pub partial_release_percentage: u32,
     pub disputed: bool,
     pub oracle: Option<Address>,
     pub verified: bool,
@@ -39,6 +42,9 @@ pub struct Milestone {
     pub name: String,
     pub percentage: u32, // 0-100
     pub released: bool,
+    // Cumulative percentage of THIS milestone released so far (0-100).
+    // `released` is always kept in sync with `partial_release_percentage == 100`.
+    pub partial_release_percentage: u32,
     pub disputed: bool,
     pub oracle: Option<Address>,
     pub verified: bool,
@@ -81,15 +87,21 @@ pub enum DataKey {
 pub const RELEASE_AFTER_LEDGERS: u32 = 10;
 pub const DEFAULT_DEADLINE_LEDGERS: u32 = 1_555_200; // 90 days @ 5s/ledger
 
+/// The full proportional amount a milestone is worth, and how much of that
+/// has been released so far given its cumulative `partial_release_percentage`.
+fn milestone_amounts(job: &Job, milestone: &Milestone) -> (i128, i128) {
+    let full_amount = (job.amount * milestone.percentage as i128) / 100i128;
+    let released_amount = (full_amount * milestone.partial_release_percentage as i128) / 100i128;
+    (full_amount, released_amount)
+}
+
 fn compute_remaining_funds(job: &Job) -> i128 {
     let mut remaining_amount: i128 = 0;
     for milestone in job.milestones.iter() {
-        if !milestone.released {
-            let proportion = milestone.percentage as i128;
-            remaining_amount = remaining_amount
-                .checked_add((job.amount * proportion) / 100i128)
-                .expect("remaining_amount overflow");
-        }
+        let (full_amount, released_amount) = milestone_amounts(job, &milestone);
+        remaining_amount = remaining_amount
+            .checked_add(full_amount - released_amount)
+            .expect("remaining_amount overflow");
     }
     remaining_amount
 }
@@ -310,7 +322,8 @@ impl EscrowContract {
 
         let mut total_percentage: u32 = 0;
         for milestone in new_milestones.iter() {
-            if milestone.released || milestone.disputed {
+            if milestone.released || milestone.disputed || milestone.partial_release_percentage != 0
+            {
                 panic!("New milestones must not be released or disputed");
             }
             total_percentage = total_percentage
@@ -360,9 +373,23 @@ impl EscrowContract {
             .unwrap_or(0)
     }
 
-    /// Client releases a specific milestone. Pays proportional XLM to freelancer.
-    pub fn release_milestone(env: Env, client: Address, job_id: String, milestone_index: u32) {
+    /// Client releases `release_pct`% of a milestone's proportional amount
+    /// (e.g. `release_pct=50` on a 40%-of-job milestone pays out 20% of the
+    /// total job amount). `release_pct` is added to whatever has already
+    /// been released for this milestone via prior partial releases; the
+    /// milestone becomes fully released once the cumulative total reaches
+    /// 100. Pays the incremental amount to the freelancer.
+    pub fn release_milestone(
+        env: Env,
+        client: Address,
+        job_id: String,
+        milestone_index: u32,
+        release_pct: u32,
+    ) {
         client.require_auth();
+        if release_pct == 0 {
+            panic!("release_pct must be greater than 0");
+        }
         let mut job: Job = env
             .storage()
             .instance()
@@ -392,8 +419,17 @@ impl EscrowContract {
             panic!("Milestone not verified by oracle");
         }
 
-        let proportion = milestone.percentage as i128;
-        let release_amount = (job.amount * proportion) / 100i128;
+        let new_partial_pct = milestone
+            .partial_release_percentage
+            .checked_add(release_pct)
+            .expect("partial_release_percentage overflow");
+        if new_partial_pct > 100 {
+            panic!("release_pct exceeds remaining milestone percentage");
+        }
+
+        let (full_amount, released_before) = milestone_amounts(&job, milestone);
+        let released_after = (full_amount * new_partial_pct as i128) / 100i128;
+        let release_amount = released_after - released_before;
 
         // ── Effects: rebuild the milestone vector, recompute status,
         //    and persist state BEFORE the external token movement (CEI ordering).
@@ -402,7 +438,8 @@ impl EscrowContract {
         for i in 0..updated_milestones.len() {
             let mut m = updated_milestones.get(i).unwrap().clone();
             if i == milestone_index {
-                m.released = true;
+                m.partial_release_percentage = new_partial_pct;
+                m.released = new_partial_pct == 100;
             }
             if m.released {
                 released_count = released_count
@@ -427,13 +464,26 @@ impl EscrowContract {
         // Event emission
         env.events().publish(
             (symbol_short!("ms_rel"), client),
-            (job_id, milestone_index, release_amount),
+            (job_id, milestone_index, release_pct, release_amount),
         );
 
         // ── Interaction: external token transfer last.
         let token_client = token::Client::new(&env, &job.token);
         let contract_addr = env.current_contract_address();
         token_client.transfer(&contract_addr, &job.freelancer, &release_amount);
+    }
+
+    /// Alias for `release_milestone` — releases `release_pct`% of a milestone's
+    /// proportional amount. Provided for callers that want an explicitly-named
+    /// entry point for partial releases.
+    pub fn release_milestone_partial(
+        env: Env,
+        client: Address,
+        job_id: String,
+        milestone_index: u32,
+        release_pct: u32,
+    ) {
+        Self::release_milestone(env, client, job_id, milestone_index, release_pct);
     }
 
     /// Freelancer submits an off-chain proof hash for oracle-verified milestones.
@@ -570,6 +620,7 @@ impl EscrowContract {
         for i in 0..updated_milestones.len() {
             let mut m = updated_milestones.get(i).unwrap().clone();
             m.released = true;
+            m.partial_release_percentage = 100;
             m.disputed = false;
             updated_milestones.set(i, m);
         }
@@ -670,11 +721,15 @@ impl EscrowContract {
             panic!("Milestone is not disputed");
         }
 
-        let proportion = milestone.percentage as i128;
-        let release_amount = (job.amount * proportion) / 100i128;
+        // Only the portion not already paid out by a prior partial release
+        // is settled here — a milestone can be disputed after some of its
+        // percentage has already been released.
+        let (full_amount, released_before) = milestone_amounts(&job, &milestone);
+        let release_amount = full_amount - released_before;
 
         milestone.disputed = false;
         milestone.released = true;
+        milestone.partial_release_percentage = 100;
         milestones.set(milestone_index, milestone);
         job.milestones = milestones;
 
@@ -725,7 +780,10 @@ impl EscrowContract {
             panic!("Job deadline has not passed");
         }
 
-        let any_claimed = job.milestones.iter().any(|m| m.released);
+        let any_claimed = job
+            .milestones
+            .iter()
+            .any(|m| m.partial_release_percentage > 0);
         if any_claimed {
             panic!("Cannot refund - milestones have been claimed");
         }
@@ -749,7 +807,9 @@ impl EscrowContract {
         }
     }
 
-    /// Freelancer can claim a milestone after release_after ledgers if not disputed.
+    /// Freelancer can claim a milestone's remaining unreleased percentage
+    /// after release_after ledgers if not disputed. If the milestone already
+    /// has a partial release, only the outstanding portion is paid out.
     pub fn claim_milestone(env: Env, freelancer: Address, job_id: String, milestone_index: u32) {
         freelancer.require_auth();
         let mut job: Job = env
@@ -774,14 +834,15 @@ impl EscrowContract {
         if milestone.released {
             panic!("Milestone already released");
         }
-        let proportion = milestone.percentage as i128;
-        let release_amount = (job.amount * proportion) / 100i128;
+        let (full_amount, released_before) = milestone_amounts(&job, milestone);
+        let release_amount = full_amount - released_before;
 
         // ── Effects: mark milestone released and update status BEFORE
         //    the external token transfer (CEI ordering).
         let mut updated_milestones = job.milestones.clone();
         let mut m = updated_milestones.get(milestone_index).unwrap().clone();
         m.released = true;
+        m.partial_release_percentage = 100;
         updated_milestones.set(milestone_index, m);
         job.milestones = updated_milestones;
         let all_released = job.milestones.iter().all(|m| m.released);
@@ -973,6 +1034,7 @@ mod tests {
             name: String::from_str(&env, "Design"),
             percentage: 50,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -982,6 +1044,7 @@ mod tests {
             name: String::from_str(&env, "Development"),
             percentage: 30,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -991,6 +1054,7 @@ mod tests {
             name: String::from_str(&env, "Testing"),
             percentage: 20,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1036,6 +1100,7 @@ mod tests {
             name: String::from_str(&env, "M1"),
             percentage: 60,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1045,6 +1110,7 @@ mod tests {
             name: String::from_str(&env, "M2"),
             percentage: 40,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1060,7 +1126,7 @@ mod tests {
             &milestones,
             &RELEASE_AFTER_LEDGERS,
         );
-        client.release_milestone(&client_addr, &job_id, &0u32);
+        client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
 
         let job = client.get_job(&job_id).unwrap();
         assert_eq!(job.status, JobStatus::PartiallyReleased);
@@ -1068,9 +1134,302 @@ mod tests {
         assert!(!job.milestones.get(1).unwrap().released);
 
         // Release second milestone -> Completed
-        client.release_milestone(&client_addr, &job_id, &1u32);
+        client.release_milestone(&client_addr, &job_id, &1u32, &100u32);
         let job2 = client.get_job(&job_id).unwrap();
         assert_eq!(job2.status, JobStatus::Completed);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Partial milestone release (#441)
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_partial_release_50pct() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-partial-50");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 40));
+        milestones.push_back(make_milestone(&env, "M2", 60));
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+
+        // 50% of a 40%-of-job milestone = 20% of the total 1000 -> 200.
+        client.release_milestone(&client_addr, &job_id, &0u32, &50u32);
+
+        let job = client.get_job(&job_id).unwrap();
+        assert_eq!(job.status, JobStatus::PartiallyReleased);
+        let m0 = job.milestones.get(0).unwrap();
+        assert_eq!(m0.partial_release_percentage, 50);
+        assert!(!m0.released);
+
+        let token_client = soroban_sdk::token::Client::new(&env, &token);
+        assert_eq!(token_client.balance(&freelancer), 200i128);
+    }
+
+    #[test]
+    fn test_partial_release_then_remaining() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-partial-then-remaining");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 100));
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+
+        client.release_milestone(&client_addr, &job_id, &0u32, &50u32);
+        let mid = client.get_job(&job_id).unwrap();
+        assert_eq!(mid.status, JobStatus::PartiallyReleased);
+        assert!(!mid.milestones.get(0).unwrap().released);
+
+        // Releasing the remaining 50% completes the milestone (and the job,
+        // since it is the only milestone).
+        client.release_milestone(&client_addr, &job_id, &0u32, &50u32);
+        let done = client.get_job(&job_id).unwrap();
+        assert_eq!(done.status, JobStatus::Completed);
+        let m0 = done.milestones.get(0).unwrap();
+        assert!(m0.released);
+        assert_eq!(m0.partial_release_percentage, 100);
+
+        let token_client = soroban_sdk::token::Client::new(&env, &token);
+        assert_eq!(token_client.balance(&freelancer), 1000i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "release_pct exceeds remaining milestone percentage")]
+    fn test_partial_release_exceeds_100_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-partial-exceeds");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 100));
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+
+        client.release_milestone(&client_addr, &job_id, &0u32, &60u32);
+        // 60 + 50 = 110 > 100 -> must panic.
+        client.release_milestone(&client_addr, &job_id, &0u32, &50u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "release_pct must be greater than 0")]
+    fn test_partial_release_zero_pct_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-partial-zero");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 100));
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+
+        client.release_milestone(&client_addr, &job_id, &0u32, &0u32);
+    }
+
+    #[test]
+    fn test_partial_release_compute_remaining() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-partial-remaining-funds");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 60));
+        milestones.push_back(make_milestone(&env, "M2", 40));
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+
+        // Release 50% of the 60%-of-job milestone -> 300 already paid out.
+        client.release_milestone(&client_addr, &job_id, &0u32, &50u32);
+
+        // Dispute the whole job and resolve in the freelancer's favor:
+        // `resolve_dispute` pays out `compute_remaining_funds`, which must
+        // exclude the 300 already released and only send the remaining 700.
+        client.dispute_job(&signers1(&env, &admin), &job_id);
+        client.resolve_dispute(&signers1(&env, &admin), &job_id, &true);
+
+        let token_client = soroban_sdk::token::Client::new(&env, &token);
+        assert_eq!(token_client.balance(&freelancer), 1000i128);
+    }
+
+    #[test]
+    fn test_claim_after_partial_release() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-claim-after-partial");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 100));
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+
+        client.release_milestone(&client_addr, &job_id, &0u32, &40u32);
+
+        env.ledger().set_sequence_number(RELEASE_AFTER_LEDGERS + 1);
+        client.claim_milestone(&freelancer, &job_id, &0u32);
+
+        let job = client.get_job(&job_id).unwrap();
+        assert_eq!(job.status, JobStatus::Completed);
+        let m0 = job.milestones.get(0).unwrap();
+        assert!(m0.released);
+        assert_eq!(m0.partial_release_percentage, 100);
+
+        let token_client = soroban_sdk::token::Client::new(&env, &token);
+        assert_eq!(token_client.balance(&freelancer), 1000i128);
+    }
+
+    #[test]
+    fn test_job_completed_only_at_full_release() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-completed-only-full");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 50));
+        milestones.push_back(make_milestone(&env, "M2", 50));
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+
+        client.release_milestone(&client_addr, &job_id, &0u32, &50u32);
+        assert_eq!(
+            client.get_job(&job_id).unwrap().status,
+            JobStatus::PartiallyReleased
+        );
+
+        // Milestone 0 reaches 100%, but milestone 1 hasn't been touched —
+        // the job must still not be Completed.
+        client.release_milestone(&client_addr, &job_id, &0u32, &50u32);
+        let after_m0_full = client.get_job(&job_id).unwrap();
+        assert_eq!(after_m0_full.status, JobStatus::PartiallyReleased);
+        assert!(after_m0_full.milestones.get(0).unwrap().released);
+        assert!(!after_m0_full.milestones.get(1).unwrap().released);
+
+        client.release_milestone(&client_addr, &job_id, &1u32, &100u32);
+        assert_eq!(
+            client.get_job(&job_id).unwrap().status,
+            JobStatus::Completed
+        );
     }
 
     #[test]
@@ -1094,6 +1453,7 @@ mod tests {
             name: String::from_str(&env, "M1"),
             percentage: 100,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1109,8 +1469,8 @@ mod tests {
             &milestones,
             &RELEASE_AFTER_LEDGERS,
         );
-        client.release_milestone(&client_addr, &job_id, &0u32);
-        client.release_milestone(&client_addr, &job_id, &0u32);
+        client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
+        client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
     }
 
     #[test]
@@ -1130,6 +1490,7 @@ mod tests {
             name: String::from_str(&env, "M1"),
             percentage: 50,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1139,6 +1500,7 @@ mod tests {
             name: String::from_str(&env, "M2"),
             percentage: 40,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1163,7 +1525,12 @@ mod tests {
         env.mock_all_auths();
         let (_admin, client) = setup(&env);
         let addr = Address::generate(&env);
-        client.release_milestone(&addr, &String::from_str(&env, "no-such-job"), &0u32);
+        client.release_milestone(
+            &addr,
+            &String::from_str(&env, "no-such-job"),
+            &0u32,
+            &100u32,
+        );
     }
 
     #[test]
@@ -1186,6 +1553,7 @@ mod tests {
             name: String::from_str(&env, "M1"),
             percentage: 100,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1229,6 +1597,7 @@ mod tests {
             name: String::from_str(&env, "M1"),
             percentage: 100,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1272,6 +1641,7 @@ mod tests {
             name: String::from_str(&env, "M1"),
             percentage: 50,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1281,6 +1651,7 @@ mod tests {
             name: String::from_str(&env, "M2"),
             percentage: 50,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1305,7 +1676,7 @@ mod tests {
         assert!(!job.milestones.get(0).unwrap().disputed);
 
         // Client can still release milestone 0 while milestone 1 is disputed
-        client.release_milestone(&client_addr, &job_id, &0u32);
+        client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
         let job2 = client.get_job(&job_id).unwrap();
         assert_eq!(job2.status, JobStatus::Disputed);
         assert!(job2.milestones.get(0).unwrap().released);
@@ -1338,6 +1709,7 @@ mod tests {
             name: String::from_str(&env, "M1"),
             percentage: 100,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1382,6 +1754,7 @@ mod tests {
             name: String::from_str(&env, "M1"),
             percentage: 100,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1422,6 +1795,7 @@ mod tests {
             name: String::from_str(&env, "M1"),
             percentage: 100,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1437,7 +1811,7 @@ mod tests {
             &milestones,
             &RELEASE_AFTER_LEDGERS,
         );
-        client.release_milestone(&client_addr, &job_id, &0u32);
+        client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
         client.dispute_milestone(&signers1(&env, &admin), &job_id, &0u32);
     }
 
@@ -1462,6 +1836,7 @@ mod tests {
             name: String::from_str(&env, "M1"),
             percentage: 100,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1500,6 +1875,7 @@ mod tests {
             name: String::from_str(&env, "M1"),
             percentage: 100,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1547,6 +1923,7 @@ mod tests {
             name: String::from_str(&env, "M1"),
             percentage: 100,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1585,6 +1962,7 @@ mod tests {
             name: String::from_str(&env, "M1"),
             percentage: 100,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1632,6 +2010,7 @@ mod tests {
             name: String::from_str(&env, "M1"),
             percentage: 100,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1671,6 +2050,7 @@ mod tests {
             name: String::from_str(&env, "M1"),
             percentage: 100,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1714,6 +2094,7 @@ mod tests {
             name: String::from_str(&env, "M1"),
             percentage: 50,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1723,6 +2104,7 @@ mod tests {
             name: String::from_str(&env, "M2"),
             percentage: 50,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1738,7 +2120,7 @@ mod tests {
             &milestones,
             &RELEASE_AFTER_LEDGERS,
         );
-        client.release_milestone(&client_addr, &job_id, &0u32);
+        client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
 
         env.ledger()
             .set_sequence_number(DEFAULT_DEADLINE_LEDGERS + 10);
@@ -1767,6 +2149,7 @@ mod tests {
             name: String::from_str(&env, "M1"),
             percentage: 100,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1823,6 +2206,7 @@ mod tests {
             name: String::from_str(&env, "M1-Design"),
             percentage: 30,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1832,6 +2216,7 @@ mod tests {
             name: String::from_str(&env, "M2-Implementation"),
             percentage: 40,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1841,6 +2226,7 @@ mod tests {
             name: String::from_str(&env, "M3-Deployment"),
             percentage: 30,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1877,7 +2263,7 @@ mod tests {
         assert!(job_resolved.milestones.get(1).unwrap().released);
 
         // 5. Client releases Milestone 3
-        client.release_milestone(&client_addr, &job_id, &2u32);
+        client.release_milestone(&client_addr, &job_id, &2u32, &100u32);
         let job_final = client.get_job(&job_id).unwrap();
         assert_eq!(job_final.status, JobStatus::Completed);
     }
@@ -1887,6 +2273,7 @@ mod tests {
             name: String::from_str(env, name),
             percentage,
             released: false,
+            partial_release_percentage: 0,
             disputed: false,
             oracle: None,
             verified: false,
@@ -1970,7 +2357,7 @@ mod tests {
             &milestones,
             &RELEASE_AFTER_LEDGERS,
         );
-        client.release_milestone(&client_addr, &job_id, &0u32);
+        client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
 
         let mut new_milestones = Vec::new(&env);
         new_milestones.push_back(make_milestone(&env, "M1", 100));
@@ -2560,6 +2947,7 @@ mod tests {
                 name: String::from_str(env, "Oracle Milestone"),
                 percentage: 100,
                 released: false,
+                partial_release_percentage: 0,
                 disputed: false,
                 oracle: oracle.clone(),
                 verified: false,
@@ -2600,7 +2988,7 @@ mod tests {
 
             client.submit_milestone_proof(&freelancer, &job_id, &0u32, &proof);
             client.verify_milestone(&oracle, &job_id, &0u32);
-            client.release_milestone(&client_addr, &job_id, &0u32);
+            client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
 
             let job = client.get_job(&job_id).unwrap();
             assert_eq!(job.status, JobStatus::Completed);
@@ -2629,7 +3017,7 @@ mod tests {
             let proof = BytesN::from_array(&env, &[1u8; 32]);
             client.submit_milestone_proof(&freelancer, &job_id, &0u32, &proof);
             // Do NOT verify → release should panic
-            client.release_milestone(&client_addr, &job_id, &0u32);
+            client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
         }
 
         #[test]
@@ -2644,7 +3032,7 @@ mod tests {
             let (job_id, _token) = setup_oracle_job(&env, &client, &client_addr, &freelancer, None);
 
             // No proof, no verification — release should succeed as before
-            client.release_milestone(&client_addr, &job_id, &0u32);
+            client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
 
             let job = client.get_job(&job_id).unwrap();
             assert_eq!(job.status, JobStatus::Completed);
