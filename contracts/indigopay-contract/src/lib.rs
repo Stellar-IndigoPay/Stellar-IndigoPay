@@ -4248,8 +4248,8 @@ impl IndigoPayContract {
     }
 
     /// Complete coordinated upgrade after all participating contract upgrades are executed.
-    pub fn complete_coordinated_upgrade(env: Env, admin: Address) {
-        require_admin_for_routine(&env, &admin);
+    pub fn complete_coordinated_upgrade(env: Env, signers: Vec<Address>) {
+        require_admin_for_critical(&env, &signers);
         let coordinated: bool = env
             .storage()
             .instance()
@@ -4291,7 +4291,7 @@ impl IndigoPayContract {
                 env.invoke_contract::<()>(
                     &addr,
                     &Symbol::new(&env, "clear_coordinated_pause"),
-                    (admin.clone(),).into_val(&env),
+                    (signers.get(0).unwrap(),).into_val(&env),
                 );
             }
         }
@@ -10045,7 +10045,7 @@ mod tests {
                 .remove(&DataKey::UpgradeEffectiveAt);
         });
 
-        client.complete_coordinated_upgrade(&admin);
+        client.complete_coordinated_upgrade(&signers1(&env, &admin));
         assert!(!client.is_coordinated_upgrade_active());
 
         let new_pid = String::from_str(&env, "new-project-2");

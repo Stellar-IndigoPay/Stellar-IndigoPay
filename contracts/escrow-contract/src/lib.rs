@@ -87,19 +87,6 @@ pub const RELEASE_AFTER_LEDGERS: u32 = 10;
 pub const DEFAULT_DEADLINE_LEDGERS: u32 = 1_555_200; // 90 days @ 5s/ledger
 const UPGRADE_TIMELOCK_LEDGERS: u32 = 34_560;
 
-fn read_admin(env: &Env) -> Address {
-    env.storage()
-        .instance()
-        .get(&DataKey::Admin)
-        .expect("Not initialized")
-}
-
-fn require_admin(env: &Env, caller: &Address) {
-    if read_admin(env) != *caller {
-        panic!("Only admin can perform this action");
-    }
-}
-
 fn require_not_paused(env: &Env) {
     let coordinated: bool = env
         .storage()
@@ -691,17 +678,8 @@ impl EscrowContract {
         milestone_index: u32,
         approve: bool,
     ) {
-        admin.require_auth();
-        require_not_paused(&env);
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Not initialized");
-        if stored_admin != admin {
-            panic!("Only admin can resolve milestone disputes");
-        }
         require_admin(&env, &signers);
+        require_not_paused(&env);
 
         let mut job: Job = env
             .storage()
@@ -978,18 +956,16 @@ impl EscrowContract {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
-    pub fn pause(env: Env, admin: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn pause(env: Env, signers: Vec<Address>) {
+        require_admin(&env, &signers);
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events().publish((symbol_short!("paused"), admin), ());
+        env.events().publish((symbol_short!("paused"), signers.get(0).unwrap()), ());
     }
 
-    pub fn unpause(env: Env, admin: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn unpause(env: Env, signers: Vec<Address>) {
+        require_admin(&env, &signers);
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events().publish((symbol_short!("unpause"), admin), ());
+        env.events().publish((symbol_short!("unpause"), signers.get(0).unwrap()), ());
     }
 
     pub fn is_paused(env: Env) -> bool {
@@ -999,9 +975,8 @@ impl EscrowContract {
             .unwrap_or(false)
     }
 
-    pub fn propose_upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn propose_upgrade(env: Env, signers: Vec<Address>, new_wasm_hash: BytesN<32>) {
+        require_admin(&env, &signers);
         if env.storage().instance().has(&DataKey::PendingUpgrade) {
             panic!("Upgrade already pending");
         }
@@ -1017,7 +992,7 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::UpgradeEffectiveAt, &effective_at);
         env.events().publish(
-            (symbol_short!("upg_prop"), admin),
+            (symbol_short!("upg_prop"), signers.get(0).unwrap()),
             (new_wasm_hash, effective_at),
         );
     }
@@ -1047,9 +1022,8 @@ impl EscrowContract {
         env.events().publish((symbol_short!("upg_exec"),), pending);
     }
 
-    pub fn cancel_upgrade(env: Env, admin: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn cancel_upgrade(env: Env, signers: Vec<Address>) {
+        require_admin(&env, &signers);
         if env
             .storage()
             .instance()
@@ -1065,7 +1039,7 @@ impl EscrowContract {
         env.storage()
             .instance()
             .remove(&DataKey::UpgradeEffectiveAt);
-        env.events().publish((symbol_short!("upg_cncl"), admin), ());
+        env.events().publish((symbol_short!("upg_cncl"), signers.get(0).unwrap()), ());
     }
 
     pub fn get_pending_upgrade(env: Env) -> Option<(BytesN<32>, u32)> {
@@ -1081,9 +1055,8 @@ impl EscrowContract {
         env.storage().instance().get(&DataKey::LastExecutedUpgrade)
     }
 
-    pub fn set_coordinated_pause(env: Env, admin: Address, new_wasm_hash: Option<BytesN<32>>) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn set_coordinated_pause(env: Env, signers: Vec<Address>, new_wasm_hash: Option<BytesN<32>>) {
+        require_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &true);
@@ -1110,18 +1083,16 @@ impl EscrowContract {
         env.events().publish((symbol_short!("coord_ps"),), true);
     }
 
-    pub fn clear_coordinated_pause(env: Env, admin: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn clear_coordinated_pause(env: Env, signers: Vec<Address>) {
+        require_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &false);
         env.events().publish((symbol_short!("coord_ps"),), false);
     }
 
-    pub fn cancel_coordinated_pause(env: Env, admin: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn cancel_coordinated_pause(env: Env, signers: Vec<Address>) {
+        require_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &false);
