@@ -1,0 +1,13 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+# Regression note: these seeds protect donor-stat invariants for small
+# positive donations, including the exact donated total, donation count,
+# badge threshold, and whole-XLM CO2 rounding behavior.
+cc 712cca7a80288e7dda70aec547bf0a4cd0770a8ab4087cedda40022204a5c35b # shrinks to amount = 1, msg_hash = 0, project_str = "proj-a0a0a", donor_idx = 0
+cc 5f3285514f682b32546ce4844fc67db22516bd2f6753cdf31144c4edda19b111 # shrinks to amounts = [1], msg_hashes = [0], project_str = "proj-00AAa"
+cc 848125a883ad0f593673e62b467f3ec58c99d949cf2e13a876303fdcc4b22903 # shrinks to amount = 1, msg_hash = 0, project_str = "proj-aaaA0", donor_idx = 0
+cc 27fbe183a4f1d0921a13c215f2b26bcf84901ce45e9f8cbb0bccd5d9df6c62e0 # shrinks to usdc_amount = 1, msg_hash = 0, project_str = "proj-0AaA0", donor_idx = 0

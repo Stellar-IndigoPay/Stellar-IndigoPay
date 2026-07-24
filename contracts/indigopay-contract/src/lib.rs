@@ -5,7 +5,7 @@
 #![allow(deprecated)]
 
 #[cfg(all(test, feature = "testutils"))]
-mod fuzz_tests;
+mod donation_fuzz;
 
 #[cfg(feature = "donation")]
 pub mod donation;
