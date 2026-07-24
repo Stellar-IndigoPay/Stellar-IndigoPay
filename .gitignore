@@ -37,3 +37,6 @@ Thumbs.db
 backend/uploads/*
 !backend/uploads/.gitkeep
 
+# Storybook static build output
+frontend/storybook-static/
+

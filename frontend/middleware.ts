@@ -58,6 +58,8 @@ function buildCsp(nonce: string, isWidget: boolean): string {
     "base-uri 'self'",
     "form-action 'self'",
     isWidget ? "frame-ancestors *" : "frame-ancestors 'none'",
+    // Reporting endpoint for CSP violations
+    "report-uri /api/csp-report",
     // Meaningless (and actively harmful) against a plain-HTTP local dev
     // server: it forces every subresource request to upgrade to HTTPS, and
     // WebKit (unlike Chromium/Firefox, which special-case localhost as

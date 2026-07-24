@@ -146,6 +146,17 @@ stellar contract invoke \
 
 `co2_per_xlm` = estimated grams of CO₂ offset per XLM donated (8,500 ≈ 8.5 kg per XLM)
 
+## Fuzz tests
+
+The contract includes property-based fuzz coverage in [src/fuzz_tests.rs](src/fuzz_tests.rs) for:
+
+- governance proposals and vote resolution invariants
+- upgrade timelock propose / cancel / execute flows
+- mixed XLM and USDC donations with oracle-price edge cases
+- project lifecycle transitions across pause, resume, and deactivation
+
+These tests use `proptest` with 10,000+ cases per suite and are enabled via `cargo test --features testutils`.
+
 ## Roadmap
 
 - **v1.3** — Impact NFT minting on badge achievement

@@ -323,4 +323,9 @@ const styles = StyleSheet.create({
     fontWeight: "bold",
     color: "#227239",
   },
+  emptyText: {
+    fontSize: 14,
+    color: "#5a7a5a",
+    textAlign: "center" as const,
+  },
 });

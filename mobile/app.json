@@ -39,7 +39,11 @@
           "autoVerify": true,
           "data": [
             { "scheme": "indigopay" },
-            { "scheme": "web+stellar" },
+            {
+              "scheme": "web+stellar",
+              "host": "pay",
+              "pathPrefix": "/"
+            },
             {
               "scheme": "https",
               "host": "indigopay.example.com",
@@ -64,6 +68,9 @@
         }
       ]
     ],
+    "scheme": "indigopay"
+  },
+  "extra": {
     "scheme": "indigopay"
   }
 }

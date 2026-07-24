@@ -8,3 +8,10 @@ cc 8d5b87fa29558ae16f67b997c73935c9586a35a7719fa87ae8aea996bfed4167 # shrinks to
 cc 1b5152f8b3ea7ac513395debf8d00c86598e77eaf0426a859c39cb4db10c9b88 # shrinks to amount = 1
 cc ea06f0bc450a7dfdc6a355c1a9d9c3729e6f0e91d624a88498b1fe946115ba18 # shrinks to usdc_amount = 21267647932558653966460912964485513216
 cc 83bff394cfb741214e3f6b2a817e359cfd03019e4a93bedacfae8ed464ef6c4f # shrinks to usdc_amount = 49517601582944426044717793280000001
+
+# Added for the new governance / timelock / multi-currency / lifecycle fuzz tests.
+# These are placeholders for future regression replay when a property fails.
+cc 2a7f9e2d17f4e51c1952504b353884f0b6a9677e # governance fuzz regression placeholder
+cc e0b2c4a4b1f2f7d6b5214104e39d4c1942f1c56 # upgrade timelock regression placeholder
+cc 99d4a89c7ca4d0b0ef7f3a09c3b1c8f7d56aa356f # multi-currency fuzz regression placeholder
+cc 7c4f4991aea3e8f2a12e5f5e0fd3d4f9e8d8901b # lifecycle fuzz regression placeholder

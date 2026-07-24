@@ -22,8 +22,12 @@ import {
   getQueuedDonations,
   getPendingCount,
   getRetryEligibleDonations,
+  getItemStatus,
+  getRetryEligible,
   markSubmitted,
   markFailed,
+  retryDonation,
+  onQueueItemUpdate,
   removeDonation,
   cleanQueue,
   clearQueue,
@@ -294,5 +298,120 @@ describe("RETRY_BACKOFF_MS schedule", () => {
     expect(RETRY_BACKOFF_MS[3]).toBe(1_800_000);
     expect(RETRY_BACKOFF_MS[4]).toBe(7_200_000);
     expect(RETRY_BACKOFF_MS[5]).toBe(21_600_000);
+  });
+});
+
+describe("getItemStatus", () => {
+  test("returns the status of a queued donation", async () => {
+    const d = await enqueueDonation(mockDonation);
+    expect(await getItemStatus(d.id)).toBe("pending");
+    await markSubmitted(d.id, "tx");
+    expect(await getItemStatus(d.id)).toBe("submitted");
+  });
+
+  test("returns null for unknown id", async () => {
+    expect(await getItemStatus("missing")).toBeNull();
+  });
+});
+
+describe("getRetryEligible alias", () => {
+  test("returns the same set as getRetryEligibleDonations", async () => {
+    await enqueueDonation(mockDonation);
+    const a = await getRetryEligible();
+    const b = await getRetryEligibleDonations();
+    expect(a).toHaveLength(b.length);
+    expect(a[0].id).toBe(b[0].id);
+  });
+});
+
+describe("markFailed permanent vs retryable", () => {
+  test("permanent failure marks donation non-retryable and failed", async () => {
+    const d = await enqueueDonation(mockDonation);
+    await markFailed(d.id, "Project deleted", {
+      permanent: true,
+      errorCode: "PROJECT_NOT_FOUND",
+    });
+
+    const list = await getQueuedDonations();
+    expect(list[0].status).toBe("failed");
+    expect(list[0].retryable).toBe(false);
+    expect(list[0].errorCode).toBe("PROJECT_NOT_FOUND");
+
+    // No longer eligible for retry even though attempts < maxAttempts.
+    const eligible = await getRetryEligibleDonations();
+    expect(eligible).toHaveLength(0);
+  });
+
+  test("non-permanent failure stays retryable and reschedules", async () => {
+    const d = await enqueueDonation(mockDonation);
+    await markFailed(d.id, "Network timeout", {
+      errorCode: undefined,
+    });
+
+    const list = await getQueuedDonations();
+    expect(list[0].status).toBe("pending");
+    expect(list[0].retryable).toBe(true);
+    expect(list[0].nextRetryAt).toBeGreaterThan(Date.now());
+  });
+
+  test("exhausting max attempts becomes permanent automatically", async () => {
+    const d = await enqueueDonation(mockDonation);
+    for (let i = 0; i < MAX_RETRY_ATTEMPTS; i++) {
+      await markFailed(d.id, `Attempt ${i + 1}`);
+    }
+    const list = await getQueuedDonations();
+    expect(list[0].status).toBe("failed");
+    expect(list[0].retryable).toBe(false);
+  });
+});
+
+describe("retryDonation", () => {
+  test("re-queues a failed donation as immediately retryable", async () => {
+    const d = await enqueueDonation(mockDonation);
+    await markFailed(d.id, "Project deleted", { permanent: true });
+    expect(await getItemStatus(d.id)).toBe("failed");
+
+    await retryDonation(d.id);
+
+    const list = await getQueuedDonations();
+    expect(list[0].status).toBe("pending");
+    expect(list[0].retryable).toBe(true);
+    expect(list[0].attempts).toBe(0);
+    const eligible = await getRetryEligibleDonations();
+    expect(eligible).toHaveLength(1);
+  });
+});
+
+describe("onQueueItemUpdate subscription", () => {
+  test("notifies listeners after a mutation", async () => {
+    const listener = jest.fn();
+    const unsub = onQueueItemUpdate(listener);
+
+    await enqueueDonation(mockDonation);
+
+    expect(listener).toHaveBeenCalled();
+    const snapshot = listener.mock.calls[listener.mock.calls.length - 1][0];
+    expect(Array.isArray(snapshot)).toBe(true);
+    expect(snapshot).toHaveLength(1);
+
+    unsub();
+    listener.mockClear();
+    await enqueueDonation(mockDonation);
+    expect(listener).not.toHaveBeenCalled();
+  });
+});
+
+describe("queue persistence", () => {
+  test("donations survive an AsyncStorage read/write round-trip", async () => {
+    const d = await enqueueDonation(mockDonation);
+    await markFailed(d.id, "boom", { permanent: true, errorCode: "TX_FAILED" });
+
+    // Re-read straight from storage to prove persistence of new fields.
+    const raw = await AsyncStorage.getItem("donation_queue");
+    const parsed = JSON.parse(raw!);
+    expect(parsed[0].id).toBe(d.id);
+    expect(parsed[0].status).toBe("failed");
+    expect(parsed[0].retryable).toBe(false);
+    expect(parsed[0].errorCode).toBe("TX_FAILED");
   });
 });

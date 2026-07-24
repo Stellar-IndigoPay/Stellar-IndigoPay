@@ -15,9 +15,14 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "npm run dev",
+    command: "npm run start",
     url: "http://localhost:3000",
     reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
+    timeout: 300_000,
+    env: {
+      NEXT_PUBLIC_STELLAR_NETWORK: "testnet",
+      NEXT_PUBLIC_HORIZON_URL: "https://horizon-testnet.stellar.org",
+      NEXT_PUBLIC_API_URL: "http://localhost:4000",
+    },
   },
 });

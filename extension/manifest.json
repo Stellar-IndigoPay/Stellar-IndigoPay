@@ -7,22 +7,34 @@
     "default_popup": "popup.html",
     "default_title": "Stellar-IndigoPay"
   },
-  "permissions": ["storage", "activeTab", "scripting", "contextMenus"],
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "contextMenus"
+  ],
   "background": {
     "service_worker": "dist/background.js"
   },
   "host_permissions": [
+    "https://api.stellar-indigopay.app/*",
+    "https://stellar-indigopay.app/*",
+    "https://*.stellar-indigopay.app/*",
     "https://app.indigopay.io/*",
     "https://testnet.indigopay.io/*"
   ],
   "content_scripts": [
     {
-      "matches": [
-        "https://app.indigopay.io/*",
-        "https://testnet.indigopay.io/*"
-      ],
+      "matches": ["<all_urls>"],
       "js": ["dist/content-script.js"],
-      "run_at": "document_end"
+      "css": ["inject/overlay.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["inject/*"],
+      "matches": ["<all_urls>"]
     }
   ],
   "privacy_policy_url": "https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/blob/main/PRIVACY.md"

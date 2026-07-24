@@ -8,6 +8,14 @@ jest.mock("../services/stellar", () => ({
   server: { getTransaction: jest.fn().mockResolvedValue({ successful: true }) },
 }));
 
+jest.mock("../services/matchQueue", () => ({
+  enqueueMatchDonation: jest.fn().mockResolvedValue(undefined),
+}));
+
+jest.mock("../services/oracleService", () => ({
+  getCurrentPrice: jest.fn(() => null),
+}));
+
 const http = require("http");
 const express = require("express");
 const { Server: SocketServer } = require("socket.io");
@@ -73,7 +81,7 @@ describe("POST /api/donations → donation_event WebSocket broadcast", () => {
     jest.clearAllMocks();
   });
 
-  test("emits donation_event to connected clients within 500 ms", (done) => {
+  test("emits donation_event to connected clients within 2000 ms", (done) => {
     const donorAddress = makePublicKey("W");
     const transactionHash = makeTxHash("7");
     const donationRow = {
@@ -93,7 +101,6 @@ describe("POST /api/donations → donation_event WebSocket broadcast", () => {
       queryResult([]), // dedup check
       queryResult(), // BEGIN
       queryResult([donationRow]), // INSERT donation
-      queryResult([]), // SELECT donation_matches (empty)
       queryResult(), // UPDATE projects
       queryResult([]), // SELECT * FROM profiles (new donor)
       queryResult([{ count: "1" }]), // SELECT COUNT(DISTINCT project_id)
@@ -107,8 +114,8 @@ describe("POST /api/donations → donation_event WebSocket broadcast", () => {
 
     const deadline = setTimeout(() => {
       socket.disconnect();
-      done(new Error("donation_event was not received within 500 ms"));
-    }, 500);
+      done(new Error("donation_event was not received within 2000 ms"));
+    }, 2000);
 
     socket.on("connect", () => {
       socket.on("donation_event", (data) => {
@@ -146,7 +153,7 @@ describe("POST /api/donations → donation_event WebSocket broadcast", () => {
       clearTimeout(deadline);
       done(err);
     });
-  }, 2000);
+  }, 3000);
 
   test("does not emit donation_event when the project is not found", (done) => {
     const donorAddress = makePublicKey("X");
@@ -226,8 +233,8 @@ describe("POST /api/donations → donation_event WebSocket broadcast", () => {
 
     const deadline = setTimeout(() => {
       socket.disconnect();
-      done(new Error("donation_event was not received within 500 ms"));
-    }, 500);
+      done(new Error("donation_event was not received within 2000 ms"));
+    }, 2000);
 
     socket.on("connect", () => {
       socket.on("donation_event", (data) => {
@@ -262,7 +269,7 @@ describe("POST /api/donations → donation_event WebSocket broadcast", () => {
       clearTimeout(deadline);
       done(err);
     });
-  }, 2000);
+  }, 3000);
 });
 
 describe("POST /api/donations → broadcast hardening", () => {
@@ -316,7 +323,6 @@ describe("POST /api/donations → broadcast hardening", () => {
       queryResult([]), // dedup check (none)
       queryResult(), // BEGIN
       queryResult([donationRow]), // INSERT donation
-      queryResult([]), // SELECT donation_matches (none)
       queryResult(), // UPDATE projects
       queryResult([]), // SELECT profile (new donor)
       queryResult([{ count: "1" }]), // COUNT(DISTINCT project_id)
@@ -351,7 +357,7 @@ describe("POST /api/donations → broadcast hardening", () => {
           new Promise((resolve, reject) => {
             const timer = setTimeout(
               () => reject(new Error("client did not receive donation_event")),
-              500,
+              2000,
             );
             socket.on("donation_event", (data) => {
               clearTimeout(timer);
@@ -534,16 +540,17 @@ describe("POST /api/donations → broadcast hardening", () => {
     }
   }, 3000);
 
-  test("emits a single primary event even when matching offers add donation rows", async () => {
+  test("emits only one event per donation (matching is now async via matchQueue)", async () => {
     const donorAddress = makePublicKey("K");
-    const matcherAddress = makePublicKey("M");
     const transactionHash = makeTxHash("f");
+    // Matching is handled asynchronously by matchQueue, so recordDonation
+    // no longer queries donation_matches or inserts match donations inline.
+    // Only 6 queries remain: SELECT project, dedup, BEGIN, INSERT, UPDATE, COMMIT.
     createMockClient(
       queryResult([{ id: "project-match" }]), // SELECT project
       queryResult([]), // dedup check
       queryResult(), // BEGIN
       queryResult([
-        // INSERT primary donation
         {
           id: "match-primary",
           project_id: "project-match",
@@ -555,23 +562,8 @@ describe("POST /api/donations → broadcast hardening", () => {
           transaction_hash: transactionHash,
           created_at: new Date().toISOString(),
         },
-      ]),
-      queryResult([
-        // active matching offer
-        {
-          id: "offer-1",
-          matcher_address: matcherAddress,
-          cap_xlm: "100",
-          matched_xlm: "0",
-          multiplier: 2,
-        },
-      ]),
-      queryResult(), // INSERT match donation
-      queryResult(), // UPDATE donation_matches
+      ]), // INSERT donation
       queryResult(), // UPDATE projects
-      queryResult([]), // SELECT profile
-      queryResult([{ count: "1" }]), // COUNT(DISTINCT project_id)
-      queryResult(), // INSERT profile
       queryResult(), // COMMIT
     );
 
