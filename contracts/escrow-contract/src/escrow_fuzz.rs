@@ -672,4 +672,66 @@ mod fuzz {
             );
         }
     }
+
+    /// Strategy for a milestone percentage split with a random count in 1..=10.
+    fn milestone_set() -> impl Strategy<Value = std::vec::Vec<u32>> {
+        (1u32..=10u32).prop_flat_map(milestone_percentages)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
+
+        /// **prop_amend_preserves_amount**: amending a job's milestones before
+        /// any release must never change the job's locked `amount`, the new
+        /// milestones must still sum to 100%, and the amendment counter must
+        /// increment by exactly one.
+        #[test]
+        fn prop_amend_preserves_amount(
+            amount in job_amount(),
+            initial_pcts in milestone_set(),
+            amended_pcts in milestone_set(),
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let contract_id = env.register_contract(None, EscrowContract);
+            let client = EscrowContractClient::new(&env, &contract_id);
+
+            let admin = Address::generate(&env);
+            client.initialize(&admin);
+
+            let client_addr = Address::generate(&env);
+            let freelancer_addr = Address::generate(&env);
+            let token_admin = Address::generate(&env);
+            let token = env
+                .register_stellar_asset_contract_v2(token_admin)
+                .address();
+            StellarAssetClient::new(&env, &token).mint(&client_addr, &amount);
+
+            let job_id = SorobanString::from_str(&env, "amend-job");
+            let initial_milestones = build_milestones(&env, &initial_pcts);
+            client.create_job(
+                &client_addr,
+                &freelancer_addr,
+                &job_id,
+                &token,
+                &amount,
+                &initial_milestones,
+            );
+
+            let amended_milestones = build_milestones(&env, &amended_pcts);
+            client.amend_job_milestones(&client_addr, &freelancer_addr, &job_id, &amended_milestones);
+
+            let after = client.get_job(&job_id).unwrap();
+            prop_assert_eq!(after.amount, amount, "amendment must not change locked amount");
+            prop_assert_eq!(after.status.clone(), JobStatus::Escrowed);
+            prop_assert_eq!(after.milestones.len(), amended_pcts.len() as u32);
+
+            let total_pct: u32 = (0..after.milestones.len())
+                .map(|i| after.milestones.get(i).unwrap().percentage)
+                .sum();
+            prop_assert_eq!(total_pct, 100u32, "amended milestones must sum to 100%");
+            prop_assert_eq!(client.get_job_amendment_count(&job_id), 1u32);
+        }
+    }
 }
