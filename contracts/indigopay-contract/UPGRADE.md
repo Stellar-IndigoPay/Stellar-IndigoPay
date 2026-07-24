@@ -15,7 +15,59 @@ If you are upgrading this contract:
 
 - The proposed WASM MUST be a drop-in replacement that preserves every storage key and value layout listed below.
 - During the 48h window, run a dry-run deployment to a testnet address with the same storage, and verify the regression test (`test_upgrade_preserves_donation_state_and_storage_keys`) passes against the new WASM.
+- **New**: Call `simulate_upgrade()` (permissionless, no auth required) to validate storage key integrity against the pending upgrade. See the Dry-Run Simulation section below.
 - If the proposed WASM is discovered to be malicious or buggy during the window, the admin MUST call `cancel_upgrade` before the timelock elapses.
+
+## Upgrade Dry-Run Simulation
+
+`simulate_upgrade()` is a read-only safety check anyone can call during the 48-hour timelock window. It validates that a pending upgrade is compatible with the current contract storage without actually executing the WASM migration.
+
+### What it checks
+
+1. **Pending upgrade exists** — panics if no upgrade was proposed.
+2. **WASM hash is non-zero** — rejects corrupted all-zeros proposals.
+3. **Scalar storage keys** — enumerates and verifies accessibility of all non-parameterized `DataKey` variants (AdminSet, AdminThreshold, ProjectCount, DonationCount, GlobalTotalRaised, GlobalCO2OffsetGrams, ContractPaused, DonationRateLimitMax, DonationRateLimitWindow, ProjectIdsAll, plus the upgrade lifecycle keys).
+4. **Project-specific keys** — iterates `ProjectIdsAll` and verifies each `Project(pid)` entry deserialises correctly, plus any associated `Proposal(pid)`, `VoterList(pid)`, or `EmergencyWithdrawal(pid)`.
+
+### Limitations
+
+- **No actual WASM execution**: Soroban host does not support storage snapshots and rollbacks, so the simulation cannot run the proposed `migrate()` function. Instead it validates storage key integrity and reports that all existing keys would be preserved (`keys_after == keys_before`).
+- **Donor-address-keyed keys** (`DonorStats`, `ImpactNFT`, `HasDonated`, etc.) cannot be enumerated without an on-chain donor index. The total key count is considered representative for validation.
+
+### Return value
+
+```rust
+pub struct SimulationResult {
+    pub success: bool,              // true if no errors found
+    pub storage_keys_before: u32,   // count of accessible storage keys
+    pub storage_keys_after: u32,    // projected count after migration (== before)
+    pub errors: Vec<String>,        // descriptive errors (empty on success)
+}
+```
+
+### Calling
+
+```bash
+# Via Stellar CLI
+stellar contract invoke \
+  --id CONTRACT_ID \
+  --network testnet \
+  -- simulate_upgrade
+```
+
+```js
+// Via JS SDK
+const result = await contract.simulate_upgrade();
+console.log(result.success, result.storage_keys_before);
+```
+
+### Testing
+
+Run the simulation tests:
+
+```bash
+cargo test -p indigopay-contract --lib simulate_upgrade
+```
 
 ## Storage Compatibility
 
