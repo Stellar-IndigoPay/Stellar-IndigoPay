@@ -4242,10 +4242,8 @@ impl IndigoPayContract {
             }
         }
 
-        env.events().publish(
-            (symbol_short!("coord_ps"), signers.get(0).unwrap()),
-            true,
-        );
+        env.events()
+            .publish((symbol_short!("coord_ps"), signers.get(0).unwrap()), true);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
@@ -4354,10 +4352,8 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .remove(&DataKey::CoordinatedContracts);
-        env.events().publish(
-            (symbol_short!("coord_cnc"), signers.get(0).unwrap()),
-            (),
-        );
+        env.events()
+            .publish((symbol_short!("coord_cnc"), signers.get(0).unwrap()), ());
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
@@ -4386,8 +4382,7 @@ impl IndigoPayContract {
                 (hash, effective_at),
             );
         }
-        env.events()
-            .publish((symbol_short!("coord_ps"),), true);
+        env.events().publish((symbol_short!("coord_ps"),), true);
     }
 
     pub fn clear_coordinated_pause(env: Env, admin: Address) {
@@ -4395,8 +4390,7 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &false);
-        env.events()
-            .publish((symbol_short!("coord_ps"),), false);
+        env.events().publish((symbol_short!("coord_ps"),), false);
     }
 
     pub fn cancel_coordinated_pause(env: Env, admin: Address) {
@@ -4408,8 +4402,7 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .remove(&DataKey::UpgradeEffectiveAt);
-        env.events()
-            .publish((symbol_short!("coord_cnc"),), ());
+        env.events().publish((symbol_short!("coord_cnc"),), ());
     }
 
     pub fn is_coordinated_upgrade_active(env: Env) -> bool {
@@ -10047,7 +10040,9 @@ mod tests {
         // upgrade completion by clearing the pending upgrade flag.
         env.as_contract(&_cid, || {
             env.storage().instance().remove(&DataKey::PendingUpgrade);
-            env.storage().instance().remove(&DataKey::UpgradeEffectiveAt);
+            env.storage()
+                .instance()
+                .remove(&DataKey::UpgradeEffectiveAt);
         });
 
         client.complete_coordinated_upgrade(&admin);
@@ -10139,7 +10134,8 @@ mod tests {
         let escrow_id = env.register_contract(None, escrow_contract::EscrowContract);
 
         let indigopay_client = IndigoPayContractClient::new(&env, &indigopay_id);
-        let attestation_client = attestation_contract::AttestationContractClient::new(&env, &attestation_id);
+        let attestation_client =
+            attestation_contract::AttestationContractClient::new(&env, &attestation_id);
         let escrow_client = escrow_contract::EscrowContractClient::new(&env, &escrow_id);
 
         let admin = Address::generate(&env);
@@ -10174,10 +10170,14 @@ mod tests {
             env.storage().instance().remove(&DataKey::PendingUpgrade);
         });
         env.as_contract(&attestation_id, || {
-            env.storage().instance().remove(&attestation_contract::DataKey::PendingUpgrade);
+            env.storage()
+                .instance()
+                .remove(&attestation_contract::DataKey::PendingUpgrade);
         });
         env.as_contract(&escrow_id, || {
-            env.storage().instance().remove(&escrow_contract::DataKey::PendingUpgrade);
+            env.storage()
+                .instance()
+                .remove(&escrow_contract::DataKey::PendingUpgrade);
         });
 
         indigopay_client.complete_coordinated_upgrade(&admin);

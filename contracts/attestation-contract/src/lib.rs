@@ -436,7 +436,7 @@ fn record_attestations_internal(
 
 fn read_donor_aggregate(env: &Env, donor: &Address) -> DonorAggregate {
     env.storage()
-        .instance()
+        .persistent()
         .get(&DataKey::DonorAggregate(donor.clone()))
         .unwrap_or(DonorAggregate {
             total_attestations: 0,
@@ -451,13 +451,13 @@ fn read_donor_aggregate(env: &Env, donor: &Address) -> DonorAggregate {
 
 fn write_donor_aggregate(env: &Env, donor: &Address, agg: &DonorAggregate) {
     env.storage()
-        .instance()
+        .persistent()
         .set(&DataKey::DonorAggregate(donor.clone()), agg);
 }
 
 fn read_chain_aggregate(env: &Env, chain: &String) -> ChainAggregate {
     env.storage()
-        .instance()
+        .persistent()
         .get(&DataKey::ChainAggregate(chain.clone()))
         .unwrap_or(ChainAggregate {
             total_attestations: 0,
@@ -471,7 +471,7 @@ fn read_chain_aggregate(env: &Env, chain: &String) -> ChainAggregate {
 
 fn write_chain_aggregate(env: &Env, chain: &String, agg: &ChainAggregate) {
     env.storage()
-        .instance()
+        .persistent()
         .set(&DataKey::ChainAggregate(chain.clone()), agg);
 }
 
@@ -1053,7 +1053,11 @@ impl AttestationContract {
         env.storage().instance().get(&DataKey::LastExecutedUpgrade)
     }
 
-    pub fn set_coordinated_pause(env: Env, admin: Address, new_wasm_hash: Option<soroban_sdk::BytesN<32>>) {
+    pub fn set_coordinated_pause(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: Option<soroban_sdk::BytesN<32>>,
+    ) {
         admin.require_auth();
         require_admin(&env, &admin);
         env.storage()
@@ -1079,8 +1083,7 @@ impl AttestationContract {
                 (hash, effective_at),
             );
         }
-        env.events()
-            .publish((symbol_short!("coord_ps"),), true);
+        env.events().publish((symbol_short!("coord_ps"),), true);
     }
 
     pub fn clear_coordinated_pause(env: Env, admin: Address) {
@@ -1100,13 +1103,16 @@ impl AttestationContract {
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &false);
-        env.events()
-            .publish((symbol_short!("coord_ps"),), false);
+        env.events().publish((symbol_short!("coord_ps"),), false);
     }
 
     pub fn cancel_coordinated_pause(env: Env, admin: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
+
+        if !Self::is_coordinated_upgrade_active(env.clone()) {
+            panic_with_error!(&env, Error::NotInCoordinatedState); // Use your contract's error type
+        }
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &false);
@@ -1114,10 +1120,8 @@ impl AttestationContract {
         env.storage()
             .instance()
             .remove(&DataKey::UpgradeEffectiveAt);
-        env.events()
-            .publish((symbol_short!("coord_ps"),), false);
-        env.events()
-            .publish((symbol_short!("coord_cnc"),), ());
+        env.events().publish((symbol_short!("coord_ps"),), false);
+        env.events().publish((symbol_short!("coord_cnc"),), ());
     }
 
     pub fn is_coordinated_upgrade_active(env: Env) -> bool {

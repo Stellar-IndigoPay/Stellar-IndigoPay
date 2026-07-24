@@ -568,19 +568,6 @@ impl EscrowContract {
         );
     }
 
-    /// M-of-N admin (deprecated): Mark a job as disputed, freezing remaining releases.
-    #[deprecated]
-    pub fn dispute_job(env: Env, admin: Address, job_id: String) {
-        admin.require_auth();
-        require_not_paused(&env);
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Not initialized");
-        if stored_admin != admin {
-            panic!("Only admin can dispute jobs");
-        }
     pub fn dispute_job(env: Env, signers: Vec<Address>, job_id: String) {
         require_admin(&env, &signers);
 
@@ -598,19 +585,6 @@ impl EscrowContract {
         env.events().publish((symbol_short!("job_disp"),), job_id);
     }
 
-    /// M-of-N admin (deprecated): Resolve a dispute and release remaining funds.
-    #[deprecated]
-    pub fn resolve_dispute(env: Env, admin: Address, job_id: String, approve_remaining: bool) {
-        admin.require_auth();
-        require_not_paused(&env);
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Not initialized");
-        if stored_admin != admin {
-            panic!("Only admin can resolve disputes");
-        }
     pub fn resolve_dispute(
         env: Env,
         signers: Vec<Address>,
@@ -662,18 +636,6 @@ impl EscrowContract {
         }
     }
 
-    /// Admin-only: Dispute a single milestone without freezing non-disputed milestones.
-    pub fn dispute_milestone(env: Env, admin: Address, job_id: String, milestone_index: u32) {
-        admin.require_auth();
-        require_not_paused(&env);
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Not initialized");
-        if stored_admin != admin {
-            panic!("Only admin can dispute milestones");
-        }
     /// M-of-N admin: Dispute a single milestone without freezing non-disputed milestones.
     pub fn dispute_milestone(
         env: Env,
@@ -1145,8 +1107,7 @@ impl EscrowContract {
                 (hash, effective_at),
             );
         }
-        env.events()
-            .publish((symbol_short!("coord_ps"),), true);
+        env.events().publish((symbol_short!("coord_ps"),), true);
     }
 
     pub fn clear_coordinated_pause(env: Env, admin: Address) {
@@ -1155,8 +1116,7 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &false);
-        env.events()
-            .publish((symbol_short!("coord_ps"),), false);
+        env.events().publish((symbol_short!("coord_ps"),), false);
     }
 
     pub fn cancel_coordinated_pause(env: Env, admin: Address) {
@@ -1169,8 +1129,7 @@ impl EscrowContract {
         env.storage()
             .instance()
             .remove(&DataKey::UpgradeEffectiveAt);
-        env.events()
-            .publish((symbol_short!("coord_cnc"),), ());
+        env.events().publish((symbol_short!("coord_cnc"),), ());
     }
 
     pub fn is_coordinated_upgrade_active(env: Env) -> bool {
