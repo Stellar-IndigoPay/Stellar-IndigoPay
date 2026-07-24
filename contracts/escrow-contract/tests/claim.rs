@@ -8,9 +8,9 @@
 ///   - Claiming an invalid milestone index panics (new)
 ///   - Full claim flow transitions to Completed (new)
 use soroban_sdk::testutils::{Address as _, Ledger};
-use soroban_sdk::{Address, Env, String as SorobanString, Vec};
+use soroban_sdk::{Address, Env, String as SorobanString};
 
-use escrow_contract::{EscrowContractClient, JobStatus};
+use escrow_contract::JobStatus;
 
 mod common;
 
@@ -46,6 +46,7 @@ fn test_freelancer_can_claim_after_release_period() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
     // Jump past the release period
@@ -80,6 +81,7 @@ fn test_claim_before_release_period_panics() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
     // Claim immediately without advancing ledger — should panic
@@ -107,9 +109,10 @@ fn test_claim_disputed_job_panics() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
-    client.dispute_job(&admin, &job_id);
+    client.dispute_job(&common::signers1(&env, &admin), &job_id);
 
     // Jump past release period
     jump_past_release_period(&env);
@@ -139,6 +142,7 @@ fn test_claim_already_released_milestone_panics() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
     jump_past_release_period(&env);
@@ -170,6 +174,7 @@ fn test_claim_invalid_milestone_index_panics() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
     jump_past_release_period(&env);
@@ -198,6 +203,7 @@ fn test_claim_all_milestones_completes_job() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
     jump_past_release_period(&env);

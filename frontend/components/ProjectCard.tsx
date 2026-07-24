@@ -1,6 +1,7 @@
 /**
  * components/ProjectCard.tsx
  */
+import Image from "next/image";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import type { ClimateProject } from "@/utils/types";
@@ -17,8 +18,10 @@ import { useXlmPrice } from "@/lib/priceContext";
 import { useWishlist } from "@/hooks/useWishlist";
 import ProjectProgressBar from "./ProjectProgressBar";
 import { SkeletonCard } from "./Skeleton";
+import { useI18n } from "@/lib/i18n";
 
 export default function ProjectCard({ project }: { project: ClimateProject }) {
+  const { t, tPlural } = useI18n();
   const pct = progressPercent(project.raisedXLM, project.goalXLM);
   const isComplete = pct >= 100;
   const xlmUsd = useXlmPrice();
@@ -37,6 +40,19 @@ export default function ProjectCard({ project }: { project: ClimateProject }) {
           transition={{ duration: 0.15, ease: "easeOut" }}
           className="flex flex-col h-full relative overflow-hidden"
         >
+          {/* Project image — next/image for optimized loading */}
+          {project.imageUrl && (
+            <div className="relative w-full h-48 -mx-6 -mt-6 mb-4 overflow-hidden">
+              <Image
+                src={project.imageUrl}
+                alt={`${project.name} project photo`}
+                fill
+                sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
+                className="object-cover"
+                loading="lazy"
+              />
+            </div>
+          )}
           {/* Category icon + badges */}
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
@@ -55,17 +71,17 @@ export default function ProjectCard({ project }: { project: ClimateProject }) {
           <div className="flex items-center gap-1.5">
             {isComplete ? (
               <span className="badge text-xs px-3 py-1 rounded-full bg-gradient-to-r from-emerald-500 to-emerald-600 text-white border-2 border-white shadow-md font-body font-bold">
-                ✅ Fully Funded
+                ✅ {t("project.fullyFunded")}
               </span>
             ) : (
               <>
                 {project.onChainVerified ? (
                   <span className="badge-indigo text-[10px] px-2 py-0.5 font-body font-bold shadow-sm">
-                    On-chain verified ✓
+                    {t("project.onChainVerified")}
                   </span>
                 ) : project.verified ? (
                   <span className="badge-verified text-xs px-2 py-0.5 font-body">
-                    ✓ Verified
+                    ✓ {t("project.verified")}
                   </span>
                 ) : null}
                 <span className={statusClass(project.status)}>
@@ -88,7 +104,7 @@ export default function ProjectCard({ project }: { project: ClimateProject }) {
         <div className="mb-4">
           {isComplete ? (
             <div className="bg-gradient-to-r from-green-500 to-emerald-600 text-white px-4 py-2 rounded-lg text-center text-sm font-semibold shadow-sm">
-              ✅ Fully Funded
+              ✅ {t("project.fullyFunded")}
             </div>
           ) : (
             <div className="space-y-2">
@@ -98,11 +114,11 @@ export default function ProjectCard({ project }: { project: ClimateProject }) {
                 className="w-full"
               />
               <div className="flex items-center justify-between text-[11px] text-[#8aaa8a] font-body">
-                <span>{formatXLM(project.raisedXLM)} raised</span>
+                <span>{formatXLM(project.raisedXLM)} {t("project.raised")}</span>
                 <span>
                   {project.goalXLM && Number(project.goalXLM) > 0
-                    ? `Goal: ${formatXLM(project.goalXLM)}`
-                    : "No goal set"}
+                    ? `${t("project.goal")}: ${formatXLM(project.goalXLM)}`
+                    : t("project.noGoalSet")}
                 </span>
               </div>
             </div>
@@ -112,14 +128,9 @@ export default function ProjectCard({ project }: { project: ClimateProject }) {
         {/* Stats row */}
         <div className="flex items-center justify-between pt-3 border-t border-[rgba(99,102,241,0.07)] dark:border-[rgba(129,140,248,0.07)]">
           <div className="flex items-center gap-3 text-xs text-[#475569] dark:text-[#94A3B8] font-body">
-            <span>👥 {project.donorCount} donors</span>
+            <span>👥 {tPlural("donor.count", project.donorCount)}</span>
             <span className="flex items-center gap-1">
               ♻️ {formatCO2(project.co2OffsetKg)}
-              {/* Non-interactive info marker. Nesting a <button> inside an <a> is
-                  invalid HTML, so we use a span with aria-label and let the
-                  parent :hover CSS ruleshow the tooltip on hover. The text
-                  itself is exposed to screen-readers through aria-label so
-                  the methodology is still discoverable. */}
               <span className="tooltip">
                 <span
                   role="img"
@@ -129,8 +140,7 @@ export default function ProjectCard({ project }: { project: ClimateProject }) {
                   ℹ️
                 </span>
                 <span className="tooltip-text">
-                  Estimated CO₂ offset based on this project&apos;s declared
-                  impact rate per XLM donated. Actual results may vary.
+                  {t("project.estimatedCO2Info")}
                 </span>
               </span>
             </span>
@@ -140,7 +150,7 @@ export default function ProjectCard({ project }: { project: ClimateProject }) {
             className="text-xs font-semibold text-[#4F46E5] dark:text-[#818CF8] font-body group-hover:text-[#6366F1]"
             aria-hidden="true"
           >
-            Donate →
+            {t("project.donate")}
           </span>
         </motion.div>
       </Link>

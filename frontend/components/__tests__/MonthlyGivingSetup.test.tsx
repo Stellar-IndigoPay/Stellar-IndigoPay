@@ -15,17 +15,34 @@ import MonthlyGivingSetup from "../MonthlyGivingSetup";
 // Note: toHaveNoViolations is registered globally for every test suite by
 // frontend/jest.setup.ts, so it does not need to be re-imported here.
 
-// Provide a deterministic projectId so the storage subset returns []
-// (we don't want localStorage state leaking between test runs).
+const mockGetMonthlySubscription = jest.fn();
+jest.mock("@/lib/monthlyGiving", () => ({
+  createMonthlySubscription: jest.fn(),
+  cancelMonthlySubscription: jest.fn(),
+  getMonthlySubscription: (...args: any[]) =>
+    mockGetMonthlySubscription(...args),
+  MIN_SUBSCRIPTION_INTERVAL_LEDGERS: 17280,
+}));
+
+// Deterministic projectId/publicKey so getMonthlySubscription's mock
+// resolves to "not subscribed" (null) and the form renders, rather than
+// the "Active subscription" branch.
 const PROJECT_ID = "test-project";
 const PROJECT_NAME = "Amazon Reforestation";
+const PUBLIC_KEY = "GDONORAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
 describe("MonthlyGivingSetup modal a11y", () => {
+  beforeEach(() => {
+    mockGetMonthlySubscription.mockReset();
+    mockGetMonthlySubscription.mockResolvedValue(null);
+  });
+
   it("exposes the proper WAI-ARIA dialog metadata", () => {
     render(
       <MonthlyGivingSetup
         projectId={PROJECT_ID}
         projectName={PROJECT_NAME}
+        publicKey={PUBLIC_KEY}
         onClose={() => {}}
       />,
     );
@@ -46,6 +63,7 @@ describe("MonthlyGivingSetup modal a11y", () => {
       <MonthlyGivingSetup
         projectId={PROJECT_ID}
         projectName={PROJECT_NAME}
+        publicKey={PUBLIC_KEY}
         onClose={() => {}}
       />,
     );
@@ -61,6 +79,7 @@ describe("MonthlyGivingSetup modal a11y", () => {
       <MonthlyGivingSetup
         projectId={PROJECT_ID}
         projectName={PROJECT_NAME}
+        publicKey={PUBLIC_KEY}
         onClose={onClose}
       />,
     );
@@ -71,26 +90,32 @@ describe("MonthlyGivingSetup modal a11y", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("associates labels with form fields", () => {
+  it("associates labels with form fields once subscription status has loaded", async () => {
     render(
       <MonthlyGivingSetup
         projectId={PROJECT_ID}
         projectName={PROJECT_NAME}
+        publicKey={PUBLIC_KEY}
         onClose={() => {}}
       />,
     );
-    expect(screen.getByLabelText(/amount \(xlm\)/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/start date/i)).toBeInTheDocument();
+    expect(
+      await screen.findByLabelText(/amount \(xlm\)/i),
+    ).toBeInTheDocument();
   });
 
   it("has no axe violations (critical/serious)", async () => {
-    const { container } = render(
+    const { container, findByLabelText } = render(
       <MonthlyGivingSetup
         projectId={PROJECT_ID}
         projectName={PROJECT_NAME}
+        publicKey={PUBLIC_KEY}
         onClose={() => {}}
       />,
     );
+    // Wait for the subscription-status fetch to settle so the scan runs
+    // against the form (not the transient "Checking…" state).
+    await findByLabelText(/amount \(xlm\)/i);
     const results = await axe(container);
     // Only fail the build on critical/serious issues per WCAG 2.1 AA scope.
     type Violation = (typeof results.violations)[number];

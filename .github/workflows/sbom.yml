@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Generate SBOM for ${{ matrix.service }}
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@v0.16.0
         with:
           format: cyclonedx-json
           artifact-name: sbom-${{ matrix.service }}.cdx.json
@@ -50,7 +50,7 @@ jobs:
       # token lacks permission (e.g., on forks).
       - name: Submit SBOM to GitHub dependency graph
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@v0.16.0
         continue-on-error: true
         with:
           format: cyclonedx-json

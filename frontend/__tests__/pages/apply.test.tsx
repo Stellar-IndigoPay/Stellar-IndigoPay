@@ -8,11 +8,9 @@
  * tree. We also mock the project-categories import to keep the test purely
  * UX-driven.
  *
- * About queries: the apply page renders the same text in two places for
- * visual hierarchy (kicker paragraph + h1 page title), so we use
- * getByRole("heading", { name }) or getAllByText for the title. Form fields
- * are looked up by getByLabelText — the Field component deliberately keeps
- * helper/error text outside the <label> so the accessible name matches exactly.
+ * Updated for react-hook-form + zod: the form now uses RHF with the
+ * zodResolver, so field registration uses `register()` and validation runs
+ * via `trigger()` on step advance.
  */
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -66,6 +64,10 @@ class FakeFile {
 
 import ApplyPage from "@/pages/apply";
 
+// The i18n mock prepends "apply." to keys: T("common.next") → "apply.common.next"
+const NEXT_BTN = "apply.common.next";
+const SUBMIT_BTN = "apply.submit";
+
 describe("ApplyPage", () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -73,8 +75,6 @@ describe("ApplyPage", () => {
 
   test("renders the first step with required organisation fields", () => {
     render(<ApplyPage />);
-    // The page renders the pageTitle twice (kicker paragraph + h1 heading)
-    // by design for visual hierarchy; scope the test to the heading role.
     expect(
       screen.getByRole("heading", { name: "apply.pageTitle" }),
     ).toBeTruthy();
@@ -85,34 +85,36 @@ describe("ApplyPage", () => {
 
   test("blocks next when required fields are empty", async () => {
     render(<ApplyPage />);
-    fireEvent.click(screen.getByRole("button", { name: /common\.next/ }));
+    fireEvent.click(screen.getByRole("button", { name: NEXT_BTN }));
 
-    // Both organisation name and contact email produce "apply.required"
-    // when empty, so the validation copy appears in two <p> elements.
-    // getAllByText is the right matcher.
+    // All required org fields trigger validation errors.
     await waitFor(() => {
-      expect(screen.getAllByText("apply.required").length).toBeGreaterThan(0);
+      const errorMessages = screen.getAllByRole("alert");
+      expect(errorMessages.length).toBeGreaterThan(0);
+      const errorTexts = errorMessages.map((e) => e.textContent).join(" ");
+      expect(errorTexts).toMatch(/required|Invalid/i);
     });
-    // Should still be on the org step.
     expect(screen.getByText("apply.stepOrg")).toBeTruthy();
   });
 
   test("blocks invalid Stellar wallet and email", async () => {
     render(<ApplyPage />);
-    fireEvent.input(screen.getByLabelText("apply.orgName *"), {
-      target: { value: "Acme" },
-    });
-    fireEvent.input(screen.getByLabelText("apply.contactEmail *"), {
-      target: { value: "not-an-email" },
-    });
-    fireEvent.input(screen.getByLabelText("apply.walletAddress *"), {
-      target: { value: "not-a-wallet" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /common\.next/ }));
+
+    await userEvent.type(screen.getByLabelText("apply.orgName *"), "Acme");
+    await userEvent.type(
+      screen.getByLabelText("apply.contactEmail *"),
+      "not-an-email",
+    );
+    await userEvent.type(
+      screen.getByLabelText("apply.walletAddress *"),
+      "not-a-wallet",
+    );
+    fireEvent.click(screen.getByRole("button", { name: NEXT_BTN }));
 
     await waitFor(() => {
-      expect(screen.getByText("apply.invalidEmail")).toBeTruthy();
-      expect(screen.getByText("apply.invalidWallet")).toBeTruthy();
+      const alerts = screen.getAllByRole("alert");
+      const messages = alerts.map((a) => a.textContent).join(" ");
+      expect(messages).toMatch(/Invalid/i);
     });
   });
 
@@ -124,6 +126,7 @@ describe("ApplyPage", () => {
     render(<ApplyPage />);
     const user = userEvent.setup();
 
+    // Org step
     await user.type(screen.getByLabelText("apply.orgName *"), "Acme Climate");
     await user.type(
       screen.getByLabelText("apply.contactEmail *"),
@@ -133,31 +136,39 @@ describe("ApplyPage", () => {
       screen.getByLabelText("apply.walletAddress *"),
       "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
     );
-    await user.click(screen.getByRole("button", { name: /common\.next/ }));
+    await user.click(screen.getByRole("button", { name: NEXT_BTN }));
 
     // Project step
-    expect(screen.getByText("apply.stepProject")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByText("apply.stepProject")).toBeTruthy();
+    });
     await user.type(screen.getByLabelText("apply.projectName *"), "Acme Solar");
     await user.type(
       screen.getByLabelText("apply.projectLocation *"),
       "Nairobi",
     );
-    await user.click(screen.getByRole("button", { name: /common\.next/ }));
+    await user.click(screen.getByRole("button", { name: NEXT_BTN }));
 
     // Impact step
-    expect(screen.getByText("apply.stepImpact")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByText("apply.stepImpact")).toBeTruthy();
+    });
     await user.type(screen.getByLabelText("apply.co2PerXLM *"), "0.05");
-    await user.click(screen.getByRole("button", { name: /common\.next/ }));
+    await user.click(screen.getByRole("button", { name: NEXT_BTN }));
 
     // Documents step — skip uploading, just go next
-    expect(screen.getByText("apply.documentsTitle")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: /common\.next/ }));
+    await waitFor(() => {
+      expect(screen.getByText("apply.documentsTitle")).toBeTruthy();
+    });
+    await user.click(screen.getByRole("button", { name: NEXT_BTN }));
 
     // Review step
-    expect(screen.getByText("apply.stepReview")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByText("apply.stepReview")).toBeTruthy();
+    });
     expect(screen.getByText("Acme Climate")).toBeTruthy();
     expect(screen.getByText("Acme Solar")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: /apply\.submit/ }));
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
 
     await waitFor(() => {
       expect(screen.getByText("apply.subThanks")).toBeTruthy();
@@ -192,15 +203,15 @@ describe("ApplyPage", () => {
       screen.getByLabelText("apply.walletAddress *"),
       "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
     );
-    await user.click(screen.getByRole("button", { name: /common\.next/ }));
+    await user.click(screen.getByRole("button", { name: NEXT_BTN }));
     await user.type(screen.getByLabelText("apply.projectName *"), "Acme Solar");
     await user.type(
       screen.getByLabelText("apply.projectLocation *"),
       "Nairobi",
     );
-    await user.click(screen.getByRole("button", { name: /common\.next/ }));
+    await user.click(screen.getByRole("button", { name: NEXT_BTN }));
     await user.type(screen.getByLabelText("apply.co2PerXLM *"), "0.05");
-    await user.click(screen.getByRole("button", { name: /common\.next/ }));
+    await user.click(screen.getByRole("button", { name: NEXT_BTN }));
 
     const fileInput = screen.getByLabelText(
       "apply.documentsTitle",
@@ -233,20 +244,37 @@ describe("ApplyPage", () => {
       screen.getByLabelText("apply.walletAddress *"),
       "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
     );
-    await user.click(screen.getByRole("button", { name: /common\.next/ }));
+    await user.click(screen.getByRole("button", { name: NEXT_BTN }));
     await user.type(screen.getByLabelText("apply.projectName *"), "Acme Solar");
     await user.type(
       screen.getByLabelText("apply.projectLocation *"),
       "Nairobi",
     );
-    await user.click(screen.getByRole("button", { name: /common\.next/ }));
+    await user.click(screen.getByRole("button", { name: NEXT_BTN }));
     await user.type(screen.getByLabelText("apply.co2PerXLM *"), "0.05");
-    await user.click(screen.getByRole("button", { name: /common\.next/ }));
-    await user.click(screen.getByRole("button", { name: /common\.next/ }));
-    await user.click(screen.getByRole("button", { name: /apply\.submit/ }));
+    await user.click(screen.getByRole("button", { name: NEXT_BTN }));
+    await user.click(screen.getByRole("button", { name: NEXT_BTN }));
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
 
     await waitFor(() => {
-      expect(screen.getByText("Backend failed. Please retry.")).toBeTruthy();
+      expect(
+        screen.getByText("Backend failed. Please retry."),
+      ).toBeTruthy();
+    });
+  });
+
+  test("shows real-time validation errors on field blur", async () => {
+    render(<ApplyPage />);
+
+    const contactEmailInput = screen.getByLabelText("apply.contactEmail *");
+    await userEvent.type(contactEmailInput, "bad-email");
+    fireEvent.blur(contactEmailInput);
+
+    // With mode: "onTouched", errors appear after blur
+    await waitFor(() => {
+      const alerts = screen.getAllByRole("alert");
+      const messages = alerts.map((a) => a.textContent).join(" ");
+      expect(messages).toMatch(/Invalid/i);
     });
   });
 });

@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createMonthlySubscription,
-  loadMonthlySubscriptions,
+  cancelMonthlySubscription,
+  getMonthlySubscription,
+  MIN_SUBSCRIPTION_INTERVAL_LEDGERS,
+  type OnChainSubscription,
 } from "@/lib/monthlyGiving";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 import { formatXLM, timeAgo } from "@/utils/format";
@@ -10,29 +13,33 @@ import type { MonthlySubscription } from "@/utils/types";
 interface MonthlyGivingSetupProps {
   projectId: string;
   projectName: string;
+  /** Connected donor wallet public key — same prop shape as DonateForm. */
+  publicKey: string;
   onClose: () => void;
-  onCreated?: (subscriptionId: string) => void;
+  onCreated?: () => void;
 }
 
-const DURATION_OPTIONS = [
-  { label: "3 months", value: "3" },
-  { label: "6 months", value: "6" },
-  { label: "12 months", value: "12" },
-  { label: "Indefinite", value: "indefinite" },
-];
+/**
+ * ~30 days at 5s/ledger. On-chain subscriptions (#81) don't have a
+ * separate "monthly" concept in the contract — this is just the interval
+ * this UI passes to `create_subscription` for a monthly cadence. A donor
+ * wanting a different cadence isn't supported by this dialog.
+ */
+const MONTHLY_INTERVAL_LEDGERS = MIN_SUBSCRIPTION_INTERVAL_LEDGERS * 30;
 
 export default function MonthlyGivingSetup({
   projectId,
   projectName,
+  publicKey,
   onClose,
   onCreated,
 }: MonthlyGivingSetupProps) {
   const [amountXLM, setAmountXLM] = useState("25");
-  const [startDate, setStartDate] = useState(
-    new Date().toISOString().slice(0, 10),
+  const [subscription, setSubscription] = useState<OnChainSubscription | null>(
+    null,
   );
-  const [duration, setDuration] = useState("3");
-  const [subscriptions, setSubscriptions] = useState<MonthlySubscription[]>([]);
+  const [loadingSubscription, setLoadingSubscription] = useState(true);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -54,35 +61,64 @@ export default function MonthlyGivingSetup({
     };
   }, []);
 
+  // Read the current on-chain subscription (if any) for this donor +
+  // project as soon as the dialog opens.
   useEffect(() => {
-    const all = loadMonthlySubscriptions();
-    setSubscriptions(all.filter((sub) => sub.projectId === projectId));
-  }, [projectId]);
+    let cancelled = false;
+    setLoadingSubscription(true);
+    getMonthlySubscription(publicKey, projectId).then((sub) => {
+      if (!cancelled) {
+        setSubscription(sub);
+        setLoadingSubscription(false);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [publicKey, projectId]);
 
   const canCreate = useMemo(() => {
     const amount = Number.parseFloat(amountXLM);
-    if (!Number.isFinite(amount) || amount < 1) return false;
-    if (!startDate) return false;
-    return true;
-  }, [amountXLM, startDate]);
+    return Number.isFinite(amount) && amount >= 1;
+  }, [amountXLM]);
 
-  const handleCreate = () => {
+  const handleCreate = async () => {
     if (!canCreate) {
-      setError("Enter a valid amount and start date.");
+      setError("Enter a valid amount.");
       return;
     }
     setError(null);
-    const durationMonths =
-      duration === "indefinite" ? null : Number.parseInt(duration, 10);
-    const created = createMonthlySubscription({
-      projectId,
-      projectName,
-      amountXLM: Number.parseFloat(amountXLM).toFixed(7),
-      startDate: new Date(startDate).toISOString(),
-      durationMonths,
-    });
-    onCreated?.(created.id);
+    setBusy(true);
+    const { subscription: created, error: createError } =
+      await createMonthlySubscription({
+        donor: publicKey,
+        projectId,
+        amountXLM: Number.parseFloat(amountXLM).toFixed(7),
+        intervalLedgers: MONTHLY_INTERVAL_LEDGERS,
+      });
+    setBusy(false);
+    if (createError || !created) {
+      setError(createError || "Could not create the subscription.");
+      return;
+    }
+    setSubscription(created);
+    onCreated?.();
     onClose();
+  };
+
+  const handleCancel = async () => {
+    setError(null);
+    setBusy(true);
+    const { success, error: cancelError } = await cancelMonthlySubscription(
+      publicKey,
+      projectId,
+    );
+    setBusy(false);
+    if (!success) {
+      setError(cancelError || "Could not cancel the subscription.");
+      return;
+    }
+    setSubscription((prev) => (prev ? { ...prev, active: false } : prev));
   };
 
   return (
@@ -121,115 +157,67 @@ export default function MonthlyGivingSetup({
           <strong>{projectName}</strong>.
         </p>
 
-        <div className="grid sm:grid-cols-2 gap-4">
-          <div>
-            <label htmlFor="amount-xlm" className="label">
-              Amount (XLM)
-            </label>
-            <input
-              id="amount-xlm"
-              type="number"
-              min="1"
-              step="1"
-              value={amountXLM}
-              onChange={(e) => setAmountXLM(e.target.value)}
-              className="input-field"
-            />
-          </div>
-          <div>
-            <label htmlFor="start-date" className="label">
-              Start Date
-            </label>
-            <input
-              id="start-date"
-              type="date"
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              className="input-field"
-            />
-          </div>
-          <div className="sm:col-span-2">
-            <label className="label">Duration</label>
-            <div className="flex flex-wrap gap-2">
-              {DURATION_OPTIONS.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() => setDuration(option.value)}
-                  className={`px-3 py-2 rounded-lg text-sm border font-body ${
-                    duration === option.value
-                      ? "btn-primary text-white border-0"
-                      : "bg-[rgba(99,102,241,0.06)] dark:bg-[rgba(129,140,248,0.08)] text-[#4F46E5] dark:text-[#818CF8] border-[rgba(99,102,241,0.15)] dark:border-[rgba(129,140,248,0.20)]"
-                  }`}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {error && (
-          <p
-            className="mt-3 text-sm text-red-600 font-body"
-            role="alert"
-          >
-            {error}
+        {loadingSubscription ? (
+          <p className="text-sm text-[#475569] dark:text-[#94A3B8] font-body">
+            Checking your subscription status&hellip;
           </p>
-        )}
-
-        <button
-          type="button"
-          onClick={handleCreate}
-          disabled={!canCreate}
-          className="btn-primary w-full mt-5 disabled:opacity-60"
-        >
-          Save Monthly Giving
-        </button>
-
-        <div className="mt-8 border-t border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)] pt-5">
-          <h4 className="font-display text-lg font-semibold text-[#0F172A] dark:text-[#E2E8F0] mb-3">
-            Subscription History
-          </h4>
-          {subscriptions.length === 0 ? (
-            <p className="text-sm text-[#475569] dark:text-[#94A3B8] font-body">
-              No subscriptions created for this project yet.
+        ) : subscription?.active ? (
+          <div className="p-3 rounded-lg border border-[rgba(99,102,241,0.10)] dark:border-[rgba(129,140,248,0.12)] bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)]">
+            <p className="text-sm font-semibold text-[#0F172A] dark:text-[#E2E8F0] font-body">
+              {formatXLM(subscription.amountXLM)} monthly &middot; Active
             </p>
-          ) : (
-            <div className="space-y-3">
-              {subscriptions.map((sub) => (
-                <div
-                  key={sub.id}
-                  className="p-3 rounded-lg border border-[rgba(99,102,241,0.10)] dark:border-[rgba(129,140,248,0.12)] bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)]"
-                >
-                  <p className="text-sm font-semibold text-[#0F172A] dark:text-[#E2E8F0] font-body">
-                    {formatXLM(sub.amountXLM)} monthly · {sub.status}
-                  </p>
-                  <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-body mt-1">
-                    Next due: {new Date(sub.nextDueDate).toLocaleDateString()}
-                  </p>
-                  {sub.history.length > 0 ? (
-                    <div className="mt-2 space-y-1">
-                      {sub.history.slice(0, 5).map((entry) => (
-                        <p
-                          key={entry.paidAt}
-                          className="text-xs text-[#475569] dark:text-[#94A3B8] font-body"
-                        >
-                          Paid {formatXLM(entry.amountXLM)} ·{" "}
-                          {timeAgo(entry.paidAt)}
-                        </p>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="mt-2 text-xs text-[#475569] dark:text-[#94A3B8] font-body">
-                      No paid months yet.
-                    </p>
-                  )}
-                </div>
-              ))}
+            <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-body mt-1">
+              Next reminder at ledger {subscription.nextExecutionLedger}
+            </p>
+
+            {error && (
+              <p className="mt-3 text-sm text-red-600 font-body" role="alert">
+                {error}
+              </p>
+            )}
+
+            <button
+              type="button"
+              onClick={handleCancel}
+              disabled={busy}
+              className="btn-secondary w-full mt-4 disabled:opacity-60"
+            >
+              {busy ? "Cancelling\u2026" : "Cancel monthly giving"}
+            </button>
+          </div>
+        ) : (
+          <>
+            <div>
+              <label htmlFor="amount-xlm" className="label">
+                Amount (XLM)
+              </label>
+              <input
+                id="amount-xlm"
+                type="number"
+                min="1"
+                step="1"
+                value={amountXLM}
+                onChange={(e) => setAmountXLM(e.target.value)}
+                className="input-field"
+              />
             </div>
-          )}
-        </div>
+
+            {error && (
+              <p className="mt-3 text-sm text-red-600 font-body" role="alert">
+                {error}
+              </p>
+            )}
+
+            <button
+              type="button"
+              onClick={handleCreate}
+              disabled={!canCreate || busy}
+              className="btn-primary w-full mt-5 disabled:opacity-60"
+            >
+              {busy ? "Confirm in wallet\u2026" : "Save Monthly Giving"}
+            </button>
+          </>
+        )}
       </div>
     </div>
   );
