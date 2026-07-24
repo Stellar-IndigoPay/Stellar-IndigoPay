@@ -72,6 +72,11 @@ pub enum DataKey {
     JobCount,
     JobIds,
     AmendmentCount(String),
+    Paused,
+    PendingUpgrade,
+    UpgradeEffectiveAt,
+    LastExecutedUpgrade,
+    CoordinatedUpgrade,
 }
 
 /// Minimum number of ledgers a job's release period may specify. Jobs
@@ -80,6 +85,39 @@ pub enum DataKey {
 /// to `create_job`.
 pub const RELEASE_AFTER_LEDGERS: u32 = 10;
 pub const DEFAULT_DEADLINE_LEDGERS: u32 = 1_555_200; // 90 days @ 5s/ledger
+const UPGRADE_TIMELOCK_LEDGERS: u32 = 34_560;
+
+fn read_admin(env: &Env) -> Address {
+    env.storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .expect("Not initialized")
+}
+
+fn require_admin(env: &Env, caller: &Address) {
+    if read_admin(env) != *caller {
+        panic!("Only admin can perform this action");
+    }
+}
+
+fn require_not_paused(env: &Env) {
+    let coordinated: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::CoordinatedUpgrade)
+        .unwrap_or(false);
+    if coordinated {
+        panic!("Coordinated upgrade in progress");
+    }
+    let paused: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false);
+    if paused {
+        panic!("Contract is paused");
+    }
+}
 
 fn compute_remaining_funds(job: &Job) -> i128 {
     let mut remaining_amount: i128 = 0;
@@ -201,6 +239,7 @@ impl EscrowContract {
         release_after: u32,
     ) {
         client.require_auth();
+        require_not_paused(&env);
         if amount <= 0 {
             panic!("Amount must be positive");
         }
@@ -291,6 +330,7 @@ impl EscrowContract {
     ) {
         client.require_auth();
         freelancer.require_auth();
+        require_not_paused(&env);
 
         let mut job: Job = env
             .storage()
@@ -363,6 +403,7 @@ impl EscrowContract {
     /// Client releases a specific milestone. Pays proportional XLM to freelancer.
     pub fn release_milestone(env: Env, client: Address, job_id: String, milestone_index: u32) {
         client.require_auth();
+        require_not_paused(&env);
         let mut job: Job = env
             .storage()
             .instance()
@@ -447,6 +488,7 @@ impl EscrowContract {
         proof_hash: BytesN<32>,
     ) {
         freelancer.require_auth();
+        require_not_paused(&env);
 
         let mut job: Job = env
             .storage()
@@ -486,6 +528,7 @@ impl EscrowContract {
     #[cfg(feature = "oracle-escrow")]
     pub fn verify_milestone(env: Env, oracle: Address, job_id: String, milestone_index: u32) {
         oracle.require_auth();
+        require_not_paused(&env);
 
         let mut job: Job = env
             .storage()
@@ -525,8 +568,6 @@ impl EscrowContract {
         );
     }
 
-    /// M-of-N admin (deprecated): Mark a job as disputed, freezing remaining releases.
-    #[deprecated]
     pub fn dispute_job(env: Env, signers: Vec<Address>, job_id: String) {
         require_admin(&env, &signers);
 
@@ -544,8 +585,6 @@ impl EscrowContract {
         env.events().publish((symbol_short!("job_disp"),), job_id);
     }
 
-    /// M-of-N admin (deprecated): Resolve a dispute and release remaining funds.
-    #[deprecated]
     pub fn resolve_dispute(
         env: Env,
         signers: Vec<Address>,
@@ -652,6 +691,16 @@ impl EscrowContract {
         milestone_index: u32,
         approve: bool,
     ) {
+        admin.require_auth();
+        require_not_paused(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if stored_admin != admin {
+            panic!("Only admin can resolve milestone disputes");
+        }
         require_admin(&env, &signers);
 
         let mut job: Job = env
@@ -712,6 +761,7 @@ impl EscrowContract {
     /// Client can request full refund after job deadline passes if no milestone has been claimed.
     pub fn refund_expired_job(env: Env, client: Address, job_id: String) {
         client.require_auth();
+        require_not_paused(&env);
         let mut job: Job = env
             .storage()
             .instance()
@@ -752,6 +802,7 @@ impl EscrowContract {
     /// Freelancer can claim a milestone after release_after ledgers if not disputed.
     pub fn claim_milestone(env: Env, freelancer: Address, job_id: String, milestone_index: u32) {
         freelancer.require_auth();
+        require_not_paused(&env);
         let mut job: Job = env
             .storage()
             .instance()
@@ -925,6 +976,167 @@ impl EscrowContract {
             .instance()
             .get(&DataKey::JobIds)
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((symbol_short!("paused"), admin), ());
+    }
+
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((symbol_short!("unpause"), admin), ());
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
+    pub fn propose_upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        if env.storage().instance().has(&DataKey::PendingUpgrade) {
+            panic!("Upgrade already pending");
+        }
+        let effective_at = env
+            .ledger()
+            .sequence()
+            .checked_add(UPGRADE_TIMELOCK_LEDGERS)
+            .expect("Upgrade effective-at overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgrade, &new_wasm_hash);
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeEffectiveAt, &effective_at);
+        env.events().publish(
+            (symbol_short!("upg_prop"), admin),
+            (new_wasm_hash, effective_at),
+        );
+    }
+
+    pub fn execute_upgrade(env: Env) {
+        let pending: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .expect("No pending upgrade");
+        let effective_at: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeEffectiveAt)
+            .expect("No pending upgrade effective-at");
+        if env.ledger().sequence() < effective_at {
+            panic!("Upgrade timelock not yet elapsed");
+        }
+        env.deployer().update_current_contract_wasm(pending.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::LastExecutedUpgrade, &pending);
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.storage()
+            .instance()
+            .remove(&DataKey::UpgradeEffectiveAt);
+        env.events().publish((symbol_short!("upg_exec"),), pending);
+    }
+
+    pub fn cancel_upgrade(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::CoordinatedUpgrade)
+            .unwrap_or(false)
+        {
+            panic!("Cannot cancel individual upgrade during coordinated upgrade");
+        }
+        if !env.storage().instance().has(&DataKey::PendingUpgrade) {
+            panic!("No pending upgrade");
+        }
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.storage()
+            .instance()
+            .remove(&DataKey::UpgradeEffectiveAt);
+        env.events().publish((symbol_short!("upg_cncl"), admin), ());
+    }
+
+    pub fn get_pending_upgrade(env: Env) -> Option<(BytesN<32>, u32)> {
+        let hash: Option<BytesN<32>> = env.storage().instance().get(&DataKey::PendingUpgrade);
+        let effective: Option<u32> = env.storage().instance().get(&DataKey::UpgradeEffectiveAt);
+        match (hash, effective) {
+            (Some(h), Some(e)) => Some((h, e)),
+            _ => None,
+        }
+    }
+
+    pub fn get_last_executed_upgrade(env: Env) -> Option<BytesN<32>> {
+        env.storage().instance().get(&DataKey::LastExecutedUpgrade)
+    }
+
+    pub fn set_coordinated_pause(env: Env, admin: Address, new_wasm_hash: Option<BytesN<32>>) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::CoordinatedUpgrade, &true);
+        if let Some(hash) = new_wasm_hash {
+            if env.storage().instance().has(&DataKey::PendingUpgrade) {
+                panic!("Upgrade already pending");
+            }
+            let effective_at = env
+                .ledger()
+                .sequence()
+                .checked_add(UPGRADE_TIMELOCK_LEDGERS)
+                .expect("Upgrade effective-at overflow");
+            env.storage()
+                .instance()
+                .set(&DataKey::PendingUpgrade, &hash);
+            env.storage()
+                .instance()
+                .set(&DataKey::UpgradeEffectiveAt, &effective_at);
+            env.events().publish(
+                (symbol_short!("upg_prop"), env.current_contract_address()),
+                (hash, effective_at),
+            );
+        }
+        env.events().publish((symbol_short!("coord_ps"),), true);
+    }
+
+    pub fn clear_coordinated_pause(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::CoordinatedUpgrade, &false);
+        env.events().publish((symbol_short!("coord_ps"),), false);
+    }
+
+    pub fn cancel_coordinated_pause(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::CoordinatedUpgrade, &false);
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.storage()
+            .instance()
+            .remove(&DataKey::UpgradeEffectiveAt);
+        env.events().publish((symbol_short!("coord_cnc"),), ());
+    }
+
+    pub fn is_coordinated_upgrade_active(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::CoordinatedUpgrade)
+            .unwrap_or(false)
     }
 }
 

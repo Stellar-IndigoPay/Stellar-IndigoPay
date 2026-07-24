@@ -34,7 +34,7 @@ pub mod donation;
  */
 use soroban_sdk::{
     contract, contractclient, contractimpl, contracttype, symbol_short, token, Address, Bytes,
-    BytesN, Env, String, Symbol, Vec,
+    BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 
 // ─── Oracle interface ─────────────────────────────────────────────────────────
@@ -392,6 +392,8 @@ pub enum DataKey {
     // returns. Used by indexers to confirm which WASM is currently
     // running at the contract address.
     LastExecutedUpgrade,
+    CoordinatedUpgrade,
+    CoordinatedContracts,
     // Pending emergency withdrawal request. One per project at a time —
     // key is project_id only; a project with multiple token balances
     // must execute withdrawals sequentially (initiate → wait → execute
@@ -553,6 +555,14 @@ fn require_admin_for_routine(env: &Env, signer: &Address) {
 /// any storage read so a paused contract costs as little as possible
 /// to verify and the panic message is uniform.
 fn require_not_paused(env: &Env) {
+    let coordinated: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::CoordinatedUpgrade)
+        .unwrap_or(false);
+    if coordinated {
+        panic!("Coordinated upgrade in progress");
+    }
     let paused: bool = env
         .storage()
         .instance()
@@ -560,6 +570,17 @@ fn require_not_paused(env: &Env) {
         .unwrap_or(false);
     if paused {
         panic!("Contract is paused");
+    }
+}
+
+fn require_not_coordinated_upgrade(env: &Env) {
+    let coordinated: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::CoordinatedUpgrade)
+        .unwrap_or(false);
+    if coordinated {
+        panic!("Coordinated upgrade in progress");
     }
 }
 
@@ -1567,6 +1588,7 @@ impl IndigoPayContract {
 
     pub fn pause_project(env: Env, admin: Address, project_id: String) {
         require_admin_for_routine(&env, &admin);
+        require_not_coordinated_upgrade(&env);
         // pause_project is intentionally NOT paused-gated so the admin can
         // still manage individual projects during a contract-wide pause.
         let mut project: Project = env
@@ -1595,6 +1617,7 @@ impl IndigoPayContract {
     /// project is not paused, to prevent accidental double-resumes).
     pub fn resume_project(env: Env, admin: Address, project_id: String) {
         require_admin_for_routine(&env, &admin);
+        require_not_coordinated_upgrade(&env);
         // resume_project is intentionally NOT paused-gated.
         let mut project: Project = env
             .storage()
@@ -3410,6 +3433,7 @@ impl IndigoPayContract {
     /// Emits proj_ver on approval, prop_rej on rejection.
     #[cfg(feature = "governance")]
     pub fn resolve_proposal(env: Env, project_id: String) {
+        require_not_paused(&env);
         let mut proposal: VoteProposal = env
             .storage()
             .instance()
@@ -3441,6 +3465,7 @@ impl IndigoPayContract {
     #[cfg(feature = "governance")]
     pub fn veto_proposal(env: Env, signers: Vec<Address>, project_id: String) {
         require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
         let mut proposal: VoteProposal = env
             .storage()
             .instance()
@@ -3851,6 +3876,7 @@ impl IndigoPayContract {
     /// `cancel_admin_transfer` first.
     pub fn transfer_admin(env: Env, signers: Vec<Address>, old_admin: Address, new_admin: Address) {
         require_admin_for_critical(&env, &signers);
+        require_not_coordinated_upgrade(&env);
         if env.storage().instance().has(&DataKey::PendingAdmin) {
             panic!("Admin transfer already pending; cancel first");
         }
@@ -3875,6 +3901,7 @@ impl IndigoPayContract {
     /// replaced by `new_admin` in the admin set (in-place swap). Threshold
     /// and set size are preserved.
     pub fn accept_admin(env: Env) {
+        require_not_coordinated_upgrade(&env);
         let (old_admin, new_admin): (Address, Address) = env
             .storage()
             .instance()
@@ -3910,6 +3937,7 @@ impl IndigoPayContract {
     /// was a mistake.
     pub fn cancel_admin_transfer(env: Env, signers: Vec<Address>) {
         require_admin_for_critical(&env, &signers);
+        require_not_coordinated_upgrade(&env);
         if !env.storage().instance().has(&DataKey::PendingAdmin) {
             panic!("No pending admin transfer");
         }
@@ -3928,6 +3956,7 @@ impl IndigoPayContract {
     /// M-of-N: add a new address to the admin set.
     pub fn add_admin(env: Env, signers: Vec<Address>, new_admin: Address) {
         require_admin_for_critical(&env, &signers);
+        require_not_coordinated_upgrade(&env);
         let mut admin_set: Vec<Address> = read_admin_set(&env);
         if admin_set.contains(&new_admin) {
             panic!("Address is already an admin");
@@ -3944,6 +3973,7 @@ impl IndigoPayContract {
     /// current threshold (call `update_threshold` first).
     pub fn remove_admin(env: Env, signers: Vec<Address>, admin_to_remove: Address) {
         require_admin_for_critical(&env, &signers);
+        require_not_coordinated_upgrade(&env);
         let admin_set: Vec<Address> = read_admin_set(&env);
         if !admin_set.contains(&admin_to_remove) {
             panic!("Address is not an admin");
@@ -3975,6 +4005,7 @@ impl IndigoPayContract {
     /// 1 <= new_threshold <= admin_set.len().
     pub fn update_threshold(env: Env, signers: Vec<Address>, new_threshold: u32) {
         require_admin_for_critical(&env, &signers);
+        require_not_coordinated_upgrade(&env);
         let admin_set: Vec<Address> = read_admin_set(&env);
         if new_threshold == 0 || new_threshold > admin_set.len() {
             panic!("Threshold must be between 1 and the number of admins");
@@ -4099,6 +4130,14 @@ impl IndigoPayContract {
     #[cfg(feature = "upgrade")]
     pub fn cancel_upgrade(env: Env, signers: Vec<Address>) {
         require_admin_for_critical(&env, &signers);
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::CoordinatedUpgrade)
+            .unwrap_or(false)
+        {
+            panic!("Cannot cancel individual upgrade during coordinated upgrade");
+        }
         if !env.storage().instance().has(&DataKey::PendingUpgrade) {
             panic!("No pending upgrade");
         }
@@ -4139,6 +4178,238 @@ impl IndigoPayContract {
             .instance()
             .get(&STORAGE_VERSION_KEY)
             .unwrap_or(1)
+    }
+
+    // ─── Coordinated Multi-Contract Upgrade ─────────────────────────────────
+
+    /// Admin-only: propose coordinated upgrade for multiple contracts.
+    /// Pauses all participating contracts atomically and sets pending upgrade WASM hashes.
+    pub fn propose_coordinated_upgrade(
+        env: Env,
+        signers: Vec<Address>,
+        new_wasm_hashes: Vec<(Address, BytesN<32>)>,
+    ) {
+        require_admin_for_critical(&env, &signers);
+        let current_coordinated: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::CoordinatedUpgrade)
+            .unwrap_or(false);
+        if current_coordinated {
+            panic!("Coordinated upgrade in progress");
+        }
+
+        let mut target_addrs: Vec<Address> = Vec::new(&env);
+        for item in new_wasm_hashes.iter() {
+            target_addrs.push_back(item.0.clone());
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::CoordinatedContracts, &target_addrs);
+        env.storage()
+            .instance()
+            .set(&DataKey::CoordinatedUpgrade, &true);
+
+        let effective_at = env
+            .ledger()
+            .sequence()
+            .checked_add(UPGRADE_TIMELOCK_LEDGERS)
+            .expect("Upgrade effective-at overflow");
+
+        for item in new_wasm_hashes.iter() {
+            let addr = item.0.clone();
+            let hash = item.1.clone();
+            if addr == env.current_contract_address() {
+                if env.storage().instance().has(&DataKey::PendingUpgrade) {
+                    panic!("Upgrade already pending");
+                }
+                env.storage()
+                    .instance()
+                    .set(&DataKey::PendingUpgrade, &hash);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::UpgradeEffectiveAt, &effective_at);
+                env.events().publish(
+                    (symbol_short!("upg_prop"), signers.get(0).unwrap()),
+                    (hash, effective_at),
+                );
+            } else {
+                env.invoke_contract::<()>(
+                    &addr,
+                    &Symbol::new(&env, "set_coordinated_pause"),
+                    (signers.get(0).unwrap(), Some(hash)).into_val(&env),
+                );
+            }
+        }
+
+        env.events()
+            .publish((symbol_short!("coord_ps"), signers.get(0).unwrap()), true);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Complete coordinated upgrade after all participating contract upgrades are executed.
+    pub fn complete_coordinated_upgrade(env: Env, admin: Address) {
+        require_admin_for_routine(&env, &admin);
+        let coordinated: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::CoordinatedUpgrade)
+            .unwrap_or(false);
+        if !coordinated {
+            panic!("No coordinated upgrade in progress");
+        }
+
+        let target_addrs: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CoordinatedContracts)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        for addr in target_addrs.iter() {
+            if addr == env.current_contract_address() {
+                if env.storage().instance().has(&DataKey::PendingUpgrade) {
+                    panic!("Upgrades not yet completed");
+                }
+            } else {
+                let pending: Option<(BytesN<32>, u32)> = env.invoke_contract(
+                    &addr,
+                    &Symbol::new(&env, "get_pending_upgrade"),
+                    ().into_val(&env),
+                );
+                if pending.is_some() {
+                    panic!("Upgrades not yet completed");
+                }
+            }
+        }
+
+        for addr in target_addrs.iter() {
+            if addr == env.current_contract_address() {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::CoordinatedUpgrade, &false);
+            } else {
+                env.invoke_contract::<()>(
+                    &addr,
+                    &Symbol::new(&env, "clear_coordinated_pause"),
+                    (admin.clone(),).into_val(&env),
+                );
+            }
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::CoordinatedUpgrade, &false);
+        env.storage()
+            .instance()
+            .remove(&DataKey::CoordinatedContracts);
+        env.events().publish((symbol_short!("coord_cmp"),), ());
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Admin-only: cancel a coordinated upgrade, restoring all contracts.
+    pub fn cancel_coordinated_upgrade(env: Env, signers: Vec<Address>) {
+        require_admin_for_critical(&env, &signers);
+        let coordinated: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::CoordinatedUpgrade)
+            .unwrap_or(false);
+        if !coordinated {
+            panic!("No coordinated upgrade in progress");
+        }
+
+        let target_addrs: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CoordinatedContracts)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        for addr in target_addrs.iter() {
+            if addr == env.current_contract_address() {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::CoordinatedUpgrade, &false);
+                env.storage().instance().remove(&DataKey::PendingUpgrade);
+                env.storage()
+                    .instance()
+                    .remove(&DataKey::UpgradeEffectiveAt);
+            } else {
+                env.invoke_contract::<()>(
+                    &addr,
+                    &Symbol::new(&env, "cancel_coordinated_pause"),
+                    (signers.get(0).unwrap(),).into_val(&env),
+                );
+            }
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::CoordinatedUpgrade, &false);
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.storage()
+            .instance()
+            .remove(&DataKey::UpgradeEffectiveAt);
+        env.storage()
+            .instance()
+            .remove(&DataKey::CoordinatedContracts);
+        env.events()
+            .publish((symbol_short!("coord_cnc"), signers.get(0).unwrap()), ());
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    pub fn set_coordinated_pause(env: Env, admin: Address, new_wasm_hash: Option<BytesN<32>>) {
+        require_admin_for_routine(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::CoordinatedUpgrade, &true);
+        if let Some(hash) = new_wasm_hash {
+            if env.storage().instance().has(&DataKey::PendingUpgrade) {
+                panic!("Upgrade already pending");
+            }
+            let effective_at = env
+                .ledger()
+                .sequence()
+                .checked_add(UPGRADE_TIMELOCK_LEDGERS)
+                .expect("Upgrade effective-at overflow");
+            env.storage()
+                .instance()
+                .set(&DataKey::PendingUpgrade, &hash);
+            env.storage()
+                .instance()
+                .set(&DataKey::UpgradeEffectiveAt, &effective_at);
+            env.events().publish(
+                (symbol_short!("upg_prop"), env.current_contract_address()),
+                (hash, effective_at),
+            );
+        }
+        env.events().publish((symbol_short!("coord_ps"),), true);
+    }
+
+    pub fn clear_coordinated_pause(env: Env, admin: Address) {
+        require_admin_for_routine(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::CoordinatedUpgrade, &false);
+        env.events().publish((symbol_short!("coord_ps"),), false);
+    }
+
+    pub fn cancel_coordinated_pause(env: Env, admin: Address) {
+        require_admin_for_routine(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::CoordinatedUpgrade, &false);
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.storage()
+            .instance()
+            .remove(&DataKey::UpgradeEffectiveAt);
+        env.events().publish((symbol_short!("coord_cnc"),), ());
+    }
+
+    pub fn is_coordinated_upgrade_active(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::CoordinatedUpgrade)
+            .unwrap_or(false)
     }
 
     // ─── Emergency withdrawal (7-day timelock) ─────────────────────────────────
@@ -5082,6 +5353,7 @@ impl IndigoPayContract {
     #[cfg(feature = "vesting")]
     pub fn cancel_vesting(env: Env, donor: Address, schedule_id: u32) {
         donor.require_auth();
+        require_not_paused(&env);
 
         let schedule_key = DataKey::VestingSchedule(donor.clone(), schedule_id);
         let schedule: VestingSchedule = env
@@ -9716,5 +9988,221 @@ mod tests {
         client.add_impact_verifier(&admin, &verifier);
         let unknown = String::from_str(&env, "does-not-exist");
         client.submit_impact_report(&verifier, &unknown, &105u32, &evidence(&env, 1));
+    }
+
+    // ─── Coordinated Upgrade Tests ──────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Coordinated upgrade in progress")]
+    fn test_coordinated_pause_blocks_writes() {
+        let (env, _cid, client, admin, _pid) = setup();
+        let wasm_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let mut list = Vec::new(&env);
+        list.push_back((_cid.clone(), wasm_hash));
+        client.propose_coordinated_upgrade(&signers1(&env, &admin), &list);
+
+        assert!(client.is_coordinated_upgrade_active());
+
+        let new_pid = String::from_str(&env, "new-project");
+        let owner = Address::generate(&env);
+        let name = String::from_str(&env, "Test Project");
+        client.register_project(&admin, &new_pid, &name, &owner, &100u32);
+    }
+
+    #[test]
+    fn test_coordinated_pause_allows_reads() {
+        let (env, _cid, client, admin, pid) = setup();
+        let wasm_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let mut list = Vec::new(&env);
+        list.push_back((_cid.clone(), wasm_hash));
+        client.propose_coordinated_upgrade(&signers1(&env, &admin), &list);
+
+        assert!(client.is_coordinated_upgrade_active());
+
+        assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.get_project_count(), 1);
+        let proj = client.get_project(&pid);
+        assert_eq!(proj.id, pid);
+    }
+
+    #[test]
+    fn test_complete_upgrade_unpauses() {
+        let (env, _cid, client, admin, _pid) = setup();
+        let wasm_hash = BytesN::from_array(&env, &[2u8; 32]);
+        let mut list = Vec::new(&env);
+        list.push_back((_cid.clone(), wasm_hash.clone()));
+        client.propose_coordinated_upgrade(&signers1(&env, &admin), &list);
+
+        assert!(client.is_coordinated_upgrade_active());
+
+        env.ledger().set_sequence_number(34_561);
+        // In unit-test host environment, WASM binaries are not compiled, so we simulate
+        // upgrade completion by clearing the pending upgrade flag.
+        env.as_contract(&_cid, || {
+            env.storage().instance().remove(&DataKey::PendingUpgrade);
+            env.storage()
+                .instance()
+                .remove(&DataKey::UpgradeEffectiveAt);
+        });
+
+        client.complete_coordinated_upgrade(&admin);
+        assert!(!client.is_coordinated_upgrade_active());
+
+        let new_pid = String::from_str(&env, "new-project-2");
+        let owner = Address::generate(&env);
+        let name = String::from_str(&env, "Test Project 2");
+        client.register_project(&admin, &new_pid, &name, &owner, &100u32);
+        assert_eq!(client.get_project_count(), 2);
+    }
+
+    #[test]
+    fn test_cancel_restores() {
+        let (env, _cid, client, admin, _pid) = setup();
+        let wasm_hash = BytesN::from_array(&env, &[3u8; 32]);
+        let mut list = Vec::new(&env);
+        list.push_back((_cid.clone(), wasm_hash));
+        client.propose_coordinated_upgrade(&signers1(&env, &admin), &list);
+
+        assert!(client.is_coordinated_upgrade_active());
+
+        client.cancel_coordinated_upgrade(&signers1(&env, &admin));
+        assert!(!client.is_coordinated_upgrade_active());
+
+        let new_pid = String::from_str(&env, "new-project-3");
+        let owner = Address::generate(&env);
+        let name = String::from_str(&env, "Test Project 3");
+        client.register_project(&admin, &new_pid, &name, &owner, &100u32);
+        assert_eq!(client.get_project_count(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_set_coordinated_pause_unauthorized_fails() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let attacker = Address::generate(&env);
+        let wasm_hash = Some(BytesN::from_array(&env, &[99u8; 32]));
+        client.set_coordinated_pause(&attacker, &wasm_hash);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_clear_coordinated_pause_unauthorized_fails() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let attacker = Address::generate(&env);
+        client.clear_coordinated_pause(&attacker);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_cancel_coordinated_pause_unauthorized_fails() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let attacker = Address::generate(&env);
+        client.cancel_coordinated_pause(&attacker);
+    }
+
+    #[test]
+    #[should_panic(expected = "Coordinated upgrade in progress")]
+    fn test_pause_project_during_coordinated_upgrade_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        let wasm_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let mut list = Vec::new(&env);
+        list.push_back((_cid.clone(), wasm_hash));
+        client.propose_coordinated_upgrade(&signers1(&env, &admin), &list);
+
+        client.pause_project(&admin, &pid);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot cancel individual upgrade during coordinated upgrade")]
+    fn test_cancel_upgrade_during_coordinated_upgrade_fails() {
+        let (env, _cid, client, admin, _pid) = setup();
+        let wasm_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let mut list = Vec::new(&env);
+        list.push_back((_cid.clone(), wasm_hash));
+        client.propose_coordinated_upgrade(&signers1(&env, &admin), &list);
+
+        client.cancel_upgrade(&signers1(&env, &admin));
+    }
+
+    #[test]
+    fn test_integration_coordinated_upgrade_all_contracts() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let indigopay_id = env.register_contract(None, IndigoPayContract);
+        let attestation_id = env.register_contract(None, attestation_contract::AttestationContract);
+        let escrow_id = env.register_contract(None, escrow_contract::EscrowContract);
+
+        let indigopay_client = IndigoPayContractClient::new(&env, &indigopay_id);
+        let attestation_client =
+            attestation_contract::AttestationContractClient::new(&env, &attestation_id);
+        let escrow_client = escrow_contract::EscrowContractClient::new(&env, &escrow_id);
+
+        let admin = Address::generate(&env);
+        indigopay_client.initialize(&signers1(&env, &admin), &1u32);
+        attestation_client.initialize(&admin);
+        attestation_client.set_relayer(&admin, &admin);
+        escrow_client.initialize(&admin);
+
+        let hash1 = BytesN::from_array(&env, &[11u8; 32]);
+        let hash2 = BytesN::from_array(&env, &[22u8; 32]);
+        let hash3 = BytesN::from_array(&env, &[33u8; 32]);
+
+        let mut list = Vec::new(&env);
+        list.push_back((indigopay_id.clone(), hash1.clone()));
+        list.push_back((attestation_id.clone(), hash2.clone()));
+        list.push_back((escrow_id.clone(), hash3.clone()));
+
+        indigopay_client.propose_coordinated_upgrade(&signers1(&env, &admin), &list);
+
+        assert!(indigopay_client.is_coordinated_upgrade_active());
+        assert!(attestation_client.is_coordinated_upgrade_active());
+        assert!(escrow_client.is_coordinated_upgrade_active());
+
+        assert_eq!(indigopay_client.get_admin(), admin);
+        assert_eq!(attestation_client.get_admin(), admin);
+        assert_eq!(escrow_client.get_job_count(), 0);
+
+        env.ledger().set_sequence_number(34_561);
+
+        // Simulate execution of upgrades on all 3 contracts by clearing pending upgrades
+        env.as_contract(&indigopay_id, || {
+            env.storage().instance().remove(&DataKey::PendingUpgrade);
+        });
+        env.as_contract(&attestation_id, || {
+            env.storage()
+                .instance()
+                .remove(&attestation_contract::DataKey::PendingUpgrade);
+        });
+        env.as_contract(&escrow_id, || {
+            env.storage()
+                .instance()
+                .remove(&escrow_contract::DataKey::PendingUpgrade);
+        });
+
+        indigopay_client.complete_coordinated_upgrade(&admin);
+
+        assert!(!indigopay_client.is_coordinated_upgrade_active());
+        assert!(!attestation_client.is_coordinated_upgrade_active());
+        assert!(!escrow_client.is_coordinated_upgrade_active());
+
+        let pid = String::from_str(&env, "proj-after-unpause");
+        let owner = Address::generate(&env);
+        let name = String::from_str(&env, "Project After Unpause");
+        indigopay_client.register_project(&admin, &pid, &name, &owner, &100u32);
+        assert_eq!(indigopay_client.get_project_count(), 1);
+
+        let donor = Address::generate(&env);
+        attestation_client.record_attestation(
+            &admin,
+            &String::from_str(&env, "ethereum"),
+            &String::from_str(&env, "0x1234567890abcdef"),
+            &donor,
+            &pid,
+            &1_000_000i128,
+            &100i128,
+            &1u32,
+        );
+        assert_eq!(attestation_client.get_total_count(), 1);
     }
 }
