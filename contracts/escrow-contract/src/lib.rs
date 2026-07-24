@@ -679,13 +679,14 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Job(job_id.clone()), &job);
-        env.storage().instance().set(
-            &DataKey::Dispute(job_id.clone(), milestone_index),
-            &dispute,
-        );
+        env.storage()
+            .instance()
+            .set(&DataKey::Dispute(job_id.clone(), milestone_index), &dispute);
 
-        env.events()
-            .publish((symbol_short!("dsp_init"), initiator), (job_id, milestone_index));
+        env.events().publish(
+            (symbol_short!("dsp_init"), initiator),
+            (job_id, milestone_index),
+        );
     }
 
     /// The other party responds to a dispute with evidence.
@@ -735,7 +736,7 @@ impl EscrowContract {
         }
 
         dispute.rounds.push_back(DisputeRound {
-            submitter: responder,
+            submitter: responder.clone(),
             evidence_hash,
             submitted_at: env.ledger().sequence(),
         });
@@ -746,10 +747,9 @@ impl EscrowContract {
             dispute.status = DisputeStatus::AwaitingResponse;
         }
 
-        env.storage().instance().set(
-            &DataKey::Dispute(job_id.clone(), milestone_index),
-            &dispute,
-        );
+        env.storage()
+            .instance()
+            .set(&DataKey::Dispute(job_id.clone(), milestone_index), &dispute);
 
         env.events().publish(
             (symbol_short!("dsp_resp"), responder),
@@ -769,10 +769,7 @@ impl EscrowContract {
             panic!("Dispute is not awaiting response");
         }
 
-        let last_round = dispute
-            .rounds
-            .get(dispute.rounds.len() - 1)
-            .unwrap();
+        let last_round = dispute.rounds.get(dispute.rounds.len() - 1).unwrap();
         let elapsed = env
             .ledger()
             .sequence()
@@ -785,10 +782,9 @@ impl EscrowContract {
 
         dispute.status = DisputeStatus::UnderReview;
 
-        env.storage().instance().set(
-            &DataKey::Dispute(job_id.clone(), milestone_index),
-            &dispute,
-        );
+        env.storage()
+            .instance()
+            .set(&DataKey::Dispute(job_id.clone(), milestone_index), &dispute);
 
         env.events()
             .publish((symbol_short!("dsp_tout"),), (job_id, milestone_index));
@@ -823,9 +819,11 @@ impl EscrowContract {
         }
 
         // If a multi-round Dispute record exists, it must be UnderReview.
-        if let Some(dispute) = env.storage().instance().get::<DataKey, Dispute>(
-            &DataKey::Dispute(job_id.clone(), milestone_index),
-        ) {
+        if let Some(dispute) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Dispute>(&DataKey::Dispute(job_id.clone(), milestone_index))
+        {
             if dispute.status == DisputeStatus::Resolved {
                 panic!("Dispute already resolved");
             }
