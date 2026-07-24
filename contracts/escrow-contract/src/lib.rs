@@ -5,7 +5,7 @@
 //! Client locks funds with `create_job`, then releases them per milestone.
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Env, String, Vec,
+    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, String, Vec,
 };
 
 #[contracttype]
@@ -42,15 +42,45 @@ pub struct Job {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum DisputeStatus {
+    Open,
+    AwaitingResponse,
+    UnderReview,
+    Resolved,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DisputeRound {
+    pub submitter: Address,
+    pub evidence_hash: BytesN<32>,
+    pub submitted_at: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Dispute {
+    pub milestone_index: u32,
+    pub initiator: Address,
+    pub initiated_at: u32,
+    pub rounds: Vec<DisputeRound>,
+    pub status: DisputeStatus,
+}
+
+#[contracttype]
 pub enum DataKey {
     Job(String),
     Admin,
     JobCount,
     JobIds,
+    Dispute(String, u32),
 }
 
 pub const RELEASE_AFTER_LEDGERS: u32 = 10;
 pub const DEFAULT_DEADLINE_LEDGERS: u32 = 1_555_200; // 90 days @ 5s/ledger
+pub const MAX_DISPUTE_ROUNDS: u32 = 3;
+pub const DISPUTE_RESPONSE_WINDOW: u32 = 100; // ledgers
 
 fn compute_remaining_funds(job: &Job) -> i128 {
     let mut remaining_amount: i128 = 0;
@@ -63,6 +93,10 @@ fn compute_remaining_funds(job: &Job) -> i128 {
         }
     }
     remaining_amount
+}
+
+fn dispute_ready_for_resolution(dispute: &Dispute) -> bool {
+    dispute.status == DisputeStatus::UnderReview || dispute.rounds.len() >= 2
 }
 
 #[contract]
@@ -364,6 +398,187 @@ impl EscrowContract {
             .publish((symbol_short!("ms_disp"), admin), (job_id, milestone_index));
     }
 
+    /// Party-initiated dispute with evidence. Client or freelancer initiates
+    /// a multi-round dispute protocol for a specific milestone.
+    pub fn initiate_dispute(
+        env: Env,
+        initiator: Address,
+        job_id: String,
+        milestone_index: u32,
+        evidence_hash: BytesN<32>,
+    ) {
+        initiator.require_auth();
+
+        let mut job: Job = env
+            .storage()
+            .instance()
+            .get(&DataKey::Job(job_id.clone()))
+            .expect("Job not found");
+
+        if initiator != job.client && initiator != job.freelancer {
+            panic!("Only client or freelancer can initiate dispute");
+        }
+
+        if milestone_index >= job.milestones.len() {
+            panic!("Invalid milestone index");
+        }
+
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::Dispute(job_id.clone(), milestone_index))
+        {
+            panic!("Active dispute already exists for this milestone");
+        }
+
+        let mut milestones = job.milestones.clone();
+        let mut milestone = milestones.get(milestone_index).unwrap().clone();
+        if milestone.released {
+            panic!("Milestone already released");
+        }
+        if milestone.disputed {
+            panic!("Milestone already disputed");
+        }
+
+        milestone.disputed = true;
+        milestones.set(milestone_index, milestone);
+        job.milestones = milestones;
+        job.status = JobStatus::Disputed;
+
+        let seq = env.ledger().sequence();
+        let mut rounds = Vec::new(&env);
+        rounds.push_back(DisputeRound {
+            submitter: initiator.clone(),
+            evidence_hash,
+            submitted_at: seq,
+        });
+
+        let dispute = Dispute {
+            milestone_index,
+            initiator: initiator.clone(),
+            initiated_at: seq,
+            rounds,
+            status: DisputeStatus::AwaitingResponse,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Job(job_id.clone()), &job);
+        env.storage().instance().set(
+            &DataKey::Dispute(job_id.clone(), milestone_index),
+            &dispute,
+        );
+
+        env.events()
+            .publish((symbol_short!("dsp_init"), initiator), (job_id, milestone_index));
+    }
+
+    /// The other party responds to a dispute with evidence.
+    pub fn respond_to_dispute(
+        env: Env,
+        responder: Address,
+        job_id: String,
+        milestone_index: u32,
+        evidence_hash: BytesN<32>,
+    ) {
+        responder.require_auth();
+
+        let mut dispute: Dispute = env
+            .storage()
+            .instance()
+            .get(&DataKey::Dispute(job_id.clone(), milestone_index))
+            .expect("No active dispute for this milestone");
+
+        if dispute.status == DisputeStatus::Resolved {
+            panic!("Dispute already resolved");
+        }
+        if dispute.status == DisputeStatus::UnderReview {
+            panic!("Dispute is under review");
+        }
+
+        let last_submitter = dispute
+            .rounds
+            .get(dispute.rounds.len() - 1)
+            .unwrap()
+            .submitter
+            .clone();
+        if responder == last_submitter {
+            panic!("Cannot respond to your own submission");
+        }
+
+        let job: Job = env
+            .storage()
+            .instance()
+            .get(&DataKey::Job(job_id.clone()))
+            .expect("Job not found");
+        if responder != job.client && responder != job.freelancer {
+            panic!("Only client or freelancer can respond to dispute");
+        }
+
+        if dispute.rounds.len() >= MAX_DISPUTE_ROUNDS {
+            panic!("Maximum dispute rounds reached");
+        }
+
+        dispute.rounds.push_back(DisputeRound {
+            submitter: responder,
+            evidence_hash,
+            submitted_at: env.ledger().sequence(),
+        });
+
+        if dispute.rounds.len() >= MAX_DISPUTE_ROUNDS {
+            dispute.status = DisputeStatus::UnderReview;
+        } else {
+            dispute.status = DisputeStatus::AwaitingResponse;
+        }
+
+        env.storage().instance().set(
+            &DataKey::Dispute(job_id.clone(), milestone_index),
+            &dispute,
+        );
+
+        env.events().publish(
+            (symbol_short!("dsp_resp"), responder),
+            (job_id, milestone_index, dispute.rounds.len()),
+        );
+    }
+
+    /// Anyone can timeout a dispute if responder doesn't respond within window.
+    pub fn timeout_dispute(env: Env, job_id: String, milestone_index: u32) {
+        let mut dispute: Dispute = env
+            .storage()
+            .instance()
+            .get(&DataKey::Dispute(job_id.clone(), milestone_index))
+            .expect("No active dispute for this milestone");
+
+        if dispute.status != DisputeStatus::AwaitingResponse {
+            panic!("Dispute is not awaiting response");
+        }
+
+        let last_round = dispute
+            .rounds
+            .get(dispute.rounds.len() - 1)
+            .unwrap();
+        let elapsed = env
+            .ledger()
+            .sequence()
+            .checked_sub(last_round.submitted_at)
+            .expect("Ledger sequence went backwards");
+
+        if elapsed < DISPUTE_RESPONSE_WINDOW {
+            panic!("Response window has not elapsed");
+        }
+
+        dispute.status = DisputeStatus::UnderReview;
+
+        env.storage().instance().set(
+            &DataKey::Dispute(job_id.clone(), milestone_index),
+            &dispute,
+        );
+
+        env.events()
+            .publish((symbol_short!("dsp_tout"),), (job_id, milestone_index));
+    }
+
     /// Admin-only: Resolve a single milestone dispute.
     /// If `approve` is true -> release funds for that milestone to freelancer.
     /// If `approve` is false -> refund funds for that milestone to client.
@@ -398,6 +613,24 @@ impl EscrowContract {
         let mut milestone = milestones.get(milestone_index).unwrap().clone();
         if !milestone.disputed {
             panic!("Milestone is not disputed");
+        }
+
+        // If a multi-round Dispute record exists, it must be UnderReview.
+        if let Some(dispute) = env.storage().instance().get::<DataKey, Dispute>(
+            &DataKey::Dispute(job_id.clone(), milestone_index),
+        ) {
+            if dispute.status == DisputeStatus::Resolved {
+                panic!("Dispute already resolved");
+            }
+            if !dispute_ready_for_resolution(&dispute) {
+                panic!("Dispute is not ready for resolution");
+            }
+            let mut resolved_dispute = dispute;
+            resolved_dispute.status = DisputeStatus::Resolved;
+            env.storage().instance().set(
+                &DataKey::Dispute(job_id.clone(), milestone_index),
+                &resolved_dispute,
+            );
         }
 
         let proportion = milestone.percentage as i128;
@@ -555,6 +788,23 @@ impl EscrowContract {
             .instance()
             .get(&DataKey::JobIds)
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    pub fn get_dispute(env: Env, job_id: String, milestone_index: u32) -> Option<Dispute> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Dispute(job_id, milestone_index))
+    }
+
+    pub fn get_dispute_history(
+        env: Env,
+        job_id: String,
+        milestone_index: u32,
+    ) -> Option<Vec<DisputeRound>> {
+        env.storage()
+            .instance()
+            .get::<DataKey, Dispute>(&DataKey::Dispute(job_id, milestone_index))
+            .map(|dispute| dispute.rounds)
     }
 }
 
@@ -1399,5 +1649,414 @@ mod tests {
         client.release_milestone(&client_addr, &job_id, &2u32);
         let job_final = client.get_job(&job_id).unwrap();
         assert_eq!(job_final.status, JobStatus::Completed);
+    }
+
+    #[test]
+    fn test_initiate_dispute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-dsp-init");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M1"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+        });
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+        );
+
+        let evidence = BytesN::from_array(&env, &[1u8; 32]);
+        client.initiate_dispute(&client_addr, &job_id, &0u32, &evidence);
+
+        let job = client.get_job(&job_id).unwrap();
+        assert_eq!(job.status, JobStatus::Disputed);
+        assert!(job.milestones.get(0).unwrap().disputed);
+
+        let dispute = client.get_dispute(&job_id, &0u32).unwrap();
+        assert_eq!(dispute.initiator, client_addr);
+        assert_eq!(dispute.status, DisputeStatus::AwaitingResponse);
+        assert_eq!(dispute.rounds.len(), 1);
+    }
+
+    #[test]
+    fn test_respond_to_dispute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-dsp-resp");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M1"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+        });
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+        );
+
+        let evidence1 = BytesN::from_array(&env, &[1u8; 32]);
+        let evidence2 = BytesN::from_array(&env, &[2u8; 32]);
+        client.initiate_dispute(&client_addr, &job_id, &0u32, &evidence1);
+        client.respond_to_dispute(&freelancer, &job_id, &0u32, &evidence2);
+
+        let dispute = client.get_dispute(&job_id, &0u32).unwrap();
+        assert_eq!(dispute.rounds.len(), 2);
+        assert_eq!(dispute.status, DisputeStatus::AwaitingResponse);
+    }
+
+    #[test]
+    fn test_resolve_after_rounds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-dsp-resolve");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M1"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+        });
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+        );
+
+        let evidence1 = BytesN::from_array(&env, &[1u8; 32]);
+        let evidence2 = BytesN::from_array(&env, &[2u8; 32]);
+        let evidence3 = BytesN::from_array(&env, &[3u8; 32]);
+
+        // Round 1: client initiates
+        client.initiate_dispute(&client_addr, &job_id, &0u32, &evidence1);
+        // Round 2: freelancer responds
+        client.respond_to_dispute(&freelancer, &job_id, &0u32, &evidence2);
+        // Round 3: client surrebuttal (hits MAX_DISPUTE_ROUNDS)
+        client.respond_to_dispute(&client_addr, &job_id, &0u32, &evidence3);
+
+        let dispute = client.get_dispute(&job_id, &0u32).unwrap();
+        assert_eq!(dispute.status, DisputeStatus::UnderReview);
+        assert_eq!(dispute.rounds.len(), 3);
+
+        // Admin resolves in favor of freelancer
+        client.resolve_milestone_dispute(&admin, &job_id, &0u32, &true);
+
+        let job = client.get_job(&job_id).unwrap();
+        assert!(job.milestones.get(0).unwrap().released);
+        assert!(!job.milestones.get(0).unwrap().disputed);
+
+        let dispute = client.get_dispute(&job_id, &0u32).unwrap();
+        assert_eq!(dispute.status, DisputeStatus::Resolved);
+
+        let bal = StellarAssetClient::new(&env, &token).balance(&freelancer);
+        assert_eq!(bal, 1000i128);
+    }
+
+    #[test]
+    fn test_timeout_dispute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-dsp-timeout");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M1"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+        });
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+        );
+
+        let evidence1 = BytesN::from_array(&env, &[1u8; 32]);
+        client.initiate_dispute(&client_addr, &job_id, &0u32, &evidence1);
+
+        // Advance past response window
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + DISPUTE_RESPONSE_WINDOW);
+
+        client.timeout_dispute(&job_id, &0u32);
+
+        let dispute = client.get_dispute(&job_id, &0u32).unwrap();
+        assert_eq!(dispute.status, DisputeStatus::UnderReview);
+
+        // Admin can now resolve
+        client.resolve_milestone_dispute(&admin, &job_id, &0u32, &false);
+        let job = client.get_job(&job_id).unwrap();
+        assert!(job.milestones.get(0).unwrap().released);
+    }
+
+    #[test]
+    #[should_panic(expected = "Maximum dispute rounds reached")]
+    fn test_max_rounds_enforced() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-dsp-max");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M1"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+        });
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+        );
+
+        let e1 = BytesN::from_array(&env, &[1u8; 32]);
+        let e2 = BytesN::from_array(&env, &[2u8; 32]);
+        let e3 = BytesN::from_array(&env, &[3u8; 32]);
+        let e4 = BytesN::from_array(&env, &[4u8; 32]);
+
+        // 3 rounds fills MAX_DISPUTE_ROUNDS
+        client.initiate_dispute(&client_addr, &job_id, &0u32, &e1);
+        client.respond_to_dispute(&freelancer, &job_id, &0u32, &e2);
+        client.respond_to_dispute(&client_addr, &job_id, &0u32, &e3);
+
+        // 4th round should panic
+        client.respond_to_dispute(&freelancer, &job_id, &0u32, &e4);
+    }
+
+    #[test]
+    fn test_dispute_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &2000i128);
+        let job_id = String::from_str(&env, "job-dsp-hist");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M1"),
+            percentage: 50,
+            released: false,
+            disputed: false,
+        });
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M2"),
+            percentage: 50,
+            released: false,
+            disputed: false,
+        });
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &2000i128,
+            &milestones,
+        );
+
+        // No disputes yet
+        assert!(client.get_dispute(&job_id, &0u32).is_none());
+        assert!(client.get_dispute(&job_id, &1u32).is_none());
+
+        // Initiate dispute on milestone 0
+        let e1 = BytesN::from_array(&env, &[10u8; 32]);
+        client.initiate_dispute(&client_addr, &job_id, &0u32, &e1);
+
+        let d0 = client.get_dispute(&job_id, &0u32).unwrap();
+        assert_eq!(d0.milestone_index, 0);
+        assert_eq!(d0.initiator, client_addr);
+        assert_eq!(d0.rounds.len(), 1);
+
+        // Milestone 1 still has no dispute
+        assert!(client.get_dispute(&job_id, &1u32).is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "Only client or freelancer can initiate dispute")]
+    fn test_non_party_cannot_initiate_dispute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-dsp-stranger");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M1"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+        });
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+        );
+
+        let evidence = BytesN::from_array(&env, &[1u8; 32]);
+        client.initiate_dispute(&stranger, &job_id, &0u32, &evidence);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot respond to your own submission")]
+    fn test_cannot_respond_to_own_submission() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-dsp-self");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M1"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+        });
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+        );
+
+        let e1 = BytesN::from_array(&env, &[1u8; 32]);
+        let e2 = BytesN::from_array(&env, &[2u8; 32]);
+        client.initiate_dispute(&client_addr, &job_id, &0u32, &e1);
+        // Client tries to respond to their own dispute
+        client.respond_to_dispute(&client_addr, &job_id, &0u32, &e2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Response window has not elapsed")]
+    fn test_timeout_too_early_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-dsp-early-timeout");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M1"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+        });
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+        );
+
+        let evidence = BytesN::from_array(&env, &[1u8; 32]);
+        client.initiate_dispute(&client_addr, &job_id, &0u32, &evidence);
+
+        // Try timeout immediately (window not elapsed)
+        client.timeout_dispute(&job_id, &0u32);
     }
 }
