@@ -425,6 +425,8 @@ pub enum DataKey {
     // Time-Locked Donation Challenge/Response Protocol (#457)
     ChallengeThreshold,
     DonationChallenge(u32),
+    // Stealth Address Donation Integration (#458)
+    StealthDonationContract,
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -2131,6 +2133,164 @@ impl IndigoPayContract {
     #[cfg(feature = "zk")]
     pub fn is_nullifier_spent(env: Env, nullifier: BytesN<32>) -> bool {
         env.storage().instance().has(&DataKey::Nullifier(nullifier))
+    }
+
+    // ─── Integrated Stealth Address Donation (#458) ───────────────────────────
+
+    /// Admin-only: configure the deployed DonationContract address for stealth donation integration (#458).
+    #[cfg(feature = "donation")]
+    pub fn set_stealth_donation_contract(env: Env, admin: Address, contract_address: Address) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::StealthDonationContract, &contract_address);
+        env.events()
+            .publish((symbol_short!("stlth_set"), admin), contract_address);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Query the configured stealth donation contract address.
+    #[cfg(feature = "donation")]
+    pub fn get_stealth_donation_contract(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::StealthDonationContract)
+            .expect("Stealth donation contract not configured")
+    }
+
+    /// Integrated stealth address donation (#458).
+    ///
+    /// Cross-calls `DonationContract.donate_stealth(...)` to record the stealth donation,
+    /// and updates main contract global and project statistics without updating donor-specific stats,
+    /// preserving donor privacy.
+    #[cfg(feature = "donation")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn donate_stealth_integrated(
+        env: Env,
+        sender: Address,
+        token: Address,
+        ephemeral_pubkey: BytesN<33>,
+        project_id: String,
+        amount: i128,
+        msg_hash: BytesN<32>,
+    ) -> u64 {
+        sender.require_auth();
+        require_not_paused(&env);
+        if amount <= 0 {
+            panic!("Donation amount must be positive");
+        }
+
+        let mut project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        if !project.active {
+            panic!("Project is not accepting donations");
+        }
+        if project.paused {
+            panic!("Project is temporarily paused");
+        }
+        require_campaign_accepts_donation(&project, env.ledger().sequence());
+
+        let stealth_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::StealthDonationContract)
+            .expect("Stealth donation contract not configured");
+
+        let stealth_client = crate::donation::contract::DonationContractClient::new(&env, &stealth_contract);
+        let donation_id = stealth_client.donate_stealth(
+            &sender,
+            &token,
+            &ephemeral_pubkey,
+            &project.wallet,
+            &amount,
+            &msg_hash,
+        );
+
+        // Pre-compute CO2 increment
+        let xlm_units = amount / STROOP;
+        let co2_increment = xlm_units
+            .checked_mul(project.co2_per_xlm as i128)
+            .expect("CO2 calculation overflow");
+
+        // Update project total_raised (donor_count is NOT updated to preserve donor anonymity)
+        project.total_raised = project
+            .total_raised
+            .checked_add(amount)
+            .expect("Project total_raised overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::Project(project_id.clone()), &project);
+
+        // Update global accumulators
+        let gr: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalTotalRaised)
+            .unwrap_or(0);
+        let new_gr = gr.checked_add(amount).expect("GlobalTotalRaised overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::GlobalTotalRaised, &new_gr);
+
+        let gc: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalCO2OffsetGrams)
+            .unwrap_or(0);
+        let new_gc = gc.checked_add(co2_increment).expect("GlobalCO2 overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::GlobalCO2OffsetGrams, &new_gc);
+
+        // Record donation in DonationRecord with zero address for privacy
+        let dc: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationCount)
+            .unwrap_or(0);
+        let new_dc = dc.checked_add(1).expect("DonationCount overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationCount, &new_dc);
+
+        let stealth_pool_donor = env.current_contract_address();
+        let msg_hash_u32 = u32::from_be_bytes([
+            msg_hash.to_array()[0],
+            msg_hash.to_array()[1],
+            msg_hash.to_array()[2],
+            msg_hash.to_array()[3],
+        ]);
+
+        let donation_record = DonationRecord {
+            donor: stealth_pool_donor.clone(),
+            project: project_id.clone(),
+            amount,
+            ledger: env.ledger().sequence(),
+            message_hash: msg_hash_u32,
+            currency: symbol_short!("XLM"),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationRecord(dc), &donation_record);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+
+        env.events().publish(
+            (
+                symbol_short!("stlth_don"),
+                stealth_pool_donor,
+                project_id,
+            ),
+            (donation_id, amount, msg_hash_u32),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+
+        donation_id
     }
 
     // ─── On-chain Impact Certificates (#382) ────────────────────────────────
@@ -8898,5 +9058,154 @@ mod tests {
         let challenge = client.get_donation_challenge(&donation_index).unwrap();
         assert!(challenge.challenged);
     }
+
+    // ─── Stealth Address Donation Integration Tests (#458) ───────────────
+
+    fn create_token_helper(env: &Env, donor: &Address, amount: i128) -> Address {
+        let token_admin = Address::generate(env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        soroban_sdk::token::StellarAssetClient::new(env, &token).mint(donor, &amount);
+        token
+    }
+
+    #[test]
+    fn test_stealth_integrated_stats() {
+        let (env, _cid, client, admin, pid) = setup();
+
+        let stealth_cid = env.register_contract(None, crate::donation::contract::DonationContract);
+        client.set_stealth_donation_contract(&admin, &stealth_cid);
+        assert_eq!(client.get_stealth_donation_contract(), stealth_cid);
+
+        let sender = Address::generate(&env);
+        let amount: i128 = 50 * STROOP;
+        let token = create_token_helper(&env, &sender, amount);
+        let ephem = BytesN::from_array(&env, &[7u8; 33]);
+        let msg_hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        let donation_id = client.donate_stealth_integrated(
+            &sender,
+            &token,
+            &ephem,
+            &pid,
+            &amount,
+            &msg_hash,
+        );
+
+        assert_eq!(donation_id, 1u64);
+
+        let project = client.get_project(&pid);
+        assert_eq!(project.total_raised, amount);
+
+        let global = client.get_global_stats();
+        assert_eq!(global.total_raised, amount);
+        // Project co2_per_xlm is 100 in setup(). 50 XLM * 100 = 5000 grams
+        assert_eq!(global.co2_offset_grams, 5000);
+    }
+
+    #[test]
+    fn test_stealth_integrated_donor_stats_not_updated() {
+        let (env, _cid, client, admin, pid) = setup();
+
+        let stealth_cid = env.register_contract(None, crate::donation::contract::DonationContract);
+        client.set_stealth_donation_contract(&admin, &stealth_cid);
+
+        let sender = Address::generate(&env);
+        let amount: i128 = 100 * STROOP;
+        let token = create_token_helper(&env, &sender, amount);
+        let ephem = BytesN::from_array(&env, &[12u8; 33]);
+        let msg_hash = BytesN::from_array(&env, &[2u8; 32]);
+
+        client.donate_stealth_integrated(
+            &sender,
+            &token,
+            &ephem,
+            &pid,
+            &amount,
+            &msg_hash,
+        );
+
+        // Donor-specific stats must NOT be updated (privacy preserved)
+        let stats = client.get_donor_stats(&sender);
+        assert_eq!(stats.total_donated, 0);
+        assert_eq!(stats.donation_count, 0);
+        assert_eq!(stats.badge, BadgeTier::None);
+
+        let project = client.get_project(&pid);
+        assert_eq!(project.donor_count, 0);
+    }
+
+    #[test]
+    fn test_stealth_integrated_project_total() {
+        let (env, _cid, client, admin, pid) = setup();
+
+        let stealth_cid = env.register_contract(None, crate::donation::contract::DonationContract);
+        client.set_stealth_donation_contract(&admin, &stealth_cid);
+
+        let sender1 = Address::generate(&env);
+        let sender2 = Address::generate(&env);
+        let amount1: i128 = 30 * STROOP;
+        let amount2: i128 = 70 * STROOP;
+
+        let token = create_token_helper(&env, &sender1, amount1);
+        soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&sender2, &amount2);
+
+        let ephem1 = BytesN::from_array(&env, &[1u8; 33]);
+        let ephem2 = BytesN::from_array(&env, &[2u8; 33]);
+        let msg_hash = BytesN::from_array(&env, &[0u8; 32]);
+
+        client.donate_stealth_integrated(&sender1, &token, &ephem1, &pid, &amount1, &msg_hash);
+        client.donate_stealth_integrated(&sender2, &token, &ephem2, &pid, &amount2, &msg_hash);
+
+        let project = client.get_project(&pid);
+        assert_eq!(project.total_raised, 100 * STROOP);
+
+        let global = client.get_global_stats();
+        assert_eq!(global.total_raised, 100 * STROOP);
+    }
+
+    #[test]
+    fn test_stealth_integrated_end_to_end() {
+        let (env, _cid, client, admin, pid) = setup();
+
+        let stealth_cid = env.register_contract(None, crate::donation::contract::DonationContract);
+        let stealth_client = crate::donation::contract::DonationContractClient::new(&env, &stealth_cid);
+
+        client.set_stealth_donation_contract(&admin, &stealth_cid);
+
+        let sender = Address::generate(&env);
+        let amount: i128 = 200 * STROOP;
+        let token = create_token_helper(&env, &sender, amount);
+        let ephem = BytesN::from_array(&env, &[99u8; 33]);
+        let msg_hash = BytesN::from_array(&env, &[5u8; 32]);
+
+        let donation_id = client.donate_stealth_integrated(
+            &sender,
+            &token,
+            &ephem,
+            &pid,
+            &amount,
+            &msg_hash,
+        );
+
+        assert_eq!(donation_id, 1u64);
+
+        // Verify DonationContract state
+        let project_wallet = client.get_project(&pid).wallet;
+        let viewing_key = BytesN::from_array(&env, &[0u8; 32]);
+        let stealth_donations = stealth_client.scan_stealth_donations(&project_wallet, &viewing_key);
+
+        assert_eq!(stealth_donations.len(), 1);
+        let sd = stealth_donations.get(0).unwrap();
+        assert_eq!(sd.amount, amount);
+        assert_eq!(sd.project_wallet, project_wallet);
+        assert_eq!(sd.ephemeral_pubkey, ephem);
+
+        // Verify IndigoPayContract state
+        assert_eq!(client.get_project(&pid).total_raised, amount);
+        assert_eq!(client.get_global_stats().total_raised, amount);
+    }
 }
+
 
