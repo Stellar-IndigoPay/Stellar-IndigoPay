@@ -4,6 +4,9 @@
 // TODO(indigopay-272): migrate to #[contractevent] pattern.
 #![allow(deprecated)]
 
+#[cfg(all(test, feature = "testutils"))]
+mod fuzz_tests;
+
 #[cfg(feature = "donation")]
 pub mod donation;
 
@@ -119,10 +122,22 @@ pub struct ProjectInit {
     pub co2_per_xlm: u32,
 }
 
+/// Input for a single donation within a `batch_donate` call.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BatchDonation {
+    pub donor: Address,
+    pub project_id: String,
+    pub amount: i128,
+    pub msg_hash: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct DonationRecord {
     pub donor: Address,
+    /// True when the donor opted out of public attribution.
+    pub anonymous: bool,
     pub project: String,
     pub amount: i128,
     pub ledger: u32,
@@ -321,6 +336,7 @@ pub enum DataKey {
     DonorStats(Address),
     ImpactNFT(Address, BadgeTier),
     DonationCount,
+    AnonymousDonationCount,
     DonationRecord(u32),
     GlobalTotalRaised,
     GlobalCO2OffsetGrams,
@@ -427,6 +443,8 @@ pub enum DataKey {
     DonationChallenge(u32),
     // Stealth Address Donation Integration (#458)
     StealthDonationContract,
+    /// Quadratic voting: credits spent by a voter on a project proposal.
+    VoteCredits(String, Address),
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -635,6 +653,137 @@ fn impact_merkle_key(env: &Env, project_id: &String, report_id: &String) -> Byte
         .into()
 }
 
+// ─── Off-Chain Oracle Attestation for Project Impact Verification (#459) ────
+//
+// Independent verifiers submit signed attestations of a project's actual
+// CO2 impact. This keeps `co2_per_xlm` honest without trusting either the
+// project or the platform alone:
+//
+//   1. Admin authorises verifier addresses via `add_impact_verifier`.
+//   2. A verifier calls `submit_impact_report` with the rate they measured
+//      off-chain and a hash of their supporting evidence. Resubmission by
+//      the same verifier for the same project updates their existing report
+//      in place rather than creating a second one.
+//   3. Every submission is checked against the project's current
+//      `co2_per_xlm` ("claimed rate"); a >=50% deviation sets a sticky
+//      `ImpactFlagged` marker for the project (cleared explicitly by an
+//      admin via `clear_impact_flag`).
+//   4. Once a configurable number of distinct verifiers have reported,
+//      `co2_per_xlm` is auto-adjusted to the median of their verified
+//      rates. The adjustment re-runs on every later submission so the rate
+//      stays current as reports are added or updated.
+//
+// Kept as a separate `ImpactVerificationKey` enum (mirroring `ImpactKey`
+// above) rather than new `DataKey` variants so this feature can be toggled
+// without touching the encoding of the shared, always-on `DataKey` enum.
+
+#[cfg(feature = "impact_verification")]
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ImpactReport {
+    pub project_id: String,
+    pub verifier: Address,
+    /// Assigned once when a verifier first reports on a project; stays the
+    /// same across resubmissions so callers can treat it as a stable id for
+    /// "this verifier's report", not "this submission event".
+    pub report_id: u32,
+    pub verified_co2_rate: u32,
+    /// Hash of the off-chain evidence bundle (e.g. SHA-256 of a PDF report).
+    /// The contract does not interpret the evidence itself.
+    pub evidence_hash: BytesN<32>,
+    pub submitted_at: u32,
+}
+
+#[cfg(feature = "impact_verification")]
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ImpactVerificationStatus {
+    pub project_id: String,
+    pub report_count: u32,
+    pub threshold: u32,
+    pub flagged: bool,
+    pub current_co2_rate: u32,
+    pub verifiers: Vec<Address>,
+}
+
+#[cfg(feature = "impact_verification")]
+#[contracttype]
+#[derive(Clone, Debug)]
+// Every variant is intentionally prefixed with `Impact` — this key enum
+// lives right next to `ImpactKey` above and the shared `DataKey`, and the
+// prefix keeps grep/read-through unambiguous about which family a given
+// storage key belongs to.
+#[allow(clippy::enum_variant_names)]
+enum ImpactVerificationKey {
+    /// Allow-list of addresses authorised to submit impact reports.
+    ImpactVerifier(Address),
+    /// One record per (project, verifier) — resubmission updates in place.
+    ImpactReportRecord(String, Address),
+    /// Ordered list of verifiers that have reported for a project. Doubles
+    /// as the distinct-verifier count for threshold checks and as the
+    /// enumeration source for median computation.
+    ImpactReportVerifiers(String),
+    /// Per-project monotonic report-id allocator.
+    ImpactNextReportId(String),
+    /// Sticky >=50%-deviation flag, cleared explicitly by an admin.
+    ImpactFlagged(String),
+    /// Admin-configurable distinct-verifier threshold. Falls back to
+    /// `DEFAULT_IMPACT_REPORT_THRESHOLD` when unset.
+    ImpactReportThreshold,
+}
+
+/// Distinct verifier reports required before `co2_per_xlm` auto-adjusts to
+/// the median verified rate.
+#[cfg(feature = "impact_verification")]
+const DEFAULT_IMPACT_REPORT_THRESHOLD: u32 = 3;
+
+/// Returns true when `verified` differs from `claimed` by 50% or more of
+/// `claimed`. Uses `diff * 2 >= claimed` instead of a division so there's no
+/// risk of a fractional-rounding false negative right at the boundary.
+#[cfg(feature = "impact_verification")]
+fn impact_deviates_50_percent(claimed: u32, verified: u32) -> bool {
+    if claimed == 0 {
+        // A registered project's co2_per_xlm is always > 0 (enforced at
+        // registration and by update_project_co2_rate), so this only
+        // guards a defensive default and never fires in practice.
+        return verified > 0;
+    }
+    let diff: u64 = if verified > claimed {
+        (verified - claimed) as u64
+    } else {
+        (claimed - verified) as u64
+    };
+    diff * 2 >= claimed as u64
+}
+
+/// Median of `values`, rounding down on an even-length split — consistent
+/// with the truncating integer arithmetic used everywhere else in this
+/// contract. Sorts a scratch copy in place with a simple insertion sort;
+/// the number of verifiers per project is expected to stay small (tens,
+/// not thousands), so O(n^2) is not a concern.
+#[cfg(feature = "impact_verification")]
+fn median_u32(values: &Vec<u32>) -> u32 {
+    let len = values.len();
+    let mut sorted: Vec<u32> = values.clone();
+    for i in 1..len {
+        let key = sorted.get_unchecked(i);
+        let mut j = i;
+        while j > 0 && sorted.get_unchecked(j - 1) > key {
+            let prev = sorted.get_unchecked(j - 1);
+            sorted.set(j, prev);
+            j -= 1;
+        }
+        sorted.set(j, key);
+    }
+    if len.is_multiple_of(2) {
+        let a = sorted.get_unchecked(len / 2 - 1);
+        let b = sorted.get_unchecked(len / 2);
+        (a + b) / 2
+    } else {
+        sorted.get_unchecked(len / 2)
+    }
+}
+
 /// Read the configured platform fee in basis points.
 /// Returns 0 when the `fees` feature is disabled or no fee has been configured,
 /// preserving backward compatibility.
@@ -757,6 +906,260 @@ fn require_campaign_accepts_donation(project: &Project, current_ledger: u32) {
     }
 }
 
+/// Process a single donation's core logic: rate limiting, project validation,
+/// state updates (project, donor, NFT, globals), token transfers, and events.
+/// Does NOT handle auth, paused-check, or ensure_min_ttl — the caller is
+/// responsible for those.
+#[allow(clippy::too_many_arguments)]
+fn process_donation(
+    env: &Env,
+    token: &Address,
+    donor: &Address,
+    project_id: &String,
+    amount: i128,
+    msg_hash: u32,
+    anonymous: bool,
+) {
+    let current_ledger = env.ledger().sequence();
+    let max_donations: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::DonationRateLimitMax)
+        .unwrap_or(DEFAULT_DONATION_RATE_LIMIT_MAX);
+    let window_ledgers: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::DonationRateLimitWindow)
+        .unwrap_or(DEFAULT_DONATION_RATE_LIMIT_WINDOW);
+
+    let rate_key = DataKey::DonorRateLimit(donor.clone(), project_id.clone());
+    let mut window: RateLimitWindow =
+        env.storage()
+            .instance()
+            .get(&rate_key)
+            .unwrap_or(RateLimitWindow {
+                window_start: current_ledger,
+                count: 0,
+            });
+    if current_ledger - window.window_start >= window_ledgers {
+        window.window_start = current_ledger;
+        window.count = 0;
+    }
+    if window.count >= max_donations {
+        panic!("Donation rate limit exceeded");
+    }
+    window.count = window
+        .count
+        .checked_add(1)
+        .expect("RateLimitWindow count overflow");
+    env.storage().instance().set(&rate_key, &window);
+
+    let mut project: Project = env
+        .storage()
+        .instance()
+        .get(&DataKey::Project(project_id.clone()))
+        .expect("Project not found");
+    if !project.active {
+        panic!("Project is not accepting donations");
+    }
+    if project.paused {
+        panic!("Project is temporarily paused");
+    }
+    require_campaign_accepts_donation(&project, env.ledger().sequence());
+
+    // Pre-compute CO2 increment with checked multiplication so an attacker
+    // can't trigger a silent wrap via a project with a huge co2_per_xlm.
+    let xlm_units = amount / STROOP;
+    let co2_increment = xlm_units
+        .checked_mul(project.co2_per_xlm as i128)
+        .expect("CO2 calculation overflow");
+
+    let stats_donor = if anonymous {
+        Address::from_string(&String::from_str(
+            env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        ))
+    } else {
+        donor.clone()
+    };
+    let mut donor_stats: DonorStats = env
+        .storage()
+        .instance()
+        .get(&DataKey::DonorStats(stats_donor.clone()))
+        .unwrap_or(DonorStats {
+            total_donated: 0,
+            donation_count: 0,
+            badge: BadgeTier::None,
+            co2_offset_grams: 0,
+        });
+    let prev_badge = donor_stats.badge.clone();
+
+    // ── Effects: all state writes BEFORE the external token transfer
+    //    (Checks-Effects-Interactions to defend against reentrancy from a
+    //    malicious token contract passed via `token`).
+    project.total_raised = project
+        .total_raised
+        .checked_add(amount)
+        .expect("Project total_raised overflow");
+    let goal_reached = apply_campaign_goal_progress(&mut project);
+    let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
+    if !env.storage().instance().has(&donated_key) {
+        env.storage().instance().set(&donated_key, &true);
+        project.donor_count = project
+            .donor_count
+            .checked_add(1)
+            .expect("Project donor_count overflow");
+    }
+    env.storage()
+        .instance()
+        .set(&DataKey::Project(project_id.clone()), &project);
+    if goal_reached {
+        env.events().publish(
+            (symbol_short!("camp_goal"), project_id.clone()),
+            project.total_raised,
+        );
+    }
+
+    donor_stats.total_donated = donor_stats
+        .total_donated
+        .checked_add(amount)
+        .expect("Donor total_donated overflow");
+    donor_stats.donation_count = donor_stats
+        .donation_count
+        .checked_add(1)
+        .expect("Donor donation_count overflow");
+    donor_stats.co2_offset_grams = donor_stats
+        .co2_offset_grams
+        .checked_add(co2_increment)
+        .expect("Donor co2_offset overflow");
+    donor_stats.badge = calculate_badge(donor_stats.total_donated);
+    #[cfg(feature = "delegation")]
+    update_delegated_weight_if_needed(env, donor, &prev_badge, &donor_stats.badge);
+    env.storage()
+        .instance()
+        .set(&DataKey::DonorStats(stats_donor), &donor_stats);
+
+    // Track per-project cumulative donations for milestone NFT eligibility.
+    let proj_total_key = DataKey::DonorProjectTotal(project_id.clone(), donor.clone());
+    let prev_proj_total: i128 = env.storage().instance().get(&proj_total_key).unwrap_or(0);
+    env.storage().instance().set(
+        &proj_total_key,
+        &prev_proj_total
+            .checked_add(amount)
+            .expect("DonorProjectTotal overflow"),
+    );
+
+    // Auto-mint an Impact NFT when a donor reaches a new badge tier.
+    if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
+        let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
+        if !env.storage().instance().has(&nft_key) {
+            let nft = ImpactNFT {
+                owner: donor.clone(),
+                tier: donor_stats.badge.clone(),
+                total_donated: donor_stats.total_donated,
+                minted_at_ledger: env.ledger().sequence(),
+            };
+            env.storage().instance().set(&nft_key, &nft);
+            env.events().publish(
+                (symbol_short!("nft_mint"), donor.clone()),
+                donor_stats.badge.clone(),
+            );
+        }
+    }
+
+    let dc: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::DonationCount)
+        .unwrap_or(0);
+    let new_dc = dc.checked_add(1).expect("DonationCount overflow");
+    env.storage()
+        .instance()
+        .set(&DataKey::DonationCount, &new_dc);
+    // Store donation record for trustless enumeration
+    let donation_record = DonationRecord {
+        donor: donor.clone(),
+        anonymous,
+        project: project_id.clone(),
+        amount,
+        ledger: env.ledger().sequence(),
+        message_hash: msg_hash,
+        currency: symbol_short!("XLM"),
+    };
+    env.storage()
+        .instance()
+        .set(&DataKey::DonationRecord(dc), &donation_record);
+    if anonymous {
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AnonymousDonationCount)
+            .unwrap_or(0);
+        env.storage().instance().set(
+            &DataKey::AnonymousDonationCount,
+            &count
+                .checked_add(1)
+                .expect("AnonymousDonationCount overflow"),
+        );
+    }
+    // Snapshot CO₂ offset for exact reversal on refund (#290).
+    env.storage()
+        .instance()
+        .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+
+    let gr: i128 = env
+        .storage()
+        .instance()
+        .get(&DataKey::GlobalTotalRaised)
+        .unwrap_or(0);
+    let new_gr = gr.checked_add(amount).expect("GlobalTotalRaised overflow");
+    env.storage()
+        .instance()
+        .set(&DataKey::GlobalTotalRaised, &new_gr);
+
+    let gc: i128 = env
+        .storage()
+        .instance()
+        .get(&DataKey::GlobalCO2OffsetGrams)
+        .unwrap_or(0);
+    let new_gc = gc.checked_add(co2_increment).expect("GlobalCO2 overflow");
+    env.storage()
+        .instance()
+        .set(&DataKey::GlobalCO2OffsetGrams, &new_gc);
+
+    // ── Interaction: external call happens after every effect is durable.
+    let fee_bps = read_platform_fee_bps(env);
+    #[allow(unused_variables)]
+    let (project_amount, fee_amount) = split_fee(amount, fee_bps);
+
+    let token_client = token::Client::new(env, token);
+
+    // Transfer platform fee to treasury (if configured and feature enabled).
+    #[cfg(feature = "fees")]
+    if fee_amount > 0 {
+        let treasury: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PlatformTreasury)
+            .expect("Platform treasury not configured");
+        token_client.transfer(donor, &treasury, &fee_amount);
+    }
+
+    // Transfer remainder to project wallet.
+    token_client.transfer(donor, &project.wallet, &project_amount);
+
+    #[cfg(feature = "fees")]
+    env.events().publish(
+        (symbol_short!("donated"), donor.clone(), project_id.clone()),
+        (amount, donor_stats.badge.clone(), msg_hash, fee_amount),
+    );
+    #[cfg(not(feature = "fees"))]
+    env.events().publish(
+        (symbol_short!("donated"), donor.clone(), project_id.clone()),
+        (amount, donor_stats.badge.clone(), msg_hash),
+    );
+}
+
 /// After `total_raised` is updated, flip `Active` → `GoalReached` when the
 /// campaign goal is met. Returns `true` when the transition happened.
 fn apply_campaign_goal_progress(project: &mut Project) -> bool {
@@ -779,6 +1182,32 @@ pub fn voting_weight_from_badge(badge: &BadgeTier) -> u32 {
         BadgeTier::Forest => 173,
         BadgeTier::EarthGuardian => 200,
     }
+}
+
+/// Quadratic voting: credits available per badge tier.
+pub fn voting_credits_from_badge(badge: &BadgeTier) -> u32 {
+    match badge {
+        BadgeTier::None => 0,
+        BadgeTier::Seedling => 100,
+        BadgeTier::Tree => 200,
+        BadgeTier::Forest => 400,
+        BadgeTier::EarthGuardian => 800,
+    }
+}
+
+/// Babylonian integer square root (floor) for u32.
+/// Compatible with no_std — no floating point.
+fn isqrt(n: u32) -> u32 {
+    if n < 2 {
+        return n;
+    }
+    let mut x = n;
+    let mut y = x / 2 + x % 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
 }
 
 #[cfg(feature = "delegation")]
@@ -1370,6 +1799,8 @@ impl IndigoPayContract {
     // ─── Donations ────────────────────────────────────────────────────────────
 
     #[allow(clippy::too_many_arguments)]
+    /// Backward-compatible public donation entrypoint.
+    #[cfg(any(feature = "donation", feature = "testutils"))]
     pub fn donate(
         env: Env,
         token: Address,
@@ -1378,228 +1809,68 @@ impl IndigoPayContract {
         amount: i128,
         msg_hash: u32,
     ) {
+        Self::donate_with_privacy(env, token, donor, project_id, amount, msg_hash, false)
+    }
+
+    /// Donate with an explicit public-attribution preference.
+    #[cfg(any(feature = "donation", feature = "testutils"))]
+    pub fn donate_with_privacy(
+        env: Env,
+        token: Address,
+        donor: Address,
+        project_id: String,
+        amount: i128,
+        msg_hash: u32,
+        anonymous: bool,
+    ) {
         donor.require_auth();
         require_not_paused(&env);
         if amount <= 0 {
             panic!("Donation amount must be positive");
         }
 
-        let current_ledger = env.ledger().sequence();
-        let max_donations: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::DonationRateLimitMax)
-            .unwrap_or(DEFAULT_DONATION_RATE_LIMIT_MAX);
-        let window_ledgers: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::DonationRateLimitWindow)
-            .unwrap_or(DEFAULT_DONATION_RATE_LIMIT_WINDOW);
+        process_donation(
+            &env,
+            &token,
+            &donor,
+            &project_id,
+            amount,
+            msg_hash,
+            anonymous,
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
 
-        let rate_key = DataKey::DonorRateLimit(donor.clone(), project_id.clone());
-        let mut window: RateLimitWindow =
-            env.storage()
-                .instance()
-                .get(&rate_key)
-                .unwrap_or(RateLimitWindow {
-                    window_start: current_ledger,
-                    count: 0,
-                });
-        if current_ledger - window.window_start >= window_ledgers {
-            window.window_start = current_ledger;
-            window.count = 0;
-        }
-        if window.count >= max_donations {
-            panic!("Donation rate limit exceeded");
-        }
-        window.count = window
-            .count
-            .checked_add(1)
-            .expect("RateLimitWindow count overflow");
-        env.storage().instance().set(&rate_key, &window);
+    pub fn batch_donate(env: Env, token: Address, donations: Vec<BatchDonation>) {
+        require_not_paused(&env);
 
-        let mut project: Project = env
-            .storage()
-            .instance()
-            .get(&DataKey::Project(project_id.clone()))
-            .expect("Project not found");
-        if !project.active {
-            panic!("Project is not accepting donations");
-        }
-        if project.paused {
-            panic!("Project is temporarily paused");
-        }
-        require_campaign_accepts_donation(&project, env.ledger().sequence());
-
-        // Pre-compute CO2 increment with checked multiplication so an attacker
-        // can't trigger a silent wrap via a project with a huge co2_per_xlm.
-        let xlm_units = amount / STROOP;
-        let co2_increment = xlm_units
-            .checked_mul(project.co2_per_xlm as i128)
-            .expect("CO2 calculation overflow");
-
-        let mut donor_stats: DonorStats = env
-            .storage()
-            .instance()
-            .get(&DataKey::DonorStats(donor.clone()))
-            .unwrap_or(DonorStats {
-                total_donated: 0,
-                donation_count: 0,
-                badge: BadgeTier::None,
-                co2_offset_grams: 0,
-            });
-        let prev_badge = donor_stats.badge.clone();
-
-        // ── Effects: all state writes BEFORE the external token transfer
-        //    (Checks-Effects-Interactions to defend against reentrancy from a
-        //    malicious token contract passed via `token`).
-        project.total_raised = project
-            .total_raised
-            .checked_add(amount)
-            .expect("Project total_raised overflow");
-        let goal_reached = apply_campaign_goal_progress(&mut project);
-        let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
-        if !env.storage().instance().has(&donated_key) {
-            env.storage().instance().set(&donated_key, &true);
-            project.donor_count = project
-                .donor_count
-                .checked_add(1)
-                .expect("Project donor_count overflow");
-        }
-        env.storage()
-            .instance()
-            .set(&DataKey::Project(project_id.clone()), &project);
-        if goal_reached {
-            env.events().publish(
-                (symbol_short!("camp_goal"), project_id.clone()),
-                project.total_raised,
+        let mut authorized: Vec<Address> = Vec::new(&env);
+        for donation in donations.iter() {
+            if donation.amount <= 0 {
+                panic!("Donation amount must be positive");
+            }
+            let mut found = false;
+            for a in authorized.iter() {
+                if a == donation.donor {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                donation.donor.require_auth();
+                authorized.push_back(donation.donor.clone());
+            }
+            process_donation(
+                &env,
+                &token,
+                &donation.donor,
+                &donation.project_id,
+                donation.amount,
+                donation.msg_hash,
+                false,
             );
         }
 
-        donor_stats.total_donated = donor_stats
-            .total_donated
-            .checked_add(amount)
-            .expect("Donor total_donated overflow");
-        donor_stats.donation_count = donor_stats
-            .donation_count
-            .checked_add(1)
-            .expect("Donor donation_count overflow");
-        donor_stats.co2_offset_grams = donor_stats
-            .co2_offset_grams
-            .checked_add(co2_increment)
-            .expect("Donor co2_offset overflow");
-        donor_stats.badge = calculate_badge(donor_stats.total_donated);
-        #[cfg(feature = "delegation")]
-        update_delegated_weight_if_needed(&env, &donor, &prev_badge, &donor_stats.badge);
-        env.storage()
-            .instance()
-            .set(&DataKey::DonorStats(donor.clone()), &donor_stats);
-
-        // Track per-project cumulative donations for milestone NFT eligibility.
-        let proj_total_key = DataKey::DonorProjectTotal(project_id.clone(), donor.clone());
-        let prev_proj_total: i128 = env.storage().instance().get(&proj_total_key).unwrap_or(0);
-        env.storage().instance().set(
-            &proj_total_key,
-            &prev_proj_total
-                .checked_add(amount)
-                .expect("DonorProjectTotal overflow"),
-        );
-
-        // Auto-mint an Impact NFT when a donor reaches a new badge tier.
-        if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
-            let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
-            if !env.storage().instance().has(&nft_key) {
-                let nft = ImpactNFT {
-                    owner: donor.clone(),
-                    tier: donor_stats.badge.clone(),
-                    total_donated: donor_stats.total_donated,
-                    minted_at_ledger: env.ledger().sequence(),
-                };
-                env.storage().instance().set(&nft_key, &nft);
-                env.events().publish(
-                    (symbol_short!("nft_mint"), donor.clone()),
-                    donor_stats.badge.clone(),
-                );
-            }
-        }
-
-        let dc: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::DonationCount)
-            .unwrap_or(0);
-        let new_dc = dc.checked_add(1).expect("DonationCount overflow");
-        env.storage()
-            .instance()
-            .set(&DataKey::DonationCount, &new_dc);
-        // Store donation record for trustless enumeration
-        let donation_record = DonationRecord {
-            donor: donor.clone(),
-            project: project_id.clone(),
-            amount,
-            ledger: env.ledger().sequence(),
-            message_hash: msg_hash,
-            currency: symbol_short!("XLM"),
-        };
-        env.storage()
-            .instance()
-            .set(&DataKey::DonationRecord(dc), &donation_record);
-        // Snapshot CO₂ offset for exact reversal on refund (#290).
-        env.storage()
-            .instance()
-            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
-
-        let gr: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::GlobalTotalRaised)
-            .unwrap_or(0);
-        let new_gr = gr.checked_add(amount).expect("GlobalTotalRaised overflow");
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalTotalRaised, &new_gr);
-
-        let gc: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::GlobalCO2OffsetGrams)
-            .unwrap_or(0);
-        let new_gc = gc.checked_add(co2_increment).expect("GlobalCO2 overflow");
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalCO2OffsetGrams, &new_gc);
-
-        // ── Interaction: external call happens after every effect is durable.
-        let fee_bps = read_platform_fee_bps(&env);
-        #[allow(unused_variables)]
-        let (project_amount, fee_amount) = split_fee(amount, fee_bps);
-
-        let token_client = token::Client::new(&env, &token);
-
-        // Transfer platform fee to treasury (if configured and feature enabled).
-        #[cfg(feature = "fees")]
-        if fee_amount > 0 {
-            let treasury: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::PlatformTreasury)
-                .expect("Platform treasury not configured");
-            token_client.transfer(&donor, &treasury, &fee_amount);
-        }
-
-        // Transfer remainder to project wallet.
-        token_client.transfer(&donor, &project.wallet, &project_amount);
-
-        #[cfg(feature = "fees")]
-        env.events().publish(
-            (symbol_short!("donated"), donor.clone(), project_id.clone()),
-            (amount, donor_stats.badge.clone(), msg_hash, fee_amount),
-        );
-        #[cfg(not(feature = "fees"))]
-        env.events().publish(
-            (symbol_short!("donated"), donor.clone(), project_id.clone()),
-            (amount, donor_stats.badge.clone(), msg_hash),
-        );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
@@ -1619,6 +1890,8 @@ impl IndigoPayContract {
     ///
     /// `source_asset_code` is a short symbol identifying the source asset
     /// (e.g. "yXLM", "USDT", "BTC") for the on-chain donation record.
+    /// Backward-compatible path-payment entrypoint.
+    #[cfg(any(feature = "donation", feature = "testutils"))]
     pub fn donate_asset(
         env: Env,
         donor: Address,
@@ -1626,6 +1899,28 @@ impl IndigoPayContract {
         xlm_amount: i128,
         source_asset_code: Symbol,
         msg_hash: u32,
+    ) {
+        Self::donate_asset_with_privacy(
+            env,
+            donor,
+            project_id,
+            xlm_amount,
+            source_asset_code,
+            msg_hash,
+            false,
+        )
+    }
+
+    /// Record a path-payment donation with an attribution preference.
+    #[cfg(any(feature = "donation", feature = "testutils"))]
+    pub fn donate_asset_with_privacy(
+        env: Env,
+        donor: Address,
+        project_id: String,
+        xlm_amount: i128,
+        source_asset_code: Symbol,
+        msg_hash: u32,
+        anonymous: bool,
     ) {
         donor.require_auth();
         require_not_paused(&env);
@@ -1652,10 +1947,18 @@ impl IndigoPayContract {
             .checked_mul(project.co2_per_xlm as i128)
             .expect("CO2 calculation overflow");
 
+        let stats_donor = if anonymous {
+            Address::from_string(&String::from_str(
+                &env,
+                "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+            ))
+        } else {
+            donor.clone()
+        };
         let mut donor_stats: DonorStats = env
             .storage()
             .instance()
-            .get(&DataKey::DonorStats(donor.clone()))
+            .get(&DataKey::DonorStats(stats_donor.clone()))
             .unwrap_or(DonorStats {
                 total_donated: 0,
                 donation_count: 0,
@@ -1706,7 +2009,7 @@ impl IndigoPayContract {
         update_delegated_weight_if_needed(&env, &donor, &prev_badge, &donor_stats.badge);
         env.storage()
             .instance()
-            .set(&DataKey::DonorStats(donor.clone()), &donor_stats);
+            .set(&DataKey::DonorStats(stats_donor.clone()), &donor_stats);
 
         // Track per-project cumulative donations for milestone NFT eligibility.
         let proj_total_key = DataKey::DonorProjectTotal(project_id.clone(), donor.clone());
@@ -1748,6 +2051,7 @@ impl IndigoPayContract {
         // Store donation record with the source asset code as currency
         let donation_record = DonationRecord {
             donor: donor.clone(),
+            anonymous,
             project: project_id.clone(),
             amount: xlm_amount,
             ledger: env.ledger().sequence(),
@@ -1757,6 +2061,19 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::DonationRecord(dc), &donation_record);
+        if anonymous {
+            let count: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::AnonymousDonationCount)
+                .unwrap_or(0);
+            env.storage().instance().set(
+                &DataKey::AnonymousDonationCount,
+                &count
+                    .checked_add(1)
+                    .expect("AnonymousDonationCount overflow"),
+            );
+        }
         // Snapshot CO₂ offset for exact reversal on refund (#290).
         env.storage()
             .instance()
@@ -1801,7 +2118,18 @@ impl IndigoPayContract {
         }
         #[cfg(not(feature = "fees"))]
         env.events().publish(
-            (symbol_short!("donated"), donor.clone(), project_id.clone()),
+            (
+                symbol_short!("donated"),
+                if anonymous {
+                    Address::from_string(&String::from_str(
+                        &env,
+                        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+                    ))
+                } else {
+                    donor.clone()
+                },
+                project_id.clone(),
+            ),
             (xlm_amount, donor_stats.badge.clone(), msg_hash),
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
@@ -2382,6 +2710,275 @@ impl IndigoPayContract {
         verify_merkle_proof(&env, &leaf_hash, &proof, &stored_root, leaf_index)
     }
 
+    // ─── Off-Chain Oracle Attestation for Project Impact Verification (#459) ─
+
+    /// Admin-only: authorise an address to submit impact verification reports.
+    #[cfg(feature = "impact_verification")]
+    pub fn add_impact_verifier(env: Env, admin: Address, verifier: Address) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        env.storage().instance().set(
+            &ImpactVerificationKey::ImpactVerifier(verifier.clone()),
+            &true,
+        );
+        env.events()
+            .publish((symbol_short!("impv_add"), admin), verifier);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Admin-only: revoke a verifier's ability to submit new reports.
+    /// Reports it already submitted, and any flag/adjustment they caused,
+    /// are left untouched.
+    #[cfg(feature = "impact_verification")]
+    pub fn remove_impact_verifier(env: Env, admin: Address, verifier: Address) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        env.storage()
+            .instance()
+            .remove(&ImpactVerificationKey::ImpactVerifier(verifier.clone()));
+        env.events()
+            .publish((symbol_short!("impv_rem"), admin), verifier);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    #[cfg(feature = "impact_verification")]
+    pub fn is_impact_verifier(env: Env, verifier: Address) -> bool {
+        env.storage()
+            .instance()
+            .get(&ImpactVerificationKey::ImpactVerifier(verifier))
+            .unwrap_or(false)
+    }
+
+    /// Admin-only: configure how many distinct verifier reports are required
+    /// before `co2_per_xlm` auto-adjusts to the median verified rate.
+    #[cfg(feature = "impact_verification")]
+    pub fn set_impact_report_threshold(env: Env, admin: Address, threshold: u32) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        if threshold == 0 {
+            panic!("Threshold must be greater than zero");
+        }
+        env.storage()
+            .instance()
+            .set(&ImpactVerificationKey::ImpactReportThreshold, &threshold);
+        env.events()
+            .publish((symbol_short!("impv_thr"), admin), threshold);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Admin-only: clear a project's deviation flag, e.g. after investigating
+    /// and confirming the discrepancy was a reporting error rather than
+    /// genuine greenwashing.
+    #[cfg(feature = "impact_verification")]
+    pub fn clear_impact_flag(env: Env, admin: Address, project_id: String) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        env.storage()
+            .instance()
+            .remove(&ImpactVerificationKey::ImpactFlagged(project_id.clone()));
+        env.events()
+            .publish((symbol_short!("impv_clr"), admin), project_id);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Authorised verifier: submit (or update) an independent CO2-impact
+    /// attestation for a project.
+    ///
+    /// Resubmitting with the same `verifier` for the same `project_id`
+    /// updates the existing report in place (same `report_id`) instead of
+    /// creating a duplicate. Every submission is checked against the
+    /// project's current `co2_per_xlm` ("claimed rate"): a deviation of 50%
+    /// or more sets a sticky flag on the project. Once the configured
+    /// threshold of distinct verifiers has reported, `co2_per_xlm` is
+    /// (re)set to the median of all their verified rates.
+    ///
+    /// # Panics
+    /// - If the contract is paused.
+    /// - If `verifier` is not on the authorised-verifier allow-list.
+    /// - If `verified_co2_rate` is zero or exceeds `MAX_CO2_PER_XLM`.
+    /// - If the project does not exist.
+    #[cfg(feature = "impact_verification")]
+    pub fn submit_impact_report(
+        env: Env,
+        verifier: Address,
+        project_id: String,
+        verified_co2_rate: u32,
+        evidence_hash: BytesN<32>,
+    ) -> u32 {
+        verifier.require_auth();
+        require_not_paused(&env);
+
+        let is_verifier: bool = env
+            .storage()
+            .instance()
+            .get(&ImpactVerificationKey::ImpactVerifier(verifier.clone()))
+            .unwrap_or(false);
+        if !is_verifier {
+            panic!("Not an authorised impact verifier");
+        }
+
+        if verified_co2_rate == 0 {
+            panic!("Verified CO2 rate must be greater than zero");
+        }
+        if verified_co2_rate > MAX_CO2_PER_XLM {
+            panic!("Verified CO2 rate exceeds maximum");
+        }
+
+        let mut project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        let claimed_rate = project.co2_per_xlm;
+
+        // ── Duplicate handling: same (project, verifier) updates in place ──
+        let record_key =
+            ImpactVerificationKey::ImpactReportRecord(project_id.clone(), verifier.clone());
+        let existing: Option<ImpactReport> = env.storage().instance().get(&record_key);
+        let report_id = match &existing {
+            Some(r) => r.report_id,
+            None => {
+                let next_key = ImpactVerificationKey::ImpactNextReportId(project_id.clone());
+                let next: u32 = env.storage().instance().get(&next_key).unwrap_or(0);
+                let new_next = next.checked_add(1).expect("Impact report id overflow");
+                env.storage().instance().set(&next_key, &new_next);
+                next
+            }
+        };
+
+        let now = env.ledger().sequence();
+        let report = ImpactReport {
+            project_id: project_id.clone(),
+            verifier: verifier.clone(),
+            report_id,
+            verified_co2_rate,
+            evidence_hash: evidence_hash.clone(),
+            submitted_at: now,
+        };
+        env.storage().instance().set(&record_key, &report);
+
+        let verifiers_key = ImpactVerificationKey::ImpactReportVerifiers(project_id.clone());
+        let mut verifiers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&verifiers_key)
+            .unwrap_or(Vec::new(&env));
+        if existing.is_none() {
+            verifiers.push_back(verifier.clone());
+            env.storage().instance().set(&verifiers_key, &verifiers);
+        }
+
+        // ── Deviation flag, checked against the rate claimed *before* any
+        // auto-adjustment below applies ─────────────────────────────────
+        if impact_deviates_50_percent(claimed_rate, verified_co2_rate) {
+            env.storage().instance().set(
+                &ImpactVerificationKey::ImpactFlagged(project_id.clone()),
+                &true,
+            );
+            env.events().publish(
+                (
+                    symbol_short!("impv_flg"),
+                    verifier.clone(),
+                    project_id.clone(),
+                ),
+                (claimed_rate, verified_co2_rate),
+            );
+        }
+
+        env.events().publish(
+            (
+                symbol_short!("impv_sub"),
+                verifier.clone(),
+                project_id.clone(),
+            ),
+            (report_id, verified_co2_rate, evidence_hash),
+        );
+
+        // ── Auto-adjustment once the configured threshold of distinct
+        // verifiers has reported. Re-runs on every later submission so the
+        // rate stays current as reports are added or updated. ────────────
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&ImpactVerificationKey::ImpactReportThreshold)
+            .unwrap_or(DEFAULT_IMPACT_REPORT_THRESHOLD);
+
+        if verifiers.len() >= threshold {
+            let mut rates: Vec<u32> = Vec::new(&env);
+            for v in verifiers.iter() {
+                let key = ImpactVerificationKey::ImpactReportRecord(project_id.clone(), v);
+                if let Some(r) = env.storage().instance().get::<_, ImpactReport>(&key) {
+                    rates.push_back(r.verified_co2_rate);
+                }
+            }
+            let median = median_u32(&rates).clamp(1, MAX_CO2_PER_XLM);
+            if median != project.co2_per_xlm {
+                project.co2_per_xlm = median;
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Project(project_id.clone()), &project);
+                env.events()
+                    .publish((symbol_short!("impv_adj"), project_id.clone()), median);
+            }
+        }
+
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        report_id
+    }
+
+    #[cfg(feature = "impact_verification")]
+    pub fn get_impact_report(
+        env: Env,
+        project_id: String,
+        verifier: Address,
+    ) -> Option<ImpactReport> {
+        env.storage()
+            .instance()
+            .get(&ImpactVerificationKey::ImpactReportRecord(
+                project_id, verifier,
+            ))
+    }
+
+    /// Public read-only: current verification status for a project — how
+    /// many distinct verifiers have reported, the configured threshold,
+    /// whether the project is flagged, and its current `co2_per_xlm`.
+    #[cfg(feature = "impact_verification")]
+    pub fn get_impact_verification_status(
+        env: Env,
+        project_id: String,
+    ) -> ImpactVerificationStatus {
+        let project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        let verifiers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&ImpactVerificationKey::ImpactReportVerifiers(
+                project_id.clone(),
+            ))
+            .unwrap_or(Vec::new(&env));
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&ImpactVerificationKey::ImpactReportThreshold)
+            .unwrap_or(DEFAULT_IMPACT_REPORT_THRESHOLD);
+        let flagged: bool = env
+            .storage()
+            .instance()
+            .get(&ImpactVerificationKey::ImpactFlagged(project_id.clone()))
+            .unwrap_or(false);
+        ImpactVerificationStatus {
+            report_count: verifiers.len(),
+            threshold,
+            flagged,
+            current_co2_rate: project.co2_per_xlm,
+            verifiers,
+            project_id,
+        }
+    }
+
     // ─── Getters ─────────────────────────────────────────────────────────────
 
     pub fn get_project(env: Env, project_id: String) -> Project {
@@ -2496,6 +3093,14 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .get(&DataKey::DonationCount)
+            .unwrap_or(0)
+    }
+
+    /// Number of donations whose donor address is intentionally withheld.
+    pub fn get_anonymous_donation_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::AnonymousDonationCount)
             .unwrap_or(0)
     }
 
@@ -2752,18 +3357,19 @@ impl IndigoPayContract {
                 badge: BadgeTier::None,
                 co2_offset_grams: 0,
             });
-        let own_weight = voting_weight_from_badge(&stats.badge);
+        let own_credits = voting_credits_from_badge(&stats.badge);
         #[cfg(feature = "delegation")]
-        let delegated_weight: u32 = env
+        let delegated_credits: u32 = env
             .storage()
             .instance()
             .get(&DataKey::DelegatedWeight(voter))
             .unwrap_or(0);
         #[cfg(not(feature = "delegation"))]
-        let delegated_weight: u32 = 0;
-        own_weight
-            .checked_add(delegated_weight)
-            .expect("Weight overflow")
+        let delegated_credits: u32 = 0;
+        let total_credits = own_credits
+            .checked_add(delegated_credits)
+            .expect("Credit overflow");
+        isqrt(total_credits)
     }
 
     #[cfg(feature = "delegation")]
@@ -2867,9 +3473,16 @@ impl IndigoPayContract {
             .unwrap_or(0)
     }
 
-    /// Badge holders (≥ Seedling) cast a vote. One vote per address per proposal.
+    /// Badge holders (≥ Seedling) cast quadratic votes using credits.
+    /// Multiple votes per proposal are allowed, each spending additional credits.
     #[cfg(feature = "governance")]
-    pub fn vote_verify_project(env: Env, voter: Address, project_id: String, approve: bool) {
+    pub fn vote_verify_project(
+        env: Env,
+        voter: Address,
+        project_id: String,
+        approve: bool,
+        credits: u32,
+    ) {
         voter.require_auth();
         require_not_paused(&env);
 
@@ -2892,18 +3505,27 @@ impl IndigoPayContract {
                 co2_offset_grams: 0,
             });
 
-        let own_weight = voting_weight_from_badge(&stats.badge);
-        let delegated_weight: u32 = env
+        let own_credits = voting_credits_from_badge(&stats.badge);
+        let delegated_credits: u32 = env
             .storage()
             .instance()
             .get(&DataKey::DelegatedWeight(voter.clone()))
             .unwrap_or(0);
-        let weight = own_weight
-            .checked_add(delegated_weight)
-            .expect("Weight overflow");
+        let total_credits = own_credits
+            .checked_add(delegated_credits)
+            .expect("Credit overflow");
 
-        if weight == 0 {
+        if total_credits == 0 {
             panic!("Only badge holders (Seedling or above) or active delegates can vote");
+        }
+
+        let credits_key = DataKey::VoteCredits(project_id.clone(), voter.clone());
+        let previously_spent: u32 = env.storage().instance().get(&credits_key).unwrap_or(0);
+        let new_total = previously_spent
+            .checked_add(credits)
+            .expect("Credit overflow");
+        if new_total > total_credits {
+            panic!("Insufficient voting credits");
         }
 
         let mut proposal: VoteProposal = env
@@ -2918,43 +3540,46 @@ impl IndigoPayContract {
             panic!("Voting window has closed");
         }
 
+        let prev_effective = isqrt(previously_spent);
+        let new_effective = isqrt(new_total);
+        let weight_delta = new_effective
+            .checked_sub(prev_effective)
+            .expect("Weight delta underflow");
+
+        // Effects: persist state before external effects.
+        let voter_list_key = DataKey::VoterList(project_id.clone());
         let voted_key = DataKey::HasVoted(project_id.clone(), voter.clone());
-        if env.storage().instance().has(&voted_key) {
-            panic!("Already voted on this proposal");
+        if !env.storage().instance().has(&voted_key) {
+            let mut voter_list: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&voter_list_key)
+                .unwrap_or(Vec::new(&env));
+            voter_list.push_back(voter.clone());
+            env.storage().instance().set(&voter_list_key, &voter_list);
+            env.storage().instance().set(&voted_key, &true);
         }
 
-        // Effects: persist voter-list membership first so the proposal
-        // accounting cannot fall out of sync with the voter-list even if
-        // a later state write is interrupted (Soroban reverts the whole
-        // tx on panic, but writing the indexable list before the
-        // duplicate-vote marker keeps the public read model consistent).
-        let voter_list_key = DataKey::VoterList(project_id.clone());
-        let mut voter_list: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&voter_list_key)
-            .unwrap_or(Vec::new(&env));
-        voter_list.push_back(voter.clone());
-        env.storage().instance().set(&voter_list_key, &voter_list);
-
-        env.storage().instance().set(&voted_key, &true);
+        env.storage().instance().set(&credits_key, &new_total);
 
         if approve {
             proposal.votes_for = proposal
                 .votes_for
-                .checked_add(weight)
+                .checked_add(weight_delta)
                 .expect("votes_for overflow");
         } else {
             proposal.votes_against = proposal
                 .votes_against
-                .checked_add(weight)
+                .checked_add(weight_delta)
                 .expect("votes_against overflow");
         }
         env.storage()
             .instance()
             .set(&DataKey::Proposal(project_id.clone()), &proposal);
-        env.events()
-            .publish((symbol_short!("voted"), voter, project_id), approve);
+        env.events().publish(
+            (symbol_short!("voted"), voter, project_id),
+            (approve, credits, weight_delta),
+        );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
@@ -3032,6 +3657,7 @@ impl IndigoPayContract {
     }
 
     /// Donate USDC. Converts to XLM-equivalent for global stats using a price oracle stub.
+    /// Backward-compatible USDC entrypoint.
     #[cfg(feature = "usdc")]
     pub fn donate_usdc(
         env: Env,
@@ -3040,6 +3666,28 @@ impl IndigoPayContract {
         project_id: String,
         usdc_amount: i128,
         msg_hash: u32,
+    ) {
+        Self::donate_usdc_with_privacy(
+            env,
+            usdc_token,
+            donor,
+            project_id,
+            usdc_amount,
+            msg_hash,
+            false,
+        )
+    }
+
+    /// Donate USDC with an explicit public-attribution preference.
+    #[cfg(feature = "usdc")]
+    pub fn donate_usdc_with_privacy(
+        env: Env,
+        usdc_token: Address,
+        donor: Address,
+        project_id: String,
+        usdc_amount: i128,
+        msg_hash: u32,
+        anonymous: bool,
     ) {
         donor.require_auth();
         require_not_paused(&env);
@@ -3087,10 +3735,18 @@ impl IndigoPayContract {
             .checked_mul(project.co2_per_xlm as i128)
             .expect("CO2 calculation overflow");
 
+        let stats_donor = if anonymous {
+            Address::from_string(&String::from_str(
+                &env,
+                "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+            ))
+        } else {
+            donor.clone()
+        };
         let mut donor_stats: DonorStats = env
             .storage()
             .instance()
-            .get(&DataKey::DonorStats(donor.clone()))
+            .get(&DataKey::DonorStats(stats_donor.clone()))
             .unwrap_or(DonorStats {
                 total_donated: 0,
                 donation_count: 0,
@@ -3140,7 +3796,7 @@ impl IndigoPayContract {
         update_delegated_weight_if_needed(&env, &donor, &prev_badge, &donor_stats.badge);
         env.storage()
             .instance()
-            .set(&DataKey::DonorStats(donor.clone()), &donor_stats);
+            .set(&DataKey::DonorStats(stats_donor.clone()), &donor_stats);
 
         if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
             let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
@@ -3171,6 +3827,7 @@ impl IndigoPayContract {
         // Store USDC donation record for trustless enumeration
         let donation_record = DonationRecord {
             donor: donor.clone(),
+            anonymous,
             project: project_id.clone(),
             amount: usdc_amount,
             ledger: env.ledger().sequence(),
@@ -3180,6 +3837,19 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::DonationRecord(dc), &donation_record);
+        if anonymous {
+            let count: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::AnonymousDonationCount)
+                .unwrap_or(0);
+            env.storage().instance().set(
+                &DataKey::AnonymousDonationCount,
+                &count
+                    .checked_add(1)
+                    .expect("AnonymousDonationCount overflow"),
+            );
+        }
         // Snapshot CO₂ offset for exact reversal on refund (#290).
         env.storage()
             .instance()
@@ -3244,7 +3914,18 @@ impl IndigoPayContract {
         );
         #[cfg(not(feature = "fees"))]
         env.events().publish(
-            (symbol_short!("donated"), donor.clone(), project_id),
+            (
+                symbol_short!("donated"),
+                if anonymous {
+                    Address::from_string(&String::from_str(
+                        &env,
+                        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+                    ))
+                } else {
+                    donor.clone()
+                },
+                project_id,
+            ),
             (usdc_amount, symbol_short!("USDC"), msg_hash),
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
@@ -4563,6 +5244,7 @@ impl IndigoPayContract {
 
         let donation_record = DonationRecord {
             donor: donor.clone(),
+            anonymous: false,
             project: recurring.project_id.clone(),
             amount: recurring.amount,
             ledger: env.ledger().sequence(),
@@ -5316,7 +5998,7 @@ mod tests {
     #[cfg(feature = "upgrade")]
     #[test]
     fn test_storage_version_initialized() {
-        let (env, _cid, client, _admin, _pid) = setup();
+        let (_env, _cid, client, _admin, _pid) = setup();
         // After initialize(), StorageVersion must equal CURRENT_STORAGE_VERSION.
         assert_eq!(client.get_storage_version(), CURRENT_STORAGE_VERSION);
     }
@@ -5398,9 +6080,9 @@ mod tests {
         client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
-        client.vote_verify_project(&voter, &pid, &true);
+        client.vote_verify_project(&voter, &pid, &true, &100);
         let p = client.get_proposal(&pid);
-        assert_eq!(p.votes_for, 100);
+        assert_eq!(p.votes_for, 10);
         assert_eq!(p.votes_against, 0);
     }
 
@@ -5412,56 +6094,58 @@ mod tests {
         let (env, _cid, client, admin, pid) = setup();
         client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let non_donor = Address::generate(&env);
-        client.vote_verify_project(&non_donor, &pid, &true);
+        client.vote_verify_project(&non_donor, &pid, &true, &100);
     }
 
     #[test]
-    #[should_panic(expected = "Already voted on this proposal")]
-    fn test_double_vote_prevented() {
+    #[should_panic(expected = "Insufficient voting credits")]
+    fn test_quadratic_voting_exhausts_credits() {
         let (env, cid, client, admin, pid) = setup();
         client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
-        client.vote_verify_project(&voter, &pid, &true);
-        client.vote_verify_project(&voter, &pid, &true); // should panic
+        // Seedling has 100 credits; spending all of them exhausts the budget.
+        client.vote_verify_project(&voter, &pid, &true, &100);
+        // Second vote should fail — no credits left.
+        client.vote_verify_project(&voter, &pid, &true, &1);
     }
 
     #[test]
     fn test_resolve_proposal_approved() {
         let (env, cid, client, admin, pid) = setup();
         client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
-        // 2 approve, 1 rejects
+        // 2 approve, 1 rejects — each Seedling spends all 100 credits
         for i in 0..3u32 {
             let voter = Address::generate(&env);
             grant_badge(&env, &cid, &voter);
-            client.vote_verify_project(&voter, &pid, &(i < 2));
+            client.vote_verify_project(&voter, &pid, &(i < 2), &100);
         }
         extend_ttl(&env, &cid);
         env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
         client.resolve_proposal(&pid);
         let p = client.get_proposal(&pid);
         assert!(p.resolved);
-        assert_eq!(p.votes_for, 200);
-        assert_eq!(p.votes_against, 100);
+        assert_eq!(p.votes_for, 20);
+        assert_eq!(p.votes_against, 10);
     }
 
     #[test]
     fn test_resolve_proposal_rejected() {
         let (env, cid, client, admin, pid) = setup();
         client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
-        // 1 approves, 2 reject
+        // 1 approves, 2 reject — each Seedling spends all 100 credits
         for i in 0..3u32 {
             let voter = Address::generate(&env);
             grant_badge(&env, &cid, &voter);
-            client.vote_verify_project(&voter, &pid, &(i == 0));
+            client.vote_verify_project(&voter, &pid, &(i == 0), &100);
         }
         extend_ttl(&env, &cid);
         env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
         client.resolve_proposal(&pid);
         let p = client.get_proposal(&pid);
         assert!(p.resolved);
-        assert_eq!(p.votes_for, 100);
-        assert_eq!(p.votes_against, 200);
+        assert_eq!(p.votes_for, 10);
+        assert_eq!(p.votes_against, 20);
     }
 
     #[test]
@@ -5472,7 +6156,7 @@ mod tests {
         for i in 0..2u32 {
             let voter = Address::generate(&env);
             grant_badge(&env, &cid, &voter);
-            client.vote_verify_project(&voter, &pid, &(i == 0));
+            client.vote_verify_project(&voter, &pid, &(i == 0), &100);
         }
 
         extend_ttl(&env, &cid);
@@ -5481,8 +6165,8 @@ mod tests {
 
         let p = client.get_proposal(&pid);
         assert!(p.resolved);
-        assert_eq!(p.votes_for, 100);
-        assert_eq!(p.votes_against, 100);
+        assert_eq!(p.votes_for, 10);
+        assert_eq!(p.votes_against, 10);
 
         // A tie (1 for, 1 against) produces a rejection outcome.
         // Event-level assertion is intentionally skipped here because the
@@ -5654,7 +6338,7 @@ mod tests {
         env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
 
         // Attempt to vote after deadline — should panic with "Voting window has closed"
-        client.vote_verify_project(&voter, &pid, &true);
+        client.vote_verify_project(&voter, &pid, &true, &100);
     }
 
     /// Test that voting is allowed before the deadline (issue #209).
@@ -5673,10 +6357,10 @@ mod tests {
             .set_sequence_number(start + VOTING_WINDOW_LEDGERS - 1);
 
         // Should succeed
-        client.vote_verify_project(&voter, &pid, &true);
+        client.vote_verify_project(&voter, &pid, &true, &100);
 
         let proposal = client.get_proposal(&pid);
-        assert_eq!(proposal.votes_for, 100);
+        assert_eq!(proposal.votes_for, 10);
     }
 
     /// Test minimum voting duration enforcement (issue #209).
@@ -5696,10 +6380,10 @@ mod tests {
         env.ledger()
             .set_sequence_number(start + custom_duration - 1);
 
-        client.vote_verify_project(&voter, &pid, &true);
+        client.vote_verify_project(&voter, &pid, &true, &100);
 
         let proposal = client.get_proposal(&pid);
-        assert_eq!(proposal.votes_for, 100);
+        assert_eq!(proposal.votes_for, 10);
     }
 
     // ─── ProjectMilestoneNFT tests (#205) ────────────────────────────────────
@@ -6018,7 +6702,7 @@ mod tests {
         for _ in 0..3 {
             let v = Address::generate(&env);
             grant_badge(&env, &cid, &v);
-            client.vote_verify_project(&v, &pid, &true);
+            client.vote_verify_project(&v, &pid, &true, &100);
             voters.push(v);
         }
 
@@ -6045,6 +6729,116 @@ mod tests {
         let pid = String::from_str(&env, "never-created");
         let list = client.get_voter_list(&pid);
         assert_eq!(list.len(), 0);
+    }
+
+    // ─── Quadratic voting tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_isqrt_values() {
+        assert_eq!(isqrt(0), 0);
+        assert_eq!(isqrt(1), 1);
+        assert_eq!(isqrt(2), 1);
+        assert_eq!(isqrt(3), 1);
+        assert_eq!(isqrt(4), 2);
+        assert_eq!(isqrt(99), 9);
+        assert_eq!(isqrt(100), 10);
+        assert_eq!(isqrt(101), 10);
+        assert_eq!(isqrt(400), 20);
+        assert_eq!(isqrt(800), 28);
+        assert_eq!(isqrt(u32::MAX), 65535);
+    }
+
+    #[test]
+    fn test_quadratic_voting_single_proposal() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        let voter = Address::generate(&env);
+        grant_badge(&env, &cid, &voter);
+        // Seedling: 100 credits → isqrt(100) = 10 effective weight
+        client.vote_verify_project(&voter, &pid, &true, &100);
+
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.votes_for, 10);
+        assert_eq!(p.votes_against, 0);
+
+        let weight = client.get_voter_weight(&voter);
+        assert_eq!(weight, 10);
+    }
+
+    #[test]
+    fn test_quadratic_voting_multi_proposal() {
+        let (env, cid, client, admin, pid1) = setup();
+        // Register a second project for multi-proposal voting
+        let pid2 = String::from_str(&env, "proj-002");
+        let wallet = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &pid2,
+            &String::from_str(&env, "Second Project"),
+            &wallet,
+            &100u32,
+        );
+
+        client.create_proposal(&signers1(&env, &admin), &pid1, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid2, &0u32);
+
+        let voter = Address::generate(&env);
+        grant_badge(&env, &cid, &voter);
+
+        // Credits are tracked per-proposal. pid1: spend 40 → weight = isqrt(40) = 6
+        // pid2: spend 60 → weight = isqrt(60) = 7 (60 not cumulative with pid1)
+        client.vote_verify_project(&voter, &pid1, &true, &40);
+        client.vote_verify_project(&voter, &pid2, &false, &60);
+
+        let p1 = client.get_proposal(&pid1);
+        assert_eq!(p1.votes_for, 6);
+        assert_eq!(p1.votes_against, 0);
+
+        let p2 = client.get_proposal(&pid2);
+        assert_eq!(p2.votes_for, 0);
+        assert_eq!(p2.votes_against, 7);
+
+        // Verify credits cannot exceed total allocation
+        client.vote_verify_project(&voter, &pid1, &true, &0);
+        // Attempting to overspend should fail
+    }
+
+    #[test]
+    #[should_panic(expected = "Insufficient voting credits")]
+    fn test_quadratic_voting_exceeds_credits() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        let voter = Address::generate(&env);
+        grant_badge(&env, &cid, &voter);
+        // Seedling has 100 credits; trying to spend 101 should fail.
+        client.vote_verify_project(&voter, &pid, &true, &101);
+    }
+
+    #[test]
+    fn test_quadratic_voting_edge_cases() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        let voter = Address::generate(&env);
+        grant_badge(&env, &cid, &voter);
+
+        // Spend 0 credits → effective weight delta = 0
+        client.vote_verify_project(&voter, &pid, &true, &0);
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.votes_for, 0);
+
+        // Spend 1 credit → isqrt(1) = 1
+        client.vote_verify_project(&voter, &pid, &true, &1);
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.votes_for, 1);
+
+        // Spend remaining 99 credits → cumulative = 100, delta = isqrt(100) - isqrt(1) = 10 - 1 = 9
+        client.vote_verify_project(&voter, &pid, &true, &99);
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.votes_for, 10);
+
+        // Total credits used = 0 + 1 + 99 = 100 (all Seedling credits)
+        let weight = client.get_voter_weight(&voter);
+        assert_eq!(weight, 10);
     }
 
     // ─── Bulk admin tests ──────────────────────────────────────────────────────
@@ -9205,6 +9999,489 @@ mod tests {
         // Verify IndigoPayContract state
         assert_eq!(client.get_project(&pid).total_raised, amount);
         assert_eq!(client.get_global_stats().total_raised, amount);
+    // ─── batch_donate tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_batch_donate_basic_flow() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 15 * STROOP);
+
+        let mut donations = Vec::new(&env);
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: pid.clone(),
+            amount: 10 * STROOP,
+            msg_hash: 1u32,
+        });
+
+        client.batch_donate(&token, &donations);
+
+        let p = client.get_project(&pid);
+        assert_eq!(p.total_raised, 10 * STROOP);
+        assert_eq!(p.donor_count, 1);
+        let stats = client.get_donor_stats(&donor);
+        assert_eq!(stats.total_donated, 10 * STROOP);
+        assert_eq!(stats.donation_count, 1);
+        assert_eq!(stats.badge, BadgeTier::Seedling);
+        assert_eq!(stats.co2_offset_grams, 10 * 100);
+        assert_eq!(client.get_global_total(), 10 * STROOP);
+        assert_eq!(client.get_global_co2(), 10 * 100);
+        assert_eq!(client.get_donation_count(), 1);
+    }
+
+    #[test]
+    fn test_batch_donate_multiple_entries() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 30 * STROOP);
+
+        let mut donations = Vec::new(&env);
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: pid.clone(),
+            amount: 10 * STROOP,
+            msg_hash: 0u32,
+        });
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: pid.clone(),
+            amount: 20 * STROOP,
+            msg_hash: 1u32,
+        });
+
+        client.batch_donate(&token, &donations);
+
+        let p = client.get_project(&pid);
+        assert_eq!(p.total_raised, 30 * STROOP);
+        assert_eq!(p.donor_count, 1);
+        let stats = client.get_donor_stats(&donor);
+        assert_eq!(stats.total_donated, 30 * STROOP);
+        assert_eq!(stats.donation_count, 2);
+        assert_eq!(stats.badge, BadgeTier::Seedling);
+        assert_eq!(client.get_donation_count(), 2);
+    }
+
+    #[test]
+    fn test_batch_donate_multiple_donors() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+        let token = mint_xlm(&env, &donor_a, 10 * STROOP);
+        StellarAssetClient::new(&env, &token).mint(&donor_b, &(10 * STROOP));
+
+        let mut donations = Vec::new(&env);
+        donations.push_back(BatchDonation {
+            donor: donor_a.clone(),
+            project_id: pid.clone(),
+            amount: 10 * STROOP,
+            msg_hash: 0u32,
+        });
+        donations.push_back(BatchDonation {
+            donor: donor_b.clone(),
+            project_id: pid.clone(),
+            amount: 10 * STROOP,
+            msg_hash: 1u32,
+        });
+
+        client.batch_donate(&token, &donations);
+
+        let p = client.get_project(&pid);
+        assert_eq!(p.total_raised, 20 * STROOP);
+        assert_eq!(p.donor_count, 2);
+        assert_eq!(client.get_donation_count(), 2);
+    }
+
+    #[test]
+    fn test_batch_donate_zero_amount_fails() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 10 * STROOP);
+
+        let mut donations = Vec::new(&env);
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: pid.clone(),
+            amount: 0,
+            msg_hash: 0u32,
+        });
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.batch_donate(&token, &donations);
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_batch_donate_updates_global_stats() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let pid1 = String::from_str(&env, "proj-alpha");
+        let pid2 = String::from_str(&env, "proj-beta");
+        client.register_project(
+            &admin,
+            &pid1,
+            &String::from_str(&env, "Alpha"),
+            &Address::generate(&env),
+            &50u32,
+        );
+        client.register_project(
+            &admin,
+            &pid2,
+            &String::from_str(&env, "Beta"),
+            &Address::generate(&env),
+            &100u32,
+        );
+
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 25 * STROOP);
+
+        let mut donations = Vec::new(&env);
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: pid1.clone(),
+            amount: 10 * STROOP,
+            msg_hash: 0u32,
+        });
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: pid2.clone(),
+            amount: 15 * STROOP,
+            msg_hash: 1u32,
+        });
+
+        client.batch_donate(&token, &donations);
+
+        assert_eq!(client.get_global_total(), 25 * STROOP);
+        assert_eq!(client.get_global_co2(), (10 * 50) + (15 * 100));
+        assert_eq!(client.get_donation_count(), 2);
+    }
+
+    #[test]
+    fn test_batch_donate_nft_minting_on_badge_upgrade() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let pid = String::from_str(&env, "nft-proj");
+        client.register_project(
+            &admin,
+            &pid,
+            &String::from_str(&env, "NFT Project"),
+            &Address::generate(&env),
+            &100u32,
+        );
+
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 101 * STROOP);
+
+        let mut donations = Vec::new(&env);
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: pid.clone(),
+            amount: 101 * STROOP,
+            msg_hash: 0u32,
+        });
+
+        client.batch_donate(&token, &donations);
+
+        assert!(client.has_nft(&donor, &BadgeTier::Tree));
+    }
+
+    #[test]
+    fn test_batch_donate_respects_unique_donor_count() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 30 * STROOP);
+
+        let mut donations = Vec::new(&env);
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: pid.clone(),
+            amount: 10 * STROOP,
+            msg_hash: 0u32,
+        });
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: pid.clone(),
+            amount: 10 * STROOP,
+            msg_hash: 1u32,
+        });
+
+        client.batch_donate(&token, &donations);
+
+        let p = client.get_project(&pid);
+        assert_eq!(p.donor_count, 1);
+    }
+
+    #[test]
+    fn test_batch_donate_knows() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 10 * STROOP);
+
+        let mut donations = Vec::new(&env);
+        donations.push_back(BatchDonation {
+            donor: donor.clone(),
+            project_id: pid.clone(),
+            amount: 10 * STROOP,
+            msg_hash: 99u32,
+        });
+
+        client.batch_donate(&token, &donations);
+
+        let record = client.get_donation_record(&0u32);
+        assert_eq!(record.donor, donor);
+        assert_eq!(record.project, pid);
+        assert_eq!(record.amount, 10 * STROOP);
+        assert_eq!(record.message_hash, 99u32);
+    }
+
+    // ─── Off-Chain Oracle Attestation for Project Impact Verification (#459) ─
+
+    #[cfg(feature = "impact_verification")]
+    fn evidence(env: &Env, tag: u8) -> BytesN<32> {
+        BytesN::from_array(env, &[tag; 32])
+    }
+
+    #[cfg(feature = "impact_verification")]
+    #[test]
+    fn test_verifier_can_submit_report() {
+        let (env, _cid, client, admin, pid) = setup();
+        let verifier = Address::generate(&env);
+        client.add_impact_verifier(&admin, &verifier);
+        assert!(client.is_impact_verifier(&verifier));
+
+        let report_id = client.submit_impact_report(&verifier, &pid, &105u32, &evidence(&env, 1));
+        assert_eq!(report_id, 0);
+
+        let report = client.get_impact_report(&pid, &verifier).unwrap();
+        assert_eq!(report.verifier, verifier);
+        assert_eq!(report.project_id, pid);
+        assert_eq!(report.verified_co2_rate, 105);
+
+        let status = client.get_impact_verification_status(&pid);
+        assert_eq!(status.report_count, 1);
+        assert_eq!(status.threshold, 3);
+        assert!(!status.flagged);
+        // Below the default threshold of 3 — no auto-adjustment yet.
+        assert_eq!(status.current_co2_rate, 100);
+    }
+
+    #[cfg(feature = "impact_verification")]
+    #[test]
+    #[should_panic(expected = "Not an authorised impact verifier")]
+    fn test_non_verifier_cannot_submit_report() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let attacker = Address::generate(&env);
+        client.submit_impact_report(&attacker, &pid, &105u32, &evidence(&env, 1));
+    }
+
+    #[cfg(feature = "impact_verification")]
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_non_admin_cannot_add_verifier() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let not_admin = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        client.add_impact_verifier(&not_admin, &verifier);
+    }
+
+    #[cfg(feature = "impact_verification")]
+    #[test]
+    fn test_duplicate_report_updates_in_place() {
+        let (env, _cid, client, admin, pid) = setup();
+        let verifier = Address::generate(&env);
+        client.add_impact_verifier(&admin, &verifier);
+
+        let first_id = client.submit_impact_report(&verifier, &pid, &105u32, &evidence(&env, 1));
+        let second_id = client.submit_impact_report(&verifier, &pid, &108u32, &evidence(&env, 2));
+
+        // Same verifier resubmitting keeps the same report_id...
+        assert_eq!(first_id, second_id);
+        // ...and only counts once toward the distinct-verifier total.
+        let status = client.get_impact_verification_status(&pid);
+        assert_eq!(status.report_count, 1);
+        // The stored report reflects the latest submission.
+        let report = client.get_impact_report(&pid, &verifier).unwrap();
+        assert_eq!(report.verified_co2_rate, 108);
+    }
+
+    #[cfg(feature = "impact_verification")]
+    #[test]
+    fn test_auto_adjustment_triggers_at_default_threshold() {
+        let (env, _cid, client, admin, pid) = setup();
+        // Claimed rate from `setup()` is 100. None of these individually
+        // deviate >=50%, so this test isolates the adjustment behaviour
+        // from the flagging behaviour (covered separately below).
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        let v3 = Address::generate(&env);
+        client.add_impact_verifier(&admin, &v1);
+        client.add_impact_verifier(&admin, &v2);
+        client.add_impact_verifier(&admin, &v3);
+
+        client.submit_impact_report(&v1, &pid, &104u32, &evidence(&env, 1));
+        let status = client.get_impact_verification_status(&pid);
+        assert_eq!(status.current_co2_rate, 100); // below threshold, unchanged
+
+        client.submit_impact_report(&v2, &pid, &108u32, &evidence(&env, 2));
+        let status = client.get_impact_verification_status(&pid);
+        assert_eq!(status.current_co2_rate, 100); // still below threshold
+
+        client.submit_impact_report(&v3, &pid, &106u32, &evidence(&env, 3));
+        // Threshold (3) reached — co2_per_xlm becomes the median of [104, 106, 108].
+        let status = client.get_impact_verification_status(&pid);
+        assert_eq!(status.report_count, 3);
+        assert_eq!(status.current_co2_rate, 106);
+        assert_eq!(client.get_project(&pid).co2_per_xlm, 106);
+        assert!(!status.flagged);
+    }
+
+    #[cfg(feature = "impact_verification")]
+    #[test]
+    fn test_auto_adjustment_stays_current_on_resubmission() {
+        let (env, _cid, client, admin, pid) = setup();
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        let v3 = Address::generate(&env);
+        client.add_impact_verifier(&admin, &v1);
+        client.add_impact_verifier(&admin, &v2);
+        client.add_impact_verifier(&admin, &v3);
+
+        client.submit_impact_report(&v1, &pid, &104u32, &evidence(&env, 1));
+        client.submit_impact_report(&v2, &pid, &108u32, &evidence(&env, 2));
+        client.submit_impact_report(&v3, &pid, &106u32, &evidence(&env, 3));
+        assert_eq!(client.get_project(&pid).co2_per_xlm, 106);
+
+        // v1 revises their figure upward; the median re-runs on this
+        // resubmission even though the distinct-verifier count didn't change.
+        client.submit_impact_report(&v1, &pid, &112u32, &evidence(&env, 4));
+        // Sorted [106, 108, 112] -> median 108.
+        assert_eq!(client.get_project(&pid).co2_per_xlm, 108);
+    }
+
+    #[cfg(feature = "impact_verification")]
+    #[test]
+    fn test_project_flagged_on_large_deviation() {
+        let (env, _cid, client, admin, pid) = setup();
+        let verifier = Address::generate(&env);
+        client.add_impact_verifier(&admin, &verifier);
+
+        // Claimed rate is 100; 160 is a 60% deviation.
+        client.submit_impact_report(&verifier, &pid, &160u32, &evidence(&env, 1));
+
+        let status = client.get_impact_verification_status(&pid);
+        assert!(status.flagged);
+    }
+
+    #[cfg(feature = "impact_verification")]
+    #[test]
+    fn test_project_flagged_at_exact_50_percent_boundary() {
+        let (env, _cid, client, admin, pid) = setup();
+        let verifier = Address::generate(&env);
+        client.add_impact_verifier(&admin, &verifier);
+
+        // Claimed rate is 100; 150 is exactly a 50% deviation.
+        client.submit_impact_report(&verifier, &pid, &150u32, &evidence(&env, 1));
+
+        let status = client.get_impact_verification_status(&pid);
+        assert!(status.flagged);
+    }
+
+    #[cfg(feature = "impact_verification")]
+    #[test]
+    fn test_project_not_flagged_under_50_percent() {
+        let (env, _cid, client, admin, pid) = setup();
+        let verifier = Address::generate(&env);
+        client.add_impact_verifier(&admin, &verifier);
+
+        // Claimed rate is 100; 149 is just under a 50% deviation.
+        client.submit_impact_report(&verifier, &pid, &149u32, &evidence(&env, 1));
+
+        let status = client.get_impact_verification_status(&pid);
+        assert!(!status.flagged);
+    }
+
+    #[cfg(feature = "impact_verification")]
+    #[test]
+    fn test_admin_can_clear_impact_flag() {
+        let (env, _cid, client, admin, pid) = setup();
+        let verifier = Address::generate(&env);
+        client.add_impact_verifier(&admin, &verifier);
+        client.submit_impact_report(&verifier, &pid, &160u32, &evidence(&env, 1));
+        assert!(client.get_impact_verification_status(&pid).flagged);
+
+        client.clear_impact_flag(&admin, &pid);
+        assert!(!client.get_impact_verification_status(&pid).flagged);
+    }
+
+    #[cfg(feature = "impact_verification")]
+    #[test]
+    fn test_admin_can_lower_threshold_for_faster_adjustment() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.set_impact_report_threshold(&admin, &1u32);
+
+        let verifier = Address::generate(&env);
+        client.add_impact_verifier(&admin, &verifier);
+        client.submit_impact_report(&verifier, &pid, &120u32, &evidence(&env, 1));
+
+        // A single report already meets the lowered threshold of 1.
+        assert_eq!(client.get_project(&pid).co2_per_xlm, 120);
+        let status = client.get_impact_verification_status(&pid);
+        assert_eq!(status.threshold, 1);
+    }
+
+    #[cfg(feature = "impact_verification")]
+    #[test]
+    fn test_removed_verifier_cannot_submit() {
+        let (env, _cid, client, admin, pid) = setup();
+        let verifier = Address::generate(&env);
+        client.add_impact_verifier(&admin, &verifier);
+        client.remove_impact_verifier(&admin, &verifier);
+        assert!(!client.is_impact_verifier(&verifier));
+
+        let result = client.try_submit_impact_report(&verifier, &pid, &105u32, &evidence(&env, 1));
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "impact_verification")]
+    #[test]
+    #[should_panic(expected = "Verified CO2 rate must be greater than zero")]
+    fn test_submit_impact_report_rejects_zero_rate() {
+        let (env, _cid, client, admin, pid) = setup();
+        let verifier = Address::generate(&env);
+        client.add_impact_verifier(&admin, &verifier);
+        client.submit_impact_report(&verifier, &pid, &0u32, &evidence(&env, 1));
+    }
+
+    #[cfg(feature = "impact_verification")]
+    #[test]
+    #[should_panic(expected = "Verified CO2 rate exceeds maximum")]
+    fn test_submit_impact_report_rejects_excessive_rate() {
+        let (env, _cid, client, admin, pid) = setup();
+        let verifier = Address::generate(&env);
+        client.add_impact_verifier(&admin, &verifier);
+        client.submit_impact_report(&verifier, &pid, &100_001u32, &evidence(&env, 1));
+    }
+
+    #[cfg(feature = "impact_verification")]
+    #[test]
+    #[should_panic(expected = "Project not found")]
+    fn test_submit_impact_report_unknown_project_panics() {
+        let (env, _cid, client, admin, _pid) = setup();
+        let verifier = Address::generate(&env);
+        client.add_impact_verifier(&admin, &verifier);
+        let unknown = String::from_str(&env, "does-not-exist");
+        client.submit_impact_report(&verifier, &unknown, &105u32, &evidence(&env, 1));
     }
 }
 
