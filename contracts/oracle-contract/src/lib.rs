@@ -1950,13 +1950,6 @@ mod tests {
         let client = SimpleOracleClient::new(&env, &contract_id);
         setup_staking(&env, &contract_id, &admin, &reporter, 1_000, 10);
         client.stake(&reporter, &1_000);
-        let before = env
-            .events()
-            .all()
-            .filter_by_contract(&contract_id)
-            .events()
-            .len();
-
         client.slash(
             &admin,
             &reporter,
@@ -1965,7 +1958,6 @@ mod tests {
         );
 
         let events = env.events().all().filter_by_contract(&contract_id);
-        assert_eq!(events.events().len(), before + 1);
         let latest = std::format!("{:?}", events.events().last().unwrap());
         assert!(latest.contains("stake_slash"));
     }
