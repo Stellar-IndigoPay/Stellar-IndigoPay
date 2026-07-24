@@ -179,6 +179,17 @@ fn require_not_paused(env: &Env) {
     }
 }
 
+fn require_not_coordinated_upgrade(env: &Env) {
+    let coordinated: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::CoordinatedUpgrade)
+        .unwrap_or(false);
+    if coordinated {
+        panic!("Coordinated upgrade in progress");
+    }
+}
+
 fn require_positive(amount: i128, label: &str) {
     if amount <= 0 {
         panic!("Amount must be positive");
@@ -468,6 +479,7 @@ impl AttestationContract {
     pub fn unpause(env: Env, admin: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
+        require_not_coordinated_upgrade(&env);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events().publish((symbol_short!("unpause"),), ());
     }
@@ -713,6 +725,7 @@ impl AttestationContract {
     pub fn propose_upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
         require_admin(&env, &admin);
+        require_not_coordinated_upgrade(&env);
         if env.storage().instance().has(&DataKey::PendingUpgrade) {
             panic!("Upgrade already pending");
         }
@@ -826,6 +839,17 @@ impl AttestationContract {
     pub fn clear_coordinated_pause(env: Env, admin: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
+        let coordinated: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::CoordinatedUpgrade)
+            .unwrap_or(false);
+        if !coordinated {
+            panic!("No coordinated upgrade in progress");
+        }
+        if env.storage().instance().has(&DataKey::PendingUpgrade) {
+            panic!("Upgrades not yet completed");
+        }
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &false);
@@ -843,6 +867,8 @@ impl AttestationContract {
         env.storage()
             .instance()
             .remove(&DataKey::UpgradeEffectiveAt);
+        env.events()
+            .publish((symbol_short!("coord_ps"),), false);
         env.events()
             .publish((symbol_short!("coord_cnc"),), ());
     }
