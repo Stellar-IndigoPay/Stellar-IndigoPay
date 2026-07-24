@@ -313,6 +313,16 @@ pub struct ImpactLeaf {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DonationChallenge {
+    pub challenged: bool,
+    pub challenger: Address,
+    pub challenged_at: u32,
+    pub resolved: bool,
+    pub approved: bool,
+}
+
+#[contracttype]
 pub enum DataKey {
     // Multi-sig admin set: Vec<Address> of authorized admin addresses.
     // Replaces the former single-admin `Admin` variant.
@@ -428,6 +438,9 @@ pub enum DataKey {
     PlatformFeeBps,
     /// Designated wallet that receives the platform fee.
     PlatformTreasury,
+    // Time-Locked Donation Challenge/Response Protocol (#457)
+    ChallengeThreshold,
+    DonationChallenge(u32),
     /// Quadratic voting: credits spent by a voter on a project proposal.
     VoteCredits(String, Address),
 }
@@ -472,6 +485,10 @@ const EMERGENCY_WITHDRAWAL_TIMELOCK: u32 = 120_960;
 // donation during which the donor may request a refund (subject to admin +
 // project wallet approval).
 const REFUND_COOLDOWN_LEDGERS: u32 = 17_280;
+
+// 24 hours × 3600 s / 5 s per ledger = 17 280 ledgers. The challenge window
+// for high-value donations.
+const CHALLENGE_WINDOW_LEDGERS: u32 = 17_280;
 
 /// Current storage schema version. Bump this and add a migration step in
 /// `migrate()` whenever a struct layout, DataKey variant, or stored value
@@ -4522,6 +4539,282 @@ impl IndigoPayContract {
             .instance()
             .get(&DataKey::RefundRequest(refund_id))
             .expect("Refund request not found")
+    }
+
+    // ─── Time-Locked Donation Challenge/Response Protocol (#457) ──────────────
+
+    /// Admin-only (M-of-N): set the minimum donation threshold that triggers a challenge period.
+    /// Setting threshold to 0 disables the challenge system (backward compatible).
+    pub fn set_challenge_threshold(env: Env, signers: Vec<Address>, threshold: i128) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        if threshold < 0 {
+            panic!("Threshold cannot be negative");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ChallengeThreshold, &threshold);
+        env.events().publish(
+            (symbol_short!("chg_thrsh"), signers.get(0).unwrap()),
+            threshold,
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Read-only: get the configured challenge threshold in stroops (0 if disabled).
+    pub fn get_challenge_threshold(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ChallengeThreshold)
+            .unwrap_or(0i128)
+    }
+
+    /// Badge holders (≥ Seedling) can challenge a donation exceeding the threshold within the 24h window.
+    pub fn challenge_donation(
+        env: Env,
+        challenger: Address,
+        donation_index: u32,
+        reason: String,
+    ) {
+        challenger.require_auth();
+        require_not_paused(&env);
+
+        let donor_stats: DonorStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonorStats(challenger.clone()))
+            .unwrap_or(DonorStats {
+                total_donated: 0,
+                donation_count: 0,
+                badge: BadgeTier::None,
+                co2_offset_grams: 0,
+            });
+        if donor_stats.badge == BadgeTier::None {
+            panic!("Only badge holders can challenge donations");
+        }
+
+        let donation: DonationRecord = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationRecord(donation_index))
+            .expect("Donation record not found");
+
+        let threshold = Self::get_challenge_threshold(env.clone());
+        if threshold == 0 || donation.amount < threshold {
+            panic!("Donation is below challenge threshold");
+        }
+
+        let current_ledger = env.ledger().sequence();
+        if current_ledger > donation.ledger + CHALLENGE_WINDOW_LEDGERS {
+            panic!("Challenge window has expired");
+        }
+
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::DonationChallenge(donation_index))
+        {
+            panic!("Donation already challenged");
+        }
+
+        let challenge = DonationChallenge {
+            challenged: true,
+            challenger: challenger.clone(),
+            challenged_at: current_ledger,
+            resolved: false,
+            approved: false,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationChallenge(donation_index), &challenge);
+
+        env.events().publish(
+            (symbol_short!("chg_sub"), donation_index, challenger),
+            (donation.amount, reason),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Admin-only: resolve a pending challenge by either approving or rejecting (refunding) the donation.
+    pub fn resolve_challenge(
+        env: Env,
+        admin: Address,
+        donation_index: u32,
+        approve: bool,
+    ) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+
+        let mut challenge: DonationChallenge = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationChallenge(donation_index))
+            .expect("Challenge not found");
+
+        if !challenge.challenged || challenge.resolved {
+            panic!("Challenge is not active or already resolved");
+        }
+
+        challenge.resolved = true;
+        challenge.approved = approve;
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationChallenge(donation_index), &challenge);
+
+        if approve {
+            env.events().publish(
+                (symbol_short!("chg_res"), donation_index, admin),
+                true,
+            );
+        } else {
+            let record: DonationRecord = env
+                .storage()
+                .instance()
+                .get(&DataKey::DonationRecord(donation_index))
+                .expect("Donation record not found");
+
+            let co2_offset: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::DonationCO2Offset(donation_index))
+                .unwrap_or(0);
+
+            let mut project: Project = env
+                .storage()
+                .instance()
+                .get(&DataKey::Project(record.project.clone()))
+                .expect("Project not found");
+
+            project.total_raised = project
+                .total_raised
+                .checked_sub(record.amount)
+                .expect("Project total_raised underflow on refund");
+            env.storage()
+                .instance()
+                .set(&DataKey::Project(record.project.clone()), &project);
+
+            let mut donor_stats: DonorStats = env
+                .storage()
+                .instance()
+                .get(&DataKey::DonorStats(record.donor.clone()))
+                .unwrap_or(DonorStats {
+                    total_donated: 0,
+                    donation_count: 0,
+                    badge: BadgeTier::None,
+                    co2_offset_grams: 0,
+                });
+            donor_stats.total_donated = donor_stats
+                .total_donated
+                .checked_sub(record.amount)
+                .expect("Donor total_donated underflow on refund");
+            donor_stats.co2_offset_grams = donor_stats
+                .co2_offset_grams
+                .checked_sub(co2_offset)
+                .expect("Donor co2_offset underflow on refund");
+            env.storage()
+                .instance()
+                .set(&DataKey::DonorStats(record.donor.clone()), &donor_stats);
+
+            let proj_total_key =
+                DataKey::DonorProjectTotal(record.project.clone(), record.donor.clone());
+            let prev_proj_total: i128 = env
+                .storage()
+                .instance()
+                .get(&proj_total_key)
+                .unwrap_or(0);
+            env.storage().instance().set(
+                &proj_total_key,
+                &prev_proj_total
+                    .checked_sub(record.amount)
+                    .expect("DonorProjectTotal underflow on refund"),
+            );
+
+            let gr: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::GlobalTotalRaised)
+                .unwrap_or(0);
+            env.storage().instance().set(
+                &DataKey::GlobalTotalRaised,
+                &gr.checked_sub(record.amount)
+                    .expect("GlobalTotalRaised underflow on refund"),
+            );
+
+            let gc: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::GlobalCO2OffsetGrams)
+                .unwrap_or(0);
+            env.storage().instance().set(
+                &DataKey::GlobalCO2OffsetGrams,
+                &gc.checked_sub(co2_offset)
+                    .expect("GlobalCO2OffsetGrams underflow on refund"),
+            );
+
+            if record.currency == symbol_short!("USDC") {
+                if let Some(usdc_token) = Self::get_usdc_token(env.clone()) {
+                    let token_client = token::Client::new(&env, &usdc_token);
+                    token_client.transfer(&project.wallet, &record.donor, &record.amount);
+                }
+            }
+
+            env.events().publish(
+                (symbol_short!("chg_res"), donation_index, admin),
+                false,
+            );
+        }
+
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Read-only: get the challenge status for a donation index.
+    pub fn get_donation_challenge(
+        env: Env,
+        donation_index: u32,
+    ) -> Option<DonationChallenge> {
+        env.storage()
+            .instance()
+            .get(&DataKey::DonationChallenge(donation_index))
+    }
+
+    /// Read-only: check whether a donation is finalized.
+    pub fn is_donation_finalized(env: Env, donation_index: u32) -> bool {
+        let record: DonationRecord = match env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationRecord(donation_index))
+        {
+            Some(rec) => rec,
+            None => return false,
+        };
+
+        let threshold = Self::get_challenge_threshold(env.clone());
+        if threshold == 0 || record.amount < threshold {
+            return true;
+        }
+
+        if let Some(challenge) = Self::get_donation_challenge(env.clone(), donation_index) {
+            if challenge.resolved {
+                return challenge.approved;
+            } else {
+                return false;
+            }
+        }
+
+        let current_ledger = env.ledger().sequence();
+        current_ledger > record.ledger + CHALLENGE_WINDOW_LEDGERS
+    }
+
+    /// Auto-finalize an unchallenged donation after the challenge window elapses.
+    pub fn auto_finalize(env: Env, donation_index: u32) -> bool {
+        let finalized = Self::is_donation_finalized(env.clone(), donation_index);
+        if finalized {
+            env.events().publish(
+                (symbol_short!("chg_fin"), donation_index),
+                (),
+            );
+        }
+        finalized
     }
 
     // ─── Recurring Donations ──────────────────────────────────────────────────
@@ -9233,6 +9526,171 @@ mod tests {
         assert!(!result);
     }
 
+    // ─── Time-Locked Donation Challenge Protocol Tests (#457) ───────────
+
+    #[test]
+    fn test_challenge_donation() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        let challenger = donor.clone();
+        let reason = String::from_str(&env, "Suspicious activity");
+        client.challenge_donation(&challenger, &donation_index, &reason);
+
+        let challenge = client.get_donation_challenge(&donation_index).unwrap();
+        assert!(challenge.challenged);
+        assert_eq!(challenge.challenger, challenger);
+        assert!(!challenge.resolved);
+        assert!(!challenge.approved);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only badge holders can challenge donations")]
+    fn test_challenge_non_badge_holder_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        let non_badge_holder = Address::generate(&env);
+        let reason = String::from_str(&env, "Flagging donation");
+        client.challenge_donation(&non_badge_holder, &donation_index, &reason);
+    }
+
+    #[test]
+    #[should_panic(expected = "Donation is below challenge threshold")]
+    fn test_challenge_below_threshold_not_triggered() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(500 * STROOP));
+
+        let reason = String::from_str(&env, "Flagging low donation");
+        client.challenge_donation(&donor, &donation_index, &reason);
+    }
+
+    #[test]
+    fn test_resolve_challenge_approve() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        let reason = String::from_str(&env, "Review requested");
+        client.challenge_donation(&donor, &donation_index, &reason);
+
+        client.resolve_challenge(&admin, &donation_index, &true);
+
+        let challenge = client.get_donation_challenge(&donation_index).unwrap();
+        assert!(challenge.resolved);
+        assert!(challenge.approved);
+
+        assert!(client.is_donation_finalized(&donation_index));
+    }
+
+    #[test]
+    fn test_resolve_challenge_reject() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let project_before = client.get_project(&pid);
+        let stats_before = client.get_donor_stats(&donor);
+        let global_before = client.get_global_stats();
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        let reason = String::from_str(&env, "Illicit source");
+        client.challenge_donation(&donor, &donation_index, &reason);
+
+        client.resolve_challenge(&admin, &donation_index, &false);
+
+        let challenge = client.get_donation_challenge(&donation_index).unwrap();
+        assert!(challenge.resolved);
+        assert!(!challenge.approved);
+
+        let project_after = client.get_project(&pid);
+        assert_eq!(project_after.total_raised, project_before.total_raised - 25 * STROOP);
+
+        let stats_after = client.get_donor_stats(&donor);
+        assert_eq!(stats_after.total_donated, stats_before.total_donated - 25 * STROOP);
+
+        let global_after = client.get_global_stats();
+        assert_eq!(global_after.total_raised, global_before.total_raised - 25 * STROOP);
+    }
+
+    #[test]
+    fn test_auto_finalize() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        assert!(!client.is_donation_finalized(&donation_index));
+
+        env.ledger().set_sequence_number(env.ledger().sequence() + CHALLENGE_WINDOW_LEDGERS + 1);
+
+        assert!(client.is_donation_finalized(&donation_index));
+        assert!(client.auto_finalize(&donation_index));
+    }
+
+    #[test]
+    fn test_threshold_zero_disables() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &0);
+        assert_eq!(client.get_challenge_threshold(), 0);
+
+        assert!(client.is_donation_finalized(&donation_index));
+    }
+
+    #[test]
+    fn test_challenge_integration() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        assert_eq!(client.get_challenge_threshold(), 10 * STROOP);
+        assert!(!client.is_donation_finalized(&donation_index));
+
+        let reason = String::from_str(&env, "Audit requested");
+        client.challenge_donation(&donor, &donation_index, &reason);
+
+        let challenge = client.get_donation_challenge(&donation_index).unwrap();
+        assert!(challenge.challenged);
+        assert!(!challenge.resolved);
+
+        client.resolve_challenge(&admin, &donation_index, &false);
+
+        let resolved_challenge = client.get_donation_challenge(&donation_index).unwrap();
+        assert!(resolved_challenge.resolved);
+        assert!(!resolved_challenge.approved);
+    }
+
+    #[test]
+    fn prop_challenge_only_badge_holders() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        let reason = String::from_str(&env, "Valid challenger");
+        client.challenge_donation(&donor, &donation_index, &reason);
+
+        let challenge = client.get_donation_challenge(&donation_index).unwrap();
+        assert!(challenge.challenged);
     // ─── batch_donate tests ───────────────────────────────────────────────────
 
     #[test]
@@ -9718,3 +10176,4 @@ mod tests {
         client.submit_impact_report(&verifier, &unknown, &105u32, &evidence(&env, 1));
     }
 }
+
