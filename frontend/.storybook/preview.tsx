@@ -1,19 +1,33 @@
-import React from "react";
+import React, { useEffect } from "react";
 import type { Preview } from "@storybook/react";
-import { ThemeProvider } from "../lib/themeContext";
-import { I18nProvider, useI18n } from "../lib/i18n";
+import { ThemeProvider } from "../lib/theme";
+import { I18nProvider } from "../lib/i18n";
 import { PriceProvider } from "../lib/priceContext";
 import { WalletProvider } from "./MockWalletProvider";
 import "../styles/globals.css";
+
+function ThemeDecorator({ children, context }: { children: React.ReactNode; context: any }) {
+  const theme = context.globals.theme || "light";
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle("dark", theme === "dark");
+    root.style.colorScheme = theme;
+  }, [theme]);
+
+  return (
+    <div className="min-h-screen bg-white text-slate-900 transition-colors duration-200 dark:bg-[#0a0a1a] dark:text-slate-100 p-4 font-body">
+      {children}
+    </div>
+  );
+}
 
 const preview: Preview = {
   parameters: {
     controls: { matchers: { color: /(background|color)$/i } },
     a11y: {
       config: {
-        rules: [
-          { id: "color-contrast", enabled: false },
-        ],
+        rules: [{ id: "color-contrast", enabled: false }],
       },
     },
     backgrounds: {
@@ -24,15 +38,29 @@ const preview: Preview = {
       ],
     },
   },
+  globalTypes: {
+    theme: {
+      name: "Theme",
+      description: "Global theme for components",
+      defaultValue: "light",
+      toolbar: {
+        icon: "circlehollow",
+        items: [
+          { value: "light", title: "Light" },
+          { value: "dark", title: "Dark" },
+        ],
+      },
+    },
+  },
   decorators: [
-    (Story) => (
+    (Story, context) => (
       <ThemeProvider>
         <I18nProvider>
           <PriceProvider>
             <WalletProvider>
-              <div className="p-4 font-body min-h-screen">
+              <ThemeDecorator context={context}>
                 <Story />
-              </div>
+              </ThemeDecorator>
             </WalletProvider>
           </PriceProvider>
         </I18nProvider>

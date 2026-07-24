@@ -35,6 +35,7 @@ const { registry } = require("./metrics");
 const { Counter, Gauge } = require("prom-client");
 const { v4: uuid } = require("uuid");
 const { computeBadges } = require("./store");
+const { insertEvent, processEvent } = require("./projectionEngine");
 
 // ── Configuration ───────────────────────────────────────────────────────────
 
@@ -377,6 +378,62 @@ async function handleDonated(evt, topics, value) {
     );
 
     await client.query("COMMIT");
+
+    // ── Event sourcing: append the immutable event, then update projections ──
+    // The `donations`/`projects`/`profiles` writes above remain the
+    // authoritative row store for endpoints that join on `donations`, while
+    // the projection tables become the canonical read models for the
+    // leaderboard, project stats, donor history, and global stats endpoints.
+    // Appending the event makes the Soroban contract the single source of
+    // truth and lets any projection be rebuilt deterministically.
+    try {
+      const projectStats = await pool.query(
+        "SELECT raised_xlm, co2_offset_kg FROM projects WHERE id = $1",
+        [projectId],
+      );
+      const raisedXlm = Number(
+        projectStats.rows[0] ? projectStats.rows[0].raised_xlm || 0 : 0,
+      );
+      const co2Kg = Number(
+        projectStats.rows[0] ? projectStats.rows[0].co2_offset_kg || 0 : 0,
+      );
+      const co2OffsetKg = raisedXlm > 0 && co2Kg > 0
+        ? (xlmAmount * co2Kg) / raisedXlm
+        : 0;
+
+      const donationEvent = {
+        event_type: "DonationRecorded",
+        aggregate_id: projectId,
+        event_data: {
+          donorAddress: donor,
+          projectId,
+          amountXLM: xlmAmount,
+          amount: xlmAmount,
+          currency: "XLM",
+          message: msgHash != null ? `msg#${msgHash}` : null,
+          co2OffsetKg,
+          projectsSupported,
+          transactionHash: txHash || "soroban-" + donationId,
+        },
+        soroban_ledger: ledger,
+        transaction_hash: txHash || "soroban-" + donationId,
+      };
+
+      await insertEvent(donationEvent);
+      await processEvent(donationEvent);
+    } catch (projErr) {
+      // Projection failure must not fail the donation commit (which already
+      // succeeded). The admin can rebuild projections from the event store.
+      logger.error(
+        {
+          event: "soroban_events_projection_error",
+          err: projErr.message,
+          projectId,
+          txHash,
+        },
+        "Failed to update projections from donation event",
+      );
+    }
 
     logger.info(
       {

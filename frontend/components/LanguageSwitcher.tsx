@@ -30,7 +30,7 @@ export default function LanguageSwitcher() {
     >
       {LOCALES.map((l) => (
         <option key={l.code} value={l.code}>
-          {l.flag} {l.label}
+          {l.flag} {l.label} {locale === l.code ? "✓" : ""}
         </option>
       ))}
     </select>

@@ -288,6 +288,41 @@ const queueLatency = new client.Gauge({
   registers: [registry],
 });
 
+// ── Event-sourcing projection engine metrics ───────────────────────────────
+
+const projectionEventsProcessedTotal = new client.Counter({
+  name: "indigopay_projection_events_processed_total",
+  help: "Total number of events processed by the projection engine, labelled by projection and outcome (success|error).",
+  labelNames: ["projection", "outcome"],
+  registers: [registry],
+});
+
+const projectionLagEvents = new client.Gauge({
+  name: "indigopay_projection_lag_events",
+  help: "Number of events in the event store not yet processed by projections.",
+  registers: [registry],
+});
+
+const projectionRebuildDurationSeconds = new client.Histogram({
+  name: "indigopay_projection_rebuild_duration_seconds",
+  help: "Duration of a full projection rebuild (replay of the entire event store), labelled by outcome.",
+  labelNames: ["outcome"],
+  buckets: [0.5, 1, 2.5, 5, 10, 20, 30, 60, 120],
+  registers: [registry],
+});
+
+const projectionRebuildLastEvents = new client.Gauge({
+  name: "indigopay_projection_rebuild_last_events",
+  help: "Number of events replayed during the most recent projection rebuild.",
+  registers: [registry],
+});
+
+const projectionRebuildInProgress = new client.Gauge({
+  name: "indigopay_projection_rebuild_in_progress",
+  help: "1 while a projection rebuild is running, 0 otherwise.",
+  registers: [registry],
+});
+
 // ── Push notification provider metrics ──────────────────────────────────────
 
 const pushSentTotal = new client.Counter({
@@ -477,57 +512,58 @@ function updateSecretRotationMetrics(status) {
   }
 }
 
+const metrics = {
+  httpRequestsTotal,
+  httpRequestDurationSeconds,
+  httpRequestsInFlight,
+  dbPoolTotalCount,
+  dbPoolIdleCount,
+  dbPoolWaitingCount,
+  dbPoolMax,
+  dbPoolUtilizationRatio,
+  dbSlowQueriesTotal,
+  dbConnectionErrorsTotal,
+  dbQueryDurationSeconds,
+  cacheOperationsTotal,
+  cacheHits,
+  cacheMisses,
+  cacheCoalesced,
+  queueJobsTotal,
+  indexerLagSeconds,
+  indexerRunning,
+  secretRotationLastTimestamp,
+  readinessCheckFailedTotal,
+  webhookDeliveriesTotal,
+  webhookAttemptsTotal,
+  webhookAttemptDurationSeconds,
+  aiSummaryTokensTotal,
+  aiSummaryCostUsdTotal,
+  aiSummaryLatencySeconds,
+  aiSummaryOutcomesTotal,
+  queueDepth,
+  queueActive,
+  queueWaiting,
+  queueFailed,
+  queueCompleted,
+  queueLatency,
+  pushSentTotal,
+  pushLatencySeconds,
+  postgresFailoverTotal,
+  projectionEventsProcessedTotal,
+  projectionLagEvents,
+  projectionRebuildDurationSeconds,
+  projectionRebuildLastEvents,
+  projectionRebuildInProgress,
+};
+
 module.exports = {
   registry,
+  metrics,
+  cacheHits,
+  cacheMisses,
+  cacheCoalesced,
   normaliseRoute,
   refreshDbPoolMetrics,
   refreshQueueMetrics,
   updateSecretRotationMetrics,
-  cacheHits,
-  cacheMisses,
-  cacheCoalesced,
-  metrics: {
-    httpRequestsTotal,
-    httpRequestDurationSeconds,
-    httpRequestsInFlight,
-    dbPoolTotalCount,
-    dbPoolIdleCount,
-    dbPoolWaitingCount,
-    dbPoolMax,
-    dbPoolUtilizationRatio,
-    dbSlowQueriesTotal,
-    dbConnectionErrorsTotal,
-    dbQueryDurationSeconds,
-    cacheOperationsTotal,
-    cacheHits,
-    cacheMisses,
-    cacheCoalesced,
-    queueJobsTotal,
-    indexerLagSeconds,
-    indigopayIndexerLagLedgers,
-    indigopayIndexerAutoBackfillsTotal,
-    indigopayIndexerStreamReconnectsTotal,
-    indexerOperationsSkippedTotal,
-    indexerRunning,
-    secretRotationLastTimestamp,
-    readinessCheckFailedTotal,
-    webhookDeliveriesTotal,
-    webhookAttemptsTotal,
-    webhookAttemptDurationSeconds,
-    aiSummaryTokensTotal,
-    aiSummaryCostUsdTotal,
-    aiSummaryLatencySeconds,
-    aiSummaryOutcomesTotal,
-    queueDepth,
-    queueActive,
-    queueWaiting,
-    queueFailed,
-    queueCompleted,
-    queueLatency,
-    pushSentTotal,
-    pushLatencySeconds,
-    postgresFailoverTotal,
-    recurringExecutionsTotal,
-    recurringPending,
-  },
 };

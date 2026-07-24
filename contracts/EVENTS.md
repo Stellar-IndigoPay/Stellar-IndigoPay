@@ -15,7 +15,13 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 
 | Event Name | Topics                           | Data                                                     | When Emitted                  |
 | ---------- | -------------------------------- | -------------------------------------------------------- | ----------------------------- |
-| `donated`  | `["donated", donor, project_id]` | `{ "amount": u128, "badge": String, "msg_hash": Bytes }` | After successful XLM donation |
+| `donated`  | `["donated", donor_or_zero_address, project_id]` | `{ "amount": u128, "badge": String, "msg_hash": Bytes }` | After successful donation |
+
+When a donor passes `anonymous: true`, `donor_or_zero_address` is the Stellar
+zero-address placeholder (`GAAAAAAAA…WHF`). Amounts and project/global impact
+metrics remain public; public donor-profile and leaderboard projections exclude it.
+The contract exposes `get_anonymous_donation_count(env, project_id)` for
+project-scoped anonymous donation totals.
 
 ---
 
@@ -271,6 +277,33 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 
 ---
 
+## 9. `sub_new` (recurring donation subscription created)
+
+**Description**: Emitted by `create_subscription` (#81). Named `sub_new` rather than the
+`sub_created` used in the issue spec because `symbol_short!` topics are capped at 9
+characters — same convention as `prop_new` / `prop_veto` elsewhere in this contract.
+
+| Event Name | Topics                  | Data                                                                  | When Emitted                    |
+| ---------- | ------------------------ | ---------------------------------------------------------------------- | -------------------------------- |
+| `sub_new`  | `["sub_new", donor]`     | `{ "project_id": String, "amount": i128, "interval_ledgers": u32, "next_execution": u32 }` | After a subscription is created or re-created |
+
+## 10. `sub_canc` (recurring donation subscription cancelled)
+
+**Description**: Emitted by `cancel_subscription` (#81). Shortened from `sub_cancelled`
+for the same `symbol_short!` 9-character limit.
+
+| Event Name | Topics                 | Data                    | When Emitted                  |
+| ---------- | ------------------------ | ------------------------ | ------------------------------ |
+| `sub_canc` | `["sub_canc", donor]`   | `{ "project_id": String }` | After a subscription is cancelled |
+
+## 11. `sub_exec` (recurring donation subscription executed)
+
+**Description**: Emitted by `execute_subscription` (#81) after it delegates to `donate`
+and advances `next_execution`. Shortened from `sub_executed`.
+
+| Event Name | Topics                 | Data                                                        | When Emitted                          |
+| ---------- | ------------------------ | -------------------------------------------------------------- | --------------------------------------- |
+| `sub_exec` | `["sub_exec", donor]`   | `{ "project_id": String, "amount": i128, "next_execution": u32 }` | After a due subscription donation executes |
 ## 27. `rec_cr` (Recurring Created)
 
 **Description**: Emitted when a donor registers a new recurring donation schedule.
@@ -298,6 +331,34 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 | Event Name | Topics                      | Data                                                                           | When Emitted                                  |
 | ---------- | --------------------------- | ------------------------------------------------------------------------------ | --------------------------------------------- |
 | `rec_exec` | `["rec_exec", keeper, donor]`| `(recurring_id: u32, amount: i128, currency: Symbol, project_id: String)`      | When a keeper executes a recurring donation   |
+
+## 30. `vest_crt` (Vesting Created)
+
+**Description**: Emitted when a donor creates a time-locked vesting donation schedule.
+
+| Event Name | Topics                           | Data                                                                                                    | When Emitted                   |
+| ---------- | -------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| `vest_crt` | `["vest_crt", donor, project_id]` | `(schedule_id: u32, total_amount: i128, amount_per_installment: i128, installment_count: u32, interval_ledgers: u32, msg_hash: u32)` | When donor calls `donate_vested` |
+
+---
+
+## 31. `vest_clm` (Vesting Claimed)
+
+**Description**: Emitted when a vested installment is claimed by anyone after the interval elapses.
+
+| Event Name | Topics                    | Data                                                     | When Emitted                          |
+| ---------- | ------------------------- | -------------------------------------------------------- | ------------------------------------- |
+| `vest_clm` | `["vest_clm", project_id]` | `(schedule_id: u32, amount: i128, remaining: u32)`       | When `claim_vested_installment` fires |
+
+---
+
+## 32. `vest_can` (Vesting Cancelled)
+
+**Description**: Emitted when a donor cancels a vesting schedule and receives back the unvested amount.
+
+| Event Name | Topics                            | Data                                      | When Emitted                    |
+| ---------- | --------------------------------- | ----------------------------------------- | ------------------------------- |
+| `vest_can` | `["vest_can", donor, project_id]` | `(schedule_id: u32, unvested_amount: i128)` | When donor calls `cancel_vesting` |
 
 ---
 

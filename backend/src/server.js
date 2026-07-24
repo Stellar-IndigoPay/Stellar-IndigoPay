@@ -65,6 +65,7 @@ const { start: startWebhookQueue,
 const { start: startPushQueue } = require("./services/pushQueue");
 const { start: startImpactQueue } = require("./services/impactQueue");
 const { start: startIdempotencyCleanup } = require("./services/idempotencyCleanup");
+const { start: startRecurringDonationWorker } = require("./services/recurringDonationWorker");
 const { start: startBlacklistCleanup } = require("./services/blacklistCleanup");
 const { startCO2VerificationCron, stopCO2VerificationCron } = require("./services/co2Verifier");
 const { startIndexer } = require("./services/indexerService");
@@ -247,6 +248,18 @@ try {
   logger.error(
     { event: "route_load_failed", route: "admin/analytics", err: err.message },
     "Failed to load admin analytics route module",
+  );
+}
+
+// Admin projection-engine management (event-sourcing rebuild endpoints).
+try {
+  const adminProjectionsRouter = require("./routes/admin/projections");
+  app.use("/api/admin/projections", adminProjectionsRouter);
+  app.use("/api/v1/admin/projections", adminProjectionsRouter);
+} catch (err) {
+  logger.error(
+    { event: "route_load_failed", route: "admin/projections", err: err.message },
+    "Failed to load admin projections route module",
   );
 }
 
@@ -439,9 +452,14 @@ async function startServer() {
   await runMigrations();
   await startSummaryQueue(io);
   await startProfileQueue(io);
+  await startMatchQueue();
   await startWebhookQueue();
   await startPushQueue();
   await startIdempotencyCleanup();
+  await startRecurringDonationWorker(io);
+  await startBlacklistCleanup();
+  await startCO2VerificationCron();
+
   await startBlacklistCleanup();
   await startCO2VerificationCron();
 
@@ -608,10 +626,12 @@ async function startServer() {
   for (const queue of [
     "./services/summaryQueue",
     "./services/profileQueue",
+    "./services/matchQueue",
     "./services/digestQueue",
     "./services/webhookQueue",
     "./services/pushQueue",
     "./services/idempotencyCleanup",
+    "./services/recurringDonationWorker",
     "./services/blacklistCleanup",
     "./services/co2Verifier",
   ]) {

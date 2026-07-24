@@ -1090,6 +1090,62 @@ router.delete("/:id/follow", async (req, res, next) => {
 );
 
 /**
+ * GET /api/projects/:id/onboarding
+ * Returns the onboarding checklist items for the project.
+ */
+router.get("/:id/onboarding", async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      "SELECT items FROM project_onboarding WHERE project_id = $1",
+      [req.params.id],
+    );
+    res.json({
+      success: true,
+      data: result.rows[0]?.items || [],
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * PATCH /api/projects/:id/onboarding/:key
+ * Marks a specific onboarding checklist item as completed.
+ */
+router.patch("/:id/onboarding/:key", async (req, res, next) => {
+  try {
+    const { key } = req.params;
+    if (!key || typeof key !== "string") {
+      throw new AppError("VALIDATION_ERROR", { field: "key" });
+    }
+
+    const existing = await pool.query(
+      "SELECT items FROM project_onboarding WHERE project_id = $1",
+      [req.params.id],
+    );
+    if (!existing.rows[0]) {
+      throw new AppError("PROJECT_NOT_FOUND");
+    }
+
+    const items = existing.rows[0].items || [];
+    const updatedItems = items.map((item) =>
+      item.key === key ? { ...item, completed: true } : item,
+    );
+
+    await pool.query(
+      `UPDATE project_onboarding
+         SET items = $1, updated_at = NOW()
+       WHERE project_id = $2`,
+      [JSON.stringify(updatedItems), req.params.id],
+    );
+
+    res.json({ success: true, data: updatedItems });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
  * POST /api/projects/:id/generate-summary
  *
  * Generates (or regenerates) a 3-sentence donor-facing impact summary using

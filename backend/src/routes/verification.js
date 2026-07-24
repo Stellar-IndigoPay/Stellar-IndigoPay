@@ -41,6 +41,7 @@ const {
 const { logAdminAction } = require("../services/audit");
 const { createRateLimiter } = require("../middleware/rateLimiter");
 const { sendAdminVerificationNotification } = require("../services/email");
+const { onboardProject } = require("../services/onboardingService");
 const {
   backendName,
   uploadToIPFS,
@@ -659,6 +660,26 @@ router.patch("/:id/status", adminRequired, async (req, res, next) => {
         logger.error(
           { event: "co2_verification_failed", requestId: req.params.id },
           `CO₂ verification failed after approval: ${err.message}`,
+        );
+      }
+
+      try {
+        const onboardResult = await onboardProject(mapRequestRow(row));
+        logAdminAction({
+          actor,
+          action: "verification.approved_and_onboarded",
+          targetType: "verification_request",
+          targetId: req.params.id,
+          metadata: {
+            projectId: onboardResult.projectId,
+            webhookSecret: onboardResult.webhookSecret,
+          },
+          ipAddress: req.ip,
+        });
+      } catch (err) {
+        logger.error(
+          { event: "project_onboarding_failed", requestId: req.params.id },
+          `Project onboarding failed after approval: ${err.message}`,
         );
       }
     }
