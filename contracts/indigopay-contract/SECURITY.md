@@ -263,3 +263,114 @@ Gated behind the `impact_verification` Cargo feature (on by default; excluded fr
 | `impv_flg`  | A submission deviated ≥50% from the claimed rate                |
 | `impv_adj`  | `co2_per_xlm` was auto-adjusted to the new median                |
 | `impv_clr`  | `clear_impact_flag` cleared a project's deviation flag           |
+
+## Off-Chain Multi-Verifier Project Verification Oracle
+
+Gated behind the `project_verification` Cargo feature (on by default; excluded
+from the size-checked `--no-default-features` CI build, same as
+`impact_verification`). Gates whether a registered project is *eligible to
+receive donations at all* — distinct from `impact_verification` above, which
+audits an ongoing metric (`co2_per_xlm`) on projects that are already
+donatable.
+
+### Trust model
+
+- **Verifiers are admin-appointed, not permissionless**, and are managed by
+  **M-of-N admin signatures** (`add_verifier` / `remove_verifier` /
+  `set_verification_threshold` / `revoke_verification` all require
+  `require_admin_for_critical`) — a stricter bar than `impact_verification`'s
+  verifier management, which only requires a single routine admin signature.
+  This was a deliberate choice for this feature: getting the verifier set or
+  threshold wrong directly controls which projects can receive donor funds at
+  all, so a single compromised admin key should not be able to unilaterally
+  add a colluding verifier or drop the threshold to zero.
+- **`VerifierSet` is a separate role from `AdminSet`.** Being an admin does
+  not make an address a verifier and vice versa; the M-of-N admin quorum
+  manages the verifier role, but does not itself attest to anything.
+- **What the threshold protects, and what it doesn't.** Requiring M distinct
+  verifier attestations before a project can receive donations raises the bar
+  from "one admin registers a project" to "M independently-appointed
+  reviewers vouched for it." It does **not** validate the *content* of the
+  off-chain evidence — the contract only stores a hash of it — so it cannot
+  detect a verifier who signs off without actually doing due diligence, or M
+  colluding verifiers who all vouch for a fraudulent project. The same
+  caveat `impact_verification` already documents applies here: a minority of
+  colluding verifiers cannot move the outcome unless they control a majority
+  of the authorised verifier set.
+- **Attestations are historical facts, not live credentials.**
+  `remove_verifier` only prevents *future* attestations from that address; it
+  does not retroactively remove attestations that address already submitted,
+  and does not demote a project that reached `Verified` partly because of
+  them. This mirrors `remove_impact_verifier`'s documented behaviour exactly
+  ("reports it already submitted... are left untouched"). Only the explicit,
+  audited `revoke_verification` call clears a project's accumulated
+  attestations.
+- **`Verified` is a one-way ratchet within a verification cycle.** Once a
+  project reaches `Verified`, neither removing a verifier nor raising
+  `VerificationThreshold` afterwards demotes it — only `revoke_verification`
+  does, and doing so resets the project to `Unverified` from a clean slate
+  (all prior attestations and evidence hashes are cleared, so re-verification
+  starts over rather than instantly re-triggering off leftover state).
+- **Duplicate attestations cannot inflate the count.** A verifier attesting
+  the same project twice panics (`DuplicateAttestation`) rather than silently
+  updating — unlike `impact_verification`'s reports, which intentionally
+  allow resubmission. A verifier who made a mistake needs an admin to
+  `revoke_verification` before attesting again.
+- **Changing the threshold never leaves a project in an inconsistent state,
+  by construction rather than by eager recomputation.** There is no bounded
+  way to walk every registered project when an admin changes
+  `VerificationThreshold`, so the contract never tries to. Instead, both
+  `attest_project` and the donation gate (`require_project_verified_for_donation`)
+  recompute a project's live status against the *current* threshold on every
+  call (never downgrading an already-`Verified` project — see the ratchet
+  point above). Practically: if an admin lowers the threshold below a
+  project's existing attester count, that project reads as `Verified`
+  immediately on the next read-only status query, and the very next
+  `donate*` or `attest_project` call persists the transition and emits
+  `proj_vfy`. There is no scenario where a project needs a *fresh*
+  attestation just to notice a threshold change that already qualifies it.
+- **Backward compatibility (legacy mode).** `VerificationThreshold` defaults
+  to `0` (absent) when never configured, and an absent `ProjectVerification`
+  key reads as `Unverified` by default. The donation gate treats
+  `(threshold == 0, Unverified)` as an explicit pass-through — every project
+  registered before this feature existed (or on a deployment that never
+  configures a threshold) remains donatable exactly as it was.
+- **`Rejected` is a reserved state.** The `VerificationStatus` enum includes
+  a `Rejected` variant for a possible future issue (e.g. an explicit
+  verifier-rejection vote). No function in this feature assigns it; it exists
+  only so a future migration doesn't need to add a new enum variant to
+  already-deployed storage.
+
+### Storage design note
+
+Kept as a separate `ProjectVerificationKey` enum rather than new `DataKey`
+variants, mirroring `ImpactVerificationKey`. Appending
+`#[cfg(feature = "project_verification")]`-gated variants directly to the
+shared, always-on `DataKey` enum would shift every later variant's XDR
+discriminant depending on whether the feature is compiled in, silently
+corrupting storage reads across builds with different feature sets. Per-
+project attester lists (`ProjectAttesters`) deliberately hold only verifier
+addresses, not full attestation records; evidence hashes live in their own
+per-(project, verifier) key (`ProjectAttestationEvidence`) so reading the
+attester list/count for a threshold check never has to pull evidence data
+along with it.
+
+### Donation gate coverage
+
+`require_project_verified_for_donation` is called from every donation-crediting
+entry point: `process_donation` (backing `donate`, `donate_with_privacy`, and
+`batch_donate`), `donate_asset_with_privacy`, `donate_anonymous`,
+`donate_usdc_with_privacy`, `execute_recurring`, and `donate_vested`. It is not
+called from `initiate_emergency_withdrawal` — that function disburses funds a
+project has already collected and is unrelated to donation eligibility.
+
+### Event audit trail
+
+| Event topic | Trigger                                                              |
+| ----------- | ---------------------------------------------------------------------- |
+| `ver_add`   | `add_verifier` authorised a new verifier                             |
+| `ver_rem`   | `remove_verifier` revoked a verifier (past attestations unaffected)  |
+| `ver_thr`   | `set_verification_threshold` changed the auto-verify threshold      |
+| `proj_att`  | `attest_project` recorded a new attestation                          |
+| `proj_vfy`  | A project's status transitioned to `Verified`                        |
+| `proj_rvk`  | `revoke_verification` cleared a project's verification state         |
