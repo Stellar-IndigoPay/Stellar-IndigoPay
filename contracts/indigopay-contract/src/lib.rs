@@ -573,6 +573,17 @@ fn require_not_paused(env: &Env) {
     }
 }
 
+fn require_not_coordinated_upgrade(env: &Env) {
+    let coordinated: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::CoordinatedUpgrade)
+        .unwrap_or(false);
+    if coordinated {
+        panic!("Coordinated upgrade in progress");
+    }
+}
+
 #[cfg(feature = "impact")]
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -1577,6 +1588,7 @@ impl IndigoPayContract {
 
     pub fn pause_project(env: Env, admin: Address, project_id: String) {
         require_admin_for_routine(&env, &admin);
+        require_not_coordinated_upgrade(&env);
         // pause_project is intentionally NOT paused-gated so the admin can
         // still manage individual projects during a contract-wide pause.
         let mut project: Project = env
@@ -1605,6 +1617,7 @@ impl IndigoPayContract {
     /// project is not paused, to prevent accidental double-resumes).
     pub fn resume_project(env: Env, admin: Address, project_id: String) {
         require_admin_for_routine(&env, &admin);
+        require_not_coordinated_upgrade(&env);
         // resume_project is intentionally NOT paused-gated.
         let mut project: Project = env
             .storage()
@@ -3863,6 +3876,7 @@ impl IndigoPayContract {
     /// `cancel_admin_transfer` first.
     pub fn transfer_admin(env: Env, signers: Vec<Address>, old_admin: Address, new_admin: Address) {
         require_admin_for_critical(&env, &signers);
+        require_not_coordinated_upgrade(&env);
         if env.storage().instance().has(&DataKey::PendingAdmin) {
             panic!("Admin transfer already pending; cancel first");
         }
@@ -3887,6 +3901,7 @@ impl IndigoPayContract {
     /// replaced by `new_admin` in the admin set (in-place swap). Threshold
     /// and set size are preserved.
     pub fn accept_admin(env: Env) {
+        require_not_coordinated_upgrade(&env);
         let (old_admin, new_admin): (Address, Address) = env
             .storage()
             .instance()
@@ -3922,6 +3937,7 @@ impl IndigoPayContract {
     /// was a mistake.
     pub fn cancel_admin_transfer(env: Env, signers: Vec<Address>) {
         require_admin_for_critical(&env, &signers);
+        require_not_coordinated_upgrade(&env);
         if !env.storage().instance().has(&DataKey::PendingAdmin) {
             panic!("No pending admin transfer");
         }
@@ -3940,6 +3956,7 @@ impl IndigoPayContract {
     /// M-of-N: add a new address to the admin set.
     pub fn add_admin(env: Env, signers: Vec<Address>, new_admin: Address) {
         require_admin_for_critical(&env, &signers);
+        require_not_coordinated_upgrade(&env);
         let mut admin_set: Vec<Address> = read_admin_set(&env);
         if admin_set.contains(&new_admin) {
             panic!("Address is already an admin");
@@ -3956,6 +3973,7 @@ impl IndigoPayContract {
     /// current threshold (call `update_threshold` first).
     pub fn remove_admin(env: Env, signers: Vec<Address>, admin_to_remove: Address) {
         require_admin_for_critical(&env, &signers);
+        require_not_coordinated_upgrade(&env);
         let admin_set: Vec<Address> = read_admin_set(&env);
         if !admin_set.contains(&admin_to_remove) {
             panic!("Address is not an admin");
@@ -3987,6 +4005,7 @@ impl IndigoPayContract {
     /// 1 <= new_threshold <= admin_set.len().
     pub fn update_threshold(env: Env, signers: Vec<Address>, new_threshold: u32) {
         require_admin_for_critical(&env, &signers);
+        require_not_coordinated_upgrade(&env);
         let admin_set: Vec<Address> = read_admin_set(&env);
         if new_threshold == 0 || new_threshold > admin_set.len() {
             panic!("Threshold must be between 1 and the number of admins");
@@ -4111,6 +4130,14 @@ impl IndigoPayContract {
     #[cfg(feature = "upgrade")]
     pub fn cancel_upgrade(env: Env, signers: Vec<Address>) {
         require_admin_for_critical(&env, &signers);
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::CoordinatedUpgrade)
+            .unwrap_or(false)
+        {
+            panic!("Cannot cancel individual upgrade during coordinated upgrade");
+        }
         if !env.storage().instance().has(&DataKey::PendingUpgrade) {
             panic!("No pending upgrade");
         }
@@ -4193,6 +4220,9 @@ impl IndigoPayContract {
             let addr = item.0.clone();
             let hash = item.1.clone();
             if addr == env.current_contract_address() {
+                if env.storage().instance().has(&DataKey::PendingUpgrade) {
+                    panic!("Upgrade already pending");
+                }
                 env.storage()
                     .instance()
                     .set(&DataKey::PendingUpgrade, &hash);
@@ -10073,6 +10103,30 @@ mod tests {
         let (env, _cid, client, _admin, _pid) = setup();
         let attacker = Address::generate(&env);
         client.cancel_coordinated_pause(&attacker);
+    }
+
+    #[test]
+    #[should_panic(expected = "Coordinated upgrade in progress")]
+    fn test_pause_project_during_coordinated_upgrade_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        let wasm_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let mut list = Vec::new(&env);
+        list.push_back((_cid.clone(), wasm_hash));
+        client.propose_coordinated_upgrade(&signers1(&env, &admin), &list);
+
+        client.pause_project(&admin, &pid);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot cancel individual upgrade during coordinated upgrade")]
+    fn test_cancel_upgrade_during_coordinated_upgrade_fails() {
+        let (env, _cid, client, admin, _pid) = setup();
+        let wasm_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let mut list = Vec::new(&env);
+        list.push_back((_cid.clone(), wasm_hash));
+        client.propose_coordinated_upgrade(&signers1(&env, &admin), &list);
+
+        client.cancel_upgrade(&signers1(&env, &admin));
     }
 
     #[test]

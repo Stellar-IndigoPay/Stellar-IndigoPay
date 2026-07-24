@@ -761,6 +761,14 @@ impl AttestationContract {
     pub fn cancel_upgrade(env: Env, admin: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::CoordinatedUpgrade)
+            .unwrap_or(false)
+        {
+            panic!("Cannot cancel individual upgrade during coordinated upgrade");
+        }
         if !env.storage().instance().has(&DataKey::PendingUpgrade) {
             panic!("No pending upgrade");
         }
