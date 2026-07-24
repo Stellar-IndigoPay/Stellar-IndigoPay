@@ -47,7 +47,7 @@ Adds configurable anomaly-detection rules with sliding-window counters that auto
 
 ### Tests
 
-**Unit tests** (7):
+**Unit tests** (8):
 - `test_anomaly_disabled_no_rules` — empty rules = no detection
 - `test_anomaly_rule_volume_below_threshold` — donation below volume threshold
 - `test_anomaly_rule_volume_above_threshold` — auto-pause on volume breach
@@ -68,7 +68,7 @@ Adds configurable anomaly-detection rules with sliding-window counters that auto
 
 ## Design Decisions
 
-1. **Detection runs AFTER transfer** — consistent with CEI pattern; the donation is final and the circuit breaker acts on the next donation.
+1. **Detection runs AFTER transfer** — the triggering donation completes, then the project is paused and subsequent donations are rejected.
 2. **No auto-unpause** — admin must call `clear_anomaly` explicitly; prevents attacker from triggering and clearing in one transaction.
 3. **Per-project isolation** — each project has independent rules and windows; no cross-project correlation (out of scope per issue).
-4. **`DEFAULT_ANOMALY_WINDOW = 720`** — fallback when `window_ledgers == 0` is rejected at rule configuration time (validated).
+4. **Positive window sizes** — `window_ledgers` must be greater than zero; zero-valued windows are rejected during rule configuration.

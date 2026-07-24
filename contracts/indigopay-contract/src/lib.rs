@@ -1194,7 +1194,7 @@ fn process_donation(
 fn check_anomaly_rules(
     env: &Env,
     project_id: &String,
-    donor: &Address,
+    _donor: &Address,
     amount: i128,
     is_new_donor: bool,
 ) {
@@ -2219,6 +2219,7 @@ impl IndigoPayContract {
             .expect("Project total_raised overflow");
         let goal_reached = apply_campaign_goal_progress(&mut project);
         let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
+        let asset_is_new_donor = !env.storage().instance().has(&donated_key);
         if !env.storage().instance().has(&donated_key) {
             env.storage().instance().set(&donated_key, &true);
             project.donor_count = project
@@ -2380,7 +2381,7 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
 
         // ── Anomaly detection
-        check_anomaly_rules(env, &project_id, &donor, xlm_amount, asset_is_new_donor);
+        check_anomaly_rules(&env, &project_id, &donor, xlm_amount, asset_is_new_donor);
     }
 
     // ─── zk-SNARK Anonymous Donations (#390) ─────────────────────────────────
@@ -2705,7 +2706,7 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
 
         // ── Anomaly detection (uses the derived anon_donor address)
-        check_anomaly_rules(env, &project_id, &anon_donor, amount, anon_is_new_donor);
+        check_anomaly_rules(&env, &project_id, &anon_donor, amount, anon_is_new_donor);
     }
 
     /// Check if a nullifier has already been spent.
@@ -3855,6 +3856,7 @@ impl IndigoPayContract {
             .expect("Project total_raised overflow");
         let goal_reached = apply_campaign_goal_progress(&mut project);
         let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
+        let usdc_is_new_donor = !env.storage().instance().has(&donated_key);
         if !env.storage().instance().has(&donated_key) {
             env.storage().instance().set(&donated_key, &true);
             project.donor_count = project
@@ -4028,7 +4030,7 @@ impl IndigoPayContract {
 
         // ── Anomaly detection
         check_anomaly_rules(
-            env,
+            &env,
             &usdc_project_id,
             &donor,
             xlm_equivalent,
@@ -5151,7 +5153,7 @@ impl IndigoPayContract {
 
         // ── Anomaly detection
         check_anomaly_rules(
-            env,
+            &env,
             &recurring.project_id,
             &rec_donor,
             xlm_equivalent,
