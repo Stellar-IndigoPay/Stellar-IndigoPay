@@ -11,7 +11,7 @@
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, Env, String as SorobanString, Vec};
 
-use escrow_contract::{EscrowContractClient, JobStatus};
+use escrow_contract::JobStatus;
 
 mod common;
 
@@ -42,7 +42,7 @@ fn test_dispute_freezes_release() {
     );
 
     // Dispute the job
-    client.dispute_job(&admin, &job_id);
+    client.dispute_job(&common::signers1(&env, &admin), &job_id);
 
     let job = client.get_job(&job_id).expect("Job should exist");
     assert_eq!(job.status, JobStatus::Disputed);
@@ -76,8 +76,8 @@ fn test_resolve_dispute_approve_remaining() {
     );
 
     // Dispute then resolve: approve remaining to freelancer
-    client.dispute_job(&admin, &job_id);
-    client.resolve_dispute(&admin, &job_id, &true);
+    client.dispute_job(&common::signers1(&env, &admin), &job_id);
+    client.resolve_dispute(&common::signers1(&env, &admin), &job_id, &true);
 
     let job = client.get_job(&job_id).expect("Job should exist");
     assert_eq!(job.status, JobStatus::Completed);
@@ -131,16 +131,17 @@ fn test_resolve_dispute_refund_client() {
         &token,
         &1000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
     // Release first milestone (50 % = 500)
     client.release_milestone(&client_addr, &job_id, &0u32);
 
     // Dispute remaining 500
-    client.dispute_job(&admin, &job_id);
+    client.dispute_job(&common::signers1(&env, &admin), &job_id);
 
     // Resolve: refund remaining to client
-    client.resolve_dispute(&admin, &job_id, &false);
+    client.resolve_dispute(&common::signers1(&env, &admin), &job_id, &false);
 
     let job = client.get_job(&job_id).expect("Job should exist");
     assert_eq!(job.status, JobStatus::Completed);
@@ -176,11 +177,11 @@ fn test_resolve_non_disputed_job_panics() {
     );
 
     // Resolve without disputing first — should panic
-    client.resolve_dispute(&admin, &job_id, &true);
+    client.resolve_dispute(&common::signers1(&env, &admin), &job_id, &true);
 }
 
 #[test]
-#[should_panic(expected = "Only admin can dispute jobs")]
+#[should_panic(expected = "Insufficient admin signatures")]
 fn test_non_admin_cannot_dispute() {
     let env = Env::default();
     env.mock_all_auths();
@@ -203,11 +204,11 @@ fn test_non_admin_cannot_dispute() {
     );
 
     // A non-admin address tries to dispute
-    client.dispute_job(&client_addr, &job_id);
+    client.dispute_job(&common::signers1(&env, &client_addr), &job_id);
 }
 
 #[test]
-#[should_panic(expected = "Only admin can resolve disputes")]
+#[should_panic(expected = "Insufficient admin signatures")]
 fn test_non_admin_cannot_resolve() {
     let env = Env::default();
     env.mock_all_auths();
@@ -229,9 +230,9 @@ fn test_non_admin_cannot_resolve() {
         1000i128,
     );
 
-    client.dispute_job(&admin, &job_id);
+    client.dispute_job(&common::signers1(&env, &admin), &job_id);
     // Non-admin tries to resolve
-    client.resolve_dispute(&freelancer, &job_id, &true);
+    client.resolve_dispute(&common::signers1(&env, &freelancer), &job_id, &true);
 }
 
 #[test]
@@ -242,5 +243,5 @@ fn test_dispute_non_existent_job_panics() {
     let (admin, client) = common::setup(&env);
 
     let job_id = SorobanString::from_str(&env, "ghost-job");
-    client.dispute_job(&admin, &job_id);
+    client.dispute_job(&common::signers1(&env, &admin), &job_id);
 }

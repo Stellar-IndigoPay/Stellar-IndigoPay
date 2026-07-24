@@ -48,6 +48,7 @@ fn test_create_job_with_usdc() {
         &usdc,
         &5000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
     let job = client.get_job(&job_id).expect("USDC job should exist");
@@ -87,6 +88,7 @@ fn test_release_milestone_usdc() {
         &usdc,
         &10_000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
     // Release milestone 0 (50 % of 10_000 = 5_000 USDC)
@@ -163,6 +165,7 @@ fn test_claim_milestone_usdc() {
         &usdc,
         &7_500i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
     // Advance past the release period
@@ -224,6 +227,7 @@ fn test_refund_usdc_job() {
         &usdc,
         &2_000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
 
     // Fast-forward past the job deadline
@@ -345,8 +349,8 @@ fn test_dispute_resolution_usdc() {
     );
 
     // Dispute and resolve (approve) → freelancer gets all 5_000 USDC
-    client.dispute_job(&admin, &job_id);
-    client.resolve_dispute(&admin, &job_id, &true);
+    client.dispute_job(&common::signers1(&env, &admin), &job_id);
+    client.resolve_dispute(&common::signers1(&env, &admin), &job_id, &true);
 
     let job = client.get_job(&job_id).unwrap();
     assert_eq!(job.status, JobStatus::Completed);
@@ -383,6 +387,7 @@ fn test_usdc_full_lifecycle_integration() {
         &usdc,
         &10_000i128,
         &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
     assert_eq!(client.get_job(&job_id).unwrap().status, JobStatus::Escrowed);
 
