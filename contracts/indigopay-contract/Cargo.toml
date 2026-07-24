@@ -27,6 +27,7 @@ upgrade = []
 usdc = []
 campaign = []
 donation = []
+zk = []
 
 [profile.release]
 lto = true

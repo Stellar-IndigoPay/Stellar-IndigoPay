@@ -235,3 +235,28 @@ Badge tiers and minted NFTs are **never** downgraded or burned on refund. The re
 ### Underflow protection
 
 All counter decrements on refund use `checked_sub(...).expect("...underflow on refund")`, consistent with the `checked_add` convention used for donations. If a refund would drive any counter negative, the transaction panics and reverts.
+## Anonymous donation proof trust model (#432)
+
+The optional `zk` feature adds `donate_anonymous_zk`. To keep the deployed
+WASM below Soroban's size limit, the contract uses a verifier-attestation
+model: an off-chain prover verifies the circuit and signs the ordered public
+inputs with Ed25519; the contract stores the 32-byte public verification key.
+Changing that key requires the configured M-of-N admin threshold.
+
+The signed statement is exactly:
+
+`project_id_hash || amount_commitment || nullifier`
+
+where each component is 32 bytes. `project_id_hash` is SHA-256 of the Soroban
+XDR encoding of the project ID. The first 16 bytes of `amount_commitment` are
+the positive, big-endian `i128` amount used for public project/global
+accounting, and the remaining bytes are circuit-defined blinding material.
+The nullifier is stored after successful verification and can never be reused.
+
+This design hides the donor identity from contract storage and donor-specific
+statistics, but it is not a trustless in-WASM Groth16 verifier: privacy and
+soundness depend on the off-chain circuit, prover service, and protection of
+the corresponding signing key. The transaction submitter can still be visible
+to ledger observers unless submission is relayed. The amount is also
+recoverable from its public commitment because exact public totals cannot be
+updated while keeping each increment secret.

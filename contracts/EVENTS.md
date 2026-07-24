@@ -9,6 +9,26 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 
 ---
 
+## `zk_vk_set`
+
+**Description**: Emitted after M-of-N admins install a new anonymous-donation
+verification key. Event data is the SHA-256 hash of the key.
+
+| Event Name  | Topics          | Data               | When Emitted |
+| ----------- | --------------- | ------------------ | ------------ |
+| `zk_vk_set` | `["zk_vk_set"]` | `BytesN<32>`       | Verification key update |
+
+## `zk_donate`
+
+**Description**: Emitted after an anonymous proof is verified and its
+nullifier consumed. No donor address is included.
+
+| Event Name  | Topics                                      | Data                                      | When Emitted |
+| ----------- | ------------------------------------------- | ----------------------------------------- | ------------ |
+| `zk_donate` | `["zk_donate", project_id, nullifier]`      | `(amount_commitment, co2_offset_grams)`   | Verified anonymous donation |
+
+---
+
 ## 1. `donated`
 
 **Description**: Emitted after a successful XLM donation to a project.
