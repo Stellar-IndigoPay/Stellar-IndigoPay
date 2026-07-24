@@ -306,6 +306,8 @@ components:
           format: uuid
         donorAddress:
           type: string
+          nullable: true
+          description: Omitted from public responses for anonymous donations.
         amount:
           type: string
         amountXLM:
@@ -321,6 +323,12 @@ components:
         createdAt:
           type: string
           format: date-time
+        anonymous:
+          type: boolean
+        receiptGeneratedAt:
+          type: string
+          format: date-time
+          nullable: true
     DonationMatch:
       type: object
       properties:
@@ -682,6 +690,10 @@ components:
         message:
           type: string
           maxLength: 100
+        anonymous:
+          type: boolean
+          default: false
+          description: Keep the donor out of public history and leaderboard projections.
         transactionHash:
           type: string
           pattern: "^[a-fA-F0-9]{64}$"
@@ -1564,6 +1576,29 @@ paths:
                       $ref: "#/components/schemas/Donation"
         "400":
           $ref: "#/components/responses/BadRequest"
+  /api/donations/{id}/receipt:
+    get:
+      tags: [Donations]
+      summary: Download a signed donation tax receipt
+      operationId: downloadDonationReceipt
+      description: Returns the immutable signed PDF receipt for a public donation. Anonymous donations have no public receipt endpoint.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Signed PDF receipt.
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/donations/recurring/{donorAddress}:
     get:
       tags: [Donations]
