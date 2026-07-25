@@ -4237,7 +4237,7 @@ impl IndigoPayContract {
                 env.invoke_contract::<()>(
                     &addr,
                     &Symbol::new(&env, "set_coordinated_pause"),
-                    (signers.get(0).unwrap(), Some(hash)).into_val(&env),
+                    (signers.clone(), Some(hash)).into_val(&env),
                 );
             }
         }
@@ -4291,7 +4291,7 @@ impl IndigoPayContract {
                 env.invoke_contract::<()>(
                     &addr,
                     &Symbol::new(&env, "clear_coordinated_pause"),
-                    (signers.get(0).unwrap(),).into_val(&env),
+                    (signers.clone(),).into_val(&env),
                 );
             }
         }
@@ -4337,7 +4337,7 @@ impl IndigoPayContract {
                 env.invoke_contract::<()>(
                     &addr,
                     &Symbol::new(&env, "cancel_coordinated_pause"),
-                    (signers.get(0).unwrap(),).into_val(&env),
+                    (signers.clone(),).into_val(&env),
                 );
             }
         }
@@ -4357,8 +4357,12 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
-    pub fn set_coordinated_pause(env: Env, admin: Address, new_wasm_hash: Option<BytesN<32>>) {
-        require_admin_for_routine(&env, &admin);
+    pub fn set_coordinated_pause(
+        env: Env,
+        signers: Vec<Address>,
+        new_wasm_hash: Option<BytesN<32>>,
+    ) {
+        require_admin_for_critical(&env, &signers);
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &true);
@@ -4385,16 +4389,16 @@ impl IndigoPayContract {
         env.events().publish((symbol_short!("coord_ps"),), true);
     }
 
-    pub fn clear_coordinated_pause(env: Env, admin: Address) {
-        require_admin_for_routine(&env, &admin);
+    pub fn clear_coordinated_pause(env: Env, signers: Vec<Address>) {
+        require_admin_for_critical(&env, &signers);
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &false);
         env.events().publish((symbol_short!("coord_ps"),), false);
     }
 
-    pub fn cancel_coordinated_pause(env: Env, admin: Address) {
-        require_admin_for_routine(&env, &admin);
+    pub fn cancel_coordinated_pause(env: Env, signers: Vec<Address>) {
+        require_admin_for_critical(&env, &signers);
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &false);
@@ -10076,28 +10080,28 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Only admin can perform this action")]
+    #[should_panic(expected = "Insufficient admin signatures")]
     fn test_set_coordinated_pause_unauthorized_fails() {
         let (env, _cid, client, _admin, _pid) = setup();
         let attacker = Address::generate(&env);
         let wasm_hash = Some(BytesN::from_array(&env, &[99u8; 32]));
-        client.set_coordinated_pause(&attacker, &wasm_hash);
+        client.set_coordinated_pause(&signers1(&env, &attacker), &wasm_hash);
     }
 
     #[test]
-    #[should_panic(expected = "Only admin can perform this action")]
+    #[should_panic(expected = "Insufficient admin signatures")]
     fn test_clear_coordinated_pause_unauthorized_fails() {
         let (env, _cid, client, _admin, _pid) = setup();
         let attacker = Address::generate(&env);
-        client.clear_coordinated_pause(&attacker);
+        client.clear_coordinated_pause(&signers1(&env, &attacker));
     }
 
     #[test]
-    #[should_panic(expected = "Only admin can perform this action")]
+    #[should_panic(expected = "Insufficient admin signatures")]
     fn test_cancel_coordinated_pause_unauthorized_fails() {
         let (env, _cid, client, _admin, _pid) = setup();
         let attacker = Address::generate(&env);
-        client.cancel_coordinated_pause(&attacker);
+        client.cancel_coordinated_pause(&signers1(&env, &attacker));
     }
 
     #[test]
@@ -10142,7 +10146,7 @@ mod tests {
         indigopay_client.initialize(&signers1(&env, &admin), &1u32);
         attestation_client.initialize(&admin);
         attestation_client.set_relayer(&admin, &admin);
-        escrow_client.initialize(&admin);
+        escrow_client.initialize(&signers1(&env, &admin), &1u32);
 
         let hash1 = BytesN::from_array(&env, &[11u8; 32]);
         let hash2 = BytesN::from_array(&env, &[22u8; 32]);
@@ -10180,7 +10184,7 @@ mod tests {
                 .remove(&escrow_contract::DataKey::PendingUpgrade);
         });
 
-        indigopay_client.complete_coordinated_upgrade(&admin);
+        indigopay_client.complete_coordinated_upgrade(&signers1(&env, &admin));
 
         assert!(!indigopay_client.is_coordinated_upgrade_active());
         assert!(!attestation_client.is_coordinated_upgrade_active());

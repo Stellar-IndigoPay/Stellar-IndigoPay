@@ -1154,9 +1154,10 @@ impl AttestationContract {
 
     pub fn set_coordinated_pause(
         env: Env,
-        admin: Address,
+        signers: Vec<Address>,
         new_wasm_hash: Option<soroban_sdk::BytesN<32>>,
     ) {
+        let admin = signers.get(0).expect("Signers vector must not be empty");
         admin.require_auth();
         require_admin(&env, &admin);
         env.storage()
@@ -1185,7 +1186,8 @@ impl AttestationContract {
         env.events().publish((symbol_short!("coord_ps"),), true);
     }
 
-    pub fn clear_coordinated_pause(env: Env, admin: Address) {
+    pub fn clear_coordinated_pause(env: Env, signers: Vec<Address>) {
+        let admin = signers.get(0).expect("Signers vector must not be empty");
         admin.require_auth();
         require_admin(&env, &admin);
         let coordinated: bool = env
@@ -1205,7 +1207,8 @@ impl AttestationContract {
         env.events().publish((symbol_short!("coord_ps"),), false);
     }
 
-    pub fn cancel_coordinated_pause(env: Env, admin: Address) {
+    pub fn cancel_coordinated_pause(env: Env, signers: Vec<Address>) {
+        let admin = signers.get(0).expect("Signers vector must not be empty");
         admin.require_auth();
         require_admin(&env, &admin);
 

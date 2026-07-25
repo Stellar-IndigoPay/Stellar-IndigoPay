@@ -959,13 +959,15 @@ impl EscrowContract {
     pub fn pause(env: Env, signers: Vec<Address>) {
         require_admin(&env, &signers);
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events().publish((symbol_short!("paused"), signers.get(0).unwrap()), ());
+        env.events()
+            .publish((symbol_short!("paused"), signers.get(0).unwrap()), ());
     }
 
     pub fn unpause(env: Env, signers: Vec<Address>) {
         require_admin(&env, &signers);
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events().publish((symbol_short!("unpause"), signers.get(0).unwrap()), ());
+        env.events()
+            .publish((symbol_short!("unpause"), signers.get(0).unwrap()), ());
     }
 
     pub fn is_paused(env: Env) -> bool {
@@ -1039,7 +1041,8 @@ impl EscrowContract {
         env.storage()
             .instance()
             .remove(&DataKey::UpgradeEffectiveAt);
-        env.events().publish((symbol_short!("upg_cncl"), signers.get(0).unwrap()), ());
+        env.events()
+            .publish((symbol_short!("upg_cncl"), signers.get(0).unwrap()), ());
     }
 
     pub fn get_pending_upgrade(env: Env) -> Option<(BytesN<32>, u32)> {
@@ -1055,7 +1058,11 @@ impl EscrowContract {
         env.storage().instance().get(&DataKey::LastExecutedUpgrade)
     }
 
-    pub fn set_coordinated_pause(env: Env, signers: Vec<Address>, new_wasm_hash: Option<BytesN<32>>) {
+    pub fn set_coordinated_pause(
+        env: Env,
+        signers: Vec<Address>,
+        new_wasm_hash: Option<BytesN<32>>,
+    ) {
         require_admin(&env, &signers);
         env.storage()
             .instance()
