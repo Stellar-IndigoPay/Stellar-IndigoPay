@@ -615,6 +615,7 @@ fn require_not_coordinated_upgrade(env: &Env) {
         .unwrap_or(false);
     if coordinated {
         panic!("Coordinated upgrade in progress");
+    }
 }
 
 /// Reverse the donation-derived accounting shared by normal and force refunds.
@@ -699,7 +700,6 @@ fn apply_refund_accounting(
     env.storage()
         .instance()
         .set(&DataKey::RefundRequest(refund_id), request);
-}
 }
 
 #[cfg(feature = "impact")]

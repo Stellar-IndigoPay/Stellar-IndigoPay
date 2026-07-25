@@ -88,6 +88,7 @@ pub enum DataKey {
     PendingUpgrade,
     UpgradeEffectiveAt,
     LastExecutedUpgrade,
+    CoordinatedUpgrade,
     FreelancerReputation(Address),
     // Ensures multiple milestone disputes on one job count only once.
     ReputationDisputeCounted(String),
@@ -1162,16 +1163,12 @@ impl EscrowContract {
         env.storage().instance().get(&DataKey::LastExecutedUpgrade)
     }
 
-    pub fn set_coordinated_pause(env: Env, admin: Address, new_wasm_hash: Option<BytesN<32>>) {
-        admin.require_auth();
-        let admin_set: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&DataKey::AdminSet)
-            .expect("Not initialized");
-        if !admin_set.contains(&admin) {
-            panic!("Only admin can perform this action");
-        }
+    pub fn set_coordinated_pause(
+        env: Env,
+        signers: Vec<Address>,
+        new_wasm_hash: Option<BytesN<32>>,
+    ) {
+        require_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &true);
@@ -1198,32 +1195,16 @@ impl EscrowContract {
         env.events().publish((symbol_short!("coord_ps"),), true);
     }
 
-    pub fn clear_coordinated_pause(env: Env, admin: Address) {
-        admin.require_auth();
-        let admin_set: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&DataKey::AdminSet)
-            .expect("Not initialized");
-        if !admin_set.contains(&admin) {
-            panic!("Only admin can perform this action");
-        }
+    pub fn clear_coordinated_pause(env: Env, signers: Vec<Address>) {
+        require_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &false);
         env.events().publish((symbol_short!("coord_ps"),), false);
     }
 
-    pub fn cancel_coordinated_pause(env: Env, admin: Address) {
-        admin.require_auth();
-        let admin_set: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&DataKey::AdminSet)
-            .expect("Not initialized");
-        if !admin_set.contains(&admin) {
-            panic!("Only admin can perform this action");
-        }
+    pub fn cancel_coordinated_pause(env: Env, signers: Vec<Address>) {
+        require_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&DataKey::CoordinatedUpgrade, &false);
