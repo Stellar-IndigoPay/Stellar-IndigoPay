@@ -271,6 +271,17 @@ pub struct RefundRequest {
     pub co2_offset_grams: i128,
 }
 
+/// A pending M-of-N refund escalation.
+#[cfg(feature = "refund")]
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ForceRefund {
+    /// Ledger at which the M-of-N admins initiated the escalation.
+    pub initiated_at: u32,
+    /// Earliest ledger at which anyone may execute the force-refund.
+    pub effective_at: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct RecurringDonation {
@@ -447,6 +458,9 @@ pub enum DataKey {
     PlatformTreasury,
     /// Quadratic voting: credits spent by a voter on a project proposal.
     VoteCredits(String, Address),
+    // Pending M-of-N force-refund escalation. Appended to preserve the
+    // discriminants of all previously deployed DataKey variants.
+    ForceRefund(u32),
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -489,6 +503,11 @@ const EMERGENCY_WITHDRAWAL_TIMELOCK: u32 = 120_960;
 // donation during which the donor may request a refund (subject to admin +
 // project wallet approval).
 const REFUND_COOLDOWN_LEDGERS: u32 = 17_280;
+
+// 72 hours × 3600 s / 5 s per ledger = 51 840 ledgers. The delay between
+// M-of-N initiation and permissionless force-refund execution.
+#[cfg(feature = "refund")]
+const FORCE_REFUND_TIMELOCK_LEDGERS: u32 = 51_840;
 
 /// Current storage schema version. Bump this and add a migration step in
 /// `migrate()` whenever a struct layout, DataKey variant, or stored value
@@ -5247,6 +5266,14 @@ impl IndigoPayContract {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
 
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::ForceRefund(refund_id))
+        {
+            panic!("Force refund escalation pending; cancel it first");
+        }
+
         let mut request: RefundRequest = env
             .storage()
             .instance()
@@ -5271,77 +5298,7 @@ impl IndigoPayContract {
 
         // ── Effects: all counter adjustments BEFORE the token transfer (CEI).
 
-        project.total_raised = project
-            .total_raised
-            .checked_sub(request.amount)
-            .expect("Project total_raised underflow on refund");
-        env.storage()
-            .instance()
-            .set(&DataKey::Project(request.project_id.clone()), &project);
-
-        // Donor stats: decrement totals but do NOT recalculate badge (permanent).
-        let mut donor_stats: DonorStats = env
-            .storage()
-            .instance()
-            .get(&DataKey::DonorStats(request.donor.clone()))
-            .unwrap_or(DonorStats {
-                total_donated: 0,
-                donation_count: 0,
-                badge: BadgeTier::None,
-                co2_offset_grams: 0,
-            });
-        donor_stats.total_donated = donor_stats
-            .total_donated
-            .checked_sub(request.amount)
-            .expect("Donor total_donated underflow on refund");
-        donor_stats.co2_offset_grams = donor_stats
-            .co2_offset_grams
-            .checked_sub(request.co2_offset_grams)
-            .expect("Donor co2_offset underflow on refund");
-        // Badge is NOT recalculated — badges are permanent.
-        env.storage()
-            .instance()
-            .set(&DataKey::DonorStats(request.donor.clone()), &donor_stats);
-
-        // Per-project cumulative donation total (milestone NFT tracker).
-        let proj_total_key =
-            DataKey::DonorProjectTotal(request.project_id.clone(), request.donor.clone());
-        let prev_proj_total: i128 = env.storage().instance().get(&proj_total_key).unwrap_or(0);
-        env.storage().instance().set(
-            &proj_total_key,
-            &prev_proj_total
-                .checked_sub(request.amount)
-                .expect("DonorProjectTotal underflow on refund"),
-        );
-
-        // Global counters.
-        let gr: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::GlobalTotalRaised)
-            .unwrap_or(0);
-        env.storage().instance().set(
-            &DataKey::GlobalTotalRaised,
-            &gr.checked_sub(request.amount)
-                .expect("GlobalTotalRaised underflow on refund"),
-        );
-
-        let gc: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::GlobalCO2OffsetGrams)
-            .unwrap_or(0);
-        env.storage().instance().set(
-            &DataKey::GlobalCO2OffsetGrams,
-            &gc.checked_sub(request.co2_offset_grams)
-                .expect("GlobalCO2OffsetGrams underflow on refund"),
-        );
-
-        // Mark approved before the external transfer.
-        request.status = RefundRequestStatus::Approved;
-        env.storage()
-            .instance()
-            .set(&DataKey::RefundRequest(refund_id), &request);
+        apply_refund_accounting(&env, refund_id, &mut request, &mut project);
 
         // ── Interaction: token transfer from project wallet back to donor.
         let token_client = token::Client::new(&env, &request.token);
@@ -5360,6 +5317,14 @@ impl IndigoPayContract {
     pub fn reject_refund(env: Env, admin: Address, refund_id: u32) {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
+
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::ForceRefund(refund_id))
+        {
+            panic!("Force refund escalation pending; cancel it first");
+        }
 
         let mut request: RefundRequest = env
             .storage()
@@ -5380,6 +5345,139 @@ impl IndigoPayContract {
             (symbol_short!("rfnd_rj"), refund_id, admin),
             (request.project_id, request.donor),
         );
+    }
+
+    /// M-of-N initiation of the 72-hour force-refund timelock.
+    ///
+    /// This only schedules the escalation; no tokens move and no donation
+    /// accounting changes until `execute_force_refund`.
+    #[cfg(feature = "refund")]
+    pub fn force_approve_refund(env: Env, signers: Vec<Address>, refund_id: u32) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+
+        let request: RefundRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey::RefundRequest(refund_id))
+            .expect("Refund request not found");
+        if request.status != RefundRequestStatus::Pending {
+            panic!("Refund request is not pending");
+        }
+
+        let force_key = DataKey::ForceRefund(refund_id);
+        if env.storage().instance().has(&force_key) {
+            panic!("Force refund already pending");
+        }
+
+        let initiated_at = env.ledger().sequence();
+        let effective_at = initiated_at
+            .checked_add(FORCE_REFUND_TIMELOCK_LEDGERS)
+            .expect("Force refund timelock overflow");
+        env.storage().instance().set(
+            &force_key,
+            &ForceRefund {
+                initiated_at,
+                effective_at,
+            },
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "rfnd_force_init"), refund_id),
+            (request.project_id, request.amount, effective_at),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Cancel a pending force-refund during its 72-hour review window.
+    #[cfg(feature = "refund")]
+    pub fn cancel_force_refund(env: Env, admin: Address, refund_id: u32) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+
+        let force_key = DataKey::ForceRefund(refund_id);
+        let force_refund: ForceRefund = env
+            .storage()
+            .instance()
+            .get(&force_key)
+            .expect("No pending force refund");
+        if env.ledger().sequence() >= force_refund.effective_at {
+            panic!("Force refund timelock already elapsed");
+        }
+
+        env.storage().instance().remove(&force_key);
+        env.events()
+            .publish((Symbol::new(&env, "rfnd_force_cncl"), refund_id, admin), ());
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Permissionless execution of a matured force-refund.
+    ///
+    /// Funds come from the canonical per-project, per-token contract-held
+    /// balance. This avoids authorization from an adversarial project wallet
+    /// and prevents funds attributed to another project or token from being
+    /// spent.
+    #[cfg(feature = "refund")]
+    pub fn execute_force_refund(env: Env, refund_id: u32) {
+        let force_key = DataKey::ForceRefund(refund_id);
+        let force_refund: ForceRefund = env
+            .storage()
+            .instance()
+            .get(&force_key)
+            .expect("No pending force refund");
+        if env.ledger().sequence() < force_refund.effective_at {
+            panic!("Force refund timelock not yet elapsed");
+        }
+
+        let mut request: RefundRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey::RefundRequest(refund_id))
+            .expect("Refund request not found");
+        if request.status != RefundRequestStatus::Pending {
+            panic!("Refund request is not pending");
+        }
+        let mut project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(request.project_id.clone()))
+            .expect("Project not found");
+
+        let balance_key =
+            DataKey::ProjectContractBalance(request.project_id.clone(), request.token.clone());
+        let pool_balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
+        if request.amount > pool_balance {
+            panic!("Insufficient force refund pool balance");
+        }
+
+        // Checks-effects-interactions: Soroban reverts every storage write if
+        // the subsequent token transfer fails.
+        env.storage().instance().remove(&force_key);
+        env.storage()
+            .instance()
+            .set(&balance_key, &(pool_balance - request.amount));
+        apply_refund_accounting(&env, refund_id, &mut request, &mut project);
+
+        let token_client = token::Client::new(&env, &request.token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &request.donor,
+            &request.amount,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "rfnd_force_exec"), refund_id),
+            (request.project_id, request.amount, request.donor),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Returns the pending force-refund escalation, if one exists.
+    #[cfg(feature = "refund")]
+    pub fn get_force_refund(env: Env, refund_id: u32) -> Option<ForceRefund> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ForceRefund(refund_id))
     }
 
     /// Read-only: returns the refund request for the given ID, or panics if
@@ -6047,6 +6145,14 @@ mod tests {
     fn signers1(env: &Env, a: &Address) -> Vec<Address> {
         let mut v = Vec::new(env);
         v.push_back(a.clone());
+        v
+    }
+
+    /// Helper: create a two-element signer Vec for threshold admin calls.
+    fn signers2(env: &Env, a: &Address, b: &Address) -> Vec<Address> {
+        let mut v = Vec::new(env);
+        v.push_back(a.clone());
+        v.push_back(b.clone());
         v
     }
 
@@ -8918,6 +9024,38 @@ mod tests {
         (donor, token, donation_index)
     }
 
+    /// Expand the default test admin set to a 2-of-3 threshold.
+    fn enable_two_of_three_admins(
+        env: &Env,
+        client: &IndigoPayContractClient,
+        first_admin: &Address,
+    ) -> (Address, Address) {
+        let second_admin = Address::generate(env);
+        let third_admin = Address::generate(env);
+        client.add_admin(&signers1(env, first_admin), &second_admin);
+        client.add_admin(&signers1(env, first_admin), &third_admin);
+        client.update_threshold(&signers1(env, first_admin), &2u32);
+        (second_admin, third_admin)
+    }
+
+    /// Put real tokens and the matching canonical accounting entry into the
+    /// force-refund pool.
+    fn fund_force_refund_pool(
+        env: &Env,
+        cid: &Address,
+        project_id: &String,
+        token: &Address,
+        amount: i128,
+    ) {
+        StellarAssetClient::new(env, token).mint(cid, &amount);
+        env.as_contract(cid, || {
+            env.storage().instance().set(
+                &DataKey::ProjectContractBalance(project_id.clone(), token.clone()),
+                &amount,
+            );
+        });
+    }
+
     #[test]
     fn test_request_refund_success() {
         let (env, _cid, client, _admin, pid) = setup();
@@ -9135,6 +9273,173 @@ mod tests {
     fn test_get_refund_request_not_found_panics() {
         let (_env, _cid, client, _admin, _pid) = setup();
         client.get_refund_request(&0);
+    }
+
+    #[test]
+    fn test_force_approve_refund_m_of_n() {
+        let (env, _cid, client, first_admin, pid) = setup();
+        let (second_admin, _third_admin) = enable_two_of_three_admins(&env, &client, &first_admin);
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+        client.request_refund(&donor, &donation_index, &token);
+
+        let initiated_at = env.ledger().sequence();
+        client.force_approve_refund(&signers2(&env, &first_admin, &second_admin), &0u32);
+
+        let pending = client.get_force_refund(&0u32).unwrap();
+        assert_eq!(pending.initiated_at, initiated_at);
+        assert_eq!(
+            pending.effective_at,
+            initiated_at + FORCE_REFUND_TIMELOCK_LEDGERS
+        );
+        assert_eq!(
+            client.get_refund_request(&0u32).status,
+            RefundRequestStatus::Pending
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Insufficient admin signatures")]
+    fn test_force_approve_single_admin_panics() {
+        let (env, _cid, client, first_admin, pid) = setup();
+        enable_two_of_three_admins(&env, &client, &first_admin);
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+        client.request_refund(&donor, &donation_index, &token);
+
+        client.force_approve_refund(&signers1(&env, &first_admin), &0u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "Force refund timelock not yet elapsed")]
+    fn test_execute_force_refund_before_timelock_panics() {
+        let (env, cid, client, first_admin, pid) = setup();
+        let (second_admin, _third_admin) = enable_two_of_three_admins(&env, &client, &first_admin);
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+        fund_force_refund_pool(&env, &cid, &pid, &token, 25 * STROOP);
+        client.request_refund(&donor, &donation_index, &token);
+        client.force_approve_refund(&signers2(&env, &first_admin, &second_admin), &0u32);
+
+        client.execute_force_refund(&0u32);
+    }
+
+    #[test]
+    fn test_execute_force_refund_after_timelock() {
+        let (env, cid, client, first_admin, pid) = setup();
+        let (second_admin, _third_admin) = enable_two_of_three_admins(&env, &client, &first_admin);
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+        let refund_amount = 25 * STROOP;
+        fund_force_refund_pool(&env, &cid, &pid, &token, refund_amount);
+        let donor_balance_before = StellarAssetClient::new(&env, &token).balance(&donor);
+
+        client.request_refund(&donor, &donation_index, &token);
+        client.force_approve_refund(&signers2(&env, &first_admin, &second_admin), &0u32);
+        let start = env.ledger().sequence();
+        extend_ttl(&env, &cid);
+        env.ledger()
+            .set_sequence_number(start + FORCE_REFUND_TIMELOCK_LEDGERS);
+        client.execute_force_refund(&0u32);
+
+        assert_eq!(
+            StellarAssetClient::new(&env, &token).balance(&donor),
+            donor_balance_before + refund_amount
+        );
+        assert_eq!(
+            client.get_refund_request(&0u32).status,
+            RefundRequestStatus::Approved
+        );
+        assert_eq!(client.get_force_refund(&0u32), None);
+    }
+
+    #[test]
+    fn test_cancel_force_refund() {
+        let (env, _cid, client, first_admin, pid) = setup();
+        let (second_admin, third_admin) = enable_two_of_three_admins(&env, &client, &first_admin);
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+        client.request_refund(&donor, &donation_index, &token);
+        client.force_approve_refund(&signers2(&env, &first_admin, &second_admin), &0u32);
+
+        // Any one admin, including one who did not initiate, may cancel.
+        client.cancel_force_refund(&third_admin, &0u32);
+
+        assert_eq!(client.get_force_refund(&0u32), None);
+        assert_eq!(
+            client.get_refund_request(&0u32).status,
+            RefundRequestStatus::Pending
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "No pending force refund")]
+    fn test_cancel_force_refund_after_execution_panics() {
+        let (env, cid, client, first_admin, pid) = setup();
+        let (second_admin, _third_admin) = enable_two_of_three_admins(&env, &client, &first_admin);
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+        fund_force_refund_pool(&env, &cid, &pid, &token, 25 * STROOP);
+        client.request_refund(&donor, &donation_index, &token);
+        client.force_approve_refund(&signers2(&env, &first_admin, &second_admin), &0u32);
+        let start = env.ledger().sequence();
+        extend_ttl(&env, &cid);
+        env.ledger()
+            .set_sequence_number(start + FORCE_REFUND_TIMELOCK_LEDGERS);
+        client.execute_force_refund(&0u32);
+
+        client.cancel_force_refund(&first_admin, &0u32);
+    }
+
+    #[test]
+    fn test_force_refund_integration_reverses_balances_and_stats() {
+        let (env, cid, client, first_admin, pid) = setup();
+        let (second_admin, _third_admin) = enable_two_of_three_admins(&env, &client, &first_admin);
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+        let refund_amount = 25 * STROOP;
+        let co2_amount = 25 * 100;
+        fund_force_refund_pool(&env, &cid, &pid, &token, 2 * refund_amount);
+
+        let project_before = client.get_project(&pid);
+        let donor_before = client.get_donor_stats(&donor);
+        let global_before = client.get_global_stats();
+        let token_before = StellarAssetClient::new(&env, &token).balance(&donor);
+
+        client.request_refund(&donor, &donation_index, &token);
+        client.force_approve_refund(&signers2(&env, &first_admin, &second_admin), &0u32);
+        let start = env.ledger().sequence();
+        extend_ttl(&env, &cid);
+        env.ledger()
+            .set_sequence_number(start + FORCE_REFUND_TIMELOCK_LEDGERS);
+        client.execute_force_refund(&0u32);
+
+        assert_eq!(
+            client.get_project(&pid).total_raised,
+            project_before.total_raised - refund_amount
+        );
+        let donor_after = client.get_donor_stats(&donor);
+        assert_eq!(
+            donor_after.total_donated,
+            donor_before.total_donated - refund_amount
+        );
+        assert_eq!(
+            donor_after.co2_offset_grams,
+            donor_before.co2_offset_grams - co2_amount
+        );
+        let global_after = client.get_global_stats();
+        assert_eq!(
+            global_after.total_raised,
+            global_before.total_raised - refund_amount
+        );
+        assert_eq!(
+            global_after.co2_offset_grams,
+            global_before.co2_offset_grams - co2_amount
+        );
+        assert_eq!(
+            StellarAssetClient::new(&env, &token).balance(&donor),
+            token_before + refund_amount
+        );
+        let remaining_pool: i128 = env.as_contract(&cid, || {
+            env.storage()
+                .instance()
+                .get(&DataKey::ProjectContractBalance(pid.clone(), token.clone()))
+                .unwrap()
+        });
+        assert_eq!(remaining_pool, refund_amount);
     }
 
     // ─── Recurring Donation Tests ─────────────────────────────────────────────

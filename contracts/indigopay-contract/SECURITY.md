@@ -215,14 +215,41 @@ No silent overflows possible. All operations that could exceed i128::MAX will pa
 
 ### Trust model
 
-`approve_refund` requires **both** admin authorization (`require_admin_for_routine`) **and** `project.wallet.require_auth()`. This means the token transfer from project wallet → donor happens atomically inside `approve_refund` (CEI ordering — all counter decrements are written before the transfer fires). If the project wallet does not co-sign, the approval reverts entirely.
+`approve_refund` requires **both** admin authorization (`require_admin_for_routine`) **and** `project.wallet.require_auth()`. This means the token transfer from project wallet → donor happens atomically inside `approve_refund` (CEI ordering — all counter decrements are written before the transfer fires). If the project wallet does not co-sign, the normal approval reverts entirely.
 
 This provides on-chain enforcement that "Approved = Paid" for three of the four motivating scenarios:
 - Donor sent to the wrong project
 - Donor entered the wrong amount
 - Technical error in the transaction
 
-The fourth scenario (project found to be fraudulent) is **unresolvable on-chain without escrow** — if the project wallet is adversarial, it will not co-sign the refund. This is a known limitation. The 24-hour cooldown + admin review provides the safety net; the project wallet co-sign closes the gap for honest-mistake cases.
+For the fourth scenario (a fraudulent or adversarial project wallet),
+`force_approve_refund` provides a separate safety valve:
+
+1. The configured M-of-N admin threshold must authorize initiation.
+2. `DataKey::ForceRefund(refund_id)` records a 72-hour (51,840-ledger)
+   timelock. The refund remains `Pending`, and no accounting changes or token
+   transfers occur at initiation.
+3. Any single current admin may cancel during the review window. Once the
+   effective ledger is reached, cancellation is disabled and anyone may call
+   `execute_force_refund`.
+4. Execution pays the donor from the canonical
+   `ProjectContractBalance(project_id, token)` contract-held pool, marks the
+   request `Approved`, and applies the same amount and CO₂ reversals as the
+   normal path.
+
+The force path does **not** seize tokens from the project wallet and does not
+assume that a Soroban token allowance will remain available. Operators must
+pre-fund the relevant project/token contract balance; execution reverts
+atomically with `Insufficient force refund pool balance` if it is insufficient.
+The pool is checked by both project ID and token address, so one project's
+force-refund cannot consume accounting attributed to another project. Contract
+token balances not represented by this canonical ledger are never used.
+
+This changes the trust model: M-of-N admins can schedule use of contract-held
+funds for a full refund, while a 72-hour public review window and single-admin
+cancellation limit colluding or compromised-admin abuse. A force escalation
+must be cancelled before the request can return to the normal approve/reject
+flow, preventing stale escalation records.
 
 ### Pre-upgrade CO₂ limitation
 

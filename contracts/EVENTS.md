@@ -215,6 +215,40 @@ project-scoped anonymous donation totals.
 
 ---
 
+## Force-refund escalation events
+
+These lifecycle events use full `Symbol` values because their names exceed the
+nine-character `symbol_short!` limit.
+
+### `rfnd_force_init`
+
+**Description**: Emitted after M-of-N admins schedule a force-refund. No tokens
+or donation accounting move at this point.
+
+| Event Name         | Topics                           | Data                                                     | When Emitted |
+| ------------------ | -------------------------------- | -------------------------------------------------------- | ------------ |
+| `rfnd_force_init`  | `["rfnd_force_init", refund_id]` | `(project_id: String, amount: i128, effective_at: u32)` | When M-of-N admins call `force_approve_refund` |
+
+### `rfnd_force_exec`
+
+**Description**: Emitted after the timelock when a force-refund is paid from
+the project's canonical contract-held token balance.
+
+| Event Name         | Topics                           | Data                                                   | When Emitted |
+| ------------------ | -------------------------------- | ------------------------------------------------------ | ------------ |
+| `rfnd_force_exec`  | `["rfnd_force_exec", refund_id]` | `(project_id: String, amount: i128, donor: Address)`  | After `execute_force_refund` completes |
+
+### `rfnd_force_cncl`
+
+**Description**: Emitted when any current admin cancels an escalation before
+its effective ledger.
+
+| Event Name         | Topics                                  | Data | When Emitted |
+| ------------------ | --------------------------------------- | ---- | ------------ |
+| `rfnd_force_cncl`  | `["rfnd_force_cncl", refund_id, admin]` | `()` | When an admin calls `cancel_force_refund` |
+
+---
+
 ## Escrow Contract Events
 
 ## 19. `job_creat`
