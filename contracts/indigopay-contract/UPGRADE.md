@@ -49,6 +49,7 @@ The current persisted keys are:
 - `DataKey::RefundCount` _(#290 donation refund)_
 - `DataKey::RefundForDonation(u32)` _(#290 donation refund)_
 - `DataKey::DonationCO2Offset(u32)` _(#290 donation refund — CO₂ snapshot per donation)_
+- `DataKey::ForceRefund(u32)` _(#429 M-of-N refund escalation timelock; appended to preserve existing discriminants)_
 - `DataKey::SubProjectIds(String)` _(#391 cross-contract project registry — sub-project index per parent)_
 - **Storage version tracking** _(#379 — Symbol-keyed, not a DataKey variant)_
 

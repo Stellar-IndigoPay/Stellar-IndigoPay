@@ -113,7 +113,7 @@ export default function ProjectCard({ project }: { project: ClimateProject }) {
                 goalXLM={project.goalXLM}
                 className="w-full"
               />
-              <div className="flex items-center justify-between text-[11px] text-[#8aaa8a] font-body">
+              <div className="flex items-center justify-between text-[11px] text-[var(--text-secondary)] font-body">
                 <span>{formatXLM(project.raisedXLM)} {t("project.raised")}</span>
                 <span>
                   {project.goalXLM && Number(project.goalXLM) > 0

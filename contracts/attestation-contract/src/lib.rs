@@ -1111,7 +1111,7 @@ impl AttestationContract {
         require_admin(&env, &admin);
 
         if !Self::is_coordinated_upgrade_active(env.clone()) {
-            panic_with_error!(&env, Error::NotInCoordinatedState); // Use your contract's error type
+            panic!("Not in coordinated state");
         }
         env.storage()
             .instance()

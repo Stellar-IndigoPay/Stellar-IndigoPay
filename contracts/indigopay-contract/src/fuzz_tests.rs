@@ -343,4 +343,49 @@ mod fuzz {
             prop_assert_eq!(donor_stats.donation_count, 1);
         }
     }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// No vector containing fewer than two distinct authorized admins can
+        /// initiate a force-refund when the configured threshold is 2.
+        #[test]
+        fn prop_force_refund_requires_m_of_n(
+            include_first in any::<bool>(),
+            duplicate_first in any::<bool>(),
+            include_outsider in any::<bool>(),
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let contract_id = env.register_contract(None, IndigoPayContract);
+            let client = IndigoPayContractClient::new(&env, &contract_id);
+            let first_admin = Address::generate(&env);
+            let second_admin = Address::generate(&env);
+            let outsider = Address::generate(&env);
+
+            client.initialize(
+                &soroban_sdk::vec![&env, first_admin.clone(), second_admin],
+                &2u32,
+            );
+
+            let mut supplied = soroban_sdk::Vec::new(&env);
+            if include_first {
+                supplied.push_back(first_admin.clone());
+            }
+            if duplicate_first {
+                supplied.push_back(first_admin);
+            }
+            if include_outsider {
+                supplied.push_back(outsider);
+            }
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.force_approve_refund(&supplied, &0u32);
+            }));
+            prop_assert!(
+                result.is_err(),
+                "fewer than two distinct admins unexpectedly satisfied a 2-of-2 threshold"
+            );
+        }
+    }
 }

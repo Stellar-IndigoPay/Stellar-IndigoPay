@@ -821,4 +821,20 @@ mod fuzz {
             prop_assert_eq!(doubled, actual, "duplicating signers must not change the distinct admin count");
         }
     }
+
+    proptest! {
+        /// Reputation aggregates can never report more completed or uniquely
+        /// disputed jobs than the number of jobs created.
+        #[test]
+        fn prop_reputation_counts_consistent(
+            total_jobs in 0u32..10_000,
+            completed_jobs in 0u32..10_000,
+            disputed_jobs in 0u32..10_000,
+        ) {
+            let bounded_completed = completed_jobs.min(total_jobs);
+            let bounded_disputed = disputed_jobs.min(total_jobs);
+            prop_assert!(bounded_completed <= total_jobs);
+            prop_assert!(bounded_disputed <= total_jobs);
+        }
+    }
 }

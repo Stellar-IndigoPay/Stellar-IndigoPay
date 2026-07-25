@@ -18,7 +18,7 @@ attestation-contract = { path = "../attestation-contract" }
 escrow-contract = { path = "../escrow-contract" }
 
 [features]
-default = ["delegation", "recurring", "refund", "governance", "emergency", "upgrade", "usdc", "campaign", "donation", "impact", "impact_verification"]
+default = ["delegation", "recurring", "refund", "governance", "emergency", "upgrade", "usdc", "campaign", "donation", "impact", "impact_verification", "project_verification"]
 testutils = ["soroban-sdk/testutils"]
 delegation = []
 recurring = []
@@ -35,6 +35,7 @@ vesting = []
 fees = []
 impact = []
 impact_verification = []
+project_verification = []
 
 [profile.release]
 lto = true
