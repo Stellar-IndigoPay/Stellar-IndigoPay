@@ -263,3 +263,26 @@ Gated behind the `impact_verification` Cargo feature (on by default; excluded fr
 | `impv_flg`  | A submission deviated ≥50% from the claimed rate                |
 | `impv_adj`  | `co2_per_xlm` was auto-adjusted to the new median                |
 | `impv_clr`  | `clear_impact_flag` cleared a project's deviation flag           |
+## Anonymous donation proof trust model (#432)
+
+The optional `zk` feature adds `donate_anonymous_zk`. To keep the deployed
+WASM compact, the contract uses a verifier-attestation model: an off-chain
+prover verifies the circuit and signs the ordered public inputs with Ed25519.
+Changing the 32-byte verification key requires the configured M-of-N admin
+threshold.
+
+The signed statement is:
+
+`project_id_hash || amount_commitment || nullifier`
+
+Each component is 32 bytes. `project_id_hash` is SHA-256 of the Soroban XDR
+encoding of the project ID. The first 16 bytes of `amount_commitment` are the
+positive, big-endian `i128` amount used for public project/global accounting;
+the remaining bytes are circuit-defined blinding material. A successfully
+verified nullifier is stored and cannot be reused.
+
+This design hides donor identity from contract storage and donor-specific
+statistics, but it is not an in-WASM Groth16 verifier. Soundness depends on the
+off-chain circuit, prover, and signing-key custody. Ledger observers may still
+identify a transaction submitter unless a relayer is used. Exact public totals
+also mean the donation amount is recoverable from the public commitment.
