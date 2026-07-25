@@ -2749,7 +2749,7 @@ impl IndigoPayContract {
             (symbol_short!("recip_set"), signers.get(0).unwrap()),
             recipients.len(),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Public read-only: get the configured platform fee recipients and their shares (#434).
     #[cfg(any(feature = "fees", feature = "testutils"))]
@@ -3785,7 +3785,7 @@ impl IndigoPayContract {
             (symbol_short!("mmr_app"), admin, project_id, new_count),
             new_root,
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     #[cfg(feature = "impact")]
     /// Public read-only: verify that a donor's impact leaf is included in the
@@ -4846,9 +4846,9 @@ impl IndigoPayContract {
     /// Admin creates a voting proposal for a project to be community-verified.
     ///
     /// `duration_ledgers` is the length of the voting window in Stellar
-    /// ledgers (≈5 s each). Pass `0` to use the default 7-day window;
-    /// any other value must be within
-    /// [`MIN_DEFAULT_VOTING_WINDOW_LEDGERS`, `MAX_DEFAULT_VOTING_WINDOW_LEDGERS`].
+    /// ledgers (≈5 s each). Pass `0` to use the governance-configured
+    /// default window; any other value must be within
+    /// [`MIN_VOTING_WINDOW_LEDGERS`, `MAX_VOTING_WINDOW_LEDGERS`].
     #[cfg(feature = "governance")]
     pub fn create_proposal(
         env: Env,
