@@ -439,18 +439,27 @@ fn record_attestations_internal(
 // (record / verify / revoke) don't duplicate aggregation logic.
 
 fn read_donor_aggregate(env: &Env, donor: &Address) -> DonorAggregate {
-    env.storage()
-        .persistent()
-        .get(&DataKey::DonorAggregate(donor.clone()))
-        .unwrap_or(DonorAggregate {
-            total_attestations: 0,
-            total_usd: 0,
-            total_xlm: 0,
-            chains: Vec::new(env),
-            pending: 0,
-            verified: 0,
-            revoked: 0,
-        })
+    let key = DataKey::DonorAggregate(donor.clone());
+    // Primary: persistent storage (all new writes go here).
+    if let Some(agg) = env.storage().persistent().get::<DataKey, DonorAggregate>(&key) {
+        return agg;
+    }
+    // Migration shim: if a value exists only in the pre-upgrade instance storage,
+    // copy it into persistent storage so subsequent reads are consistent.
+    if let Some(agg) = env.storage().instance().get::<DataKey, DonorAggregate>(&key) {
+        env.storage().persistent().set(&key, &agg);
+        return agg;
+    }
+    // Neither location has a value — first-time default.
+    DonorAggregate {
+        total_attestations: 0,
+        total_usd: 0,
+        total_xlm: 0,
+        chains: Vec::new(env),
+        pending: 0,
+        verified: 0,
+        revoked: 0,
+    }
 }
 
 fn write_donor_aggregate(env: &Env, donor: &Address, agg: &DonorAggregate) {
@@ -460,17 +469,26 @@ fn write_donor_aggregate(env: &Env, donor: &Address, agg: &DonorAggregate) {
 }
 
 fn read_chain_aggregate(env: &Env, chain: &String) -> ChainAggregate {
-    env.storage()
-        .persistent()
-        .get(&DataKey::ChainAggregate(chain.clone()))
-        .unwrap_or(ChainAggregate {
-            total_attestations: 0,
-            total_usd: 0,
-            total_xlm: 0,
-            pending: 0,
-            verified: 0,
-            revoked: 0,
-        })
+    let key = DataKey::ChainAggregate(chain.clone());
+    // Primary: persistent storage (all new writes go here).
+    if let Some(agg) = env.storage().persistent().get::<DataKey, ChainAggregate>(&key) {
+        return agg;
+    }
+    // Migration shim: if a value exists only in the pre-upgrade instance storage,
+    // copy it into persistent storage so subsequent reads are consistent.
+    if let Some(agg) = env.storage().instance().get::<DataKey, ChainAggregate>(&key) {
+        env.storage().persistent().set(&key, &agg);
+        return agg;
+    }
+    // Neither location has a value — first-time default.
+    ChainAggregate {
+        total_attestations: 0,
+        total_usd: 0,
+        total_xlm: 0,
+        pending: 0,
+        verified: 0,
+        revoked: 0,
+    }
 }
 
 fn write_chain_aggregate(env: &Env, chain: &String, agg: &ChainAggregate) {
