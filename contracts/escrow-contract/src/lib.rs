@@ -88,7 +88,6 @@ pub enum DataKey {
     PendingUpgrade,
     UpgradeEffectiveAt,
     LastExecutedUpgrade,
-    CoordinatedUpgrade,
     FreelancerReputation(Address),
     // Ensures multiple milestone disputes on one job count only once.
     ReputationDisputeCounted(String),
@@ -101,8 +100,6 @@ pub enum DataKey {
 pub const RELEASE_AFTER_LEDGERS: u32 = 10;
 pub const DEFAULT_DEADLINE_LEDGERS: u32 = 1_555_200; // 90 days @ 5s/ledger
 const UPGRADE_TIMELOCK_LEDGERS: u32 = 34_560;
-
-
 
 fn require_not_paused(env: &Env) {
     let coordinated: bool = env
