@@ -485,6 +485,26 @@ model.
 
 ---
 
+## 39. `tok_reg` (Token Registered)
+
+**Description**: Emitted when an admin registers a new token and its oracle into the dynamic token registry.
+
+| Event Name | Topics                 | Data                             | When Emitted                     |
+| ---------- | ---------------------- | -------------------------------- | -------------------------------- |
+| `tok_reg`  | `["tok_reg", admin]`   | `(token: Address, symbol: Symbol)` | When admin calls `register_token` |
+
+---
+
+## 40. `tok_rem` (Token Removed)
+
+**Description**: Emitted when an admin removes a token from active registration in the dynamic token registry.
+
+| Event Name | Topics                 | Data               | When Emitted                   |
+| ---------- | ---------------------- | ------------------ | ------------------------------ |
+| `tok_rem`  | `["tok_rem", admin]`   | `token: Address`   | When admin calls `remove_token` |
+
+---
+
 ## Usage Notes
 
 - All events follow Soroban’s standard event format: `topics: Vec<Val>`, `data: Val`.
