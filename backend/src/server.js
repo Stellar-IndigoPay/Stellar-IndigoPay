@@ -65,6 +65,7 @@ const { start: startWebhookQueue,
 const { start: startPushQueue } = require("./services/pushQueue");
 const { start: startImpactQueue } = require("./services/impactQueue");
 const { start: startIdempotencyCleanup } = require("./services/idempotencyCleanup");
+const { start: startRecurringDonationWorker } = require("./services/recurringDonationWorker");
 const { start: startBlacklistCleanup } = require("./services/blacklistCleanup");
 const { startCO2VerificationCron, stopCO2VerificationCron } = require("./services/co2Verifier");
 const { startIndexer } = require("./services/indexerService");
@@ -455,6 +456,10 @@ async function startServer() {
   await startWebhookQueue();
   await startPushQueue();
   await startIdempotencyCleanup();
+  await startRecurringDonationWorker(io);
+  await startBlacklistCleanup();
+  await startCO2VerificationCron();
+
   await startBlacklistCleanup();
   await startCO2VerificationCron();
 
@@ -626,6 +631,7 @@ async function startServer() {
     "./services/webhookQueue",
     "./services/pushQueue",
     "./services/idempotencyCleanup",
+    "./services/recurringDonationWorker",
     "./services/blacklistCleanup",
     "./services/co2Verifier",
   ]) {

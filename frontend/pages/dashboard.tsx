@@ -12,7 +12,10 @@ import ProjectRating from "@/components/ProjectRating";
 import Tabs from "@/components/Tabs";
 import RecurringDonationsTab from "@/components/RecurringDonationsTab";
 import { fetchProfile, fetchDonorHistory, fetchProjects } from "@/lib/api";
-import { getDueMonthlySubscriptions } from "@/lib/monthlyGiving";
+import {
+  getDueMonthlySubscriptionsForDonor,
+  type OnChainSubscription,
+} from "@/lib/monthlyGiving";
 import { getXLMBalance, getFriendBotFunding, NETWORK } from "@/lib/stellar";
 import {
   useDonorHistory,
@@ -46,7 +49,7 @@ export default function Dashboard() {
   >("idle");
   const [friendbotError, setFrienbotError] = useState<string | null>(null);
   const [dueSubscriptions, setDueSubscriptions] = useState<
-    MonthlySubscription[]
+    OnChainSubscription[]
   >([]);
   const { wishlist } = useWishlist();
   const [showCertificate, setShowCertificate] = useState(false);
@@ -138,7 +141,7 @@ export default function Dashboard() {
   // Due monthly subscriptions
   useEffect(() => {
     if (!publicKey) return;
-    setDueSubscriptions(getDueMonthlySubscriptions());
+    getDueMonthlySubscriptionsForDonor(publicKey).then(setDueSubscriptions);
   }, [publicKey]);
 
   const donationsList = donations ?? [];
@@ -304,15 +307,15 @@ export default function Dashboard() {
               <div className="space-y-2">
                 {dueSubscriptions.map((subscription) => (
                   <div
-                    key={subscription.id}
+                    key={subscription.projectId}
                     className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-lg border border-amber-200 bg-white px-3 py-2"
                   >
                     <p className="text-sm text-amber-900 font-body">
-                      {subscription.projectName}:{" "}
+                      {subscription.projectId}:{" "}
                       {formatXLM(subscription.amountXLM)}
                     </p>
                     <Link
-                      href={`/projects/${subscription.projectId}?amount=${encodeURIComponent(subscription.amountXLM)}&monthlySubId=${encodeURIComponent(subscription.id)}`}
+                      href={`/projects/${subscription.projectId}?amount=${encodeURIComponent(subscription.amountXLM)}&monthlySubId=${encodeURIComponent(subscription.projectId)}`}
                       className="btn-primary text-xs py-1.5 px-3 inline-flex items-center justify-center"
                     >
                       Pay Now

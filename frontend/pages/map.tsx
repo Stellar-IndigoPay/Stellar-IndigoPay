@@ -115,7 +115,7 @@ export default function MapPage({ projects, fetchedAt }: MapPageProps) {
           )}
 
           {/* Bottom-left attribution note (subtle) --------------------------- */}
-          <p className="absolute bottom-2 left-3 z-[1000] text-[10px] text-gray-400 pointer-events-none select-none hidden sm:block">
+          <p className="absolute bottom-2 left-3 z-[1000] text-[10px] text-[var(--text-secondary)] pointer-events-none select-none hidden sm:block">
             {t("map.dataUpdated").replace(
               "{time}",
               new Date(fetchedAt).toLocaleTimeString(),

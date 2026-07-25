@@ -9,6 +9,26 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 
 ---
 
+## `zk_vk_set`
+
+**Description**: Emitted after M-of-N admins install a new anonymous-donation
+verification key. Event data is the SHA-256 hash of the key.
+
+| Event Name  | Topics          | Data               | When Emitted |
+| ----------- | --------------- | ------------------ | ------------ |
+| `zk_vk_set` | `["zk_vk_set"]` | `BytesN<32>`       | Verification key update |
+
+## `zk_donate`
+
+**Description**: Emitted after an anonymous proof is verified and its
+nullifier consumed. No donor address is included.
+
+| Event Name  | Topics                                      | Data                                      | When Emitted |
+| ----------- | ------------------------------------------- | ----------------------------------------- | ------------ |
+| `zk_donate` | `["zk_donate", project_id, nullifier]`      | `(amount_commitment, co2_offset_grams)`   | Verified anonymous donation |
+
+---
+
 ## 1. `donated`
 
 **Description**: Emitted after a successful XLM donation to a project.
@@ -277,6 +297,33 @@ project-scoped anonymous donation totals.
 
 ---
 
+## 9. `sub_new` (recurring donation subscription created)
+
+**Description**: Emitted by `create_subscription` (#81). Named `sub_new` rather than the
+`sub_created` used in the issue spec because `symbol_short!` topics are capped at 9
+characters — same convention as `prop_new` / `prop_veto` elsewhere in this contract.
+
+| Event Name | Topics                  | Data                                                                  | When Emitted                    |
+| ---------- | ------------------------ | ---------------------------------------------------------------------- | -------------------------------- |
+| `sub_new`  | `["sub_new", donor]`     | `{ "project_id": String, "amount": i128, "interval_ledgers": u32, "next_execution": u32 }` | After a subscription is created or re-created |
+
+## 10. `sub_canc` (recurring donation subscription cancelled)
+
+**Description**: Emitted by `cancel_subscription` (#81). Shortened from `sub_cancelled`
+for the same `symbol_short!` 9-character limit.
+
+| Event Name | Topics                 | Data                    | When Emitted                  |
+| ---------- | ------------------------ | ------------------------ | ------------------------------ |
+| `sub_canc` | `["sub_canc", donor]`   | `{ "project_id": String }` | After a subscription is cancelled |
+
+## 11. `sub_exec` (recurring donation subscription executed)
+
+**Description**: Emitted by `execute_subscription` (#81) after it delegates to `donate`
+and advances `next_execution`. Shortened from `sub_executed`.
+
+| Event Name | Topics                 | Data                                                        | When Emitted                          |
+| ---------- | ------------------------ | -------------------------------------------------------------- | --------------------------------------- |
+| `sub_exec` | `["sub_exec", donor]`   | `{ "project_id": String, "amount": i128, "next_execution": u32 }` | After a due subscription donation executes |
 ## 27. `rec_cr` (Recurring Created)
 
 **Description**: Emitted when a donor registers a new recurring donation schedule.
@@ -335,6 +382,75 @@ project-scoped anonymous donation totals.
 
 ---
 
+## Off-Chain Multi-Verifier Project Verification Oracle
+
+Gated behind the `project_verification` Cargo feature (on by default). An M-of-N
+committee of admin-appointed verifiers attests that a project has passed
+independent off-chain due diligence; once enough distinct verifiers have
+attested, the project auto-transitions to `Verified` and every `donate*` entry
+point starts accepting donations to it. See `SECURITY.md` for the full trust
+model.
+
+## 33. `ver_add` (Verifier Added)
+
+**Description**: Emitted when M-of-N admins authorise a new address to submit project attestations.
+
+| Event Name | Topics          | Data                | When Emitted                    |
+| ---------- | --------------- | -------------------- | -------------------------------- |
+| `ver_add`  | `["ver_add"]`   | `verifier: Address`  | When admins call `add_verifier` |
+
+---
+
+## 34. `ver_rem` (Verifier Removed)
+
+**Description**: Emitted when M-of-N admins revoke a verifier's ability to submit new attestations. Attestations it already submitted are not affected.
+
+| Event Name | Topics          | Data                | When Emitted                       |
+| ---------- | --------------- | -------------------- | ------------------------------------ |
+| `ver_rem`  | `["ver_rem"]`   | `verifier: Address`  | When admins call `remove_verifier` |
+
+---
+
+## 35. `ver_thr` (Verification Threshold Updated)
+
+**Description**: Emitted when M-of-N admins change the number of distinct verifier attestations required for a project to auto-verify. `0` disables the gate (legacy mode).
+
+| Event Name | Topics          | Data              | When Emitted                                   |
+| ---------- | --------------- | ------------------ | ------------------------------------------------ |
+| `ver_thr`  | `["ver_thr"]`   | `threshold: u32`   | When admins call `set_verification_threshold` |
+
+---
+
+## 36. `proj_att` (Project Attestation Recorded)
+
+**Description**: Emitted when an authorised verifier attests a project. Fired once per (project, verifier) pair — a second attestation from the same verifier for the same project panics instead of re-emitting this event.
+
+| Event Name | Topics                                | Data                                             | When Emitted                       |
+| ---------- | -------------------------------------- | -------------------------------------------------- | ------------------------------------ |
+| `proj_att` | `["proj_att", verifier, project_id]`   | `(attestation_count: u32, evidence_hash: BytesN<32>)` | When a verifier calls `attest_project` |
+
+---
+
+## 37. `proj_vfy` (Project Verified)
+
+**Description**: Emitted the moment a project's distinct-attester count reaches `VerificationThreshold`, in the same invocation as the attestation (or donation) that crossed it. Fires at most once per verification cycle — a `revoke_verification` followed by re-attesting to the threshold fires it again.
+
+| Event Name | Topics                     | Data                    | When Emitted                                          |
+| ---------- | --------------------------- | ------------------------ | -------------------------------------------------------- |
+| `proj_vfy` | `["proj_vfy", project_id]`  | `attestation_count: u32` | When a project's status transitions to `Verified`        |
+
+---
+
+## 38. `proj_rvk` (Project Verification Revoked)
+
+**Description**: Emitted when M-of-N admins clear a project's entire verification state — all accumulated attestations and evidence hashes are removed and the project reverts to `Unverified`.
+
+| Event Name | Topics                          | Data              | When Emitted                                |
+| ---------- | --------------------------------- | ------------------ | ---------------------------------------------- |
+| `proj_rvk` | `["proj_rvk", admin]`            | `project_id: String` | When admins call `revoke_verification`      |
+
+---
+
 ## Usage Notes
 
 - All events follow Soroban’s standard event format: `topics: Vec<Val>`, `data: Val`.
@@ -342,7 +458,7 @@ project-scoped anonymous donation totals.
 - Events can be queried via Horizon or Soroban RPC tools.
 - Frontend / backend should listen to these for real-time updates, notifications, and leaderboard.
 
-**Last Updated**: July 19, 2026
+**Last Updated**: July 24, 2026
 
 ---
 
