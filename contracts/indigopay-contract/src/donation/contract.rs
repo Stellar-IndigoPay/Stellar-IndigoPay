@@ -3,9 +3,9 @@ use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, Ve
 use crate::donation::{
     events::{emit_pause_recurring, emit_resume_recurring, emit_stealth_donation},
     storage::{
-        add_project_donation, get_project_donations, get_recurring_counter, get_recurring_donation,
-        get_stealth_counter, get_stealth_donation, set_recurring_counter, set_recurring_donation,
-        set_stealth_counter, set_stealth_donation,
+        add_project_donation, get_project_donations, get_recurring_counter,
+        get_recurring_donation, get_stealth_counter, get_stealth_donation,
+        set_recurring_counter, set_recurring_donation, set_stealth_counter, set_stealth_donation,
     },
     types::{RecurringDonation, StealthDonation},
 };
@@ -416,16 +416,13 @@ mod tests {
 
         let recurring_id = client.create_recurring(&donor, &project, &1_000_000, &100);
 
-        // Pause recurring donation
         client.pause_recurring(&donor, &recurring_id);
         let donation = client.get_recurring_donation(&recurring_id);
         assert!(donation.paused);
 
-        // Advance ledgers to simulate 2 missed cycles (200 ledgers)
         env.ledger()
             .set_sequence_number(env.ledger().sequence() + 200);
 
-        // Resume with catch up
         client.resume_recurring(&donor, &token, &recurring_id, &true);
 
         let resumed_donation = client.get_recurring_donation(&recurring_id);
