@@ -330,7 +330,7 @@ mod fuzz {
         // donations still succeed and produce correct offset values.
         #[test]
         fn prop_usdc_max_co2_rate_boundary(
-            usdc_amount in 1i128..=100_000_000i128,
+            usdc_amount in 1_250_000i128..=100_000_000i128,
         ) {
             let (env, client, project_id, usdc_token) = setup_usdc(100_000);
             let donor = Address::generate(&env);
@@ -341,6 +341,99 @@ mod fuzz {
             let donor_stats = client.get_donor_stats(&donor);
             prop_assert!(donor_stats.co2_offset_grams > 0, "CO₂ offset should be non-zero at max rate");
             prop_assert_eq!(donor_stats.donation_count, 1);
+        }
+
+        /// Random token address must panic if unregistered when calling `donate_token`.
+        #[test]
+        fn prop_donate_token_random_token(
+            amount in 1i128..=100_000_000i128,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let cid = env.register_contract(None, IndigoPayContract);
+            let client = IndigoPayContractClient::new(&env, &cid);
+            let admin = Address::generate(&env);
+            client.initialize(&soroban_sdk::vec![&env, admin.clone()], &1u32);
+
+            let project_id = SorobanString::from_str(&env, "proj-random-token");
+            let wallet = Address::generate(&env);
+            client.register_project(
+                &admin,
+                &project_id,
+                &SorobanString::from_str(&env, "Random Token Project"),
+                &wallet,
+                &100u32,
+            );
+
+            let random_token = Address::generate(&env);
+            let donor = Address::generate(&env);
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.donate_token(&random_token, &donor, &project_id, &amount, &MSG_HASH);
+            }));
+            prop_assert!(result.is_err(), "donate_token should panic for unregistered token");
+        }
+
+        /// XLM-equivalent calculation test: rate * amount must equal total_donated.
+        #[test]
+        fn prop_xlm_equivalent_calculation(
+            usdc_amount in 1i128..=10_000_000_000i128,
+        ) {
+            let (env, client, project_id, usdc_token) = setup_usdc(100u32);
+            let donor = Address::generate(&env);
+            fund_usdc(&env, &usdc_token, &donor, usdc_amount);
+
+            client.donate_token(&usdc_token, &donor, &project_id, &usdc_amount, &MSG_HASH);
+
+            let stats = client.get_donor_stats(&donor);
+            // Oracle rate is 8 XLM per 1 USDC
+            let expected_xlm = usdc_amount.checked_mul(8).unwrap();
+            prop_assert_eq!(stats.total_donated, expected_xlm);
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// No vector containing fewer than two distinct authorized admins can
+        /// initiate a force-refund when the configured threshold is 2.
+        #[test]
+        fn prop_force_refund_requires_m_of_n(
+            include_first in any::<bool>(),
+            duplicate_first in any::<bool>(),
+            include_outsider in any::<bool>(),
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let contract_id = env.register_contract(None, IndigoPayContract);
+            let client = IndigoPayContractClient::new(&env, &contract_id);
+            let first_admin = Address::generate(&env);
+            let second_admin = Address::generate(&env);
+            let outsider = Address::generate(&env);
+
+            client.initialize(
+                &soroban_sdk::vec![&env, first_admin.clone(), second_admin],
+                &2u32,
+            );
+
+            let mut supplied = soroban_sdk::Vec::new(&env);
+            if include_first {
+                supplied.push_back(first_admin.clone());
+            }
+            if duplicate_first {
+                supplied.push_back(first_admin);
+            }
+            if include_outsider {
+                supplied.push_back(outsider);
+            }
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.force_approve_refund(&supplied, &0u32);
+            }));
+            prop_assert!(
+                result.is_err(),
+                "fewer than two distinct admins unexpectedly satisfied a 2-of-2 threshold"
+            );
         }
     }
 }

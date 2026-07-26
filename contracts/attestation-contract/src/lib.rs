@@ -93,6 +93,43 @@ pub struct Attestation {
     pub created_by: Address, // the relayer that recorded it.
 }
 
+// ─── Aggregate types ────────────────────────────────────────────────────────
+
+/// Per-chain count for a donor's attestations.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ChainCount {
+    pub chain: String,
+    pub count: u64,
+}
+
+/// On-chain donor aggregation so the frontend can fetch donation summaries
+/// in O(1) time instead of iterating all attestations off-chain.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DonorAggregate {
+    pub total_attestations: u64,
+    pub total_usd: i128,
+    pub total_xlm: i128,
+    pub chains: Vec<ChainCount>,
+    pub pending: u64,
+    pub verified: u64,
+    pub revoked: u64,
+}
+
+/// Per-chain aggregate tracking total attestations, USD/XLM volumes,
+/// and status breakdown for a given source chain.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ChainAggregate {
+    pub total_attestations: u64,
+    pub total_usd: i128,
+    pub total_xlm: i128,
+    pub pending: u64,
+    pub verified: u64,
+    pub revoked: u64,
+}
+
 // ─── DataKey enum ───────────────────────────────────────────────────────────
 //
 // `SourceTxSeen(chain, hash)` is the on-chain replay guard. `Attestation(id)`
@@ -121,6 +158,10 @@ pub enum DataKey {
     TotalCount,
     /// Count of attestations currently in PENDING (filtered out by reads).
     PendingCount,
+    /// Donor aggregate — O(1) donation summary.
+    DonorAggregate(Address),
+    /// Per-chain aggregate — totals + status breakdown.
+    ChainAggregate(String),
     /// Mutable upgrade timelock shared with the parent contract family.
     /// See `propose_upgrade` / `execute_upgrade` / `cancel_upgrade`.
     PendingUpgrade,
@@ -318,6 +359,14 @@ fn record_attestations_internal(
             .instance()
             .set(&DataKey::Attestation(id), &record);
 
+        update_aggregates_on_record(
+            env,
+            &record.donor,
+            &record.source_chain,
+            record.amount_usd,
+            record.amount_xlm,
+        );
+
         let mut donor_ids = if let Some(cached) = donor_indexes.get(input.donor.clone()) {
             cached
         } else {
@@ -358,6 +407,185 @@ fn record_attestations_internal(
     }
 
     ids
+}
+
+// ─── Aggregate helpers ───────────────────────────────────────────────────────
+//
+// Centralised update functions so the three mutation entry-points
+// (record / verify / revoke) don't duplicate aggregation logic.
+
+fn read_donor_aggregate(env: &Env, donor: &Address) -> DonorAggregate {
+    env.storage()
+        .instance()
+        .get(&DataKey::DonorAggregate(donor.clone()))
+        .unwrap_or(DonorAggregate {
+            total_attestations: 0,
+            total_usd: 0,
+            total_xlm: 0,
+            chains: Vec::new(env),
+            pending: 0,
+            verified: 0,
+            revoked: 0,
+        })
+}
+
+fn write_donor_aggregate(env: &Env, donor: &Address, agg: &DonorAggregate) {
+    env.storage()
+        .instance()
+        .set(&DataKey::DonorAggregate(donor.clone()), agg);
+}
+
+fn read_chain_aggregate(env: &Env, chain: &String) -> ChainAggregate {
+    env.storage()
+        .instance()
+        .get(&DataKey::ChainAggregate(chain.clone()))
+        .unwrap_or(ChainAggregate {
+            total_attestations: 0,
+            total_usd: 0,
+            total_xlm: 0,
+            pending: 0,
+            verified: 0,
+            revoked: 0,
+        })
+}
+
+fn write_chain_aggregate(env: &Env, chain: &String, agg: &ChainAggregate) {
+    env.storage()
+        .instance()
+        .set(&DataKey::ChainAggregate(chain.clone()), agg);
+}
+
+/// Called during `record_attestation`. Increments all cumulative counters
+/// for the donor and the source chain, and updates the per-donor chain list.
+fn update_aggregates_on_record(
+    env: &Env,
+    donor: &Address,
+    chain: &String,
+    amount_usd: i128,
+    amount_xlm: i128,
+) {
+    // ── Donor aggregate ────────────────────────────────────────────────
+    let mut donor_agg = read_donor_aggregate(env, donor);
+    donor_agg.total_attestations = donor_agg
+        .total_attestations
+        .checked_add(1)
+        .expect("donor total_attestations overflow");
+    donor_agg.total_usd = donor_agg
+        .total_usd
+        .checked_add(amount_usd)
+        .expect("donor total_usd overflow");
+    donor_agg.total_xlm = donor_agg
+        .total_xlm
+        .checked_add(amount_xlm)
+        .expect("donor total_xlm overflow");
+    donor_agg.pending = donor_agg
+        .pending
+        .checked_add(1)
+        .expect("donor pending overflow");
+
+    // Update (or insert) per-chain counter within the donor aggregate.
+    {
+        let mut found = false;
+        let mut new_chains: Vec<ChainCount> = Vec::new(env);
+        for i in 0..donor_agg.chains.len() {
+            let mut cc: ChainCount = donor_agg.chains.get(i).unwrap();
+            if cc.chain == *chain {
+                cc.count = cc.count.checked_add(1).expect("chain count overflow");
+                new_chains.push_back(cc);
+                found = true;
+            } else {
+                new_chains.push_back(cc);
+            }
+        }
+        if !found {
+            new_chains.push_back(ChainCount {
+                chain: chain.clone(),
+                count: 1,
+            });
+        }
+        donor_agg.chains = new_chains;
+    }
+    write_donor_aggregate(env, donor, &donor_agg);
+
+    // ── Chain aggregate ────────────────────────────────────────────────
+    let mut chain_agg = read_chain_aggregate(env, chain);
+    chain_agg.total_attestations = chain_agg
+        .total_attestations
+        .checked_add(1)
+        .expect("chain total_attestations overflow");
+    chain_agg.total_usd = chain_agg
+        .total_usd
+        .checked_add(amount_usd)
+        .expect("chain total_usd overflow");
+    chain_agg.total_xlm = chain_agg
+        .total_xlm
+        .checked_add(amount_xlm)
+        .expect("chain total_xlm overflow");
+    chain_agg.pending = chain_agg
+        .pending
+        .checked_add(1)
+        .expect("chain pending overflow");
+    write_chain_aggregate(env, chain, &chain_agg);
+}
+
+/// Called during `verify_attestation`. Moves one attestation from Pending
+/// to Verified in both the donor and chain aggregates.
+fn update_aggregates_on_verify(env: &Env, donor: &Address, chain: &String) {
+    // ── Donor aggregate ────────────────────────────────────────────────
+    let mut donor_agg = read_donor_aggregate(env, donor);
+    if donor_agg.pending > 0 {
+        donor_agg.pending -= 1;
+    }
+    donor_agg.verified = donor_agg
+        .verified
+        .checked_add(1)
+        .expect("donor verified overflow");
+    write_donor_aggregate(env, donor, &donor_agg);
+
+    // ── Chain aggregate ────────────────────────────────────────────────
+    let mut chain_agg = read_chain_aggregate(env, chain);
+    if chain_agg.pending > 0 {
+        chain_agg.pending -= 1;
+    }
+    chain_agg.verified = chain_agg
+        .verified
+        .checked_add(1)
+        .expect("chain verified overflow");
+    write_chain_aggregate(env, chain, &chain_agg);
+}
+
+/// Called during `revoke_attestation`. Moves one attestation to Revoked
+/// and decrements whichever status it was previously in (Pending or Verified).
+fn update_aggregates_on_revoke(env: &Env, donor: &Address, chain: &String, was_pending: bool) {
+    // ── Donor aggregate ────────────────────────────────────────────────
+    let mut donor_agg = read_donor_aggregate(env, donor);
+    if was_pending {
+        if donor_agg.pending > 0 {
+            donor_agg.pending -= 1;
+        }
+    } else if donor_agg.verified > 0 {
+        donor_agg.verified -= 1;
+    }
+    donor_agg.revoked = donor_agg
+        .revoked
+        .checked_add(1)
+        .expect("donor revoked overflow");
+    write_donor_aggregate(env, donor, &donor_agg);
+
+    // ── Chain aggregate ────────────────────────────────────────────────
+    let mut chain_agg = read_chain_aggregate(env, chain);
+    if was_pending {
+        if chain_agg.pending > 0 {
+            chain_agg.pending -= 1;
+        }
+    } else if chain_agg.verified > 0 {
+        chain_agg.verified -= 1;
+    }
+    chain_agg.revoked = chain_agg
+        .revoked
+        .checked_add(1)
+        .expect("chain revoked overflow");
+    write_chain_aggregate(env, chain, &chain_agg);
 }
 
 // ─── Contract ───────────────────────────────────────────────────────────────
@@ -544,6 +772,9 @@ impl AttestationContract {
             .instance()
             .set(&DataKey::Attestation(id), &record);
 
+        let donor = record.donor.clone();
+        let chain = record.source_chain.clone();
+
         let pending: u64 = env
             .storage()
             .instance()
@@ -555,6 +786,8 @@ impl AttestationContract {
                 .instance()
                 .set(&DataKey::PendingCount, &new_pending);
         }
+
+        update_aggregates_on_verify(&env, &donor, &chain);
 
         env.events().publish((symbol_short!("att_vfy"),), id);
     }
@@ -579,6 +812,9 @@ impl AttestationContract {
         env.storage()
             .instance()
             .set(&DataKey::Attestation(id), &record);
+        let donor = record.donor.clone();
+        let chain = record.source_chain.clone();
+
         if was_pending {
             let pending: u64 = env
                 .storage()
@@ -592,6 +828,9 @@ impl AttestationContract {
                     .set(&DataKey::PendingCount, &new_pending);
             }
         }
+
+        update_aggregates_on_revoke(&env, &donor, &chain, was_pending);
+
         env.events().publish((symbol_short!("att_rvk"), admin), id);
     }
 
@@ -679,6 +918,14 @@ impl AttestationContract {
             .instance()
             .get(&DataKey::TotalCount)
             .unwrap_or(0)
+    }
+
+    pub fn get_donor_aggregate(env: Env, donor: Address) -> DonorAggregate {
+        read_donor_aggregate(&env, &donor)
+    }
+
+    pub fn get_chain_aggregate(env: Env, chain: String) -> ChainAggregate {
+        read_chain_aggregate(&env, &chain)
     }
 
     pub fn is_paused(env: Env) -> bool {
@@ -1463,5 +1710,422 @@ mod tests {
         client.add_allowed_chain(&admin, &String::from_str(&env, "ethereum"));
         let inputs = soroban_sdk::vec![&env, batch_input(&env, &donor, "polygon", "0xunlisted"),];
         client.record_attestation_batch(&relayer, &inputs);
+    }
+
+    // ─── Aggregate tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_donor_aggregate_on_record() {
+        let (env, id, _admin, _relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let chain = String::from_str(&env, "ethereum");
+        client.record_attestation(
+            &client.get_relayer().unwrap(),
+            &chain,
+            &String::from_str(&env, "0xaa"),
+            &donor,
+            &String::from_str(&env, "proj-1"),
+            &10_000_000i128,
+            &80_000_000i128,
+            &0u32,
+        );
+
+        let agg = client.get_donor_aggregate(&donor);
+        assert_eq!(agg.total_attestations, 1);
+        assert_eq!(agg.total_usd, 10_000_000);
+        assert_eq!(agg.total_xlm, 80_000_000);
+        assert_eq!(agg.pending, 1);
+        assert_eq!(agg.verified, 0);
+        assert_eq!(agg.revoked, 0);
+        assert_eq!(agg.chains.len(), 1);
+        assert_eq!(agg.chains.get(0).unwrap().chain, chain);
+        assert_eq!(agg.chains.get(0).unwrap().count, 1);
+    }
+
+    #[test]
+    fn test_donor_aggregate_on_verify() {
+        let (env, id, _admin, _relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let chain = String::from_str(&env, "polygon");
+        let new_id = client.record_attestation(
+            &client.get_relayer().unwrap(),
+            &chain,
+            &String::from_str(&env, "0xbb"),
+            &donor,
+            &String::from_str(&env, "proj-2"),
+            &5_000_000i128,
+            &40_000_000i128,
+            &0u32,
+        );
+
+        let agg_before = client.get_donor_aggregate(&donor);
+        assert_eq!(agg_before.pending, 1);
+        assert_eq!(agg_before.verified, 0);
+
+        client.verify_attestation(&new_id);
+
+        let agg_after = client.get_donor_aggregate(&donor);
+        assert_eq!(agg_after.pending, 0);
+        assert_eq!(agg_after.verified, 1);
+        assert_eq!(agg_after.revoked, 0);
+        assert_eq!(agg_after.total_attestations, 1);
+        assert_eq!(agg_after.total_usd, 5_000_000);
+        assert_eq!(agg_after.total_xlm, 40_000_000);
+    }
+
+    #[test]
+    fn test_aggregate_with_revoked() {
+        let (env, id, admin, _relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let chain = String::from_str(&env, "arbitrum");
+        let new_id = client.record_attestation(
+            &client.get_relayer().unwrap(),
+            &chain,
+            &String::from_str(&env, "0xcc"),
+            &donor,
+            &String::from_str(&env, "proj-3"),
+            &3_000_000i128,
+            &24_000_000i128,
+            &0u32,
+        );
+
+        client.revoke_attestation(&admin, &new_id);
+
+        let agg = client.get_donor_aggregate(&donor);
+        assert_eq!(agg.pending, 0);
+        assert_eq!(agg.verified, 0);
+        assert_eq!(agg.revoked, 1);
+        assert_eq!(agg.total_attestations, 1);
+        assert_eq!(agg.total_usd, 3_000_000);
+        assert_eq!(agg.total_xlm, 24_000_000);
+    }
+
+    #[test]
+    fn test_revoke_verified_attestation_updates_aggregate_correctly() {
+        let (env, id, admin, _relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let chain = String::from_str(&env, "optimism");
+        let new_id = client.record_attestation(
+            &client.get_relayer().unwrap(),
+            &chain,
+            &String::from_str(&env, "0xdd"),
+            &donor,
+            &String::from_str(&env, "proj-4"),
+            &2_000_000i128,
+            &16_000_000i128,
+            &0u32,
+        );
+        client.verify_attestation(&new_id);
+
+        let agg_before = client.get_donor_aggregate(&donor);
+        assert_eq!(agg_before.verified, 1);
+        assert_eq!(agg_before.pending, 0);
+
+        client.revoke_attestation(&admin, &new_id);
+
+        let agg_after = client.get_donor_aggregate(&donor);
+        assert_eq!(agg_after.verified, 0);
+        assert_eq!(agg_after.revoked, 1);
+        assert_eq!(agg_after.total_attestations, 1);
+    }
+
+    #[test]
+    fn test_chain_aggregate() {
+        let (env, id, _admin, _relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let eth = String::from_str(&env, "ethereum");
+
+        client.record_attestation(
+            &client.get_relayer().unwrap(),
+            &eth,
+            &String::from_str(&env, "0xee1"),
+            &donor,
+            &String::from_str(&env, "proj"),
+            &10_000_000i128,
+            &80_000_000i128,
+            &0u32,
+        );
+
+        let chain_agg = client.get_chain_aggregate(&eth);
+        assert_eq!(chain_agg.total_attestations, 1);
+        assert_eq!(chain_agg.total_usd, 10_000_000);
+        assert_eq!(chain_agg.total_xlm, 80_000_000);
+        assert_eq!(chain_agg.pending, 1);
+        assert_eq!(chain_agg.verified, 0);
+        assert_eq!(chain_agg.revoked, 0);
+    }
+
+    #[test]
+    fn test_chain_aggregate_after_verify_and_revoke() {
+        let (env, id, admin, _relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let sol = String::from_str(&env, "solana");
+
+        let id1 = client.record_attestation(
+            &client.get_relayer().unwrap(),
+            &sol,
+            &String::from_str(&env, "0xff1"),
+            &donor,
+            &String::from_str(&env, "proj"),
+            &7_000_000i128,
+            &56_000_000i128,
+            &0u32,
+        );
+
+        client.verify_attestation(&id1);
+
+        let chain_agg = client.get_chain_aggregate(&sol);
+        assert_eq!(chain_agg.pending, 0);
+        assert_eq!(chain_agg.verified, 1);
+        assert_eq!(chain_agg.revoked, 0);
+
+        client.revoke_attestation(&admin, &id1);
+        let chain_agg = client.get_chain_aggregate(&sol);
+        assert_eq!(chain_agg.pending, 0);
+        assert_eq!(chain_agg.verified, 0);
+        assert_eq!(chain_agg.revoked, 1);
+        assert_eq!(chain_agg.total_attestations, 1);
+    }
+
+    #[test]
+    fn test_multiple_attestations_across_multiple_chains() {
+        let (env, id, _admin, _relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let eth = String::from_str(&env, "ethereum");
+        let polygon = String::from_str(&env, "polygon");
+        let sol = String::from_str(&env, "solana");
+
+        client.record_attestation(
+            &client.get_relayer().unwrap(),
+            &eth,
+            &String::from_str(&env, "0x11"),
+            &donor,
+            &String::from_str(&env, "proj"),
+            &1_000_000i128,
+            &8_000_000i128,
+            &0u32,
+        );
+        client.record_attestation(
+            &client.get_relayer().unwrap(),
+            &eth,
+            &String::from_str(&env, "0x12"),
+            &donor,
+            &String::from_str(&env, "proj"),
+            &2_000_000i128,
+            &16_000_000i128,
+            &0u32,
+        );
+        client.record_attestation(
+            &client.get_relayer().unwrap(),
+            &polygon,
+            &String::from_str(&env, "0x21"),
+            &donor,
+            &String::from_str(&env, "proj"),
+            &3_000_000i128,
+            &24_000_000i128,
+            &0u32,
+        );
+        client.record_attestation(
+            &client.get_relayer().unwrap(),
+            &sol,
+            &String::from_str(&env, "0x31"),
+            &donor,
+            &String::from_str(&env, "proj"),
+            &4_000_000i128,
+            &32_000_000i128,
+            &0u32,
+        );
+
+        let donor_agg = client.get_donor_aggregate(&donor);
+        assert_eq!(donor_agg.total_attestations, 4);
+        assert_eq!(donor_agg.total_usd, 10_000_000);
+        assert_eq!(donor_agg.total_xlm, 80_000_000);
+        assert_eq!(donor_agg.pending, 4);
+        assert_eq!(donor_agg.verified, 0);
+        assert_eq!(donor_agg.revoked, 0);
+
+        assert_eq!(donor_agg.chains.len(), 3);
+        let find_count = |chains: &soroban_sdk::Vec<ChainCount>, target: &String| -> u64 {
+            for i in 0..chains.len() {
+                let cc = chains.get(i).unwrap();
+                if cc.chain == *target {
+                    return cc.count;
+                }
+            }
+            0
+        };
+        assert_eq!(find_count(&donor_agg.chains, &eth), 2);
+        assert_eq!(find_count(&donor_agg.chains, &polygon), 1);
+        assert_eq!(find_count(&donor_agg.chains, &sol), 1);
+
+        let eth_agg = client.get_chain_aggregate(&eth);
+        assert_eq!(eth_agg.total_attestations, 2);
+        assert_eq!(eth_agg.total_usd, 3_000_000);
+        assert_eq!(eth_agg.total_xlm, 24_000_000);
+
+        let polygon_agg = client.get_chain_aggregate(&polygon);
+        assert_eq!(polygon_agg.total_attestations, 1);
+        assert_eq!(polygon_agg.total_usd, 3_000_000);
+        assert_eq!(polygon_agg.total_xlm, 24_000_000);
+
+        let sol_agg = client.get_chain_aggregate(&sol);
+        assert_eq!(sol_agg.total_attestations, 1);
+        assert_eq!(sol_agg.total_usd, 4_000_000);
+        assert_eq!(sol_agg.total_xlm, 32_000_000);
+    }
+
+    #[test]
+    fn test_aggregate_consistency_after_repeated_operations() {
+        let (env, id, admin, _relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let chain = String::from_str(&env, "ethereum");
+
+        let id1 = client.record_attestation(
+            &client.get_relayer().unwrap(),
+            &chain,
+            &String::from_str(&env, "0xr1"),
+            &donor,
+            &String::from_str(&env, "proj"),
+            &1_000_000i128,
+            &8_000_000i128,
+            &0u32,
+        );
+        let id2 = client.record_attestation(
+            &client.get_relayer().unwrap(),
+            &chain,
+            &String::from_str(&env, "0xr2"),
+            &donor,
+            &String::from_str(&env, "proj"),
+            &2_000_000i128,
+            &16_000_000i128,
+            &0u32,
+        );
+        let id3 = client.record_attestation(
+            &client.get_relayer().unwrap(),
+            &chain,
+            &String::from_str(&env, "0xr3"),
+            &donor,
+            &String::from_str(&env, "proj"),
+            &3_000_000i128,
+            &24_000_000i128,
+            &0u32,
+        );
+
+        let mut agg = client.get_donor_aggregate(&donor);
+        assert_eq!(agg.total_attestations, 3);
+        assert_eq!(agg.pending, 3);
+        assert_eq!(agg.verified, 0);
+        assert_eq!(agg.revoked, 0);
+
+        client.verify_attestation(&id1);
+        agg = client.get_donor_aggregate(&donor);
+        assert_eq!(agg.pending, 2);
+        assert_eq!(agg.verified, 1);
+        assert_eq!(agg.revoked, 0);
+        assert_eq!(agg.total_attestations, 3);
+
+        client.revoke_attestation(&admin, &id2);
+        agg = client.get_donor_aggregate(&donor);
+        assert_eq!(agg.pending, 1);
+        assert_eq!(agg.verified, 1);
+        assert_eq!(agg.revoked, 1);
+
+        client.verify_attestation(&id3);
+        agg = client.get_donor_aggregate(&donor);
+        assert_eq!(agg.pending, 0);
+        assert_eq!(agg.verified, 2);
+        assert_eq!(agg.revoked, 1);
+        assert_eq!(agg.total_attestations, 3);
+
+        client.revoke_attestation(&admin, &id1);
+        agg = client.get_donor_aggregate(&donor);
+        assert_eq!(agg.pending, 0);
+        assert_eq!(agg.verified, 1);
+        assert_eq!(agg.revoked, 2);
+
+        let chain_agg = client.get_chain_aggregate(&chain);
+        assert_eq!(chain_agg.pending, 0);
+        assert_eq!(chain_agg.verified, 1);
+        assert_eq!(chain_agg.revoked, 2);
+        assert_eq!(chain_agg.total_attestations, 3);
+        assert_eq!(chain_agg.total_usd, 6_000_000);
+        assert_eq!(chain_agg.total_xlm, 48_000_000);
+    }
+
+    #[test]
+    fn test_aggregate_empty_donor_returns_zeros() {
+        let (env, id, _admin, _relayer, _donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let unknown_donor = Address::generate(&env);
+        let agg = client.get_donor_aggregate(&unknown_donor);
+        assert_eq!(agg.total_attestations, 0);
+        assert_eq!(agg.total_usd, 0);
+        assert_eq!(agg.total_xlm, 0);
+        assert_eq!(agg.pending, 0);
+        assert_eq!(agg.verified, 0);
+        assert_eq!(agg.revoked, 0);
+        assert_eq!(agg.chains.len(), 0);
+    }
+
+    #[test]
+    fn test_aggregate_empty_chain_returns_zeros() {
+        let (env, id, _admin, _relayer, _donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let unknown_chain = String::from_str(&env, "nonexistent");
+        let agg = client.get_chain_aggregate(&unknown_chain);
+        assert_eq!(agg.total_attestations, 0);
+        assert_eq!(agg.total_usd, 0);
+        assert_eq!(agg.total_xlm, 0);
+        assert_eq!(agg.pending, 0);
+        assert_eq!(agg.verified, 0);
+        assert_eq!(agg.revoked, 0);
+    }
+
+    #[test]
+    fn test_different_donors_aggregate_independently() {
+        let (env, id, _admin, _relayer, donor_a) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let donor_b = Address::generate(&env);
+        let chain = String::from_str(&env, "ethereum");
+
+        client.record_attestation(
+            &client.get_relayer().unwrap(),
+            &chain,
+            &String::from_str(&env, "0xd1"),
+            &donor_a,
+            &String::from_str(&env, "proj"),
+            &1_000_000i128,
+            &8_000_000i128,
+            &0u32,
+        );
+        client.record_attestation(
+            &client.get_relayer().unwrap(),
+            &chain,
+            &String::from_str(&env, "0xd2"),
+            &donor_b,
+            &String::from_str(&env, "proj"),
+            &2_000_000i128,
+            &16_000_000i128,
+            &0u32,
+        );
+        client.record_attestation(
+            &client.get_relayer().unwrap(),
+            &chain,
+            &String::from_str(&env, "0xd3"),
+            &donor_b,
+            &String::from_str(&env, "proj"),
+            &3_000_000i128,
+            &24_000_000i128,
+            &0u32,
+        );
+
+        let agg_a = client.get_donor_aggregate(&donor_a);
+        assert_eq!(agg_a.total_attestations, 1);
+        assert_eq!(agg_a.total_usd, 1_000_000);
+
+        let agg_b = client.get_donor_aggregate(&donor_b);
+        assert_eq!(agg_b.total_attestations, 2);
+        assert_eq!(agg_b.total_usd, 5_000_000);
+        assert_eq!(agg_b.total_xlm, 40_000_000);
     }
 }

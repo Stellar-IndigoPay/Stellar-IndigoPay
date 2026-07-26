@@ -67,6 +67,8 @@ const USDC_ASSET_CODE = "USDC";
 
 /**
  * Read the persisted cursor from indexer_state.
+ *
+ * @returns {Promise<number>} Last processed ledger, or 0 when unavailable.
  */
 async function readCursor() {
   try {
@@ -85,6 +87,10 @@ async function readCursor() {
 
 /**
  * Atomically update the cursor (called WITHIN the donation transaction).
+ *
+ * @param {{query: Function}} client - Database client from the active transaction.
+ * @param {number|string} ledger - Ledger sequence to store if it is newer.
+ * @returns {Promise<void>}
  */
 async function updateCursor(client, ledger) {
   await client.query(
@@ -98,6 +104,8 @@ async function updateCursor(client, ledger) {
 
 /**
  * Fetch all active project wallets and cache them, plus resolve USDC config.
+ *
+ * @returns {Promise<void>}
  */
 async function updateProjectWallets() {
   try {
@@ -412,17 +420,17 @@ async function startIndexer(socketIo) {
   lagBackoffMs = Number(process.env.INDEXER_LAG_CHECK_INTERVAL_MS || 30_000);
   await checkLag();
 
-  logger.info(
-    { event: "indexer_started", usdcEnabled: Boolean(usdcTokenAddress) },
-    "Starting Horizon operations stream" +
-      (usdcTokenAddress ? " (USDC indexing enabled)" : ""),
-  );
-
   await openStream();
 }
 
 /**
  * Returns the indexer status for the health endpoint.
+ *
+ * @returns {{isRunning: boolean, lastProcessedLedger: number,
+ *   projectWalletsCount: number, usdcTokenConfigured: boolean,
+ *   usdcToXlmRate: number, reconnectAttempt: number, lagLedgers: number,
+ *   lastLagCheckAt: number|null, backoffMs: number,
+ *   lastBackfillOutcome: string|null, timestamp: string}}
  */
 function getStatus() {
   return {
@@ -442,6 +450,8 @@ function getStatus() {
 
 /**
  * Stop the indexer. Idempotent.
+ *
+ * @returns {Promise<void>}
  */
 async function stop() {
   closeStream();

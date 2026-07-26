@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Bug Fixes
+
+* **backend:** require admin authentication for pending project review endpoint (closes #516)
+* **backend:** surface geocoding failures as project creation warnings (closes #519)
+
+### Documentation
+
+* **backend:** document key service exports with JSDoc for TypeDoc (closes #548)
+
 ### Performance
 
 * **frontend:** optimize Core Web Vitals with next/image, next/font, and bundle splitting (closes #261)
@@ -17,6 +26,15 @@
   + Add unit test suite in `frontend/components/__tests__/LiveDonationTicker.test.tsx`
 
 ### Features
+
+* **contracts:** enforce Rust formatting via a robust pre-commit hook (closes #60)
+  - Implement reliable Cargo detection in `.husky/check-rust-fmt.sh` with PATH resolution for `$HOME/.cargo/bin` and `$HOME/.cargo/env` compatibility
+  - Optimize pre-commit hook to skip execution overhead and run instantly when no Rust files are staged
+  - Remove redundant `.husky/check-rust-fmt.sh` execution from package.json lint-staged config
+
+* **backend:** standardize structured startup, shutdown, and shutdown-error logging for background workers, with graceful queue draining
+
+* **contracts:** emit `StealthScan` events with the project wallet, donation count, and ledger timestamp after stealth donation scans (closes #514)
 
 * **contracts/backend:** add opt-in anonymous donations and signed, cached tax receipt PDFs with locked XLM/USD values
 

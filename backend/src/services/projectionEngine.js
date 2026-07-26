@@ -63,6 +63,10 @@ function co2OffsetForDonation(amountXlm, projectRaisedXlm, projectCo2Kg) {
 /**
  * Impact score matching the legacy leaderboard formula:
  *   score = total_xlm * 0.7 + (total_co2_kg / 100) * 0.3
+ *
+ * @param {number|string} totalXlm - Total XLM attributed to the donor or project.
+ * @param {number|string} totalCo2Kg - Total CO2 offset in kilograms.
+ * @returns {number} Weighted impact score used for leaderboard ordering.
  */
 function computeImpactScore(totalXlm, totalCo2Kg) {
   return Number(totalXlm) * 0.7 + Number(totalCo2Kg || 0) / 100 * 0.3;
@@ -440,6 +444,8 @@ async function rebuildProjection(name, opts = {}) {
 
 /**
  * Get the in-progress state of a rebuild, used by the admin status endpoint.
+ *
+ * @returns {boolean} True when a projection rebuild is currently active.
  */
 function isRebuilding() {
   return projectionRebuildInProgress.get() === 1;

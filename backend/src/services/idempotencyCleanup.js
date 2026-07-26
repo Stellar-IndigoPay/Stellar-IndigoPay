@@ -53,7 +53,7 @@ async function start() {
       { event: "idempotency_cleanup_disabled" },
       "[idempotencyCleanup] Cleanup disabled via env",
     );
-    return;
+    return false;
   }
 
   const cronSchedule = cronOverride || DEFAULT_CRON;

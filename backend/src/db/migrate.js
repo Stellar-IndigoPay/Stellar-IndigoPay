@@ -8,6 +8,7 @@ const {
   seedProjectUpdates,
   seedJobs,
 } = require("../services/store");
+const { lintMigrations } = require("../../scripts/validate-migrations");
 
 const MIGRATIONS_DIR = path.join(__dirname, "migrations");
 
@@ -40,7 +41,16 @@ async function getAppliedVersions(client) {
   return result.rows.map((r) => r.version);
 }
 
-async function runMigrations() {
+async function runMigrations({ dryRun = false } = {}) {
+  const lintResult = lintMigrations();
+  if (lintResult.issues.length > 0) {
+    throw new Error(
+      `Migration policy violations detected: ${lintResult.issues
+        .map((issue) => `${issue.rule}:${issue.file}`)
+        .join(", ")}`,
+    );
+  }
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -54,11 +64,15 @@ async function runMigrations() {
       if (applied.includes(version)) continue;
       const migration = require(file);
       console.log(`[DB] Applying migration: ${version}`);
-      await migration.up(client);
-      await client.query(
-        "INSERT INTO schema_migrations (version, name) VALUES ($1, $2)",
-        [version, migration.name ?? version],
-      );
+      if (dryRun) {
+        console.log(`[DB] Dry-run: ${version} would be applied without committing`);
+      } else {
+        await migration.up(client);
+        await client.query(
+          "INSERT INTO schema_migrations (version, name) VALUES ($1, $2)",
+          [version, migration.name ?? version],
+        );
+      }
       ran++;
     }
 
@@ -66,7 +80,12 @@ async function runMigrations() {
       console.log("[DB] No pending migrations");
     }
 
-    await client.query("COMMIT");
+    if (!dryRun) {
+      await client.query("COMMIT");
+    } else {
+      await client.query("ROLLBACK");
+      console.log("[DB] Dry-run completed; no changes were committed");
+    }
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -74,8 +93,10 @@ async function runMigrations() {
     client.release();
   }
 
-  await seedDatabase();
-  console.log("[DB] Migration complete");
+  if (!dryRun) {
+    await seedDatabase();
+    console.log("[DB] Migration complete");
+  }
 }
 
 /**
@@ -218,6 +239,7 @@ async function seedDatabase() {
 if (require.main === module) {
   const args = process.argv.slice(2);
   const rollbackIdx = args.indexOf("--rollback");
+  const dryRun = args.includes("--dry-run");
 
   if (rollbackIdx !== -1) {
     const stepsArg = args[rollbackIdx + 1];
@@ -230,7 +252,7 @@ if (require.main === module) {
         process.exit(1);
       });
   } else {
-    runMigrations()
+    runMigrations({ dryRun })
       .then(() => process.exit(0))
       .catch((err) => {
         console.error("[DB] Migration failed:", err.message);

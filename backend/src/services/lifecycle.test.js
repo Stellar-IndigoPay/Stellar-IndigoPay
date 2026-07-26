@@ -1,9 +1,15 @@
 "use strict";
 
+jest.mock("../logger", () => ({
+  error: jest.fn(),
+}));
+
+const logger = require("../logger");
 const lifecycle = require("./lifecycle");
 
 describe("lifecycle service", () => {
   beforeEach(() => {
+    jest.clearAllMocks();
     lifecycle._resetForTests();
   });
 
@@ -43,24 +49,23 @@ describe("lifecycle service", () => {
 
   test("runShutdownHandlers continues past a throwing handler", async () => {
     const order = [];
-    const origError = console.error;
-    console.error = jest.fn();
-    try {
-      lifecycle.onShutdown(() => {
-        order.push("a");
-      });
-      lifecycle.onShutdown(() => {
-        order.push("b");
-        throw new Error("boom");
-      });
-      lifecycle.onShutdown(() => {
-        order.push("c");
-      });
-      await lifecycle.runShutdownHandlers();
-      expect(order).toEqual(["a", "b", "c"]);
-    } finally {
-      console.error = origError;
-    }
+    lifecycle.onShutdown(() => {
+      order.push("a");
+    });
+    lifecycle.onShutdown(() => {
+      order.push("b");
+      throw new Error("boom");
+    });
+    lifecycle.onShutdown(() => {
+      order.push("c");
+    });
+    await lifecycle.runShutdownHandlers();
+
+    expect(order).toEqual(["a", "b", "c"]);
+    expect(logger.error).toHaveBeenCalledWith(
+      { event: "shutdown_handler_error", err: "boom" },
+      "Lifecycle shutdown handler failed",
+    );
   });
 
   test("onShutdown ignores non-function arguments", async () => {

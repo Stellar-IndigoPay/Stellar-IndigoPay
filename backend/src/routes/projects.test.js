@@ -538,6 +538,39 @@ describe("POST /api/projects (admin)", () => {
   });
 });
 
+describe("GET /api/projects/admin/pending", () => {
+  let app;
+
+  beforeEach(() => {
+    app = buildApp();
+    jest.resetAllMocks();
+  });
+
+  test("returns 401 without admin auth", async () => {
+    const res = await request(app).get("/api/projects/admin/pending");
+
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe("UNAUTHORIZED");
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  test("returns pending projects with admin auth", async () => {
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ total: 1 }] })
+      .mockResolvedValueOnce({ rows: [{ ...MOCK_PROJECT_ROW, verified: false }] });
+
+    const res = await request(app)
+      .get("/api/projects/admin/pending")
+      .set("X-Admin-Key", "test-admin-key")
+      .expect(200);
+
+    expect(res.body.success).toBe(true);
+    expect(res.body.total).toBe(1);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].verified).toBe(false);
+  });
+});
+
 describe("POST /api/projects (create)", () => {
   let app;
 
@@ -602,6 +635,12 @@ describe("POST /api/projects (create)", () => {
       .expect(201);
 
     expect(res.body.success).toBe(true);
+    expect(res.body.warnings).toEqual([
+      {
+        code: "GEOCODING_ERROR",
+        message: "Could not geocode the provided location",
+      },
+    ]);
     expect(pool.query).toHaveBeenCalledTimes(1);
   });
 });

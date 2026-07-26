@@ -79,11 +79,6 @@ async function start() {
       await processDelivery(deliveryId);
     },
   );
-
-  logger.info(
-    { event: "webhook_queue_started", queue: QUEUE },
-    "webhook queue worker registered",
-  );
 }
 
 /**
@@ -421,14 +416,8 @@ function postSigned(urlString, body, headers) {
 
 async function stop() {
   if (!boss) return;
-  try {
-    await boss.stop({ graceful: true, timeout: 15_000 });
-  } catch (err) {
-    logger.warn(
-      { event: "webhook_queue_stop_error", err: err.message },
-      "graceful stop failed",
-    );
-  }
+  await boss.stop({ graceful: true, timeout: 15_000 });
+  boss = null;
 }
 
 module.exports = {
