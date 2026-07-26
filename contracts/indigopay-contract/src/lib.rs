@@ -391,6 +391,9 @@ pub enum DataKey {
     // value as historical and consult `get_last_executed_upgrade`.
     ContractWasmHash,
     USDCTokenAddress,
+    // Donation token allowlist. A present `true` value means the Stellar
+    // asset contract may be used by `donate` and `donate_asset`.
+    AllowedToken(Address),
     // Price oracle for USDC → XLM conversion
     OracleAddress,
     // Addresses of every voter on a given proposal, exposed via
@@ -596,6 +599,30 @@ fn require_admin_for_routine(env: &Env, signer: &Address) {
     let admin_set: Vec<Address> = read_admin_set(env);
     if !admin_set.contains(signer) {
         panic!("Only admin can perform this action");
+    }
+}
+
+/// Return the deterministic Stellar Asset Contract address for native XLM.
+fn native_xlm_token(env: &Env) -> Address {
+    // XDR `Asset::Native` is the four-byte, big-endian discriminant zero.
+    let serialized_native_asset = Bytes::from_array(env, &[0, 0, 0, 0]);
+    env.deployer()
+        .with_stellar_asset(serialized_native_asset)
+        .deployed_address()
+}
+
+fn token_is_allowed(env: &Env, token: &Address) -> bool {
+    token == &native_xlm_token(env)
+        || env
+            .storage()
+            .instance()
+            .get(&DataKey::AllowedToken(token.clone()))
+            .unwrap_or(false)
+}
+
+fn require_allowed_token(env: &Env, token: &Address) {
+    if !token_is_allowed(env, token) {
+        panic!("Token is not allowed for donations");
     }
 }
 
@@ -1099,7 +1126,7 @@ fn require_project_verified_for_donation(env: &Env, project_id: &String) {
 /// Read the configured platform fee in basis points.
 /// Returns 0 when the `fees` feature is disabled or no fee has been configured,
 /// preserving backward compatibility.
-fn read_platform_fee_bps(_env: &Env) -> u32 {
+fn read_platform_fee_bps(env: &Env) -> u32 {
     #[cfg(feature = "fees")]
     {
         env.storage()
@@ -1109,6 +1136,7 @@ fn read_platform_fee_bps(_env: &Env) -> u32 {
     }
     #[cfg(not(feature = "fees"))]
     {
+        let _ = env;
         0
     }
 }
@@ -2246,6 +2274,7 @@ impl IndigoPayContract {
     ) {
         donor.require_auth();
         require_not_paused(&env);
+        require_allowed_token(&env, &token);
         if amount <= 0 {
             panic!("Donation amount must be positive");
         }
@@ -2310,12 +2339,14 @@ impl IndigoPayContract {
     /// a second token transfer. This keeps the contract simple while
     /// leveraging Stellar's native DEX for path payments.
     ///
-    /// `source_asset_code` is a short symbol identifying the source asset
-    /// (e.g. "yXLM", "USDT", "BTC") for the on-chain donation record.
+    /// `source_asset` is the Stellar Asset Contract address of the source
+    /// asset and must be allowlisted (native XLM is always accepted).
+    /// `source_asset_code` is a short symbol identifying it in the record.
     /// Backward-compatible path-payment entrypoint.
     #[cfg(any(feature = "donation", feature = "testutils"))]
     pub fn donate_asset(
         env: Env,
+        source_asset: Address,
         donor: Address,
         project_id: String,
         xlm_amount: i128,
@@ -2324,6 +2355,7 @@ impl IndigoPayContract {
     ) {
         Self::donate_asset_with_privacy(
             env,
+            source_asset,
             donor,
             project_id,
             xlm_amount,
@@ -2335,8 +2367,10 @@ impl IndigoPayContract {
 
     /// Record a path-payment donation with an attribution preference.
     #[cfg(any(feature = "donation", feature = "testutils"))]
+    #[allow(clippy::too_many_arguments)]
     pub fn donate_asset_with_privacy(
         env: Env,
+        source_asset: Address,
         donor: Address,
         project_id: String,
         xlm_amount: i128,
@@ -2346,6 +2380,7 @@ impl IndigoPayContract {
     ) {
         donor.require_auth();
         require_not_paused(&env);
+        require_allowed_token(&env, &source_asset);
         if xlm_amount <= 0 {
             panic!("Donation amount must be positive");
         }
@@ -4553,6 +4588,36 @@ impl IndigoPayContract {
         env.storage().instance().get(&DataKey::USDCTokenAddress)
     }
 
+    /// Admin-only: allow a Stellar asset contract to be used for donations.
+    pub fn add_allowed_token(env: Env, admin: Address, token: Address) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::AllowedToken(token.clone()), &true);
+        env.events()
+            .publish((Symbol::new(&env, "token_added"), admin), token);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Admin-only: remove a Stellar asset contract from the donation allowlist.
+    /// Native XLM remains accepted regardless of this storage entry.
+    pub fn remove_allowed_token(env: Env, admin: Address, token: Address) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        env.storage()
+            .instance()
+            .remove(&DataKey::AllowedToken(token.clone()));
+        env.events()
+            .publish((Symbol::new(&env, "token_removed"), admin), token);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Return whether a token is accepted for donations. Native XLM always is.
+    pub fn is_token_allowed(env: Env, token: Address) -> bool {
+        token_is_allowed(&env, &token)
+    }
+
     /// Admin-only: Configure the per-donor per-project donation rate limit.
     pub fn set_donation_rate_limit(
         env: Env,
@@ -6169,6 +6234,7 @@ mod tests {
         let donor = Address::generate(&env);
         let amount = 50 * STROOP; // 50 XLM
         soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&donor, &amount);
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &amount, &1u32);
 
         // get_global_stats must agree with each individual getter
@@ -7409,6 +7475,7 @@ mod tests {
         let token_client = StellarAssetClient::new(&env, &token);
 
         token_client.mint(&donor, &(200 * STROOP));
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &(101 * STROOP), &0u32);
 
         assert!(!client.has_project_nft(&donor, &pid));
@@ -7435,6 +7502,7 @@ mod tests {
         let token_client = StellarAssetClient::new(&env, &token);
 
         token_client.mint(&donor, &(100 * STROOP));
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &(50 * STROOP), &0u32);
 
         client.mint_project_nft(&donor, &pid);
@@ -7452,6 +7520,7 @@ mod tests {
         let token_client = StellarAssetClient::new(&env, &token);
 
         token_client.mint(&donor, &(200 * STROOP));
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &(101 * STROOP), &0u32);
 
         client.mint_project_nft(&donor, &pid);
@@ -7480,7 +7549,9 @@ mod tests {
         let token_client = StellarAssetClient::new(&env, &token);
 
         token_client.mint(&donor, &(300 * STROOP));
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid1, &(101 * STROOP), &0u32);
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid2, &(50 * STROOP), &1u32);
 
         client.mint_project_nft(&donor, &pid1);
@@ -7500,7 +7571,9 @@ mod tests {
 
         // Two donations summing to > 100 XLM
         token_client.mint(&donor, &(200 * STROOP));
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &(60 * STROOP), &0u32);
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &(60 * STROOP), &1u32);
 
         client.mint_project_nft(&donor, &pid);
@@ -7591,6 +7664,7 @@ mod tests {
             .register_stellar_asset_contract_v2(token_admin)
             .address();
         StellarAssetClient::new(&env, &token).mint(&donor, &(25 * STROOP));
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &(25 * STROOP), &42u32);
     }
 
@@ -7606,6 +7680,7 @@ mod tests {
             .register_stellar_asset_contract_v2(token_admin)
             .address();
         StellarAssetClient::new(&env, &token).mint(&donor, &(25 * STROOP));
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &(25 * STROOP), &42u32);
 
         let p = client.get_project(&pid);
@@ -7629,6 +7704,8 @@ mod tests {
             .address();
         let token_client = StellarAssetClient::new(&env, &token);
         token_client.mint(&donor, &(15 * STROOP));
+
+        client.add_allowed_token(&client.get_admin(), &token);
 
         client.donate(&token, &donor, &pid, &(15 * STROOP), &1u32);
 
@@ -7667,8 +7744,12 @@ mod tests {
             .address();
         StellarAssetClient::new(&env, &token).mint(&donor, &(30 * STROOP));
 
+        client.add_allowed_token(&client.get_admin(), &token);
+
         client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32);
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &(10 * STROOP), &1u32);
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &(10 * STROOP), &2u32);
 
         let p = client.get_project(&pid);
@@ -7694,7 +7775,10 @@ mod tests {
         token_client.mint(&donor_a, &(10 * STROOP));
         token_client.mint(&donor_b, &(10 * STROOP));
 
+        client.add_allowed_token(&client.get_admin(), &token);
+
         client.donate(&token, &donor_a, &pid, &(10 * STROOP), &0u32);
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor_b, &pid, &(10 * STROOP), &1u32);
 
         let p = client.get_project(&pid);
@@ -8155,7 +8239,20 @@ mod tests {
             &(env.ledger().sequence() + 1_000),
         );
         let donor = Address::generate(&env);
-        client.donate_asset(&donor, &pid, &(30 * STROOP), &symbol_short!("yXLM"), &0u32);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&donor, &(30 * STROOP));
+        client.add_allowed_token(&client.get_admin(), &token);
+        client.donate_asset(
+            &token,
+            &donor,
+            &pid,
+            &(30 * STROOP),
+            &symbol_short!("yXLM"),
+            &0u32,
+        );
         assert_eq!(
             client.get_project(&pid).campaign_status,
             CampaignStatus::GoalReached
@@ -8245,6 +8342,7 @@ mod tests {
         let donor = Address::generate(&env);
         let token = mint_xlm(&env, &donor, 3 * STROOP);
         for i in 0..3u32 {
+            client.add_allowed_token(&client.get_admin(), &token);
             client.donate(&token, &donor, &pid, &STROOP, &i);
         }
         assert_eq!(client.get_project(&pid).total_raised, 3 * STROOP);
@@ -8258,8 +8356,10 @@ mod tests {
         let donor = Address::generate(&env);
         let token = mint_xlm(&env, &donor, 4 * STROOP);
         for i in 0..3u32 {
+            client.add_allowed_token(&client.get_admin(), &token);
             client.donate(&token, &donor, &pid, &STROOP, &i);
         }
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &STROOP, &3u32);
     }
 
@@ -8270,11 +8370,14 @@ mod tests {
         let donor = Address::generate(&env);
         let token = mint_xlm(&env, &donor, 3 * STROOP);
         let window_start = env.ledger().sequence();
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &STROOP, &0u32);
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &STROOP, &1u32);
 
         extend_ttl(&env, &cid);
         env.ledger().set_sequence_number(window_start + 50);
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &STROOP, &2u32);
         assert_eq!(client.get_project(&pid).total_raised, 3 * STROOP);
     }
@@ -8286,13 +8389,16 @@ mod tests {
         let donor = Address::generate(&env);
         let token = mint_xlm(&env, &donor, 3 * STROOP);
         let window_start = env.ledger().sequence();
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &STROOP, &0u32);
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &STROOP, &1u32);
 
         // Still inside the window — third donation must be blocked.
         extend_ttl(&env, &cid);
         env.ledger().set_sequence_number(window_start + 50 - 1);
         let blocked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.add_allowed_token(&client.get_admin(), &token);
             client.donate(&token, &donor, &pid, &STROOP, &2u32);
         }));
         assert!(
@@ -8302,6 +8408,7 @@ mod tests {
 
         // Exactly at window expiry — window resets and donation succeeds.
         env.ledger().set_sequence_number(window_start + 50);
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &STROOP, &2u32);
         assert_eq!(client.get_project(&pid).total_raised, 3 * STROOP);
     }
@@ -8322,9 +8429,12 @@ mod tests {
 
         let donor = Address::generate(&env);
         let token = mint_xlm(&env, &donor, 5 * STROOP);
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &STROOP, &0u32);
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &STROOP, &1u32);
         // pid is at limit; pid2 still has its own counter.
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid2, &STROOP, &2u32);
         assert_eq!(client.get_project(&pid2).total_raised, STROOP);
     }
@@ -8337,6 +8447,8 @@ mod tests {
         let donor_b = Address::generate(&env);
         let token_a = mint_xlm(&env, &donor_a, 3 * STROOP);
         let token_b = mint_xlm(&env, &donor_b, 3 * STROOP);
+        client.add_allowed_token(&admin, &token_a);
+        client.add_allowed_token(&admin, &token_b);
 
         client.donate(&token_a, &donor_a, &pid, &STROOP, &0u32);
         client.donate(&token_a, &donor_a, &pid, &STROOP, &1u32);
@@ -8352,9 +8464,11 @@ mod tests {
         let token = mint_xlm(&env, &donor, 5 * STROOP);
 
         client.set_donation_rate_limit(&admin, &1, &100);
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &STROOP, &0u32);
 
         let blocked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.add_allowed_token(&client.get_admin(), &token);
             client.donate(&token, &donor, &pid, &STROOP, &1u32);
         }));
         assert!(
@@ -8364,7 +8478,9 @@ mod tests {
 
         client.set_donation_rate_limit(&admin, &3, &100);
         assert_eq!(client.get_donation_rate_limit(), (3, 100));
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &STROOP, &1u32);
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &STROOP, &2u32);
         assert_eq!(client.get_project(&pid).total_raised, 3 * STROOP);
     }
@@ -8382,6 +8498,7 @@ mod tests {
         let (env, _cid, client, _admin, pid) = setup();
         let donor = Address::generate(&env);
         let token = mint_xlm(&env, &donor, STROOP);
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &STROOP, &0u32);
         assert_eq!(client.get_donation_rate_limit(), (10, 720));
         assert_eq!(client.get_project(&pid).total_raised, STROOP);
@@ -8426,6 +8543,7 @@ mod tests {
 
         // A donate attempt must panic with the contract-level pause message.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.add_allowed_token(&client.get_admin(), &token);
             client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32);
         }));
         assert!(result.is_err(), "donate should be rejected while paused");
@@ -8454,6 +8572,7 @@ mod tests {
             .register_stellar_asset_contract_v2(token_admin)
             .address();
         soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&donor, &(10 * STROOP));
+        client.add_allowed_token(&client.get_admin(), &token);
         client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32);
 
         let p = client.get_project(&pid);
