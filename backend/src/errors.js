@@ -50,6 +50,10 @@ const ERROR_CODES = {
   INVALID_TX_HASH: { status: 400, message: "Invalid transaction hash" },
   INVALID_CURSOR: { status: 400, message: "Invalid pagination cursor" },
   TX_FAILED: { status: 400, message: "Transaction failed on Stellar" },
+  GEOCODING_ERROR: {
+    status: 422,
+    message: "Could not geocode the provided location",
+  },
   INVALID_STATE_TRANSITION: {
     status: 400,
     message: "Invalid state transition",

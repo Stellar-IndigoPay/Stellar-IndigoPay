@@ -1,4 +1,4 @@
-use soroban_sdk::{symbol_short, Address, BytesN, Env};
+use soroban_sdk::{symbol_short, Address, BytesN, Env, Symbol};
 
 pub fn emit_stealth_donation(
     env: &Env,
@@ -21,22 +21,9 @@ pub fn emit_stealth_donation(
     );
 }
 
-pub fn emit_pause_recurring(env: &Env, donation_id: u64, donor: &Address, paused_at: u64) {
+pub fn emit_stealth_scan(env: &Env, project_wallet: &Address, donation_count: u32) {
     env.events().publish(
-        (symbol_short!("rec_pause"), donor.clone()),
-        (donation_id, paused_at),
-    );
-}
-
-pub fn emit_resume_recurring(
-    env: &Env,
-    donation_id: u64,
-    donor: &Address,
-    catch_up: bool,
-    catch_up_amount: i128,
-) {
-    env.events().publish(
-        (symbol_short!("rec_resum"), donor.clone()),
-        (donation_id, catch_up, catch_up_amount),
+        (Symbol::new(env, "StealthScan"), project_wallet.clone()),
+        (donation_count, env.ledger().timestamp()),
     );
 }

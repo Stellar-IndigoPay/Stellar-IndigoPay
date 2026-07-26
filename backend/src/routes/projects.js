@@ -35,7 +35,7 @@ const { adminRequired } = require("../middleware/auth");
 // sanitizedStringField imported but unused — kept for future validation use
 // eslint-disable-next-line no-unused-vars
 const { sanitizedStringField } = require("../middleware/validation");
-const { AppError } = require("../errors");
+const { AppError, ERROR_CODES } = require("../errors");
 const { geocode } = require("../services/geocoder");
 const logger = require("../logger");
 
@@ -453,6 +453,7 @@ router.post("/", validate(projectSubmissionSchema), async (req, res, next) => {
     );
 
     let project = result.rows[0];
+    const warnings = [];
     const coords = await geocode(project.location);
     if (coords) {
       const geocoded = await pool.query(
@@ -465,11 +466,19 @@ router.post("/", validate(projectSubmissionSchema), async (req, res, next) => {
         { event: "project_no_geocode", projectId: id, location: project.location },
         "Could not geocode project location",
       );
+      warnings.push({
+        code: "GEOCODING_ERROR",
+        message: ERROR_CODES.GEOCODING_ERROR.message,
+      });
     }
 
     await invalidateCache("cache:v1:projects:list:*");
     await invalidateCache("cache:v1:map:*");
-    res.status(201).json({ success: true, data: mapProjectRow(project) });
+    res.status(201).json({
+      success: true,
+      data: mapProjectRow(project),
+      ...(warnings.length ? { warnings } : {}),
+    });
   } catch (e) {
     next(e);
   }
@@ -776,7 +785,7 @@ router.post("/:id/milestones/:milestoneId/reach", async (req, res, next) => {
  * GET /api/projects/admin/pending
  * Admin-only endpoint returning unverified active projects for review.
  */
-router.get("/admin/pending", async (req, res, next) => {
+router.get("/admin/pending", adminRequired, async (req, res, next) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
     const offset = parseInt(req.query.offset, 10) || 0;

@@ -14,6 +14,7 @@
 
 const PgBoss = require("pg-boss");
 const pool = require("../db/pool");
+const logger = require("../logger");
 const { v4: uuid } = require("uuid");
 
 const QUEUE = "donation-match";
@@ -27,7 +28,10 @@ async function start() {
 
   boss = new PgBoss(connectionString);
   boss.on("error", (err) =>
-    console.error("[matchQueue] pg-boss error:", err.message),
+    logger.error(
+      { event: "match_queue_error", err: err.message },
+      "Match queue pg-boss error",
+    ),
   );
 
   await boss.start();
@@ -86,21 +90,15 @@ async function start() {
       await client.query("COMMIT");
     } catch (err) {
       await client.query("ROLLBACK").catch(() => {});
-      console.error(
-        "[matchQueue] error processing match for project",
-        projectId,
-        err.message,
+      logger.error(
+        { event: "match_queue_job_error", projectId, err: err.message },
+        "Match queue job failed",
       );
       throw err; // pg-boss will retry
     } finally {
       client.release();
     }
   });
-
-  console.log(
-    "[matchQueue] pg-boss started, worker registered on queue:",
-    QUEUE,
-  );
 }
 
 async function stop() {
