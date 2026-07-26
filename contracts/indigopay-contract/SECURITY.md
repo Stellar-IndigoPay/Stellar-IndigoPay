@@ -313,3 +313,13 @@ statistics, but it is not an in-WASM Groth16 verifier. Soundness depends on the
 off-chain circuit, prover, and signing-key custody. Ledger observers may still
 identify a transaction submitter unless a relayer is used. Exact public totals
 also mean the donation amount is recoverable from the public commitment.
+
+## Multi-Token Donation Support (#421)
+
+### Trust model & Registry security
+
+- **Token registration is admin-gated.** `register_token` and `remove_token` require `require_admin_for_routine` and are paused-gated by `require_not_paused`. Only authorized admins can add or deactivate tokens in the registry.
+- **Oracle rate safety.** Oracle conversion uses checked multiplication (`checked_mul`) when computing `xlm_equivalent` from token amounts and oracle price feeds. Oracles returning price <= 0 panic immediately to prevent invalid state.
+- **Per-token rate limit isolation.** `donate_token` keys rate limits on `DataKey::DonorRateLimitPerToken(donor, project_id, token_address)`. This guarantees that rate limit windows for distinct assets (e.g. XLM vs USDC vs custom tokens) operate independently.
+- **Backward compatibility.** Legacy `donate` and `donate_usdc` entrypoints seamlessly delegate to `donate_token_with_privacy`, ensuring existing integrations continue to function without state corruption or breakage.
+

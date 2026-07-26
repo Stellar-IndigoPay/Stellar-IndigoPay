@@ -45,6 +45,7 @@ use soroban_sdk::{contracterror, panic_with_error};
 /// Any on-chain contract implementing `get_price` can serve as the oracle.
 /// `get_price` returns the number of XLM stroops equivalent to 1 USDC stroop.
 /// Example: if 1 USDC = 8 XLM, return 8.
+#[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
 #[contractclient(name = "OracleClient")]
 pub trait OracleInterface {
     fn get_price(env: Env) -> i128;
@@ -338,6 +339,16 @@ pub struct ImpactLeaf {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TokenConfig {
+    pub token: Address,
+    pub oracle: Address,
+    pub symbol: Symbol,
+    pub active: bool,
+    pub registered_at: u32,
+}
+
+#[contracttype]
 pub enum DataKey {
     // Multi-sig admin set: Vec<Address> of authorized admin addresses.
     // Replaces the former single-admin `Admin` variant.
@@ -458,6 +469,10 @@ pub enum DataKey {
     PlatformTreasury,
     /// Quadratic voting: credits spent by a voter on a project proposal.
     VoteCredits(String, Address),
+    // Multi-token registry
+    TokenConfig(Address),
+    TokenList,
+    DonorRateLimitPerToken(Address, String, Address),
     // Pending M-of-N force-refund escalation. Appended to preserve the
     // discriminants of all previously deployed DataKey variants.
     ForceRefund(u32),
@@ -466,6 +481,8 @@ pub enum DataKey {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const STROOP: i128 = 10_000_000;
+#[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+const PRICE_SCALE: i128 = 1;
 
 // 7 days × 24 h × 3600 s ÷ 5 s per ledger ≈ 120_960 ledgers — used as the
 // default when `create_proposal` is called without an explicit duration.
@@ -1124,6 +1141,7 @@ pub fn calculate_badge(total_stroops: i128) -> BadgeTier {
 }
 
 /// Reject donations when the project's campaign is not accepting them.
+#[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
 fn require_campaign_accepts_donation(project: &Project, current_ledger: u32) {
     match project.campaign_status {
         CampaignStatus::None => {}
@@ -1138,17 +1156,78 @@ fn require_campaign_accepts_donation(project: &Project, current_ledger: u32) {
     }
 }
 
+#[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+fn get_token_config_for_donate_token(env: &Env, token: &Address) -> TokenConfig {
+    let config_key = DataKey::TokenConfig(token.clone());
+    if let Some(config) = env.storage().instance().get::<_, TokenConfig>(&config_key) {
+        if !config.active {
+            panic!("Token is inactive");
+        }
+        return config;
+    }
+
+    if let Some(native_token) = env
+        .storage()
+        .instance()
+        .get::<_, Address>(&DataKey::NativeTokenAddress)
+    {
+        if native_token == *token {
+            return TokenConfig {
+                token: token.clone(),
+                oracle: token.clone(),
+                symbol: symbol_short!("XLM"),
+                active: true,
+                registered_at: 0,
+            };
+        }
+    }
+
+    if let Some(usdc_token) = env
+        .storage()
+        .instance()
+        .get::<_, Address>(&DataKey::USDCTokenAddress)
+    {
+        if usdc_token == *token {
+            let oracle_addr = env
+                .storage()
+                .instance()
+                .get::<_, Address>(&DataKey::OracleAddress)
+                .expect("Price oracle not configured");
+            return TokenConfig {
+                token: token.clone(),
+                oracle: oracle_addr,
+                symbol: symbol_short!("USDC"),
+                active: true,
+                registered_at: 0,
+            };
+        }
+    }
+
+    panic!("Token not registered");
+}
+
+#[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+fn anon_address(env: &Env) -> Address {
+    Address::from_string(&String::from_str(
+        env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    ))
+}
+
 /// Process a single donation's core logic: rate limiting, project validation,
 /// state updates (project, donor, NFT, globals), token transfers, and events.
 /// Does NOT handle auth, paused-check, or ensure_min_ttl — the caller is
 /// responsible for those.
+#[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
 #[allow(clippy::too_many_arguments)]
-fn process_donation(
+fn process_donation_token(
     env: &Env,
     token: &Address,
+    token_symbol: &Symbol,
     donor: &Address,
     project_id: &String,
-    amount: i128,
+    raw_amount: i128,
+    xlm_equivalent: i128,
     msg_hash: u32,
     anonymous: bool,
 ) {
@@ -1164,15 +1243,20 @@ fn process_donation(
         .get(&DataKey::DonationRateLimitWindow)
         .unwrap_or(DEFAULT_DONATION_RATE_LIMIT_WINDOW);
 
-    let rate_key = DataKey::DonorRateLimit(donor.clone(), project_id.clone());
+    let rate_key =
+        DataKey::DonorRateLimitPerToken(donor.clone(), project_id.clone(), token.clone());
     let mut window: RateLimitWindow =
-        env.storage()
-            .instance()
-            .get(&rate_key)
-            .unwrap_or(RateLimitWindow {
-                window_start: current_ledger,
-                count: 0,
-            });
+        env.storage().instance().get(&rate_key).unwrap_or_else(|| {
+            let legacy_key = DataKey::DonorRateLimit(donor.clone(), project_id.clone());
+            env.storage()
+                .instance()
+                .get(&legacy_key)
+                .unwrap_or(RateLimitWindow {
+                    window_start: current_ledger,
+                    count: 0,
+                })
+        });
+
     if current_ledger - window.window_start >= window_ledgers {
         window.window_start = current_ledger;
         window.count = 0;
@@ -1201,18 +1285,14 @@ fn process_donation(
     require_project_verified_for_donation(env, project_id);
     require_campaign_accepts_donation(&project, env.ledger().sequence());
 
-    // Pre-compute CO2 increment with checked multiplication so an attacker
-    // can't trigger a silent wrap via a project with a huge co2_per_xlm.
-    let xlm_units = amount / STROOP;
+    // Pre-compute CO2 increment using XLM equivalent
+    let xlm_units = xlm_equivalent / STROOP;
     let co2_increment = xlm_units
         .checked_mul(project.co2_per_xlm as i128)
         .expect("CO2 calculation overflow");
 
     let stats_donor = if anonymous {
-        Address::from_string(&String::from_str(
-            env,
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-        ))
+        anon_address(env)
     } else {
         donor.clone()
     };
@@ -1228,12 +1308,10 @@ fn process_donation(
         });
     let prev_badge = donor_stats.badge.clone();
 
-    // ── Effects: all state writes BEFORE the external token transfer
-    //    (Checks-Effects-Interactions to defend against reentrancy from a
-    //    malicious token contract passed via `token`).
+    // ── Effects: state updates using XLM equivalent
     project.total_raised = project
         .total_raised
-        .checked_add(amount)
+        .checked_add(xlm_equivalent)
         .expect("Project total_raised overflow");
     let goal_reached = apply_campaign_goal_progress(&mut project);
     let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
@@ -1256,7 +1334,7 @@ fn process_donation(
 
     donor_stats.total_donated = donor_stats
         .total_donated
-        .checked_add(amount)
+        .checked_add(xlm_equivalent)
         .expect("Donor total_donated overflow");
     donor_stats.donation_count = donor_stats
         .donation_count
@@ -1273,17 +1351,17 @@ fn process_donation(
         .instance()
         .set(&DataKey::DonorStats(stats_donor), &donor_stats);
 
-    // Track per-project cumulative donations for milestone NFT eligibility.
+    // Track per-project cumulative donations for milestone NFT eligibility
     let proj_total_key = DataKey::DonorProjectTotal(project_id.clone(), donor.clone());
     let prev_proj_total: i128 = env.storage().instance().get(&proj_total_key).unwrap_or(0);
     env.storage().instance().set(
         &proj_total_key,
         &prev_proj_total
-            .checked_add(amount)
+            .checked_add(xlm_equivalent)
             .expect("DonorProjectTotal overflow"),
     );
 
-    // Auto-mint an Impact NFT when a donor reaches a new badge tier.
+    // Auto-mint Impact NFT when donor reaches new badge tier
     if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
         let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
         if !env.storage().instance().has(&nft_key) {
@@ -1310,19 +1388,21 @@ fn process_donation(
     env.storage()
         .instance()
         .set(&DataKey::DonationCount, &new_dc);
-    // Store donation record for trustless enumeration
+
+    // Store donation record with raw token amount and token symbol
     let donation_record = DonationRecord {
         donor: donor.clone(),
         anonymous,
         project: project_id.clone(),
-        amount,
+        amount: raw_amount,
         ledger: env.ledger().sequence(),
         message_hash: msg_hash,
-        currency: symbol_short!("XLM"),
+        currency: token_symbol.clone(),
     };
     env.storage()
         .instance()
         .set(&DataKey::DonationRecord(dc), &donation_record);
+
     if anonymous {
         let count: u32 = env
             .storage()
@@ -1336,7 +1416,7 @@ fn process_donation(
                 .expect("AnonymousDonationCount overflow"),
         );
     }
-    // Snapshot CO₂ offset for exact reversal on refund (#290).
+
     env.storage()
         .instance()
         .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
@@ -1346,7 +1426,9 @@ fn process_donation(
         .instance()
         .get(&DataKey::GlobalTotalRaised)
         .unwrap_or(0);
-    let new_gr = gr.checked_add(amount).expect("GlobalTotalRaised overflow");
+    let new_gr = gr
+        .checked_add(xlm_equivalent)
+        .expect("GlobalTotalRaised overflow");
     env.storage()
         .instance()
         .set(&DataKey::GlobalTotalRaised, &new_gr);
@@ -1361,14 +1443,13 @@ fn process_donation(
         .instance()
         .set(&DataKey::GlobalCO2OffsetGrams, &new_gc);
 
-    // ── Interaction: external call happens after every effect is durable.
+    // ── Interaction: external token transfer of raw_amount
     let fee_bps = read_platform_fee_bps(env);
     #[allow(unused_variables)]
-    let (project_amount, fee_amount) = split_fee(amount, fee_bps);
+    let (project_amount, fee_amount) = split_fee(raw_amount, fee_bps);
 
     let token_client = token::Client::new(env, token);
 
-    // Transfer platform fee to treasury (if configured and feature enabled).
     #[cfg(feature = "fees")]
     if fee_amount > 0 {
         let treasury: Address = env
@@ -1379,18 +1460,61 @@ fn process_donation(
         token_client.transfer(donor, &treasury, &fee_amount);
     }
 
-    // Transfer remainder to project wallet.
     token_client.transfer(donor, &project.wallet, &project_amount);
 
     #[cfg(feature = "fees")]
     env.events().publish(
         (symbol_short!("donated"), donor.clone(), project_id.clone()),
-        (amount, donor_stats.badge.clone(), msg_hash, fee_amount),
+        (raw_amount, token_symbol.clone(), msg_hash, fee_amount),
     );
     #[cfg(not(feature = "fees"))]
     env.events().publish(
-        (symbol_short!("donated"), donor.clone(), project_id.clone()),
-        (amount, donor_stats.badge.clone(), msg_hash),
+        (
+            symbol_short!("donated"),
+            if anonymous {
+                Address::from_string(&String::from_str(
+                    env,
+                    "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+                ))
+            } else {
+                donor.clone()
+            },
+            project_id.clone(),
+        ),
+        (raw_amount, token_symbol.clone(), msg_hash),
+    );
+}
+
+#[cfg(any(feature = "donation", feature = "usdc", feature = "testutils"))]
+#[allow(clippy::too_many_arguments)]
+fn process_donation(
+    env: &Env,
+    token: &Address,
+    donor: &Address,
+    project_id: &String,
+    amount: i128,
+    msg_hash: u32,
+    anonymous: bool,
+) {
+    let token_symbol = if let Some(config) = env
+        .storage()
+        .instance()
+        .get::<_, TokenConfig>(&DataKey::TokenConfig(token.clone()))
+    {
+        config.symbol
+    } else {
+        symbol_short!("XLM")
+    };
+    process_donation_token(
+        env,
+        token,
+        &token_symbol,
+        donor,
+        project_id,
+        amount,
+        amount,
+        msg_hash,
+        anonymous,
     );
 }
 
@@ -2077,6 +2201,7 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
+    #[cfg(any(feature = "batch", feature = "donation", feature = "testutils"))]
     pub fn batch_donate(env: Env, token: Address, donations: Vec<BatchDonation>) {
         require_not_paused(&env);
 
@@ -4146,246 +4271,178 @@ impl IndigoPayContract {
         msg_hash: u32,
         anonymous: bool,
     ) {
-        donor.require_auth();
+        Self::donate_token_with_privacy(
+            env,
+            usdc_token,
+            donor,
+            project_id,
+            usdc_amount,
+            msg_hash,
+            anonymous,
+        )
+    }
+
+    /// Admin-only: Register a token and its price oracle into the token registry.
+    #[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+    pub fn register_token(
+        env: Env,
+        admin: Address,
+        token_address: Address,
+        oracle_address: Address,
+        symbol: Symbol,
+    ) {
+        require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
-        if usdc_amount <= 0 {
-            panic!("Donation amount must be positive");
-        }
 
-        let stored_usdc: Option<Address> = env.storage().instance().get(&DataKey::USDCTokenAddress);
-        if stored_usdc.is_none() || stored_usdc.unwrap() != usdc_token {
-            panic!("USDC token not configured");
-        }
-
-        // Fetch the USDC→XLM price from the configured oracle.
-        // The oracle returns how many XLM stroops equal 1 USDC stroop.
-        let oracle_addr: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::OracleAddress)
-            .expect("Price oracle not configured");
-        let oracle = OracleClient::new(&env, &oracle_addr);
-        let rate = oracle.get_price();
-        if rate <= 0 {
-            panic!("Oracle returned invalid price");
-        }
-        let xlm_equivalent = usdc_amount
-            .checked_mul(rate)
-            .expect("USDC to XLM conversion overflow");
-
-        let mut project: Project = env
-            .storage()
-            .instance()
-            .get(&DataKey::Project(project_id.clone()))
-            .expect("Project not found");
-        if !project.active {
-            panic!("Project is not accepting donations");
-        }
-        if project.paused {
-            panic!("Project is temporarily paused");
-        }
-        #[cfg(feature = "project_verification")]
-        require_project_verified_for_donation(&env, &project_id);
-        require_campaign_accepts_donation(&project, env.ledger().sequence());
-
-        // Pre-compute CO2 increment using XLM-equivalent
-        let xlm_units = xlm_equivalent / STROOP;
-        let co2_increment = xlm_units
-            .checked_mul(project.co2_per_xlm as i128)
-            .expect("CO2 calculation overflow");
-
-        let stats_donor = if anonymous {
-            Address::from_string(&String::from_str(
-                &env,
-                "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-            ))
-        } else {
-            donor.clone()
-        };
-        let mut donor_stats: DonorStats = env
-            .storage()
-            .instance()
-            .get(&DataKey::DonorStats(stats_donor.clone()))
-            .unwrap_or(DonorStats {
-                total_donated: 0,
-                donation_count: 0,
-                badge: BadgeTier::None,
-                co2_offset_grams: 0,
-            });
-        let prev_badge = donor_stats.badge.clone();
-
-        // Update project and donor stats using XLM-equivalent
-        project.total_raised = project
-            .total_raised
-            .checked_add(xlm_equivalent)
-            .expect("Project total_raised overflow");
-        let goal_reached = apply_campaign_goal_progress(&mut project);
-        let donated_key = DataKey::HasDonated(project_id.clone(), donor.clone());
-        if !env.storage().instance().has(&donated_key) {
-            env.storage().instance().set(&donated_key, &true);
-            project.donor_count = project
-                .donor_count
-                .checked_add(1)
-                .expect("Project donor_count overflow");
-        }
-        env.storage()
-            .instance()
-            .set(&DataKey::Project(project_id.clone()), &project);
-        if goal_reached {
-            env.events().publish(
-                (symbol_short!("camp_goal"), project_id.clone()),
-                project.total_raised,
-            );
-        }
-
-        donor_stats.total_donated = donor_stats
-            .total_donated
-            .checked_add(xlm_equivalent)
-            .expect("Donor total_donated overflow");
-        donor_stats.donation_count = donor_stats
-            .donation_count
-            .checked_add(1)
-            .expect("Donor donation_count overflow");
-        donor_stats.co2_offset_grams = donor_stats
-            .co2_offset_grams
-            .checked_add(co2_increment)
-            .expect("Donor co2_offset overflow");
-        donor_stats.badge = calculate_badge(donor_stats.total_donated);
-        #[cfg(feature = "delegation")]
-        update_delegated_weight_if_needed(&env, &donor, &prev_badge, &donor_stats.badge);
-        env.storage()
-            .instance()
-            .set(&DataKey::DonorStats(stats_donor.clone()), &donor_stats);
-
-        if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
-            let nft_key = DataKey::ImpactNFT(donor.clone(), donor_stats.badge.clone());
-            if !env.storage().instance().has(&nft_key) {
-                let nft = ImpactNFT {
-                    owner: donor.clone(),
-                    tier: donor_stats.badge.clone(),
-                    total_donated: donor_stats.total_donated,
-                    minted_at_ledger: env.ledger().sequence(),
-                };
-                env.storage().instance().set(&nft_key, &nft);
-                env.events().publish(
-                    (symbol_short!("nft_mint"), donor.clone()),
-                    donor_stats.badge.clone(),
-                );
+        let config_key = DataKey::TokenConfig(token_address.clone());
+        if let Some(existing) = env.storage().instance().get::<_, TokenConfig>(&config_key) {
+            if existing.active {
+                panic!("Token already registered");
             }
         }
 
-        let dc: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::DonationCount)
-            .unwrap_or(0);
-        let new_dc = dc.checked_add(1).expect("DonationCount overflow");
-        env.storage()
-            .instance()
-            .set(&DataKey::DonationCount, &new_dc);
-        // Store USDC donation record for trustless enumeration
-        let donation_record = DonationRecord {
-            donor: donor.clone(),
-            anonymous,
-            project: project_id.clone(),
-            amount: usdc_amount,
-            ledger: env.ledger().sequence(),
-            message_hash: msg_hash,
-            currency: symbol_short!("USDC"),
+        let config = TokenConfig {
+            token: token_address.clone(),
+            oracle: oracle_address.clone(),
+            symbol: symbol.clone(),
+            active: true,
+            registered_at: env.ledger().sequence(),
         };
-        env.storage()
-            .instance()
-            .set(&DataKey::DonationRecord(dc), &donation_record);
-        if anonymous {
-            let count: u32 = env
-                .storage()
-                .instance()
-                .get(&DataKey::AnonymousDonationCount)
-                .unwrap_or(0);
-            env.storage().instance().set(
-                &DataKey::AnonymousDonationCount,
-                &count
-                    .checked_add(1)
-                    .expect("AnonymousDonationCount overflow"),
-            );
-        }
-        // Snapshot CO₂ offset for exact reversal on refund (#290).
-        env.storage()
-            .instance()
-            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
 
-        let gr: i128 = env
+        env.storage().instance().set(&config_key, &config);
+
+        let mut list: Vec<Address> = env
             .storage()
             .instance()
-            .get(&DataKey::GlobalTotalRaised)
-            .unwrap_or(0);
-        env.storage().instance().set(
-            &DataKey::GlobalTotalRaised,
-            &gr.checked_add(xlm_equivalent)
-                .expect("GlobalTotalRaised overflow"),
-        );
-
-        let gg: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::GlobalCO2OffsetGrams)
-            .unwrap_or(0);
-        env.storage().instance().set(
-            &DataKey::GlobalCO2OffsetGrams,
-            &gg.checked_add(co2_increment)
-                .expect("GlobalCO2OffsetGrams overflow"),
-        );
-
-        // Track per-project cumulative donations for milestone NFT eligibility.
-        let proj_total_key = DataKey::DonorProjectTotal(project_id.clone(), donor.clone());
-        let prev_proj_total: i128 = env.storage().instance().get(&proj_total_key).unwrap_or(0);
-        env.storage().instance().set(
-            &proj_total_key,
-            &prev_proj_total
-                .checked_add(xlm_equivalent)
-                .expect("DonorProjectTotal overflow"),
-        );
-
-        let token_client = token::Client::new(&env, &usdc_token);
-        let project_wallet = project.wallet;
-
-        // Fee split for USDC donations.
-        let fee_bps = read_platform_fee_bps(&env);
-        #[allow(unused_variables)]
-        let (project_usdc, fee_amount) = split_fee(usdc_amount, fee_bps);
-
-        #[cfg(feature = "fees")]
-        if fee_amount > 0 {
-            let treasury: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::PlatformTreasury)
-                .expect("Platform treasury not configured");
-            token_client.transfer(&donor, &treasury, &fee_amount);
+            .get(&DataKey::TokenList)
+            .unwrap_or(Vec::new(&env));
+        if !list.contains(&token_address) {
+            list.push_back(token_address.clone());
+            env.storage().instance().set(&DataKey::TokenList, &list);
         }
 
-        token_client.transfer(&donor, &project_wallet, &project_usdc);
+        env.events()
+            .publish((symbol_short!("tok_reg"), admin), (token_address, symbol));
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
 
-        #[cfg(feature = "fees")]
-        env.events().publish(
-            (symbol_short!("donated"), donor.clone(), project_id),
-            (usdc_amount, symbol_short!("USDC"), msg_hash, fee_amount),
-        );
-        #[cfg(not(feature = "fees"))]
-        env.events().publish(
-            (
-                symbol_short!("donated"),
-                if anonymous {
-                    Address::from_string(&String::from_str(
-                        &env,
-                        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-                    ))
-                } else {
-                    donor.clone()
-                },
-                project_id,
-            ),
-            (usdc_amount, symbol_short!("USDC"), msg_hash),
+    /// Admin-only: Remove a token from active registration in the registry.
+    #[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+    pub fn remove_token(env: Env, admin: Address, token_address: Address) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+
+        let config_key = DataKey::TokenConfig(token_address.clone());
+        let mut config: TokenConfig = env
+            .storage()
+            .instance()
+            .get(&config_key)
+            .expect("Token not registered");
+
+        if !config.active {
+            panic!("Token is already inactive");
+        }
+
+        config.active = false;
+        env.storage().instance().set(&config_key, &config);
+
+        let mut list: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenList)
+            .unwrap_or(Vec::new(&env));
+        if let Some(idx) = list.first_index_of(&token_address) {
+            list.remove(idx);
+            env.storage().instance().set(&DataKey::TokenList, &list);
+        }
+
+        env.events()
+            .publish((symbol_short!("tok_rem"), admin), token_address);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Query configuration for a registered token.
+    #[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+    pub fn get_token_config(env: Env, token_address: Address) -> Option<TokenConfig> {
+        env.storage()
+            .instance()
+            .get(&DataKey::TokenConfig(token_address))
+    }
+
+    /// Query the list of active registered tokens.
+    #[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+    pub fn get_token_list(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::TokenList)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Generic donation entrypoint for any registered token.
+    #[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+    pub fn donate_token(
+        env: Env,
+        token: Address,
+        donor: Address,
+        project_id: String,
+        amount: i128,
+        msg_hash: u32,
+    ) {
+        Self::donate_token_with_privacy(env, token, donor, project_id, amount, msg_hash, false)
+    }
+
+    /// Generic donation entrypoint for any registered token with explicit privacy choice.
+    #[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+    pub fn donate_token_with_privacy(
+        env: Env,
+        token: Address,
+        donor: Address,
+        project_id: String,
+        amount: i128,
+        msg_hash: u32,
+        anonymous: bool,
+    ) {
+        donor.require_auth();
+        require_not_paused(&env);
+        if amount <= 0 {
+            panic!("Donation amount must be positive");
+        }
+
+        let token_config = get_token_config_for_donate_token(&env, &token);
+
+        let xlm_equivalent = if token_config.symbol == symbol_short!("XLM")
+            || (env.storage().instance().has(&DataKey::NativeTokenAddress)
+                && env
+                    .storage()
+                    .instance()
+                    .get::<_, Address>(&DataKey::NativeTokenAddress)
+                    .unwrap()
+                    == token)
+        {
+            amount
+        } else {
+            let oracle_addr = token_config.oracle.clone();
+            let oracle = OracleClient::new(&env, &oracle_addr);
+            let rate = oracle.get_price();
+            if rate <= 0 {
+                panic!("Oracle returned invalid price");
+            }
+            amount
+                .checked_mul(rate)
+                .expect("Token to XLM conversion overflow")
+                / PRICE_SCALE
+        };
+
+        process_donation_token(
+            &env,
+            &token,
+            &token_config.symbol,
+            &donor,
+            &project_id,
+            amount,
+            xlm_equivalent,
+            msg_hash,
+            anonymous,
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
@@ -4398,6 +4455,34 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::USDCTokenAddress, &usdc_token);
+
+        let oracle_addr = env
+            .storage()
+            .instance()
+            .get(&DataKey::OracleAddress)
+            .unwrap_or(usdc_token.clone());
+
+        let config = TokenConfig {
+            token: usdc_token.clone(),
+            oracle: oracle_addr,
+            symbol: symbol_short!("USDC"),
+            active: true,
+            registered_at: env.ledger().sequence(),
+        };
+
+        let config_key = DataKey::TokenConfig(usdc_token.clone());
+        env.storage().instance().set(&config_key, &config);
+
+        let mut list: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenList)
+            .unwrap_or(Vec::new(&env));
+        if !list.contains(&usdc_token) {
+            list.push_back(usdc_token.clone());
+            env.storage().instance().set(&DataKey::TokenList, &list);
+        }
+
         env.events()
             .publish((symbol_short!("usdc_set"),), usdc_token);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
@@ -4460,6 +4545,38 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::OracleAddress, &oracle);
+
+        if let Some(usdc_token) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::USDCTokenAddress)
+        {
+            let config_key = DataKey::TokenConfig(usdc_token.clone());
+            let mut config = env
+                .storage()
+                .instance()
+                .get::<_, TokenConfig>(&config_key)
+                .unwrap_or(TokenConfig {
+                    token: usdc_token.clone(),
+                    oracle: oracle.clone(),
+                    symbol: symbol_short!("USDC"),
+                    active: true,
+                    registered_at: env.ledger().sequence(),
+                });
+            config.oracle = oracle.clone();
+            env.storage().instance().set(&config_key, &config);
+
+            let mut list: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&DataKey::TokenList)
+                .unwrap_or(Vec::new(&env));
+            if !list.contains(&usdc_token) {
+                list.push_back(usdc_token.clone());
+                env.storage().instance().set(&DataKey::TokenList, &list);
+            }
+        }
+
         env.events().publish((symbol_short!("oracle"),), oracle);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
@@ -6121,9 +6238,11 @@ impl IndigoPayContract {
 ///   - The admin registers it via `IndigoPayContract::set_oracle(admin, oracle_address)`
 ///
 /// Example real oracle sources: Band Protocol, DIA, or a custom TWAP contract.
+#[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
 #[contract]
 pub struct MockOracle;
 
+#[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
 #[contractimpl]
 impl OracleInterface for MockOracle {
     fn get_price(_env: Env) -> i128 {
