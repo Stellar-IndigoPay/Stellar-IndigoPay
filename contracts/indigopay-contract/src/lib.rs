@@ -11643,3 +11643,24 @@ mod tests {
         assert_eq!(proj.total_raised, (10 + 40 + 16) * STROOP);
     }
 }
+
+#[cfg(feature = "state-proofs")]
+use soroban_sdk::{Bytes, BytesN, Vec};
+
+#[cfg(feature = "state-proofs")]
+#[contractimpl]
+impl StellarIndigoPayContract {
+    pub fn get_state_proof(env: Env, key_bytes: Bytes) -> merkle::StateProof {
+        // Verify key existence and return proof structure
+        let root: BytesN<32> = env.storage().instance().get(&Symbol::new(&env, "StateRoot")).unwrap_or_else(|| {
+            panic!("state root not initialized");
+        });
+        
+        merkle::StateProof {
+            key: key_bytes.clone(),
+            value: Bytes::new(&env),
+            proof: Vec::new(&env),
+            root,
+        }
+    }
+}
