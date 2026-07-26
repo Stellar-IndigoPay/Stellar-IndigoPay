@@ -516,6 +516,46 @@ model.
 
 ---
 
+## 41. `prop_phas` (Proposal Phase Transition)
+
+**Description**: Emitted whenever a governance proposal moves from one phase to another (e.g. Deliberation → Voting, Voting → Passed, Voting → Rejected, Passed → Executed, or veto into Rejected). Idempotent — if a transition is attempted but the deadline has not yet passed, no event is emitted.
+
+| Event Name | Topics                             | Data                                    | When Emitted                                        |
+| ---------- | ---------------------------------- | --------------------------------------- | --------------------------------------------------- |
+| `prop_phas`| `["prop_phas", project_id]`       | `(old_phase: ProposalPhase, new_phase: ProposalPhase)` | After `advance_proposal_phase`, `resolve_proposal`, `veto_proposal`, or `execute_proposal` transitions the proposal |
+
+**Phase values**: `0` = Draft, `1` = Deliberation, `2` = Voting, `3` = Passed, `4` = Rejected, `5` = Executed.
+
+---
+
+## 42. `prop_exec` (Proposal Executed)
+
+**Description**: Emitted when a Passed proposal is finalized via `execute_proposal` after the execution delay has elapsed.
+
+| Event Name | Topics                          | Data  | When Emitted                              |
+| ---------- | ------------------------------- | ----- | ----------------------------------------- |
+| `prop_exec`| `["prop_exec", project_id]`    | `()`  | After `execute_proposal` transitions Passed → Executed |
+
+---
+
+## Governance Phase Lifecycle
+
+The multi-round proposal lifecycle (Draft → Deliberation → Voting → Passed/Rejected → Executed) is tracked by these events:
+
+| Event      | Topics                              | When                                                                 |
+| ---------- | ----------------------------------- | -------------------------------------------------------------------- |
+| `prop_new` | `["prop_new", admin]`              | Proposal created (carries `deliberation_ledgers` and `voting_ledgers` in data) |
+| `voted`    | `["voted", voter, project_id]`     | Quadratic vote cast (during Voting phase only)                       |
+| `prop_phas`| `["prop_phas", project_id]`        | Any phase transition (carries `(old_phase, new_phase)` in data)      |
+| `prop_veto`| `["prop_veto", admin]`             | M-of-N admin force-veto (transitions to Rejected immediately)        |
+| `proj_ver` | `["proj_ver"]`                      | Proposal passed with majority (emitted during Voting → Passed transition) |
+| `prop_rej` | `["prop_rej"]`                      | Proposal rejected (tie or losing vote; emitted during Voting → Rejected transition) |
+| `prop_exec`| `["prop_exec", project_id]`        | Proposal finalized after execution delay                             |
+
+When `deliberation_ledgers = 0` at creation, the proposal starts directly in the Voting phase (single-round backward compatibility).
+
+---
+
 ## Usage Notes
 
 - All events follow Soroban’s standard event format: `topics: Vec<Val>`, `data: Val`.
