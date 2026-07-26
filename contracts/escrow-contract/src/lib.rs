@@ -1044,8 +1044,6 @@ impl EscrowContract {
         read_admin_threshold(&env)
     }
 
-
-
     pub fn get_job(env: Env, job_id: String) -> Option<Job> {
         env.storage().instance().get(&DataKey::Job(job_id))
     }

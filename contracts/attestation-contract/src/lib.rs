@@ -441,12 +441,20 @@ fn record_attestations_internal(
 fn read_donor_aggregate(env: &Env, donor: &Address) -> DonorAggregate {
     let key = DataKey::DonorAggregate(donor.clone());
     // Primary: persistent storage (all new writes go here).
-    if let Some(agg) = env.storage().persistent().get::<DataKey, DonorAggregate>(&key) {
+    if let Some(agg) = env
+        .storage()
+        .persistent()
+        .get::<DataKey, DonorAggregate>(&key)
+    {
         return agg;
     }
     // Migration shim: if a value exists only in the pre-upgrade instance storage,
     // copy it into persistent storage so subsequent reads are consistent.
-    if let Some(agg) = env.storage().instance().get::<DataKey, DonorAggregate>(&key) {
+    if let Some(agg) = env
+        .storage()
+        .instance()
+        .get::<DataKey, DonorAggregate>(&key)
+    {
         env.storage().persistent().set(&key, &agg);
         return agg;
     }
@@ -471,12 +479,20 @@ fn write_donor_aggregate(env: &Env, donor: &Address, agg: &DonorAggregate) {
 fn read_chain_aggregate(env: &Env, chain: &String) -> ChainAggregate {
     let key = DataKey::ChainAggregate(chain.clone());
     // Primary: persistent storage (all new writes go here).
-    if let Some(agg) = env.storage().persistent().get::<DataKey, ChainAggregate>(&key) {
+    if let Some(agg) = env
+        .storage()
+        .persistent()
+        .get::<DataKey, ChainAggregate>(&key)
+    {
         return agg;
     }
     // Migration shim: if a value exists only in the pre-upgrade instance storage,
     // copy it into persistent storage so subsequent reads are consistent.
-    if let Some(agg) = env.storage().instance().get::<DataKey, ChainAggregate>(&key) {
+    if let Some(agg) = env
+        .storage()
+        .instance()
+        .get::<DataKey, ChainAggregate>(&key)
+    {
         env.storage().persistent().set(&key, &agg);
         return agg;
     }
