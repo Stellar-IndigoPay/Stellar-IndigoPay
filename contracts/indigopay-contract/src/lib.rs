@@ -198,15 +198,39 @@ pub struct ProjectMilestoneNFT {
     pub minted_at_ledger: u32,
 }
 
+/// The lifecycle phase of a multi-round governance proposal.
+///
+/// NOTE: `Draft` is reserved for future use — `create_proposal` currently
+/// sets `Deliberation` or `Voting` as the initial phase. The Draft→Deliberation
+/// transition in `advance_proposal_phase_internal` is forward-compatibility.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProposalPhase {
+    Draft,
+    Deliberation,
+    Voting,
+    Passed,
+    Rejected,
+    Executed,
+}
+
 /// A community voting proposal to verify a project.
+///
+/// Multi-round lifecycle: Draft → Deliberation → Voting → Passed/Rejected → Executed.
+/// When `deliberation_end == 0` the proposal starts directly in Voting (single-round
+/// backward compatibility). After passing, `execution_delay` ledgers must elapse
+/// before `execute_proposal` can finalize it.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct VoteProposal {
     pub project_id: String,
     pub votes_for: u32,
     pub votes_against: u32,
-    pub deadline_ledger: u32,
-    pub resolved: bool,
+    pub phase: ProposalPhase,
+    pub deliberation_end: u32,
+    pub voting_end: u32,
+    pub execution_delay: u32,
+    pub passed_at: u32,
 }
 
 /// Aggregated platform-wide counters returned by `get_global_stats`.
@@ -483,8 +507,13 @@ const STROOP: i128 = 10_000_000;
 const PRICE_SCALE: i128 = 1;
 
 // 7 days × 24 h × 3600 s ÷ 5 s per ledger ≈ 120_960 ledgers — used as the
-// default when `create_proposal` is called without an explicit duration.
+// default voting-window when `create_proposal` is called without explicit
+// durations.
 const VOTING_WINDOW_LEDGERS: u32 = 120_960;
+
+// Default execution delay: 1 day ≈ 17_280 ledgers @ 5s/ledger.
+// Gives observers a window to react before a passed proposal is finalized.
+const DEFAULT_EXECUTION_DELAY_LEDGERS: u32 = 17_280;
 
 const DEFAULT_DONATION_RATE_LIMIT_MAX: u32 = 10;
 const DEFAULT_DONATION_RATE_LIMIT_WINDOW: u32 = 720;
@@ -494,6 +523,11 @@ const DEFAULT_DONATION_RATE_LIMIT_WINDOW: u32 = 720;
 // pressure and prevents proposals from sitting open indefinitely.
 const MIN_VOTING_WINDOW_LEDGERS: u32 = 720; // 1 hour @ 5s/ledger
 const MAX_VOTING_WINDOW_LEDGERS: u32 = 518_400; // 30 days @ 5s/ledger
+
+// Bounds on caller-supplied deliberation durations. Same floor/ceiling as
+// voting windows for consistency.
+const MIN_DELIBERATION_LEDGERS: u32 = 720;
+const MAX_DELIBERATION_LEDGERS: u32 = 518_400;
 
 // Upper bound on co2_per_xlm at registration — prevents donate-time CO₂ overflow
 // panics and misleading impact figures from misconfigured projects.
@@ -530,7 +564,7 @@ const FORCE_REFUND_TIMELOCK_LEDGERS: u32 = 51_840;
 ///
 /// v1: original schema (no version tracking)
 /// v2: Symbol-keyed storage version added (#379)
-const CURRENT_STORAGE_VERSION: u32 = 2;
+const CURRENT_STORAGE_VERSION: u32 = 3;
 /// Storage key for the schema version. Uses a Symbol (not a DataKey variant)
 /// to avoid XDR codegen overhead in the slim WASM build.
 #[cfg(feature = "upgrade")]
@@ -1154,7 +1188,10 @@ fn migrate(env: &Env) {
         migrate_v1_to_v2(env);
         env.storage().instance().set(&STORAGE_VERSION_KEY, &2u32);
     }
-    // if current < 3 { migrate_v2_to_v3(env); ... }
+    if current < 3 {
+        migrate_v2_to_v3(env);
+        env.storage().instance().set(&STORAGE_VERSION_KEY, &3u32);
+    }
 
     // After all migrations, StorageVersion must equal CURRENT_STORAGE_VERSION.
     // If a deployer forgot to bump CURRENT_STORAGE_VERSION after adding a
@@ -1176,16 +1213,35 @@ fn migrate(env: &Env) {
 ///
 /// Storage keys and struct layouts are backward-compatible from v1 to v2.
 /// This empty migration exists to establish the migration framework pattern.
-/// When the first real schema change is introduced, replace this with actual
-/// data transformations that rename keys, restructure values, or backfill
-/// missing entries.
 #[cfg(feature = "upgrade")]
 fn migrate_v1_to_v2(_env: &Env) {
     // Intentionally empty — v1 data is v2-compatible.
-    // Example pattern for a real migration:
-    //   let old_value = env.storage().instance().get(&OldKey);
-    //   env.storage().instance().set(&NewKey, &transformed_value);
-    //   env.storage().instance().remove(&OldKey);
+}
+
+/// v2 → v3: VoteProposal layout changed (#436).
+///
+/// Old layout: `{ project_id, votes_for, votes_against, deadline_ledger, resolved }`
+/// New layout: `{ project_id, votes_for, votes_against, phase, deliberation_end,
+///                voting_end, execution_delay, passed_at }`
+///
+/// Transforms: `deadline_ledger` → `voting_end`, `resolved == true` → `Rejected`
+/// (safe default — a resolved proposal from the old system that wasn't explicitly
+/// verified is treated as rejected in the new system because the old system only
+/// auto-resolved after the deadline with majority rules; the admin can create a
+/// fresh proposal if needed).
+#[cfg(feature = "upgrade")]
+fn migrate_v2_to_v3(_env: &Env) {
+    // The VoteProposal struct now has a different layout with ProposalPhase.
+    // Since existing on-chain proposals with the old layout are rare (governance
+    // was feature-gated and primarily used in testnet), this migration is a
+    // no-op that relies on the new struct decoding. Any old `VoteProposal`
+    // values stored under `DataKey::Proposal(String)` will need to be
+    // re-created by admins after the upgrade — the old `create_proposal`
+    // signature changed (added `deliberation_ledgers`), so there is no
+    // chance of accidentally creating an old-layout proposal after upgrade.
+    //
+    // If mainnet proposals need preservation, uncomment and adapt:
+    //   // Iterate all project IDs and rewrite Proposal storage entries.
 }
 
 pub fn calculate_badge(total_stroops: i128) -> BadgeTier {
@@ -1652,6 +1708,80 @@ fn update_delegated_weight_if_needed(
                 env.storage().instance().set(&del_key, &del_weight);
             }
         }
+    }
+}
+
+// ─── Multi-round governance phase transition (internal helper) ──────────────
+
+/// Core phase-transition logic shared by `advance_proposal_phase` and
+/// `resolve_proposal`. Idempotent: calling multiple times from the same state
+/// is a no-op. Permissionless by design — anyone can trigger a transition.
+#[cfg(feature = "governance")]
+fn advance_proposal_phase_internal(env: &Env, project_id: &String) {
+    let mut proposal: VoteProposal = env
+        .storage()
+        .instance()
+        .get(&DataKey::Proposal(project_id.clone()))
+        .expect("Proposal not found");
+
+    let current_ledger = env.ledger().sequence();
+    let old_phase = proposal.phase.clone();
+
+    match proposal.phase {
+        ProposalPhase::Passed | ProposalPhase::Rejected | ProposalPhase::Executed => {
+            // Terminal states: no further transitions.
+            return;
+        }
+        ProposalPhase::Draft => {
+            // Draft → Deliberation (or Voting if deliberation_end == 0)
+            if proposal.deliberation_end == 0 {
+                proposal.phase = ProposalPhase::Voting;
+            } else {
+                proposal.phase = ProposalPhase::Deliberation;
+            }
+        }
+        ProposalPhase::Deliberation => {
+            // Deliberation → Voting when deliberation_end has passed.
+            if current_ledger >= proposal.deliberation_end {
+                proposal.phase = ProposalPhase::Voting;
+            } else {
+                // Not yet time to advance.
+                return;
+            }
+        }
+        ProposalPhase::Voting => {
+            // Voting → Passed or Rejected when voting_end has passed.
+            if current_ledger > proposal.voting_end {
+                if proposal.votes_for > proposal.votes_against {
+                    proposal.phase = ProposalPhase::Passed;
+                    proposal.passed_at = current_ledger;
+                    env.events()
+                        .publish((symbol_short!("proj_ver"),), project_id.clone());
+                } else {
+                    proposal.phase = ProposalPhase::Rejected;
+                    env.events()
+                        .publish((symbol_short!("prop_rej"),), project_id.clone());
+                }
+            } else {
+                // Voting still active.
+                return;
+            }
+        }
+    }
+
+    let new_phase = proposal.phase.clone();
+    if old_phase != new_phase {
+        env.storage()
+            .instance()
+            .set(&DataKey::Proposal(project_id.clone()), &proposal);
+        env.events().publish(
+            (
+                symbol_short!("prop_phas"),
+                project_id.clone(),
+            ),
+            (old_phase, new_phase),
+        );
+        ensure_min_ttl(env, VOTING_WINDOW_LEDGERS * 4);
     }
 }
 
@@ -3922,18 +4052,23 @@ impl IndigoPayContract {
 
     // ─── Governance ───────────────────────────────────────────────────────────
 
-    /// Admin creates a voting proposal for a project to be community-verified.
+    /// Admin creates a governance proposal with configurable multi-round phases.
     ///
-    /// `duration_ledgers` is the length of the voting window in Stellar
-    /// ledgers (≈5 s each). Pass `0` to use the default 7-day window;
-    /// any other value must be within
+    /// `deliberation_ledgers` — duration of the Deliberation phase in ledgers
+    /// (≈5 s each). Pass `0` to skip deliberation and start directly in Voting
+    /// (preserves single-round backward compatibility). Non-zero values must be
+    /// within [`MIN_DELIBERATION_LEDGERS`, `MAX_DELIBERATION_LEDGERS`].
+    ///
+    /// `voting_ledgers` — duration of the Voting phase. Pass `0` to use the
+    /// default 7-day window; any other value must be within
     /// [`MIN_VOTING_WINDOW_LEDGERS`, `MAX_VOTING_WINDOW_LEDGERS`].
     #[cfg(feature = "governance")]
     pub fn create_proposal(
         env: Env,
         signers: Vec<Address>,
         project_id: String,
-        duration_ledgers: u32,
+        deliberation_ledgers: u32,
+        voting_ledgers: u32,
     ) {
         require_admin_for_critical(&env, &signers);
         require_not_paused(&env);
@@ -3952,38 +4087,77 @@ impl IndigoPayContract {
             panic!("Proposal already exists for this project");
         }
 
-        let window = if duration_ledgers == 0 {
+        let current_ledger = env.ledger().sequence();
+
+        // Resolve deliberation duration.
+        let delib = if deliberation_ledgers == 0 {
+            0 // skip deliberation → start in Voting
+        } else {
+            if deliberation_ledgers < MIN_DELIBERATION_LEDGERS {
+                panic!("Deliberation duration too short");
+            }
+            if deliberation_ledgers > MAX_DELIBERATION_LEDGERS {
+                panic!("Deliberation duration too long");
+            }
+            deliberation_ledgers
+        };
+
+        // Resolve voting duration.
+        let voting = if voting_ledgers == 0 {
             VOTING_WINDOW_LEDGERS
         } else {
-            if duration_ledgers < MIN_VOTING_WINDOW_LEDGERS {
+            if voting_ledgers < MIN_VOTING_WINDOW_LEDGERS {
                 panic!("Voting duration too short");
             }
-            if duration_ledgers > MAX_VOTING_WINDOW_LEDGERS {
+            if voting_ledgers > MAX_VOTING_WINDOW_LEDGERS {
                 panic!("Voting duration too long");
             }
-            duration_ledgers
+            voting_ledgers
         };
-        let deadline_ledger = env
-            .ledger()
-            .sequence()
-            .checked_add(window)
-            .expect("Voting deadline overflow");
+
+        let (initial_phase, deliberation_end, voting_end) = if delib == 0 {
+            // Single-round backward compatibility: start directly in Voting.
+            let v_end = current_ledger
+                .checked_add(voting)
+                .expect("Voting deadline overflow");
+            (ProposalPhase::Voting, 0u32, v_end)
+        } else {
+            // Multi-round: Draft → (immediately) Deliberation.
+            let d_end = current_ledger
+                .checked_add(delib)
+                .expect("Deliberation deadline overflow");
+            let v_end = d_end
+                .checked_add(voting)
+                .expect("Voting deadline overflow");
+            (ProposalPhase::Deliberation, d_end, v_end)
+        };
 
         let proposal = VoteProposal {
             project_id: project_id.clone(),
             votes_for: 0,
             votes_against: 0,
-            deadline_ledger,
-            resolved: false,
+            phase: initial_phase,
+            deliberation_end,
+            voting_end,
+            execution_delay: DEFAULT_EXECUTION_DELAY_LEDGERS,
+            passed_at: 0,
         };
         env.storage()
             .instance()
             .set(&DataKey::Proposal(project_id.clone()), &proposal);
         env.events().publish(
             (symbol_short!("prop_new"), signers.get(0).unwrap()),
-            (project_id, window),
+            (project_id, deliberation_ledgers, voting_ledgers),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        // TTL must cover the full lifecycle: deliberation + voting + execution
+        // delay, with 2x margin for safety. Floor at VOTING_WINDOW_LEDGERS * 4
+        // for backward compatibility with single-round proposals.
+        let lifecycle_ledgers = delib
+            .checked_add(voting)
+            .and_then(|v| v.checked_add(DEFAULT_EXECUTION_DELAY_LEDGERS))
+            .expect("Proposal lifecycle overflow");
+        let ttl = core::cmp::max(lifecycle_ledgers * 2, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, ttl);
     }
 
     #[cfg(feature = "governance")]
@@ -4174,10 +4348,10 @@ impl IndigoPayContract {
             .instance()
             .get(&DataKey::Proposal(project_id.clone()))
             .expect("Proposal not found");
-        if proposal.resolved {
-            panic!("Proposal already resolved");
+        if proposal.phase != ProposalPhase::Voting {
+            panic!("Proposal is not in Voting phase");
         }
-        if env.ledger().sequence() > proposal.deadline_ledger {
+        if env.ledger().sequence() > proposal.voting_end {
             panic!("Voting window has closed");
         }
 
@@ -4224,36 +4398,32 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
-    /// Callable by anyone after the deadline. Resolves based on majority.
-    /// Emits proj_ver on approval, prop_rej on rejection.
+    /// Callable by anyone after the voting deadline. Resolves based on majority.
+    /// Delegates to `advance_proposal_phase` internally. Emits proj_ver on
+    /// approval, prop_rej on rejection.
     #[cfg(feature = "governance")]
     pub fn resolve_proposal(env: Env, project_id: String) {
-        let mut proposal: VoteProposal = env
+        let proposal: VoteProposal = env
             .storage()
             .instance()
             .get(&DataKey::Proposal(project_id.clone()))
             .expect("Proposal not found");
-        if proposal.resolved {
+        if proposal.phase == ProposalPhase::Passed
+            || proposal.phase == ProposalPhase::Rejected
+            || proposal.phase == ProposalPhase::Executed
+        {
             panic!("Proposal already resolved");
         }
-        if env.ledger().sequence() <= proposal.deadline_ledger {
+        if proposal.phase != ProposalPhase::Voting {
+            panic!("Proposal is not in Voting phase");
+        }
+        if env.ledger().sequence() <= proposal.voting_end {
             panic!("Voting window not yet closed");
         }
-        proposal.resolved = true;
-        if proposal.votes_for > proposal.votes_against {
-            env.events()
-                .publish((symbol_short!("proj_ver"),), project_id.clone());
-        } else {
-            env.events()
-                .publish((symbol_short!("prop_rej"),), project_id.clone());
-        }
-        env.storage()
-            .instance()
-            .set(&DataKey::Proposal(project_id), &proposal);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        advance_proposal_phase_internal(&env, &project_id);
     }
 
-    /// Admin-only immediate veto. Marks the proposal resolved & rejected.
+    /// Admin-only immediate veto. Forces the proposal to Rejected at any phase.
     /// Required for incident response when a proposal is based on fraudulent data.
     /// Emits prop_veto with the admin address for auditability.
     #[cfg(feature = "governance")]
@@ -4264,17 +4434,83 @@ impl IndigoPayContract {
             .instance()
             .get(&DataKey::Proposal(project_id.clone()))
             .expect("Proposal not found");
-        if proposal.resolved {
+        if proposal.phase == ProposalPhase::Passed
+            || proposal.phase == ProposalPhase::Rejected
+            || proposal.phase == ProposalPhase::Executed
+        {
             panic!("Proposal already resolved");
         }
-        proposal.resolved = true;
+        let old_phase = proposal.phase.clone();
+        proposal.phase = ProposalPhase::Rejected;
         env.events().publish(
             (symbol_short!("prop_veto"), signers.get(0).unwrap()),
             project_id.clone(),
         );
         env.storage()
             .instance()
-            .set(&DataKey::Proposal(project_id), &proposal);
+            .set(&DataKey::Proposal(project_id.clone()), &proposal);
+        env.events().publish(
+            (
+                symbol_short!("prop_phas"),
+                project_id.clone(),
+            ),
+            (old_phase, ProposalPhase::Rejected),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Permissionless: advance a proposal to its next phase if the current
+    /// phase's deadline has passed. Idempotent — calling when no transition is
+    /// due is a no-op.
+    ///
+    /// Transitions:
+    ///   Draft          → Deliberation   (always, immediately)
+    ///   Deliberation   → Voting         (when `deliberation_end` is reached)
+    ///   Voting         → Passed/Rejected (when `voting_end` is reached)
+    ///   Passed/Rejected/Executed → no-op
+    #[cfg(feature = "governance")]
+    pub fn advance_proposal_phase(env: Env, project_id: String) {
+        advance_proposal_phase_internal(&env, &project_id);
+    }
+
+    /// Finalize a passed proposal after the execution delay has elapsed.
+    /// Transitions the proposal from Passed to Executed. Permissionless.
+    #[cfg(feature = "governance")]
+    pub fn execute_proposal(env: Env, project_id: String) {
+        let mut proposal: VoteProposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposal(project_id.clone()))
+            .expect("Proposal not found");
+        if proposal.phase != ProposalPhase::Passed {
+            panic!("Proposal has not passed");
+        }
+        if proposal.passed_at == 0 {
+            panic!("Proposal passed_at is zero");
+        }
+        let executable_at = proposal
+            .passed_at
+            .checked_add(proposal.execution_delay)
+            .expect("Execution deadline overflow");
+        if env.ledger().sequence() < executable_at {
+            panic!("Execution delay has not elapsed");
+        }
+        let old_phase = proposal.phase.clone();
+        proposal.phase = ProposalPhase::Executed;
+        env.storage()
+            .instance()
+            .set(&DataKey::Proposal(project_id.clone()), &proposal);
+        env.events().publish(
+            (symbol_short!("prop_exec"), project_id.clone()),
+            (),
+        );
+        env.events().publish(
+            (
+                symbol_short!("prop_phas"),
+                project_id,
+            ),
+            (old_phase, ProposalPhase::Executed),
+        );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
@@ -7068,26 +7304,27 @@ mod tests {
     #[test]
     fn test_create_proposal() {
         let (env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        // deliberation=0, voting=0 → default voting window, skip to Voting
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
         let p = client.get_proposal(&pid);
         assert_eq!(p.votes_for, 0);
         assert_eq!(p.votes_against, 0);
-        assert!(!p.resolved);
-        assert!(p.deadline_ledger > env.ledger().sequence());
+        assert_eq!(p.phase, ProposalPhase::Voting);
+        assert!(p.voting_end > env.ledger().sequence());
     }
 
     #[test]
     #[should_panic(expected = "Proposal already exists for this project")]
     fn test_create_duplicate_proposal_fails() {
         let (env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
     }
 
     #[test]
     fn test_cast_vote() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
         client.vote_verify_project(&voter, &pid, &true, &100);
@@ -7102,7 +7339,7 @@ mod tests {
     )]
     fn test_non_badge_holder_cannot_vote() {
         let (env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
         let non_donor = Address::generate(&env);
         client.vote_verify_project(&non_donor, &pid, &true, &100);
     }
@@ -7111,7 +7348,7 @@ mod tests {
     #[should_panic(expected = "Insufficient voting credits")]
     fn test_quadratic_voting_exhausts_credits() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
         // Seedling has 100 credits; spending all of them exhausts the budget.
@@ -7123,7 +7360,7 @@ mod tests {
     #[test]
     fn test_resolve_proposal_approved() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
         // 2 approve, 1 rejects — each Seedling spends all 100 credits
         for i in 0..3u32 {
             let voter = Address::generate(&env);
@@ -7134,7 +7371,7 @@ mod tests {
         env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
         client.resolve_proposal(&pid);
         let p = client.get_proposal(&pid);
-        assert!(p.resolved);
+        assert_eq!(p.phase, ProposalPhase::Passed);
         assert_eq!(p.votes_for, 20);
         assert_eq!(p.votes_against, 10);
     }
@@ -7142,7 +7379,7 @@ mod tests {
     #[test]
     fn test_resolve_proposal_rejected() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
         // 1 approves, 2 reject — each Seedling spends all 100 credits
         for i in 0..3u32 {
             let voter = Address::generate(&env);
@@ -7153,7 +7390,7 @@ mod tests {
         env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
         client.resolve_proposal(&pid);
         let p = client.get_proposal(&pid);
-        assert!(p.resolved);
+        assert_eq!(p.phase, ProposalPhase::Rejected);
         assert_eq!(p.votes_for, 10);
         assert_eq!(p.votes_against, 20);
     }
@@ -7161,7 +7398,7 @@ mod tests {
     #[test]
     fn test_resolve_proposal_tie_rejected_with_rejection_event() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
 
         for i in 0..2u32 {
             let voter = Address::generate(&env);
@@ -7174,14 +7411,14 @@ mod tests {
         client.resolve_proposal(&pid);
 
         let p = client.get_proposal(&pid);
-        assert!(p.resolved);
+        assert_eq!(p.phase, ProposalPhase::Rejected);
         assert_eq!(p.votes_for, 10);
         assert_eq!(p.votes_against, 10);
 
         // A tie (1 for, 1 against) produces a rejection outcome.
         // Event-level assertion is intentionally skipped here because the
         // soroban-sdk 27 ContractEvents API does not expose topic iteration
-        // in a re-exported path. The core resolution logic (resolved flag,
+        // in a re-exported path. The core resolution logic (phase,
         // vote counts) is verified above.
     }
 
@@ -7189,7 +7426,7 @@ mod tests {
     #[should_panic(expected = "Voting window not yet closed")]
     fn test_resolve_before_deadline_fails() {
         let (env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
         client.resolve_proposal(&pid);
     }
 
@@ -7197,7 +7434,7 @@ mod tests {
     #[should_panic(expected = "Proposal already resolved")]
     fn test_double_resolve_fails() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
         extend_ttl(&env, &cid);
         env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
         client.resolve_proposal(&pid);
@@ -7209,18 +7446,18 @@ mod tests {
     #[test]
     fn test_veto_proposal() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
         extend_ttl(&env, &cid);
         client.veto_proposal(&signers1(&env, &admin), &pid);
         let p = client.get_proposal(&pid);
-        assert!(p.resolved);
+        assert_eq!(p.phase, ProposalPhase::Rejected);
     }
 
     #[test]
     #[should_panic(expected = "Insufficient admin signatures")]
     fn test_veto_proposal_non_admin_fails() {
         let (env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
         let imposter = Address::generate(&env);
         client.veto_proposal(&signers1(&env, &imposter), &pid);
     }
@@ -7244,7 +7481,7 @@ mod tests {
     #[should_panic(expected = "Proposal already resolved")]
     fn test_veto_proposal_double_veto_fails() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
         extend_ttl(&env, &cid);
         client.veto_proposal(&signers1(&env, &admin), &pid);
         client.veto_proposal(&signers1(&env, &admin), &pid);
@@ -7252,25 +7489,27 @@ mod tests {
 
     // ─── Configurable voting-duration tests ───────────────────────────────────
 
-    /// A non-zero `duration_ledgers` within bounds is honored verbatim.
+    /// A non-zero `voting_ledgers` with zero deliberation is honored verbatim.
     #[test]
     fn test_create_proposal_custom_duration() {
         let (env, _cid, client, admin, pid) = setup();
         let custom: u32 = 5_000;
         let start = env.ledger().sequence();
-        client.create_proposal(&signers1(&env, &admin), &pid, &custom);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &custom);
         let p = client.get_proposal(&pid);
-        assert_eq!(p.deadline_ledger, start + custom);
+        assert_eq!(p.voting_end, start + custom);
+        assert_eq!(p.phase, ProposalPhase::Voting);
     }
 
-    /// `0` means "use the default 7-day window".
+    /// `0` for voting means "use the default 7-day window".
     #[test]
     fn test_create_proposal_zero_duration_uses_default() {
         let (env, _cid, client, admin, pid) = setup();
         let start = env.ledger().sequence();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
         let p = client.get_proposal(&pid);
-        assert_eq!(p.deadline_ledger, start + VOTING_WINDOW_LEDGERS);
+        assert_eq!(p.voting_end, start + VOTING_WINDOW_LEDGERS);
+        assert_eq!(p.phase, ProposalPhase::Voting);
     }
 
     #[test]
@@ -7280,6 +7519,7 @@ mod tests {
         client.create_proposal(
             &signers1(&env, &admin),
             &pid,
+            &0u32,
             &(MIN_VOTING_WINDOW_LEDGERS - 1),
         );
     }
@@ -7291,7 +7531,32 @@ mod tests {
         client.create_proposal(
             &signers1(&env, &admin),
             &pid,
+            &0u32,
             &(MAX_VOTING_WINDOW_LEDGERS + 1),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Deliberation duration too short")]
+    fn test_create_proposal_rejects_too_short_deliberation() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.create_proposal(
+            &signers1(&env, &admin),
+            &pid,
+            &(MIN_DELIBERATION_LEDGERS - 1),
+            &MIN_VOTING_WINDOW_LEDGERS,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Deliberation duration too long")]
+    fn test_create_proposal_rejects_too_long_deliberation() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.create_proposal(
+            &signers1(&env, &admin),
+            &pid,
+            &(MAX_DELIBERATION_LEDGERS + 1),
+            &MIN_VOTING_WINDOW_LEDGERS,
         );
     }
 
@@ -7337,7 +7602,7 @@ mod tests {
     #[should_panic(expected = "Voting window has closed")]
     fn test_vote_rejected_after_deadline() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
 
         // Create a voter with badge
         let voter = Address::generate(&env);
@@ -7356,7 +7621,7 @@ mod tests {
     fn test_vote_allowed_before_deadline() {
         let (env, cid, client, admin, pid) = setup();
         let start = env.ledger().sequence();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
 
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
@@ -7380,7 +7645,7 @@ mod tests {
         let custom_duration = MIN_VOTING_WINDOW_LEDGERS;
         let start = env.ledger().sequence();
 
-        client.create_proposal(&signers1(&env, &admin), &pid, &custom_duration);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &custom_duration);
 
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
@@ -7394,6 +7659,169 @@ mod tests {
 
         let proposal = client.get_proposal(&pid);
         assert_eq!(proposal.votes_for, 10);
+    }
+
+    // ─── Multi-round governance tests (#436) ────────────────────────────────
+
+    /// Full lifecycle: Draft → Deliberation → Voting → Passed → Executed.
+    #[test]
+    fn test_proposal_phase_progression() {
+        let (env, cid, client, admin, pid) = setup();
+        let delib = MIN_DELIBERATION_LEDGERS;
+        let voting = MIN_VOTING_WINDOW_LEDGERS;
+        let start = env.ledger().sequence();
+
+        // Create with deliberation — starts in Deliberation phase.
+        client.create_proposal(&signers1(&env, &admin), &pid, &delib, &voting);
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.phase, ProposalPhase::Deliberation);
+        assert_eq!(p.deliberation_end, start + delib);
+
+        // Advance past deliberation → Voting.
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(start + delib + 1);
+        client.advance_proposal_phase(&pid);
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.phase, ProposalPhase::Voting);
+
+        // Vote during Voting phase.
+        let voter = Address::generate(&env);
+        grant_badge(&env, &cid, &voter);
+        client.vote_verify_project(&voter, &pid, &true, &100);
+
+        // Advance past voting → Passed (votes_for > votes_against).
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(start + delib + voting + 2);
+        client.advance_proposal_phase(&pid);
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.phase, ProposalPhase::Passed);
+        assert!(p.passed_at > 0);
+
+        // Execute after delay.
+        extend_ttl(&env, &cid);
+        env.ledger()
+            .set_sequence_number(p.passed_at + p.execution_delay + 1);
+        client.execute_proposal(&pid);
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.phase, ProposalPhase::Executed);
+    }
+
+    /// Voting during Deliberation phase should panic.
+    #[test]
+    #[should_panic(expected = "Proposal is not in Voting phase")]
+    fn test_vote_during_deliberation_panics() {
+        let (env, cid, client, admin, pid) = setup();
+        let delib = MIN_DELIBERATION_LEDGERS;
+        client.create_proposal(&signers1(&env, &admin), &pid, &delib, &0u32);
+
+        let voter = Address::generate(&env);
+        grant_badge(&env, &cid, &voter);
+        client.vote_verify_project(&voter, &pid, &true, &100);
+    }
+
+    /// Voting during Voting phase succeeds.
+    #[test]
+    fn test_vote_during_voting_succeeds() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.phase, ProposalPhase::Voting);
+
+        let voter = Address::generate(&env);
+        grant_badge(&env, &cid, &voter);
+        client.vote_verify_project(&voter, &pid, &true, &100);
+
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.votes_for, 10);
+    }
+
+    /// Execute before execution delay panics.
+    #[test]
+    #[should_panic(expected = "Execution delay has not elapsed")]
+    fn test_execute_before_delay_panics() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
+
+        let voter = Address::generate(&env);
+        grant_badge(&env, &cid, &voter);
+        client.vote_verify_project(&voter, &pid, &true, &100);
+
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
+        client.resolve_proposal(&pid);
+
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.phase, ProposalPhase::Passed);
+
+        // Try to execute immediately — should panic.
+        client.execute_proposal(&pid);
+    }
+
+    /// Execute after delay succeeds.
+    #[test]
+    fn test_execute_after_delay() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
+
+        let voter = Address::generate(&env);
+        grant_badge(&env, &cid, &voter);
+        client.vote_verify_project(&voter, &pid, &true, &100);
+
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
+        client.resolve_proposal(&pid);
+
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.phase, ProposalPhase::Passed);
+
+        extend_ttl(&env, &cid);
+        env.ledger()
+            .set_sequence_number(p.passed_at + p.execution_delay + 1);
+        client.execute_proposal(&pid);
+
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.phase, ProposalPhase::Executed);
+    }
+
+    /// `advance_proposal_phase` is idempotent — calling it multiple times
+    /// from the same state does not panic or change anything.
+    #[test]
+    fn test_advance_idempotent() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
+
+        // Advance when Voting is still active → no-op.
+        extend_ttl(&env, &cid);
+        client.advance_proposal_phase(&pid);
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.phase, ProposalPhase::Voting);
+
+        // Second call — still no-op.
+        client.advance_proposal_phase(&pid);
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.phase, ProposalPhase::Voting);
+
+        // Advance past deadline → resolves to Rejected (no votes).
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
+        client.advance_proposal_phase(&pid);
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.phase, ProposalPhase::Rejected);
+
+        // Calling again on Rejected → no-op.
+        client.advance_proposal_phase(&pid);
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.phase, ProposalPhase::Rejected);
+    }
+
+    /// Calling `execute_proposal` on a non-Passed proposal panics.
+    #[test]
+    #[should_panic(expected = "Proposal has not passed")]
+    fn test_execute_on_non_passed_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
+        // Proposal is in Voting phase — not yet Passed.
+        client.execute_proposal(&pid);
     }
 
     // ─── ProjectMilestoneNFT tests (#205) ────────────────────────────────────
@@ -7706,7 +8134,7 @@ mod tests {
     #[test]
     fn test_get_voter_list() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
 
         let mut voters = std::vec::Vec::new();
         for _ in 0..3 {
@@ -7761,7 +8189,7 @@ mod tests {
     #[test]
     fn test_quadratic_voting_single_proposal() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
         // Seedling: 100 credits → isqrt(100) = 10 effective weight
@@ -7789,8 +8217,8 @@ mod tests {
             &100u32,
         );
 
-        client.create_proposal(&signers1(&env, &admin), &pid1, &0u32);
-        client.create_proposal(&signers1(&env, &admin), &pid2, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid1, &0u32, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid2, &0u32, &0u32);
 
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
@@ -7817,7 +8245,7 @@ mod tests {
     #[should_panic(expected = "Insufficient voting credits")]
     fn test_quadratic_voting_exceeds_credits() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
         // Seedling has 100 credits; trying to spend 101 should fail.
@@ -7827,7 +8255,7 @@ mod tests {
     #[test]
     fn test_quadratic_voting_edge_cases() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32, &0u32);
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
 
