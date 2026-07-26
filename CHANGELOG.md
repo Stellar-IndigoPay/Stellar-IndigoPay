@@ -28,11 +28,7 @@
 
 * **backend:** standardize structured startup, shutdown, and shutdown-error logging for background workers, with graceful queue draining
 
-* **backend:** JSDoc and TypeDoc validation CI check with warning-as-error strictness (GF-045)
-  - Add `typedoc` as a devDependency in `backend/package.json`
-  - Enable `"treatWarningsAsErrors": true` in `backend/typedoc.json`
-  - Add a dedicated CI step `npm run docs` in `.github/workflows/ci.yml`
-  - Resolve pre-existing JSDoc/TypeDoc syntax and tag warnings across backend service files
+* **contracts:** emit `StealthScan` events with the project wallet, donation count, and ledger timestamp after stealth donation scans (closes #514)
 
 * **contracts/backend:** add opt-in anonymous donations and signed, cached tax receipt PDFs with locked XLM/USD values
 
