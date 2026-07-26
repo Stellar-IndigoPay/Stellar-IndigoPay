@@ -40,7 +40,7 @@
  *
  * LIMITATIONS:
  *   - These are lightweight, dependency-free adapters. They deliberately
- *     avoid pulling in the full @aws-sdk/client-s3 package to keep the
+ *     avoid pulling in the full `@aws-sdk/client-s3` package to keep the
  *     install footprint small. If you need presigned URLs, multipart
  *     uploads, or KMS encryption, replace the relevant branch with the
  *     official SDK.

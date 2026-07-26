@@ -28,6 +28,12 @@
 
 * **backend:** standardize structured startup, shutdown, and shutdown-error logging for background workers, with graceful queue draining
 
+* **backend:** JSDoc and TypeDoc validation CI check with warning-as-error strictness (GF-045)
+  - Add `typedoc` as a devDependency in `backend/package.json`
+  - Enable `"treatWarningsAsErrors": true` in `backend/typedoc.json`
+  - Add a dedicated CI step `npm run docs` in `.github/workflows/ci.yml`
+  - Resolve pre-existing JSDoc/TypeDoc syntax and tag warnings across backend service files
+
 * **contracts/backend:** add opt-in anonymous donations and signed, cached tax receipt PDFs with locked XLM/USD values
 
 * **frontend:** complete 100% i18n coverage across all locale dictionaries, pluralization, and locale-aware formatting (closes #264, #262)

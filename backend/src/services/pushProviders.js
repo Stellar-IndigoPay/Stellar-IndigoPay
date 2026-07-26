@@ -96,6 +96,9 @@ function recordMetrics(provider, outcome, startMs) {
 // ApnsProvider
 // ---------------------------------------------------------------------------
 
+/**
+ * APNs (Apple Push Notification service) provider implementation.
+ */
 class ApnsProvider {
   constructor() {
     this._provider = null;
@@ -209,6 +212,9 @@ class ApnsProvider {
 
 const FCM_SEND_URL = "https://fcm.googleapis.com/fcm/send";
 
+/**
+ * FCM (Firebase Cloud Messaging) provider implementation.
+ */
 class FcmProvider {
   constructor() {
     this._serverKey = process.env.FCM_SERVER_KEY || null;
@@ -308,6 +314,9 @@ const expoClient = new Expo(
     : undefined,
 );
 
+/**
+ * Expo push notification service provider implementation.
+ */
 class ExpoProvider {
   get providerName() {
     return "expo";
