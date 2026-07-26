@@ -243,6 +243,20 @@ pub struct EmergencyWithdrawal {
     pub executable_at: u32,
 }
 
+// Grace period after next_execution_ledger before a keeper can be slashed (~1 hour at ~5s ledgers)
+pub const GRACE_PERIOD_LEDGERS: u32 = 720;
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum ContractError {
+    // ... existing variants
+    KeeperAlreadyRegistered = 30,
+    NoKeeperRegistered = 31,
+    GracePeriodNotExpired = 32,
+    RecurringNotActive = 33,
+}
+
 // ─── Donation refund (#290) ─────────────────────────────────────────────────
 
 /// Status of a refund request.
@@ -284,17 +298,26 @@ pub struct ForceRefund {
 }
 
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecurringDonation {
     pub donor: Address,
+    pub recipient: Address,
     pub project_id: String,
+    pub token: Address,
     pub amount: i128,
+    pub interval_ledgers: u32,
+    pub next_execution_ledger: u32,
+    pub keeper_incentive: i128,
+    pub keeper_bond: i128,                     // Required bond to register as keeper
+    pub registered_keeper: Option<Address>,    // Address of currently registered keeper
+    pub keeper_registered_at: u32,             // Ledger sequence when keeper registered
     pub currency: Symbol,      // "XLM" or "USDC"
     pub interval_ledgers: u32, // e.g. 518400 ≈ 30 days @ 5s/ledger
     pub next_execution_ledger: u32,
-    pub keeper_incentive: i128, // stroops paid to executor
+    pub keeper_incentive: i128, // stroops paid to keeper
     pub active: bool,
     pub created_at: u32,
+    pub active: bool,
 }
 
 /// A time-locked vesting schedule for gradual donation release.
@@ -5422,16 +5445,22 @@ impl IndigoPayContract {
     pub fn create_recurring(
         env: Env,
         donor: Address,
+        recipient: Address,
+        token: Address,
         project_id: String,
         amount: i128,
         currency: Symbol,
         interval_ledgers: u32,
         keeper_incentive: i128,
+        keeper_bond: i128,
         msg_hash: u32,
-    ) -> u32 {
+    ) -> Result<u64, ContractError> {
         donor.require_auth();
         require_not_paused(&env);
 
+        let recurring_id = get_and_inc_recurring_id(&env);
+        let next_execution_ledger = env.ledger().sequence() + interval_ledgers;
+        
         if amount <= 0 {
             panic!("Donation amount must be positive");
         }
@@ -5460,16 +5489,19 @@ impl IndigoPayContract {
             .checked_add(interval_ledgers)
             .expect("next_execution_ledger overflow");
 
-        let recurring = RecurringDonation {
+
+        let donation = RecurringDonation {
             donor: donor.clone(),
-            project_id: project_id.clone(),
+            recipient,
+            token,
             amount,
-            currency: currency.clone(),
             interval_ledgers,
             next_execution_ledger,
             keeper_incentive,
+            keeper_bond,
+            registered_keeper: None,
+            keeper_registered_at: 0,
             active: true,
-            created_at: env.ledger().sequence(),
         };
 
         let recurring_key = DataKey::RecurringDonation(donor.clone(), recurring_id);
@@ -5485,9 +5517,17 @@ impl IndigoPayContract {
                 keeper_incentive,
                 msg_hash,
             ),
+        );   
+
+        env.storage().persistent().set(&(donor.clone(), recurring_id), &donation);
+
+        // Event emission
+        env.events().publish(
+            (Symbol::new(&env, "rec_cr"), donor),
+            recurring_id,
         );
 
-        recurring_id
+        Ok(recurring_id)
     }
 
     #[cfg(feature = "recurring")]
@@ -5509,12 +5549,20 @@ impl IndigoPayContract {
         recurring.active = false;
         env.storage().instance().set(&recurring_key, &recurring);
 
-        env.events()
-            .publish((symbol_short!("rec_can"), donor, recurring_id), ());
+        donation.active = false;
+            env.storage().persistent().set(&key, &donation);
+
+        env.events().publish(
+            (Symbol::new(&env, "rec_can"), donor),
+            recurring_id,
+        );
+
+        Ok(())
     }
 
     #[cfg(feature = "recurring")]
-    pub fn execute_recurring(env: Env, keeper: Address, donor: Address, recurring_id: u32) {
+    pub fn execute_recurring(env: Env, keeper: Address, donor: Address, recurring_id: u64
+        ) -> Result<(), ContractError> {
         keeper.require_auth();
         require_not_paused(&env);
 
@@ -5543,6 +5591,55 @@ impl IndigoPayContract {
         if project.paused {
             panic!("Project is temporarily paused");
         }
+
+        let key = (donor.clone(), recurring_id);
+        let mut donation: RecurringDonation = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NotFound)?;
+
+        if !donation.active {
+            return Err(ContractError::RecurringNotActive);
+        }
+
+        if env.ledger().sequence() < donation.next_execution_ledger {
+            return Err(ContractError::NotMaturedYet);
+        }
+
+        let token_client = token::Client::new(&env, &donation.token);
+
+        // 1. Process donation transfer
+        token_client.transfer(&donation.donor, &donation.recipient, &donation.amount);
+
+        // 2. Pay executor the keeper incentive
+        if donation.keeper_incentive > 0 {
+            token_client.transfer(&donation.donor, &executor, &donation.keeper_incentive);
+        }
+
+        // 3. Return bond to registered keeper if present
+        if let Some(registered) = donation.registered_keeper.take() {
+            if donation.keeper_bond > 0 {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &registered,
+                    &donation.keeper_bond,
+                );
+            }
+            donation.keeper_registered_at = 0;
+        }
+
+        donation.next_execution_ledger = env.ledger().sequence() + donation.interval_ledgers;
+        env.storage().persistent().set(&key, &donation);
+
+        env.events().publish(
+            (Symbol::new(&env, "rec_exec"), executor),
+            recurring_id,
+        );
+
+        Ok(())
+    }
+        
         #[cfg(feature = "project_verification")]
         require_project_verified_for_donation(&env, &recurring.project_id);
         require_campaign_accepts_donation(&project, env.ledger().sequence());
@@ -5759,6 +5856,48 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
+    pub fn register_as_keeper(
+        env: Env,
+        keeper: Address,
+        donor: Address,
+        recurring_id: u64,
+    ) -> Result<(), ContractError> {
+        keeper.require_auth();
+
+    let key = (donor.clone(), recurring_id);
+    let mut donation: RecurringDonation = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .ok_or(ContractError::NotFound)?;
+
+    if !donation.active {
+        return Err(ContractError::RecurringNotActive);
+    }
+
+    if donation.registered_keeper.is_some() {
+        return Err(ContractError::KeeperAlreadyRegistered);
+    }
+
+    // Lock keeper bond into the contract
+    if donation.keeper_bond > 0 {
+        let token_client = token::Client::new(&env, &donation.token);
+        token_client.transfer(&keeper, &env.current_contract_address(), &donation.keeper_bond);
+    }
+
+    donation.registered_keeper = Some(keeper.clone());
+    donation.keeper_registered_at = env.ledger().sequence();
+
+    env.storage().persistent().set(&key, &donation);
+
+    env.events().publish(
+        (Symbol::new(&env, "rec_reg"), keeper),
+        recurring_id,
+    );
+
+    Ok(())
+}
+    
     pub fn get_recurring(env: Env, donor: Address, recurring_id: u32) -> RecurringDonation {
         env.storage()
             .instance()
@@ -5908,6 +6047,64 @@ impl IndigoPayContract {
     /// - If all installments have already been released.
     /// - If the interval has not yet elapsed.
     #[cfg(feature = "vesting")]
+    pub fn slash_keeper(
+        env: Env,
+        slasher: Address,
+        donor: Address,
+        recurring_id: u64,
+    ) -> Result<(), ContractError> {
+        slasher.require_auth();
+
+        let key = (donor.clone(), recurring_id);
+        let mut donation: RecurringDonation = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NotFound)?;
+
+        if !donation.active {
+            return Err(ContractError::RecurringNotActive);
+        }
+
+        let registered_keeper = donation
+            .registered_keeper
+            .clone()
+            .ok_or(ContractError::NoKeeperRegistered)?;
+
+        // Check if grace period has passed: current_ledger > next_execution_ledger + 720
+        let slashable_after = donation.next_execution_ledger + GRACE_PERIOD_LEDGERS;
+        if env.ledger().sequence() <= slashable_after {
+            return Err(ContractError::GracePeriodNotExpired);
+        }
+
+        // Split bond 50/50 between slasher and project wallet
+        if donation.keeper_bond > 0 {
+            let slasher_share = donation.keeper_bond / 2;
+            let project_share = donation.keeper_bond - slasher_share;
+
+            let token_client = token::Client::new(&env, &donation.token);
+
+        // Send 50% to slasher
+            token_client.transfer(&env.current_contract_address(), &slasher, &slasher_share);
+
+        // Send 50% to recipient/project
+            token_client.transfer(&env.current_contract_address(), &donation.recipient, &project_share);
+        }
+
+        // Reset registered keeper
+        donation.registered_keeper = None;
+        donation.keeper_registered_at = 0;
+
+        env.storage().persistent().set(&key, &donation);
+
+        env.events().publish(
+            (Symbol::new(&env, "rec_slash"), slasher),
+            (recurring_id, registered_keeper),
+        );
+
+        Ok(())
+    }
+
     pub fn claim_vested_installment(env: Env, donor: Address, schedule_id: u32) {
         require_not_paused(&env);
 
