@@ -11,11 +11,7 @@ const { createRateLimiter } = require("../middleware/rateLimiter");
 const { invalidateCache } = require("../middleware/cache");
 const { validate } = require("../middleware/validate");
 const { stellarAddress, profileSchema } = require("../validators/schemas");
-const {
-  sanitizedStringField,
-  validateBody,
-  stripHtml,
-} = require("../middleware/validation");
+const { stripHtml } = require("../middleware/validation");
 const { AppError } = require("../errors");
 
 function validateKey(k) {
@@ -75,7 +71,7 @@ router.get(
 router.post(
   "/",
   profilePostLimiter,
-  validateBody(profileBodySchema),
+  validate(profileBodySchema),
   async (req, res, next) => {
     try {
       const { publicKey, displayName, bio } = req.body;

@@ -174,13 +174,15 @@ describe("GET /api/leaderboard — limit handling", () => {
     expect(pool.query).toHaveBeenCalledWith(expect.any(String), [100]);
   });
 
-  test("rejects non-numeric limit with 400", async () => {
+  test("rejects non-numeric limit with 422 SCHEMA_VALIDATION_ERROR", async () => {
     const res = await request(app)
       .get("/api/leaderboard?limit=abc")
-      .expect(400);
+      .expect(422);
 
-    expect(res.body.error).toBe("Validation failed");
-    expect(res.body.details[0].path).toBe("limit");
+    expect(res.body.error.code).toBe("SCHEMA_VALIDATION_ERROR");
+    expect(res.body.error.message).toBe("Validation failed");
+    expect(Array.isArray(res.body.error.details)).toBe(true);
+    expect(res.body.error.details[0].path).toBe("limit");
     expect(pool.query).not.toHaveBeenCalled();
   });
 });

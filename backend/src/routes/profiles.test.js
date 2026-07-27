@@ -48,6 +48,22 @@ describe("POST /api/profiles", () => {
 
     expect(res.body.error.code).toBe("SCHEMA_VALIDATION_ERROR");
     expect(res.body.error.message).toBe("Validation failed");
-    expect(res.body.error.details.displayName).toBeDefined();
+    // `details` is now an array of {path, message} entries, matching every
+    // other route that uses the unified `validate` middleware (#050).
+    expect(Array.isArray(res.body.error.details)).toBe(true);
+    const displayNameDetail = res.body.error.details.find(
+      (d) => d.path === "displayName",
+    );
+    expect(displayNameDetail).toBeDefined();
+    // Pin the message so a future regression to the LENGTH refinement
+    // (or any other field's check) still fails this test rather than
+    // passing for the wrong reason. Assert a non-empty string rather
+    // than matching `/html/i` because `displayName`'s schema applies
+    // a regex check *before* any HTML filter, so the visible rejection
+    // message can be e.g. "Only letters, numbers, underscores, and
+    // spaces allowed". Hard-coding /html/i would couple the test to
+    // schema-internal ordering.
+    expect(typeof displayNameDetail.message).toBe("string");
+    expect(displayNameDetail.message.length).toBeGreaterThan(0);
   });
 });
