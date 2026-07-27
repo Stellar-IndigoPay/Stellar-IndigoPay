@@ -33,11 +33,16 @@ pub mod donation;
  *     --source alice --network testnet
  */
 use soroban_sdk::{
-    contract, contractclient, contractimpl, contracttype, symbol_short, token, Address, Bytes,
-    BytesN, Env, String, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, String,
+    Symbol, Vec,
 };
 #[cfg(feature = "project_verification")]
 use soroban_sdk::{contracterror, panic_with_error};
+
+#[cfg(feature = "usdc")]
+use soroban_sdk::contractclient;
+#[cfg(feature = "impact")]
+use soroban_sdk::Bytes;
 
 // ─── Oracle interface ─────────────────────────────────────────────────────────
 
@@ -116,6 +121,7 @@ pub enum CampaignStatus {
 }
 
 /// Input for registering a project via `batch_register_projects`.
+#[cfg(feature = "batch")]
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ProjectInit {
@@ -126,6 +132,7 @@ pub struct ProjectInit {
 }
 
 /// Input for a single donation within a `batch_donate` call.
+#[cfg(feature = "batch")]
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct BatchDonation {
@@ -199,6 +206,7 @@ pub struct ProjectMilestoneNFT {
 }
 
 /// A community voting proposal to verify a project.
+#[cfg(feature = "governance")]
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct VoteProposal {
@@ -233,6 +241,7 @@ pub struct GlobalStats {
 /// execute withdrawals sequentially, not in parallel).
 /// The `amount` field must not exceed `ProjectContractBalance(project_id, token)`
 /// at execution time — enforced by `execute_emergency_withdrawal`.
+#[cfg(feature = "emergency")]
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct EmergencyWithdrawal {
@@ -246,6 +255,7 @@ pub struct EmergencyWithdrawal {
 // ─── Donation refund (#290) ─────────────────────────────────────────────────
 
 /// Status of a refund request.
+#[cfg(feature = "refund")]
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum RefundRequestStatus {
@@ -256,6 +266,7 @@ pub enum RefundRequestStatus {
 
 /// A donor-initiated refund request. Created by `request_refund`, resolved by
 /// `approve_refund` (which atomically transfers tokens back) or `reject_refund`.
+#[cfg(feature = "refund")]
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct RefundRequest {
@@ -302,6 +313,7 @@ pub struct RecurringDonation {
 /// in equal installments over a configurable number of ledgers, rather
 /// than all at once. The first installment is transferred immediately;
 /// subsequent installments are claimable after each interval elapses.
+#[cfg(feature = "vesting")]
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct VestingSchedule {
@@ -315,6 +327,23 @@ pub struct VestingSchedule {
     pub installments_released: u32,
     pub created_at: u32,
     pub token: Address,
+}
+
+#[cfg(feature = "ratings")]
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectRating {
+    pub rating: u32,
+    pub comment_hash: BytesN<32>,
+    pub rated_at_ledger: u32,
+}
+
+#[cfg(feature = "ratings")]
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectRatingStats {
+    pub total_rating: u32,
+    pub rating_count: u32,
 }
 
 /// An on-chain impact certificate leaf for a single donor's contribution.
@@ -372,6 +401,7 @@ pub enum DataKey {
     // Governance
     Proposal(String),
     HasVoted(String, Address),
+    VoteCredits(String, Address),
     // Per-donor per-project cumulative donation total for milestone NFT gating
     DonorProjectTotal(String, Address),
     // Per-donor per-project sliding-window donation rate limit
@@ -492,7 +522,9 @@ const DEFAULT_DONATION_RATE_LIMIT_WINDOW: u32 = 720;
 // Bounds on caller-supplied voting durations. Floor (~1 hour) keeps the
 // window long enough to be observed; ceiling (~30 days) bounds storage TTL
 // pressure and prevents proposals from sitting open indefinitely.
+#[cfg(feature = "governance")]
 const MIN_VOTING_WINDOW_LEDGERS: u32 = 720; // 1 hour @ 5s/ledger
+#[cfg(feature = "governance")]
 const MAX_VOTING_WINDOW_LEDGERS: u32 = 518_400; // 30 days @ 5s/ledger
 
 // Upper bound on co2_per_xlm at registration — prevents donate-time CO₂ overflow
@@ -505,6 +537,7 @@ const MAX_CO2_PER_XLM: u32 = 100_000;
 // downstream observers a 48-hour window to react to a pending upgrade
 // (e.g. by exiting their positions or signalling objections via
 // off-chain channels) before the WASM is swapped.
+#[cfg(feature = "upgrade")]
 const UPGRADE_TIMELOCK_LEDGERS: u32 = 34_560;
 
 // 7 days × 24 h × 3600 s ÷ 5 s per ledger = 120_960 ledgers. The minimum
@@ -512,11 +545,13 @@ const UPGRADE_TIMELOCK_LEDGERS: u32 = 34_560;
 // which `execute_emergency_withdrawal` can fire. Gives donors and observers
 // a 7-day window to object off-chain before contract-held funds are sent to
 // the new wallet.
+#[cfg(feature = "emergency")]
 const EMERGENCY_WITHDRAWAL_TIMELOCK: u32 = 120_960;
 
 // 24 hours × 3600 s / 5 s per ledger = 17 280 ledgers. The window after a
 // donation during which the donor may request a refund (subject to admin +
 // project wallet approval).
+#[cfg(feature = "refund")]
 const REFUND_COOLDOWN_LEDGERS: u32 = 17_280;
 
 // 72 hours × 3600 s / 5 s per ledger = 51 840 ledgers. The delay between
@@ -530,6 +565,7 @@ const FORCE_REFUND_TIMELOCK_LEDGERS: u32 = 51_840;
 ///
 /// v1: original schema (no version tracking)
 /// v2: Symbol-keyed storage version added (#379)
+#[cfg(feature = "upgrade")]
 const CURRENT_STORAGE_VERSION: u32 = 2;
 /// Storage key for the schema version. Uses a Symbol (not a DataKey variant)
 /// to avoid XDR codegen overhead in the slim WASM build.
@@ -1851,6 +1887,7 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
+    #[cfg(feature = "batch")]
     pub fn batch_register_projects(env: Env, admin: Address, projects: Vec<ProjectInit>) {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
@@ -2215,6 +2252,107 @@ impl IndigoPayContract {
             treasury,
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    // ─── Project Ratings ─────────────────────────────────────────────────────
+
+    /// Rate a project as a verified donor.
+    ///
+    /// Stores one rating per (project_id, donor). Calling this again updates
+    /// the donor's previous rating and adjusts the aggregate average.
+    #[cfg(feature = "ratings")]
+    pub fn rate_project(
+        env: Env,
+        donor: Address,
+        project_id: String,
+        rating: u32,
+        comment_hash: BytesN<32>,
+    ) {
+        donor.require_auth();
+        require_not_paused(&env);
+        if !(1..=5).contains(&rating) {
+            panic!("Rating must be between 1 and 5");
+        }
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::HasDonated(project_id.clone(), donor.clone()))
+        {
+            panic!("Donor has not donated to project");
+        }
+
+        let rating_key = DataKey::ProjectRating(project_id.clone(), donor.clone());
+        let previous: Option<ProjectRating> = env.storage().instance().get(&rating_key);
+        let stats_key = DataKey::ProjectRatingStats(project_id.clone());
+        let mut stats: ProjectRatingStats =
+            env.storage()
+                .instance()
+                .get(&stats_key)
+                .unwrap_or(ProjectRatingStats {
+                    total_rating: 0,
+                    rating_count: 0,
+                });
+
+        if let Some(prev) = previous {
+            stats.total_rating = stats
+                .total_rating
+                .checked_sub(prev.rating)
+                .and_then(|total| total.checked_add(rating))
+                .expect("Project rating total overflow");
+        } else {
+            stats.total_rating = stats
+                .total_rating
+                .checked_add(rating)
+                .expect("Project rating total overflow");
+            stats.rating_count = stats
+                .rating_count
+                .checked_add(1)
+                .expect("Project rating count overflow");
+        }
+
+        let stored = ProjectRating {
+            rating,
+            comment_hash: comment_hash.clone(),
+            rated_at_ledger: env.ledger().sequence(),
+        };
+        env.storage().instance().set(&rating_key, &stored);
+        env.storage().instance().set(&stats_key, &stats);
+        env.events().publish(
+            (symbol_short!("rated"), donor, project_id),
+            (rating, comment_hash),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    #[cfg(feature = "ratings")]
+    pub fn get_project_avg_rating(env: Env, project_id: String) -> (u32, u32) {
+        let stats: ProjectRatingStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProjectRatingStats(project_id))
+            .unwrap_or(ProjectRatingStats {
+                total_rating: 0,
+                rating_count: 0,
+            });
+        if stats.rating_count == 0 {
+            return (0, 0);
+        }
+        (
+            stats
+                .total_rating
+                .checked_mul(100)
+                .expect("Project average rating overflow")
+                / stats.rating_count,
+            stats.rating_count,
+        )
+    }
+
+    #[cfg(feature = "ratings")]
+    pub fn get_donor_rating(env: Env, project_id: String, donor: Address) -> Option<u32> {
+        env.storage()
+            .instance()
+            .get::<DataKey, ProjectRating>(&DataKey::ProjectRating(project_id, donor))
+            .map(|rating| rating.rating)
     }
 
     // ─── Donations ────────────────────────────────────────────────────────────
@@ -5408,6 +5546,7 @@ impl IndigoPayContract {
 
     /// Read-only: returns the refund request for the given ID, or panics if
     /// not found.
+    #[cfg(feature = "refund")]
     pub fn get_refund_request(env: Env, refund_id: u32) -> RefundRequest {
         env.storage()
             .instance()
@@ -5759,6 +5898,7 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
+    #[cfg(feature = "recurring")]
     pub fn get_recurring(env: Env, donor: Address, recurring_id: u32) -> RecurringDonation {
         env.storage()
             .instance()
@@ -5766,6 +5906,7 @@ impl IndigoPayContract {
             .expect("Recurring donation not found")
     }
 
+    #[cfg(feature = "recurring")]
     pub fn get_donor_recurrings(env: Env, donor: Address) -> Vec<RecurringDonation> {
         let count_key = DataKey::DonorRecurringCount(donor.clone());
         let count: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
@@ -6030,6 +6171,7 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
+    #[cfg(feature = "recurring")]
     pub fn get_native_token(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::NativeTokenAddress)
     }
@@ -7700,6 +7842,83 @@ mod tests {
         let p = client.get_project(&pid);
         assert_eq!(p.donor_count, 2);
         assert_eq!(p.total_raised, 20 * STROOP);
+    }
+
+    #[cfg(feature = "ratings")]
+    fn donate_for_rating(env: &Env, client: &IndigoPayContractClient, pid: &String) -> Address {
+        let donor = Address::generate(env);
+        let token_admin = Address::generate(env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(env, &token).mint(&donor, &(10 * STROOP));
+        client.donate(&token, &donor, pid, &(10 * STROOP), &0u32);
+        donor
+    }
+
+    #[cfg(feature = "ratings")]
+    fn comment_hash(env: &Env, marker: u8) -> BytesN<32> {
+        BytesN::from_array(env, &[marker; 32])
+    }
+
+    #[cfg(feature = "ratings")]
+    #[test]
+    fn test_rate_project_by_donor() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = donate_for_rating(&env, &client, &pid);
+
+        client.rate_project(&donor, &pid, &4u32, &comment_hash(&env, 1));
+
+        assert_eq!(client.get_donor_rating(&pid, &donor), Some(4));
+        assert_eq!(client.get_project_avg_rating(&pid), (400, 1));
+    }
+
+    #[cfg(feature = "ratings")]
+    #[test]
+    #[should_panic(expected = "Donor has not donated to project")]
+    fn test_rate_project_by_non_donor_fails() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+
+        client.rate_project(&donor, &pid, &4u32, &comment_hash(&env, 2));
+    }
+
+    #[cfg(feature = "ratings")]
+    #[test]
+    fn test_rerate_project() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = donate_for_rating(&env, &client, &pid);
+
+        client.rate_project(&donor, &pid, &4u32, &comment_hash(&env, 3));
+        client.rate_project(&donor, &pid, &5u32, &comment_hash(&env, 4));
+
+        assert_eq!(client.get_donor_rating(&pid, &donor), Some(5));
+        assert_eq!(client.get_project_avg_rating(&pid), (500, 1));
+    }
+
+    #[cfg(feature = "ratings")]
+    #[test]
+    fn test_average_rating_calculation() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor1 = donate_for_rating(&env, &client, &pid);
+        let donor2 = donate_for_rating(&env, &client, &pid);
+        let donor3 = donate_for_rating(&env, &client, &pid);
+
+        client.rate_project(&donor1, &pid, &5u32, &comment_hash(&env, 5));
+        client.rate_project(&donor2, &pid, &4u32, &comment_hash(&env, 6));
+        client.rate_project(&donor3, &pid, &3u32, &comment_hash(&env, 7));
+
+        assert_eq!(client.get_project_avg_rating(&pid), (400, 3));
+    }
+
+    #[cfg(feature = "ratings")]
+    #[test]
+    #[should_panic(expected = "Rating must be between 1 and 5")]
+    fn test_invalid_rating_value_fails() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = donate_for_rating(&env, &client, &pid);
+
+        client.rate_project(&donor, &pid, &0u32, &comment_hash(&env, 8));
     }
 
     /// `get_voter_list` returns voters in the order they voted.
