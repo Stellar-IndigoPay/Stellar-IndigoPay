@@ -223,6 +223,28 @@ mod tests {
         assert_eq!(stored.msg_hash, msg_hash);
     }
 
+    #[test]
+    fn test_stealth_donation_counter_monotonic() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, TestHarness);
+        let client = TestHarnessClient::new(&env, &contract_id);
+
+        let donor = Address::generate(&env);
+        let project = Address::generate(&env);
+        let token = create_token(&env, &donor, 30_000_000);
+        let msg_hash = BytesN::from_array(&env, &[0u8; 32]);
+        let amount: i128 = 1_000_000;
+
+        let id1 = client.donate_stealth(&donor, &token, &BytesN::from_array(&env, &[1u8; 33]), &project, &amount, &msg_hash);
+        let id2 = client.donate_stealth(&donor, &token, &BytesN::from_array(&env, &[2u8; 33]), &project, &amount, &msg_hash);
+        let id3 = client.donate_stealth(&donor, &token, &BytesN::from_array(&env, &[3u8; 33]), &project, &amount, &msg_hash);
+
+        assert_eq!(id1, 1u64);
+        assert_eq!(id2, 2u64);
+        assert_eq!(id3, 3u64);
+    }
+
     fn seed_donations(env: &Env, contract_id: &Address) -> (Address, BytesN<32>) {
         let client = TestHarnessClient::new(env, contract_id);
 
