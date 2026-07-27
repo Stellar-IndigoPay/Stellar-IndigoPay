@@ -1,154 +1,136 @@
-const STELLAR_ADDRESS_REGEX = /\bG[A-Z2-7]{55}\b/g;
+/**
+ * extension/src/content-script.ts
+ *
+ * Entry point for the Chrome content script.
+ *
+ * Imports the pure-logic module and wires up the auto-init, MutationObserver,
+ * periodic re-scan, and message listeners. Only this file has module-level
+ * side effects, so test files can import content-script-logic.ts safely.
+ */
 
-function createTooltip(): HTMLDivElement {
-  const tooltip = document.createElement("div");
-  tooltip.className = "indigopay-tooltip";
-  tooltip.textContent = "Donate to this address via IndigoPay";
-  tooltip.style.cssText = `
-    position: absolute;
-    background: #1a1a1a;
-    color: #fff;
-    padding: 8px 12px;
-    border-radius: 6px;
-    font-size: 12px;
-    font-weight: 500;
-    white-space: nowrap;
-    z-index: 10000;
-    pointer-events: none;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-    bottom: 100%;
-    left: 50%;
-    transform: translateX(-50%);
-    margin-bottom: 8px;
-  `;
-  return tooltip;
-}
+import {
+  scanAndInject,
+  injectDonateButton,
+  overlayCleanup,
+  setOverlayCleanup,
+  isInsideProcessedElement,
+  STELLAR_ADDRESS_RE,
+} from "./content-script-logic";
 
-function highlightAddresses(node: Node) {
-  if (node.nodeType === Node.TEXT_NODE) {
-    const text = node.textContent;
-    if (!text || !STELLAR_ADDRESS_REGEX.test(text)) return;
+// ── constants ────────────────────────────────────────────────────────
 
-    const fragment = document.createDocumentFragment();
-    let lastIndex = 0;
-    let match;
+const PROCESSED_ATTR = "data-indigopay-processed";
+const RESCAN_INTERVAL_MS = 3000;
 
-    STELLAR_ADDRESS_REGEX.lastIndex = 0;
-    while ((match = STELLAR_ADDRESS_REGEX.exec(text)) !== null) {
-      if (match.index > lastIndex) {
-        fragment.appendChild(
-          document.createTextNode(text.substring(lastIndex, match.index)),
-        );
-      }
+// ── MutationObserver for dynamic content (SPA support) ───────────────
 
-      const span = document.createElement("span");
-      span.className = "indigopay-address";
-      span.textContent = match[0];
-      span.style.cssText = `
-        background: linear-gradient(135deg, #4CAF50, #2E7D32);
-        color: white;
-        padding: 2px 6px;
-        border-radius: 4px;
-        cursor: pointer;
-        font-weight: 600;
-        display: inline-block;
-        position: relative;
-        margin: 0 2px;
-        transition: all 0.2s ease;
-      `;
+let mutationObserver: MutationObserver | null = null;
 
-      let tooltip: HTMLDivElement | null = null;
+function createObserver(): MutationObserver {
+  return new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          injectDonateButton(node as Text);
+        } else if (node.nodeType === Node.ELEMENT_NODE) {
+          const walker = document.createTreeWalker(
+            node as HTMLElement,
+            NodeFilter.SHOW_TEXT,
+            {
+              acceptNode(n) {
+                if (!n.textContent) return NodeFilter.FILTER_REJECT;
+                if (
+                  n.parentElement?.closest("script, style, noscript, iframe")
+                ) {
+                  return NodeFilter.FILTER_REJECT;
+                }
+                // Check ancestor chain (not just immediate parent)
+                if (isInsideProcessedElement(n)) {
+                  return NodeFilter.FILTER_REJECT;
+                }
+                STELLAR_ADDRESS_RE.lastIndex = 0;
+                if (STELLAR_ADDRESS_RE.test(n.textContent)) {
+                  return NodeFilter.FILTER_ACCEPT;
+                }
+                return NodeFilter.FILTER_REJECT;
+              },
+            },
+          );
 
-      span.addEventListener("mouseenter", () => {
-        tooltip = createTooltip();
-        const rect = span.getBoundingClientRect();
-        tooltip.style.left = rect.left + rect.width / 2 + "px";
-        tooltip.style.top = rect.top + window.scrollY + "px";
-        document.body.appendChild(tooltip);
-      });
-
-      span.addEventListener("mouseleave", () => {
-        if (tooltip && tooltip.parentNode) {
-          tooltip.parentNode.removeChild(tooltip);
+          let textNode: Text | null;
+          while ((textNode = walker.nextNode() as Text | null)) {
+            injectDonateButton(textNode);
+          }
         }
-        tooltip = null;
-      });
-
-      span.addEventListener("click", () => {
-        chrome.runtime.sendMessage({
-          action: "openDonatePopup",
-          address: match![0],
-        });
-      });
-
-      fragment.appendChild(span);
-      lastIndex = STELLAR_ADDRESS_REGEX.lastIndex;
-    }
-
-    if (lastIndex < text.length) {
-      fragment.appendChild(document.createTextNode(text.substring(lastIndex)));
-    }
-
-    if (node.parentNode) {
-      node.parentNode.replaceChild(fragment, node);
-    }
-  } else if (
-    node.nodeType === Node.ELEMENT_NODE &&
-    !["SCRIPT", "STYLE", "NOSCRIPT", "IFRAME"].includes(
-      (node as HTMLElement).tagName,
-    )
-  ) {
-    node.childNodes.forEach((child) => highlightAddresses(child));
-  }
-}
-
-let currentProjectId: string | null = null;
-
-function checkProjectContext() {
-  const metaTag =
-    document.querySelector('meta[name="indigopay:project:id"]') ||
-    document.querySelector('meta[property="indigopay:project:id"]');
-  let projectId = metaTag ? metaTag.getAttribute("content") : null;
-
-  if (!projectId) {
-    const match = window.location.pathname.match(
-      /\/projects\/([a-zA-Z0-9_-]+)/,
-    );
-    if (match) projectId = match[1];
-  }
-
-  if (projectId !== currentProjectId) {
-    currentProjectId = projectId;
-    chrome.runtime
-      .sendMessage({ action: "setProjectContext", projectId })
-      .catch(() => {});
-  }
-}
-
-document.addEventListener("DOMContentLoaded", () => {
-  highlightAddresses(document.body);
-  checkProjectContext();
-});
-
-const observer = new MutationObserver((mutations) => {
-  mutations.forEach((mutation) => {
-    mutation.addedNodes.forEach((node) => {
-      if (
-        node.nodeType === Node.ELEMENT_NODE ||
-        node.nodeType === Node.TEXT_NODE
-      ) {
-        highlightAddresses(node);
       }
-    });
+    }
   });
-  checkProjectContext();
+}
+
+// ── periodic re-scan for SPA safety ──────────────────────────────────
+
+let autoRescanTimer: ReturnType<typeof setInterval> | null = null;
+
+function startRescanTimer(): void {
+  stopRescanTimer();
+  autoRescanTimer = setInterval(() => {
+    scanAndInject();
+  }, RESCAN_INTERVAL_MS);
+}
+
+function stopRescanTimer(): void {
+  if (autoRescanTimer !== null) {
+    clearInterval(autoRescanTimer);
+    autoRescanTimer = null;
+  }
+}
+
+// ── initialization ───────────────────────────────────────────────────
+
+function init(): void {
+  const run = () => {
+    scanAndInject();
+
+    mutationObserver = createObserver();
+    mutationObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+
+    startRescanTimer();
+  };
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", run);
+  } else {
+    run();
+  }
+}
+
+init();
+
+window.addEventListener("beforeunload", () => {
+  if (mutationObserver) {
+    mutationObserver.disconnect();
+    mutationObserver = null;
+  }
+  stopRescanTimer();
+  if (overlayCleanup) {
+    overlayCleanup();
+    setOverlayCleanup(null);
+  }
 });
 
-observer.observe(document.body, {
-  childList: true,
-  subtree: true,
-});
+// ── message listener from background script ──────────────────────────
 
-window.addEventListener("popstate", checkProjectContext);
-// In case DOMContentLoaded already fired
-checkProjectContext();
+chrome.runtime.onMessage.addListener((message: any) => {
+  if (message.type === "TRIGGER_RESCAN") {
+    scanAndInject();
+  }
+  if (message.type === "CLOSE_OVERLAY") {
+    if (overlayCleanup) {
+      overlayCleanup();
+      setOverlayCleanup(null);
+    }
+  }
+});

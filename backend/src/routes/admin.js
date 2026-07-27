@@ -361,5 +361,6 @@ router.use("/indexer", require("./admin/indexer"));
 router.use("/secret-rotations", require("./admin/secretRotations"));
 router.use("/metrics", require("./admin/metrics"));
 router.use("/failover-metric", require("./admin/failoverMetric"));
+router.use("/matches", require("./admin/matches"));
 
 module.exports = router;

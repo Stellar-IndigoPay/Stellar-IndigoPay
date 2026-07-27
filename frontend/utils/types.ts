@@ -104,7 +104,7 @@ export interface ProjectCampaign {
 export interface Donation {
   id: string;
   projectId: string;
-  donorAddress: string;
+  donorAddress: string | null;
   // Amount as stored and the currency used (e.g. "XLM" or "USDC").
   amountXLM?: string;
   amount?: string;
@@ -112,6 +112,8 @@ export interface Donation {
   message?: string;
   transactionHash: string;
   createdAt: string;
+  anonymous?: boolean;
+  receiptGeneratedAt?: string | null;
   // On-chain contract data
   contractRecordId?: string;
   // Matching status
@@ -248,4 +250,28 @@ export interface MonthlySubscription {
   status: "active" | "completed";
   createdAt: string;
   history: MonthlyDonationHistoryItem[];
+}
+
+/**
+ * Verification request lifecycle data.
+ */
+export interface VerificationRequest {
+  id: string;
+  projectId?: string;
+  projectName: string;
+  projectDescription?: string | null;
+  status: "pending" | "approved" | "rejected" | "under_review" | string;
+  submittedAt?: string | null;
+  reviewedAt?: string | null;
+  reviewerNotes?: string | null;
+  reviewedBy?: string | null;
+  walletAddress: string;
+  timeline?: Array<{
+    type?: string;
+    label?: string;
+    at?: string;
+    date?: string;
+    details?: string;
+  }>;
+  [key: string]: any;
 }

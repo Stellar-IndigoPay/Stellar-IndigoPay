@@ -9,13 +9,50 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 
 ---
 
+## `zk_vk_set`
+
+**Description**: Emitted after M-of-N admins install a new anonymous-donation
+verification key. Event data is the SHA-256 hash of the key.
+
+| Event Name  | Topics          | Data               | When Emitted |
+| ----------- | --------------- | ------------------ | ------------ |
+| `zk_vk_set` | `["zk_vk_set"]` | `BytesN<32>`       | Verification key update |
+
+## `zk_donate`
+
+**Description**: Emitted after an anonymous proof is verified and its
+nullifier consumed. No donor address is included.
+
+| Event Name  | Topics                                      | Data                                      | When Emitted |
+| ----------- | ------------------------------------------- | ----------------------------------------- | ------------ |
+| `zk_donate` | `["zk_donate", project_id, nullifier]`      | `(amount_commitment, co2_offset_grams)`   | Verified anonymous donation |
+
+---
+
+## `StealthScan`
+
+**Description**: Emitted when an authenticated project wallet scans for its
+stealth donations, including scans that find no donations.
+
+| Event Name    | Topics                              | Data                                         | When Emitted |
+| ------------- | ----------------------------------- | -------------------------------------------- | ------------ |
+| `StealthScan` | `["StealthScan", project_wallet]`   | `(donation_count: u32, timestamp: u64)`      | After `scan_stealth_donations` completes |
+
+---
+
 ## 1. `donated`
 
 **Description**: Emitted after a successful XLM donation to a project.
 
 | Event Name | Topics                           | Data                                                     | When Emitted                  |
 | ---------- | -------------------------------- | -------------------------------------------------------- | ----------------------------- |
-| `donated`  | `["donated", donor, project_id]` | `{ "amount": u128, "badge": String, "msg_hash": Bytes }` | After successful XLM donation |
+| `donated`  | `["donated", donor_or_zero_address, project_id]` | `{ "amount": u128, "badge": String, "msg_hash": Bytes }` | After successful donation |
+
+When a donor passes `anonymous: true`, `donor_or_zero_address` is the Stellar
+zero-address placeholder (`GAAAAAAAA…WHF`). Amounts and project/global impact
+metrics remain public; public donor-profile and leaderboard projections exclude it.
+The contract exposes `get_anonymous_donation_count(env, project_id)` for
+project-scoped anonymous donation totals.
 
 ---
 
@@ -189,6 +226,296 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 
 ---
 
+## Force-refund escalation events
+
+These lifecycle events use full `Symbol` values because their names exceed the
+nine-character `symbol_short!` limit.
+
+### `rfnd_force_init`
+
+**Description**: Emitted after M-of-N admins schedule a force-refund. No tokens
+or donation accounting move at this point.
+
+| Event Name         | Topics                           | Data                                                     | When Emitted |
+| ------------------ | -------------------------------- | -------------------------------------------------------- | ------------ |
+| `rfnd_force_init`  | `["rfnd_force_init", refund_id]` | `(project_id: String, amount: i128, effective_at: u32)` | When M-of-N admins call `force_approve_refund` |
+
+### `rfnd_force_exec`
+
+**Description**: Emitted after the timelock when a force-refund is paid from
+the project's canonical contract-held token balance.
+
+| Event Name         | Topics                           | Data                                                   | When Emitted |
+| ------------------ | -------------------------------- | ------------------------------------------------------ | ------------ |
+| `rfnd_force_exec`  | `["rfnd_force_exec", refund_id]` | `(project_id: String, amount: i128, donor: Address)`  | After `execute_force_refund` completes |
+
+### `rfnd_force_cncl`
+
+**Description**: Emitted when any current admin cancels an escalation before
+its effective ledger.
+
+| Event Name         | Topics                                  | Data | When Emitted |
+| ------------------ | --------------------------------------- | ---- | ------------ |
+| `rfnd_force_cncl`  | `["rfnd_force_cncl", refund_id, admin]` | `()` | When an admin calls `cancel_force_refund` |
+
+---
+
+## Escrow Contract Events
+
+## 19. `job_creat`
+
+**Description**: Emitted when a client creates and funds an escrow job.
+
+| Event Name  | Topics                     | Data                                           | When Emitted                     |
+| ----------- | -------------------------- | ---------------------------------------------- | -------------------------------- |
+| `job_creat` | `["job_creat", client]`    | `(job_id: String, freelancer: Address, amount: i128)` | When client calls `create_job` |
+
+---
+
+## 20. `ms_rel`
+
+**Description**: Emitted when a client releases funds for a specific milestone.
+
+| Event Name | Topics                  | Data                                                        | When Emitted                            |
+| ---------- | ----------------------- | ----------------------------------------------------------- | --------------------------------------- |
+| `ms_rel`   | `["ms_rel", client]`    | `(job_id: String, milestone_index: u32, release_amount: i128)` | When client calls `release_milestone`   |
+
+---
+
+## 21. `ms_claim`
+
+**Description**: Emitted when a freelancer claims a released milestone after the release period.
+
+| Event Name | Topics                     | Data                                                        | When Emitted                            |
+| ---------- | -------------------------- | ----------------------------------------------------------- | --------------------------------------- |
+| `ms_claim` | `["ms_claim", freelancer]` | `(job_id: String, milestone_index: u32, release_amount: i128)` | When freelancer calls `claim_milestone` |
+
+---
+
+## 22. `ms_disp`
+
+**Description**: Emitted when an admin disputes a single milestone on a job.
+
+| Event Name | Topics                 | Data                                      | When Emitted                            |
+| ---------- | ---------------------- | ----------------------------------------- | --------------------------------------- |
+| `ms_disp`  | `["ms_disp", admin]`   | `(job_id: String, milestone_index: u32)`  | When admin calls `dispute_milestone`    |
+
+---
+
+## 23. `ms_reslv`
+
+**Description**: Emitted when an admin resolves a single milestone dispute.
+
+| Event Name | Topics                 | Data                                                           | When Emitted                                   |
+| ---------- | ---------------------- | -------------------------------------------------------------- | ---------------------------------------------- |
+| `ms_reslv` | `["ms_reslv", admin]`  | `(job_id: String, milestone_index: u32, approve: bool)`       | When admin calls `resolve_milestone_dispute`   |
+
+---
+
+## 24. `job_refnd`
+
+**Description**: Emitted when a client claims an auto-refund for an expired job with no claimed milestones.
+
+| Event Name  | Topics                     | Data                                    | When Emitted                             |
+| ----------- | -------------------------- | --------------------------------------- | ---------------------------------------- |
+| `job_refnd` | `["job_refnd", client]`    | `(job_id: String, refund_amount: i128)` | When client calls `refund_expired_job`   |
+
+---
+
+## 25. `job_disp` (deprecated)
+
+**Description**: Emitted when an admin disputes an entire job.
+
+| Event Name | Topics                 | Data               | When Emitted                        |
+| ---------- | ---------------------- | ------------------ | ----------------------------------- |
+| `job_disp` | `["job_disp", admin]`  | `job_id: String`   | When admin calls `dispute_job`      |
+
+---
+
+## 26. `job_reslv` (deprecated)
+
+**Description**: Emitted when an admin resolves an entire job dispute.
+
+| Event Name  | Topics                 | Data                                        | When Emitted                        |
+| ----------- | ---------------------- | ------------------------------------------- | ----------------------------------- |
+| `job_reslv` | `["job_reslv", admin]` | `(job_id: String, approve_remaining: bool)` | When admin calls `resolve_dispute`  |
+
+---
+
+## 9. `sub_new` (recurring donation subscription created)
+
+**Description**: Emitted by `create_subscription` (#81). Named `sub_new` rather than the
+`sub_created` used in the issue spec because `symbol_short!` topics are capped at 9
+characters — same convention as `prop_new` / `prop_veto` elsewhere in this contract.
+
+| Event Name | Topics                  | Data                                                                  | When Emitted                    |
+| ---------- | ------------------------ | ---------------------------------------------------------------------- | -------------------------------- |
+| `sub_new`  | `["sub_new", donor]`     | `{ "project_id": String, "amount": i128, "interval_ledgers": u32, "next_execution": u32 }` | After a subscription is created or re-created |
+
+## 10. `sub_canc` (recurring donation subscription cancelled)
+
+**Description**: Emitted by `cancel_subscription` (#81). Shortened from `sub_cancelled`
+for the same `symbol_short!` 9-character limit.
+
+| Event Name | Topics                 | Data                    | When Emitted                  |
+| ---------- | ------------------------ | ------------------------ | ------------------------------ |
+| `sub_canc` | `["sub_canc", donor]`   | `{ "project_id": String }` | After a subscription is cancelled |
+
+## 11. `sub_exec` (recurring donation subscription executed)
+
+**Description**: Emitted by `execute_subscription` (#81) after it delegates to `donate`
+and advances `next_execution`. Shortened from `sub_executed`.
+
+| Event Name | Topics                 | Data                                                        | When Emitted                          |
+| ---------- | ------------------------ | -------------------------------------------------------------- | --------------------------------------- |
+| `sub_exec` | `["sub_exec", donor]`   | `{ "project_id": String, "amount": i128, "next_execution": u32 }` | After a due subscription donation executes |
+## 27. `rec_cr` (Recurring Created)
+
+**Description**: Emitted when a donor registers a new recurring donation schedule.
+
+| Event Name | Topics                           | Data                                                                                                    | When Emitted                              |
+| ---------- | -------------------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| `rec_cr`   | `["rec_cr", donor, project_id]`  | `(recurring_id: u32, amount: i128, currency: Symbol, interval_ledgers: u32, keeper_incentive: i128, msg_hash: u32)` | When a donor registers a recurring schedule |
+
+---
+
+## 28. `rec_can` (Recurring Cancelled)
+
+**Description**: Emitted when a donor cancels an active recurring donation schedule.
+
+| Event Name | Topics                 | Data                 | When Emitted                                |
+| ---------- | ---------------------- | -------------------- | ------------------------------------------- |
+| `rec_can`  | `["rec_can", donor]`   | `(recurring_id: u32)` | When a donor cancels a recurring schedule   |
+
+---
+
+## 29. `rec_exec` (Recurring Executed)
+
+**Description**: Emitted when a keeper successfully executes a matured recurring donation schedule.
+
+| Event Name | Topics                      | Data                                                                           | When Emitted                                  |
+| ---------- | --------------------------- | ------------------------------------------------------------------------------ | --------------------------------------------- |
+| `rec_exec` | `["rec_exec", keeper, donor]`| `(recurring_id: u32, amount: i128, currency: Symbol, project_id: String)`      | When a keeper executes a recurring donation   |
+
+## 30. `vest_crt` (Vesting Created)
+
+**Description**: Emitted when a donor creates a time-locked vesting donation schedule.
+
+| Event Name | Topics                           | Data                                                                                                    | When Emitted                   |
+| ---------- | -------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| `vest_crt` | `["vest_crt", donor, project_id]` | `(schedule_id: u32, total_amount: i128, amount_per_installment: i128, installment_count: u32, interval_ledgers: u32, msg_hash: u32)` | When donor calls `donate_vested` |
+
+---
+
+## 31. `vest_clm` (Vesting Claimed)
+
+**Description**: Emitted when a vested installment is claimed by anyone after the interval elapses.
+
+| Event Name | Topics                    | Data                                                     | When Emitted                          |
+| ---------- | ------------------------- | -------------------------------------------------------- | ------------------------------------- |
+| `vest_clm` | `["vest_clm", project_id]` | `(schedule_id: u32, amount: i128, remaining: u32)`       | When `claim_vested_installment` fires |
+
+---
+
+## 32. `vest_can` (Vesting Cancelled)
+
+**Description**: Emitted when a donor cancels a vesting schedule and receives back the unvested amount.
+
+| Event Name | Topics                            | Data                                      | When Emitted                    |
+| ---------- | --------------------------------- | ----------------------------------------- | ------------------------------- |
+| `vest_can` | `["vest_can", donor, project_id]` | `(schedule_id: u32, unvested_amount: i128)` | When donor calls `cancel_vesting` |
+
+---
+
+## Off-Chain Multi-Verifier Project Verification Oracle
+
+Gated behind the `project_verification` Cargo feature (on by default). An M-of-N
+committee of admin-appointed verifiers attests that a project has passed
+independent off-chain due diligence; once enough distinct verifiers have
+attested, the project auto-transitions to `Verified` and every `donate*` entry
+point starts accepting donations to it. See `SECURITY.md` for the full trust
+model.
+
+## 33. `ver_add` (Verifier Added)
+
+**Description**: Emitted when M-of-N admins authorise a new address to submit project attestations.
+
+| Event Name | Topics          | Data                | When Emitted                    |
+| ---------- | --------------- | -------------------- | -------------------------------- |
+| `ver_add`  | `["ver_add"]`   | `verifier: Address`  | When admins call `add_verifier` |
+
+---
+
+## 34. `ver_rem` (Verifier Removed)
+
+**Description**: Emitted when M-of-N admins revoke a verifier's ability to submit new attestations. Attestations it already submitted are not affected.
+
+| Event Name | Topics          | Data                | When Emitted                       |
+| ---------- | --------------- | -------------------- | ------------------------------------ |
+| `ver_rem`  | `["ver_rem"]`   | `verifier: Address`  | When admins call `remove_verifier` |
+
+---
+
+## 35. `ver_thr` (Verification Threshold Updated)
+
+**Description**: Emitted when M-of-N admins change the number of distinct verifier attestations required for a project to auto-verify. `0` disables the gate (legacy mode).
+
+| Event Name | Topics          | Data              | When Emitted                                   |
+| ---------- | --------------- | ------------------ | ------------------------------------------------ |
+| `ver_thr`  | `["ver_thr"]`   | `threshold: u32`   | When admins call `set_verification_threshold` |
+
+---
+
+## 36. `proj_att` (Project Attestation Recorded)
+
+**Description**: Emitted when an authorised verifier attests a project. Fired once per (project, verifier) pair — a second attestation from the same verifier for the same project panics instead of re-emitting this event.
+
+| Event Name | Topics                                | Data                                             | When Emitted                       |
+| ---------- | -------------------------------------- | -------------------------------------------------- | ------------------------------------ |
+| `proj_att` | `["proj_att", verifier, project_id]`   | `(attestation_count: u32, evidence_hash: BytesN<32>)` | When a verifier calls `attest_project` |
+
+---
+
+## 37. `proj_vfy` (Project Verified)
+
+**Description**: Emitted the moment a project's distinct-attester count reaches `VerificationThreshold`, in the same invocation as the attestation (or donation) that crossed it. Fires at most once per verification cycle — a `revoke_verification` followed by re-attesting to the threshold fires it again.
+
+| Event Name | Topics                     | Data                    | When Emitted                                          |
+| ---------- | --------------------------- | ------------------------ | -------------------------------------------------------- |
+| `proj_vfy` | `["proj_vfy", project_id]`  | `attestation_count: u32` | When a project's status transitions to `Verified`        |
+
+---
+
+## 38. `proj_rvk` (Project Verification Revoked)
+
+**Description**: Emitted when M-of-N admins clear a project's entire verification state — all accumulated attestations and evidence hashes are removed and the project reverts to `Unverified`.
+
+| Event Name | Topics                          | Data              | When Emitted                                |
+| ---------- | --------------------------------- | ------------------ | ---------------------------------------------- |
+| `proj_rvk` | `["proj_rvk", admin]`            | `project_id: String` | When admins call `revoke_verification`      |
+
+---
+
+## 39. `tok_reg` (Token Registered)
+
+**Description**: Emitted when an admin registers a new token and its oracle into the dynamic token registry.
+
+| Event Name | Topics                 | Data                             | When Emitted                     |
+| ---------- | ---------------------- | -------------------------------- | -------------------------------- |
+| `tok_reg`  | `["tok_reg", admin]`   | `(token: Address, symbol: Symbol)` | When admin calls `register_token` |
+
+---
+
+## 40. `tok_rem` (Token Removed)
+
+**Description**: Emitted when an admin removes a token from active registration in the dynamic token registry.
+
+| Event Name | Topics                 | Data               | When Emitted                   |
+| ---------- | ---------------------- | ------------------ | ------------------------------ |
+| `tok_rem`  | `["tok_rem", admin]`   | `token: Address`   | When admin calls `remove_token` |
+
+---
+
 ## Usage Notes
 
 - All events follow Soroban’s standard event format: `topics: Vec<Val>`, `data: Val`.
@@ -196,7 +523,7 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 - Events can be queried via Horizon or Soroban RPC tools.
 - Frontend / backend should listen to these for real-time updates, notifications, and leaderboard.
 
-**Last Updated**: July 18, 2026
+**Last Updated**: July 26, 2026
 
 ---
 

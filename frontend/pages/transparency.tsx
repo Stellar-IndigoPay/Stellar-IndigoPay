@@ -18,11 +18,11 @@
  * @see docs/issue-253.md for full spec.
  */
 import { useMemo, useEffect, useState, useRef } from "react";
+import dynamic from "next/dynamic";
 import type { GetServerSideProps } from "next";
 import PageMeta from "@/components/PageMeta";
 import HealthBanner from "@/components/HealthBanner";
 import StatCard, { StatCardSkeleton } from "@/components/StatCard";
-import WorldMap from "@/components/WorldMap";
 import type { DonationMapItem } from "@/components/WorldMap";
 import SLOStatusPanel from "@/components/SLOStatusPanel";
 import { useGlobalStats, useSLOData } from "@/lib/transparencyHooks";
@@ -31,6 +31,15 @@ import { fetchProjects } from "@/lib/api";
 import { streamGlobalProjectDonations } from "@/lib/stellar";
 import { formatCO2, timeAgo } from "@/utils/format";
 import type { ClimateProject } from "@/utils/types";
+
+const WorldMap = dynamic(() => import("@/components/WorldMap"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex items-center justify-center h-64">
+      <span className="text-sm text-[#94A3B8] font-body">Loading map…</span>
+    </div>
+  ),
+});
 
 // ── Icons (inline SVGs for zero dependencies) ────────────────────────────
 

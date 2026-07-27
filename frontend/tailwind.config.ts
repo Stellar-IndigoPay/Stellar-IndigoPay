@@ -66,8 +66,8 @@ const config: Config = {
         },
       },
       fontFamily: {
-        display: ["'Plus Jakarta Sans'", "system-ui", "sans-serif"],
-        body: ["'Inter'", "system-ui", "sans-serif"],
+        display: ["var(--font-display)", "system-ui", "sans-serif"],
+        body: ["var(--font-inter)", "system-ui", "sans-serif"],
         mono: ["'JetBrains Mono'", "monospace"],
       },
       animation: {

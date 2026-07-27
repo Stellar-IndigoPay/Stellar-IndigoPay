@@ -172,6 +172,7 @@ const donationSchema = z.object({
   amountXLM: xlmAmount,
   currency: z.enum(DONATION_CURRENCIES).optional().default("XLM"),
   message: z.string().max(100, "Message must be at most 100 characters").optional(),
+  anonymous: z.boolean().optional().default(false),
 });
 
 // ── Verification request schema ──────────────────────────────────────────────

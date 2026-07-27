@@ -152,6 +152,7 @@ async function enqueueDigest(type) {
 async function stop() {
   if (!boss) return;
   await boss.stop({ graceful: true, timeout: 15_000 });
+  boss = null;
 }
 
-module.exports = { start, runDigest, enqueueDigest };
+module.exports = { start, stop, runDigest, enqueueDigest };

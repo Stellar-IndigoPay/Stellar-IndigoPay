@@ -18,6 +18,9 @@
  */
 module.exports = {
   testRunner: "jest-circus/runner",
+  testEnvironment: "node",
+  setupFiles: ["<rootDir>/test-setup.js"],
+  testTimeout: 20000,
   transformIgnorePatterns: [
     "node_modules/(?!(uuid|@stellar/stellar-sdk|pino|pino-http|prom-client)/)",
   ],

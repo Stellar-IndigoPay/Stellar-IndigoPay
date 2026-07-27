@@ -8,6 +8,7 @@ const { z } = require("zod");
 const pool = require("../db/pool");
 const { mapProfileRow } = require("../services/store");
 const { createRateLimiter } = require("../middleware/rateLimiter");
+const { invalidateCache } = require("../middleware/cache");
 const { validate } = require("../middleware/validate");
 const { stellarAddress, profileSchema } = require("../validators/schemas");
 const {
@@ -94,6 +95,8 @@ router.post(
       RETURNING *`,
         [publicKey, trimmedDisplayName, trimmedBio],
       );
+
+      invalidateCache("cache:v1:leaderboard:*");
 
       res.json({ success: true, data: mapProfileRow(result.rows[0]) });
     } catch (e) {

@@ -23,6 +23,7 @@ import {
 import { fetchProjects } from "@/lib/api";
 import { shortenAddress } from "@/utils/format";
 import GovernanceSkeleton from "@/components/GovernanceSkeleton";
+import { useI18n } from "@/lib/i18n";
 import {
   Contract,
   TransactionBuilder,
@@ -130,6 +131,7 @@ function ledgersToDays(ledgers: number): string {
 }
 
 export default function GovernancePage() {
+  const { t } = useI18n();
   const router = useRouter();
   const [publicKey, setPublicKey] = useState<string | null>(null);
   const [isBadgeHolder, setIsBadgeHolder] = useState(false);
@@ -265,10 +267,9 @@ export default function GovernancePage() {
   const governanceJsonLd = {
     "@context": "https://schema.org",
     "@type": "WebPage",
-    name: "Governance | Stellar IndigoPay",
+    name: `${t("governance.title")} | Stellar IndigoPay`,
     url: canonicalUrl,
-    description:
-      "Vote on project verification proposals with your impact badge on Stellar IndigoPay.",
+    description: t("governance.subtitle"),
   };
 
   if (isLoading) return <GovernanceSkeleton />;
@@ -276,8 +277,8 @@ export default function GovernancePage() {
   return (
     <div className="min-h-screen bg-[#fcfdfc] font-body text-forest-900 pb-20">
       <PageMeta
-        title="Governance | Stellar IndigoPay"
-        description="Vote on project verification proposals with your impact badge."
+        title={`${t("governance.title")} | Stellar IndigoPay`}
+        description={t("governance.subtitle")}
         canonicalUrl={canonicalUrl}
         jsonLd={governanceJsonLd}
       />
@@ -285,12 +286,10 @@ export default function GovernancePage() {
       <main className="max-w-3xl mx-auto px-4 py-12 sm:px-6">
         <div className="mb-10">
           <h1 className="text-4xl font-display font-bold text-[#0F172A] dark:text-[#E2E8F0] tracking-tight">
-            Community <span className="text-gradient">Governance</span>
+            {t("governance.title")}
           </h1>
           <p className="mt-3 text-[#475569] dark:text-[#94A3B8]">
-            Badge holders vote to verify new climate projects. You need at least
-            a <span className="font-semibold">Seedling badge</span> (≥ 10 XLM
-            donated) to cast a vote.
+            {t("governance.subtitle")}
           </p>
         </div>
 

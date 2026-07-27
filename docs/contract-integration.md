@@ -106,9 +106,47 @@ Represents donor impact level based on cumulative donations.
 
 ## Recording Donations (Cross-Contract Calls)
 
+### Multi-Token Donations with `donate_token()`
+
+The `donate_token()` entrypoint supports donations in any registered Stellar asset (e.g. XLM, USDC, yXLM, USDT, BTC-representative tokens).
+
+**Signature:**
+
+```rust
+pub fn donate_token(
+    env:        Env,
+    token:      Address,           // Token contract address (must be registered)
+    donor:      Address,           // Who is donating (must authorize)
+    project_id: String,            // Target project ID
+    amount:     i128,              // Amount in token stroops/units
+    msg_hash:   u32,               // Message hash (for UI reference)
+)
+```
+
+**Token Registry Management (Admin Only):**
+
+```rust
+// Register a new token with its price oracle
+pub fn register_token(
+    env: Env,
+    admin: Address,
+    token_address: Address,
+    oracle_address: Address,
+    symbol: Symbol,
+);
+
+// Deactivate a registered token
+pub fn remove_token(
+    env: Env,
+    admin: Address,
+    token_address: Address,
+);
+```
+
 ### Step 1: Understand the `donate()` Function
 
 The Stellar-IndigoPay contract's `donate()` function records a donation and transfers XLM to the project wallet.
+
 
 **Signature:**
 

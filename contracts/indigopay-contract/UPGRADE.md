@@ -15,7 +15,59 @@ If you are upgrading this contract:
 
 - The proposed WASM MUST be a drop-in replacement that preserves every storage key and value layout listed below.
 - During the 48h window, run a dry-run deployment to a testnet address with the same storage, and verify the regression test (`test_upgrade_preserves_donation_state_and_storage_keys`) passes against the new WASM.
+- **New**: Call `simulate_upgrade()` (permissionless, no auth required) to validate storage key integrity against the pending upgrade. See the Dry-Run Simulation section below.
 - If the proposed WASM is discovered to be malicious or buggy during the window, the admin MUST call `cancel_upgrade` before the timelock elapses.
+
+## Upgrade Dry-Run Simulation
+
+`simulate_upgrade()` is a read-only safety check anyone can call during the 48-hour timelock window. It validates that a pending upgrade is compatible with the current contract storage without actually executing the WASM migration.
+
+### What it checks
+
+1. **Pending upgrade exists** — panics if no upgrade was proposed.
+2. **WASM hash is non-zero** — rejects corrupted all-zeros proposals.
+3. **Scalar storage keys** — enumerates and verifies accessibility of all non-parameterized `DataKey` variants (AdminSet, AdminThreshold, ProjectCount, DonationCount, GlobalTotalRaised, GlobalCO2OffsetGrams, ContractPaused, DonationRateLimitMax, DonationRateLimitWindow, ProjectIdsAll, plus the upgrade lifecycle keys).
+4. **Project-specific keys** — iterates `ProjectIdsAll` and verifies each `Project(pid)` entry deserialises correctly, plus any associated `Proposal(pid)`, `VoterList(pid)`, or `EmergencyWithdrawal(pid)`.
+
+### Limitations
+
+- **No actual WASM execution**: Soroban host does not support storage snapshots and rollbacks, so the simulation cannot run the proposed `migrate()` function. Instead it validates storage key integrity and reports that all existing keys would be preserved (`keys_after == keys_before`).
+- **Donor-address-keyed keys** (`DonorStats`, `ImpactNFT`, `HasDonated`, etc.) cannot be enumerated without an on-chain donor index. The total key count is considered representative for validation.
+
+### Return value
+
+```rust
+pub struct SimulationResult {
+    pub success: bool,              // true if no errors found
+    pub storage_keys_before: u32,   // count of accessible storage keys
+    pub storage_keys_after: u32,    // projected count after migration (== before)
+    pub errors: Vec<String>,        // descriptive errors (empty on success)
+}
+```
+
+### Calling
+
+```bash
+# Via Stellar CLI
+stellar contract invoke \
+  --id CONTRACT_ID \
+  --network testnet \
+  -- simulate_upgrade
+```
+
+```js
+// Via JS SDK
+const result = await contract.simulate_upgrade();
+console.log(result.success, result.storage_keys_before);
+```
+
+### Testing
+
+Run the simulation tests:
+
+```bash
+cargo test -p indigopay-contract --lib simulate_upgrade
+```
 
 ## Storage Compatibility
 
@@ -49,6 +101,12 @@ The current persisted keys are:
 - `DataKey::RefundCount` _(#290 donation refund)_
 - `DataKey::RefundForDonation(u32)` _(#290 donation refund)_
 - `DataKey::DonationCO2Offset(u32)` _(#290 donation refund — CO₂ snapshot per donation)_
+- `DataKey::ForceRefund(u32)` _(#429 M-of-N refund escalation timelock; appended to preserve existing discriminants)_
+- `DataKey::SubProjectIds(String)` _(#391 cross-contract project registry — sub-project index per parent)_
+- `DataKey::TokenConfig(Address)` _(#421 dynamic token registry configuration per asset)_
+- `DataKey::TokenList` _(#421 dynamic token registry enumeration list)_
+- `DataKey::DonorRateLimitPerToken(Address, String, Address)` _(#421 per-token donation rate limit window)_
+- **Storage version tracking** _(#379 — Symbol-keyed, not a DataKey variant)_
 
 Do not rename or remove these variants, change their argument order, or reorder/remove fields from stored structs such as `Project`, `DonorStats`, `ImpactNFT`, `ProjectMilestoneNFT`, `VoteProposal`, or `GlobalStats` without adding an explicit migration path. New fields should be handled through a new storage version or a new key namespace so existing v1 values remain decodable.
 
@@ -74,12 +132,61 @@ This confirms the storage keys and value layouts used by existing donation state
 - `test_cancel_upgrade_clears_pending` and `test_cancel_upgrade_during_timelock_succeeds` — verify the cancel path.
 - `test_get_pending_upgrade` — verifies the read-only getter returns the correct `(hash, effective_at)` tuple.
 
+## Storage Versioning and Migration (#379)
+
+The contract uses a `DataKey::StorageVersion` key to track the current schema
+version. This enables automated storage migrations after contract upgrades:
+
+### Version constants
+
+- `CURRENT_STORAGE_VERSION` — defined at the top of `lib.rs`. Bump this and add
+  a migration step in `migrate()` whenever a struct layout, DataKey variant,
+  or stored value encoding changes in a backward-incompatible way.
+- `DataKey::StorageVersion` — persists the version number after each migration
+  step completes, ensuring no step is applied twice.
+
+### How migrations work
+
+1. `initialize()` sets `StorageVersion = CURRENT_STORAGE_VERSION` for new
+   contracts, so they skip all historical migrations.
+2. For upgraded contracts, `execute_upgrade()` calls `migrate()` immediately
+   after swapping the WASM.
+3. `migrate()` reads the current `StorageVersion`, applies each pending
+   migration step sequentially (e.g., `migrate_v1_to_v2`), and updates
+   `StorageVersion` after each step.
+4. The final assertion in `migrate()` panics if `StorageVersion` does not
+   equal `CURRENT_STORAGE_VERSION`, catching incomplete migration sequences
+   at upgrade time.
+
+### Adding a new migration
+
+1. Bump `CURRENT_STORAGE_VERSION`.
+2. Add the migration function (e.g., `migrate_v2_to_v3`).
+3. Add a `if current < NEW_VERSION { migrate_v2_to_v3(env); set_storage_version(NEW_VERSION); }`
+   block in `migrate()`.
+4. Handle backward-incompatible changes — rename old keys, transform stored
+   values, or backfill missing entries — inside the migration function.
+
+### Example migration (v1 → v2)
+
+The v1→v2 migration is empty because v1 storage is v2-compatible. It exists
+solely to establish the migration framework pattern. When the first real
+schema change is introduced, replace it with actual data transformations.
+
 ## Validation
 
 Run the focused regression test:
 
 ```bash
 cargo test -p indigopay-contract --lib test_upgrade_preserves_donation_state_and_storage_keys
+```
+
+Run the storage versioning tests:
+
+```bash
+cargo test -p indigopay-contract --lib test_storage_version_initialized
+cargo test -p indigopay-contract --lib test_migration_runs_on_upgrade
+cargo test -p indigopay-contract --lib test_migration_idempotent
 ```
 
 Run the timelock regression test:

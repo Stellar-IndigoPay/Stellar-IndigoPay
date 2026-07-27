@@ -350,7 +350,7 @@ export default function ProjectAnalyticsPage() {
                   <tr key={donor.donorAddress} className="border-b border-forest-50 hover:bg-forest-50/50">
                     <td className="py-3 px-3 font-bold text-forest-900">{idx + 1}</td>
                     <td className="py-3 px-3 font-mono text-xs text-forest-700">
-                      {shortenAddress(donor.donorAddress)}
+                      {shortenAddress(donor.donorAddress || "")}
                     </td>
                     <td className="py-3 px-3 text-right font-semibold text-forest-900">
                       {formatXLM(donor.totalContributed)}

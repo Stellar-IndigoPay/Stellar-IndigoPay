@@ -168,6 +168,32 @@ groups:
   - name: stellar-indigopay-backend-readiness
     interval: 30s
     rules:
+      - alert: IndexerLagHigh
+        expr: indigopay_indexer_lag_ledgers > 500
+        for: 5m
+        labels:
+          severity: page
+          routing: pagerduty
+        annotations:
+          summary: "Indexer lag is >500 ledgers (~42 minutes behind)"
+          description: "The Horizon indexer is {{ $value }} ledgers behind. Auto-backfill may be failing."
+
+      - alert: IndexerLagWarning
+        expr: indigopay_indexer_lag_ledgers > 50
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Indexer lag is >50 ledgers"
+
+      - alert: IndexerStreamDown
+        expr: rate(indigopay_indexer_stream_reconnects_total[10m]) == 0 AND indigopay_indexer_lag_ledgers > 0
+        for: 5m
+        labels:
+          severity: page
+          routing: pagerduty
+        annotations:
+          summary: "Indexer stream appears down — no reconnects and positive lag"
       - alert: ReadinessProbeFailing
         # We can't directly scrape /api/readyz, so this rule fires when the
         # in-process readiness_log metric indicates a failure. The wrapper

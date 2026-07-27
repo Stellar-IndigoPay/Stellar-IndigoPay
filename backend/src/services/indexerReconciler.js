@@ -165,11 +165,6 @@ async function startReconciler() {
   if (isRunning) return;
   isRunning = true;
 
-  logger.info(
-    { event: "reconciler_started", intervalMs: RECONCILE_INTERVAL_MS },
-    `Starting indexer reconciler every ${RECONCILE_INTERVAL_MS}ms`,
-  );
-
   // Run an initial check after a short delay to let the indexer warm up
   setTimeout(async () => {
     try {

@@ -19,13 +19,9 @@ import { formatCO2, formatXLM, progressPercent } from "@/utils/format";
 import type { GlobalStats, CategoryStats } from "@/lib/api";
 import type { ClimateProject } from "@/utils/types";
 
-interface LiveDonationTickerItem {
-  id: string;
-  projectId: string;
-  projectName: string;
-  amountXLM: string;
-  createdAt: string;
-}
+import LiveDonationTicker from "@/components/LiveDonationTicker";
+import type { Donation as LiveDonationTickerItem } from "@/components/LiveDonationTicker";
+
 
 const FEATURES = [
   {
@@ -117,7 +113,6 @@ export default function Home() {
   const [liveDonations, setLiveDonations] = useState<LiveDonationTickerItem[]>(
     [],
   );
-  const [tickerIndex, setTickerIndex] = useState(0);
 
   useEffect(() => {
     let closeStream: (() => void) | null = null;
@@ -166,19 +161,6 @@ export default function Home() {
     };
   }, []);
 
-  useEffect(() => {
-    if (liveDonations.length <= 1) return;
-    const timer = window.setInterval(() => {
-      setTickerIndex((current) => (current + 1) % liveDonations.length);
-    }, 3500);
-    return () => window.clearInterval(timer);
-  }, [liveDonations.length]);
-
-  useEffect(() => {
-    if (tickerIndex >= liveDonations.length) {
-      setTickerIndex(0);
-    }
-  }, [liveDonations.length, tickerIndex]);
 
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || "https://stellar-indigopay.app";
   const canonicalUrl = `${appUrl}/`;
@@ -445,48 +427,7 @@ export default function Home() {
         />
       )}
 
-      <LiveDonationTicker donations={liveDonations} activeIndex={tickerIndex} />
-    </div>
-  );
-}
-
-function LiveDonationTicker({
-  donations,
-  activeIndex,
-}: {
-  donations: LiveDonationTickerItem[];
-  activeIndex: number;
-}) {
-  if (donations.length === 0) return null;
-  const item = donations[activeIndex];
-
-  return (
-    <div
-      className="fixed bottom-0 left-0 right-0 z-40 border-t border-[rgba(99,102,241,0.20)] dark:border-[rgba(129,140,248,0.20)] bg-[#0F172A]/95 dark:bg-[#0A0A1A]/95 backdrop-blur px-4 py-2.5"
-      role="region"
-      aria-label="Live donation ticker"
-    >
-      <div className="max-w-6xl mx-auto flex items-center gap-3 text-sm text-white font-body">
-        <span className="inline-flex items-center gap-2 text-[11px] uppercase tracking-widest text-[#818CF8] font-bold">
-          <span
-            className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shadow-sm shadow-emerald-500/50"
-            aria-hidden="true"
-          />
-          Live donations
-        </span>
-        {/* aria-live polite so screen readers announce ticker updates but
-            don't interrupt the user's current utterance. */}
-        <p key={item.id} className="animate-fade-in-up" aria-live="polite">
-          <span className="sr-only">A new donation: </span>
-          just donated <strong>{formatXLM(item.amountXLM)}</strong> to{" "}
-          <Link
-            href={`/projects/${item.projectId}`}
-            className="text-[#A5B4FC] hover:text-[#818CF8] transition-colors focus:outline-none focus:ring-2 focus:ring-[#818CF8] rounded"
-          >
-            {item.projectName}
-          </Link>
-        </p>
-      </div>
+      <LiveDonationTicker donations={liveDonations} />
     </div>
   );
 }

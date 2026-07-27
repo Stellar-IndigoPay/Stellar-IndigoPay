@@ -99,4 +99,27 @@ describe("GET /api/readyz (readiness)", () => {
     expect(res.status).toBe(200);
     expect(res.body.checks.pool.status).toBe("ok");
   });
+
+  test("maps indexer lag status from the service status payload", async () => {
+    jest.spyOn(pool.getWriter(), "query").mockResolvedValueOnce({ rows: [] });
+    Object.defineProperty(pool, "_writerPool", {
+      value: { waitingCount: 3, max: 20 },
+      writable: true,
+      configurable: true,
+    });
+
+    const indexerService = require("../services/indexerService");
+    jest.spyOn(indexerService, "getStatus").mockReturnValue({
+      isRunning: true,
+      lagLedgers: 12,
+      lastProcessedLedger: 88,
+    });
+
+    const res = await request(buildApp()).get("/api/readyz");
+    expect(res.status).toBe(200);
+    expect(res.body.checks.indexer.status).toBe("ok");
+    expect(res.body.checks.indexer.lag_ledgers).toBe(12);
+    expect(res.body.checks.indexer.stream_active).toBe(true);
+    expect(res.body.checks.indexer.last_processed_ledger).toBe(88);
+  });
 });

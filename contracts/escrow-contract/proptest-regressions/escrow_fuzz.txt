@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e5c8fd1a98dfd399c350b83fb87dbd11348e81faf96ae295156d984223578a24 # shrinks to ops = [CreateJob { milestones: [100], amount: 1000000 }, CreateJob { milestones: [100], amount: 1000000 }, CreateJob { milestones: [100], amount: 1000000 }, CreateJob { milestones: [100], amount: 1000000 }, CreateJob { milestones: [100], amount: 1000000 }, CreateJob { milestones: [100], amount: 1000000 }, DisputeJob { job_idx: 5 }, ResolveDispute { job_idx: 5, approve_remaining: true }]

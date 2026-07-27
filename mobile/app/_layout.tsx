@@ -166,6 +166,10 @@ export default function RootLayout() {
               options={{ title: "Import Wallet", headerShown: false }}
             />
             <Stack.Screen
+              name="sep0007"
+              options={{ title: "Payment Request" }}
+            />
+            <Stack.Screen
               name="wallet/sep0007"
               options={{ title: "Confirm Transaction" }}
             />

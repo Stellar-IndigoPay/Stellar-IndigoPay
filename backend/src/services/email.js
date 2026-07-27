@@ -319,6 +319,128 @@ function buildDigestText({ digest, dashboardUrl, unsubscribeUrl }) {
   return lines.join("\n");
 }
 
+async function sendOnboardingEmail({
+  to,
+  projectName,
+  projectId,
+  webhookSecret,
+  webhookUrl,
+  dashboardUrl,
+  setupGuideUrl,
+}) {
+  if (!RESEND_API_KEY) {
+    if (process.env.NODE_ENV !== "test") {
+      console.warn("[email] RESEND_API_KEY not set — skipping onboarding email");
+    }
+    return;
+  }
+  const html = buildOnboardingHtml({
+    projectName,
+    webhookUrl,
+    dashboardUrl,
+    setupGuideUrl,
+    webhookSecret,
+  });
+  const text = buildOnboardingText({
+    projectName,
+    projectId,
+    webhookUrl,
+    dashboardUrl,
+    setupGuideUrl,
+    webhookSecret,
+  });
+
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: FROM_ADDRESS,
+      to: [to],
+      subject: sanitizeHeader(`Welcome to Stellar IndigoPay — ${projectName}`),
+      html,
+      text,
+    }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Resend onboarding email failed: ${errBody}`);
+  }
+
+  return await res.json();
+}
+
+function buildOnboardingHtml({
+  projectName,
+  webhookUrl,
+  dashboardUrl,
+  setupGuideUrl,
+  webhookSecret,
+}) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#FAFAFE;font-family:'Inter',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#FAFAFE;padding:32px 0;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;max-width:600px;width:100%;">
+        <tr><td style="background:#4F46E5;padding:24px 32px;"><p style="margin:0;color:#ffffff;font-size:20px;font-weight:700;">Welcome to Stellar IndigoPay</p></td></tr>
+        <tr><td style="padding:32px;">
+          <p style="margin:0 0 8px;font-size:13px;color:#94A3B8;text-transform:uppercase;letter-spacing:.05em;">Your project is verified</p>
+          <h1 style="margin:0 0 16px;font-size:22px;color:#0F172A;">${escHtml(projectName)}</h1>
+          <p style="margin:0 0 24px;font-size:15px;color:#334155;line-height:1.6;">Your project has been approved and is now active on Stellar IndigoPay. Start by completing the setup checklist below.</p>
+          <table width="100%" cellpadding="0" cellspacing="0" style="background:#F8FAFC;border-radius:12px;padding:20px;">
+            <tr><td style="padding:12px 0;font-size:14px;color:#334155;">• Verify wallet ownership</td></tr>
+            <tr><td style="padding:12px 0;font-size:14px;color:#334155;">• Configure webhook endpoint</td></tr>
+            <tr><td style="padding:12px 0;font-size:14px;color:#334155;">• Create your first campaign</td></tr>
+            <tr><td style="padding:12px 0;font-size:14px;color:#334155;">• Post a project update</td></tr>
+            <tr><td style="padding:12px 0;font-size:14px;color:#334155;">• Embed donation widget on your site</td></tr>
+          </table>
+          <p style="margin:24px 0 0;font-size:14px;color:#334155;line-height:1.6;">Your webhook secret is:</p>
+          <pre style="background:#F1F5F9;border-radius:8px;padding:16px;font-size:13px;color:#0F172A;overflow-x:auto;">${escHtml(webhookSecret)}</pre>
+          <p style="margin:16px 0 0;font-size:14px;color:#334155;line-height:1.6;">Use it when configuring your webhook endpoint to receive signed milestone notifications.</p>
+          <a href="${dashboardUrl}" style="display:inline-block;margin-top:20px;background:#4F46E5;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:8px;font-size:14px;font-weight:600;">Open Dashboard</a>
+          <a href="${setupGuideUrl}" style="display:inline-block;margin-top:20px;margin-left:12px;background:#E2E8F0;color:#0F172A;text-decoration:none;padding:12px 24px;border-radius:8px;font-size:14px;font-weight:600;">View setup guide</a>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
+function buildOnboardingText({
+  projectName,
+  projectId,
+  webhookUrl,
+  dashboardUrl,
+  setupGuideUrl,
+  webhookSecret,
+}) {
+  return [
+    `Welcome to Stellar IndigoPay — ${projectName}`,
+    "",
+    "Your project has been approved and is now active on the platform.",
+    "",
+    "Setup checklist:",
+    "- Verify wallet ownership",
+    "- Configure webhook endpoint",
+    "- Create your first campaign",
+    "- Post a project update",
+    "- Embed the donation widget on your site",
+    "",
+    `Project dashboard: ${dashboardUrl}`,
+    `Project details: ${webhookUrl}`,
+    `Setup guide: ${setupGuideUrl}`,
+    "",
+    "Your webhook secret:",
+    webhookSecret,
+  ].join("\n");
+}
+
 async function sendDigestEmail({
   to,
   digest,
@@ -381,4 +503,9 @@ function escHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
-module.exports = { sendUpdateNotifications, sendAdminVerificationNotification, sendDigestEmail };
+module.exports = {
+  sendUpdateNotifications,
+  sendAdminVerificationNotification,
+  sendOnboardingEmail,
+  sendDigestEmail,
+};

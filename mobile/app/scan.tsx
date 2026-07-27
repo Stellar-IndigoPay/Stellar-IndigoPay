@@ -491,6 +491,36 @@ const styles = StyleSheet.create({
     width: 260,
     height: 260,
   },
+  corner: {
+    position: "absolute" as const,
+    width: CORNER,
+    height: CORNER,
+    borderColor: "#a5d6a7",
+  },
+  topLeft: {
+    top: 0,
+    left: 0,
+    borderTopWidth: BORDER,
+    borderLeftWidth: BORDER,
+  },
+  topRight: {
+    top: 0,
+    right: 0,
+    borderTopWidth: BORDER,
+    borderRightWidth: BORDER,
+  },
+  bottomLeft: {
+    bottom: 0,
+    left: 0,
+    borderBottomWidth: BORDER,
+    borderLeftWidth: BORDER,
+  },
+  bottomRight: {
+    bottom: 0,
+    right: 0,
+    borderBottomWidth: BORDER,
+    borderRightWidth: BORDER,
+  },
   bottomOverlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.55)",

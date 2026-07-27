@@ -1,6 +1,15 @@
 "use strict";
 
 jest.mock("../db/pool", () => ({ query: jest.fn() }));
+jest.mock("../services/redis", () => ({
+  get: jest.fn().mockResolvedValue(null),
+  set: jest.fn().mockResolvedValue(undefined),
+  getClient: jest.fn(),
+  initRedis: jest.fn(),
+  deletePattern: jest.fn(),
+  shardCount: jest.fn().mockReturnValue(0),
+  _reset: jest.fn(),
+}));
 
 const pool = require("../db/pool");
 const request = require("supertest");

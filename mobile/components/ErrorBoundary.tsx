@@ -39,12 +39,11 @@ interface ErrorBoundaryState {
   error: Error | null;
 }
 
+declare const __DEV__: boolean | undefined;
+
 function isProduction(): boolean {
-  // React Native doesn't have access to `process.env.NODE_ENV` from a
-  // typical `__DEV__` global control; we check both.
-  // eslint-disable-next-line @typescript-eslint/strict-boolean-expressions
   const explicit =
-    typeof process !== "undefined" && process?.env?.NODE_ENV === "production";
+    typeof process !== "undefined" && (process as any)?.env?.NODE_ENV === "production";
   return explicit || __DEV__ === false;
 }
 
@@ -63,7 +62,7 @@ export class ErrorBoundary extends React.Component<
     // Fire-and-forget; never await inside lifecycle methods (could
     // reenter React eject).
     void captureException(error, {
-      componentStack: info.componentStack,
+      componentStack: info.componentStack ?? undefined,
     });
   }
 
@@ -90,8 +89,8 @@ export class ErrorBoundary extends React.Component<
         </Text>
         <Text style={styles.title}>Something went wrong</Text>
         <Text style={styles.body}>
-          {showDetails && error.message
-            ? error.message
+          {showDetails && error
+            ? ((error as Error).message || "An unexpected error occurred while rendering this screen.")
             : "An unexpected error occurred while rendering this screen."}
         </Text>
         {showDetails && error.stack ? (

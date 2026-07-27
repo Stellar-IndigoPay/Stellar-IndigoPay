@@ -15,6 +15,12 @@ function parseMigration(filePath) {
 
   const upMatch = content.match(/--\s*UP\s*\n([\s\S]*?)(?:\n--\s*DOWN\s*\n|\n--\s*DOWN\s*$|$)/i);
   const downMatch = content.match(/--\s*DOWN\s*\n([\s\S]*)/i);
+const {
+  seedProjects,
+  seedProjectUpdates,
+  seedJobs,
+} = require("../services/store");
+const { lintMigrations } = require("../../scripts/validate-migrations");
 
   const up = upMatch?.[1]?.trim();
   const down = downMatch?.[1]?.trim();
@@ -50,7 +56,16 @@ function loadSqlMigrationFiles() {
     .map((file) => path.join(MIGRATIONS_DIR, file));
 }
 
-async function runMigrations() {
+async function runMigrations({ dryRun = false } = {}) {
+  const lintResult = lintMigrations();
+  if (lintResult.issues.length > 0) {
+    throw new Error(
+      `Migration policy violations detected: ${lintResult.issues
+        .map((issue) => `${issue.rule}:${issue.file}`)
+        .join(", ")}`,
+    );
+  }
+
   const client = await pool.connect();
   try {
     await ensureHistoryTable(client);
