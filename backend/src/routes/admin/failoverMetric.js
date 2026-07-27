@@ -19,6 +19,7 @@
 const express = require("express");
 const router = express.Router();
 const logger = require("../../logger");
+const { sendAppError } = require("../../errors");
 
 const VALID_OUTCOMES = new Set(["initiated", "succeeded", "failed"]);
 
@@ -41,19 +42,15 @@ router.post("/", (req, res) => {
         ? authHeader.slice(7)
         : "";
       if (providedToken !== expectedToken) {
-        return res
-          .status(401)
-          .json({ error: { code: "UNAUTHORIZED", message: "Invalid token" } });
+        return sendAppError(res, "UNAUTHORIZED", { reason: "Invalid token" });
       }
     }
 
     const { outcome } = req.body || {};
     if (!outcome || !VALID_OUTCOMES.has(outcome)) {
-      return res.status(400).json({
-        error: {
-          code: "VALIDATION_ERROR",
-          message: `outcome must be one of: ${[...VALID_OUTCOMES].join(", ")}`,
-        },
+      return sendAppError(res, "VALIDATION_ERROR", {
+        field: "outcome",
+        detail: `outcome must be one of: ${[...VALID_OUTCOMES].join(", ")}`,
       });
     }
 
@@ -78,8 +75,8 @@ router.post("/", (req, res) => {
       { event: "failover_metric_error", err: e.message },
       "Failed to record failover metric",
     );
-    res.status(500).json({
-      error: { code: "INTERNAL_ERROR", message: "Failed to record metric" },
+    return sendAppError(res, "INTERNAL_ERROR", {
+      detail: "Failed to record metric",
     });
   }
 });
