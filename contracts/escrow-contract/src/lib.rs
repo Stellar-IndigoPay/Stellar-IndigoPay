@@ -861,6 +861,9 @@ impl EscrowContract {
             .get(&DataKey::Job(job_id.clone()))
             .expect("Job not found");
 
+        if job.freelancer != freelancer {
+            panic!("Only the job's freelancer can claim");
+        }
         if job.disputed {
             panic!("Job is disputed; cannot claim milestone");
         }
@@ -1708,6 +1711,51 @@ mod tests {
             &RELEASE_AFTER_LEDGERS,
         );
         client.claim_milestone(&freelancer, &job_id, &0u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only the job's freelancer can claim")]
+    fn test_claim_milestone_wrong_freelancer_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let wrong_freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-wrong-freelancer");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M1"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+
+        // Advance sequence past release_after
+        env.ledger().set_sequence_number(RELEASE_AFTER_LEDGERS + 1);
+
+        // Wrong freelancer tries to claim - should panic
+        client.claim_milestone(&wrong_freelancer, &job_id, &0u32);
     }
 
     #[test]

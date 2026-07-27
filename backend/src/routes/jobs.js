@@ -8,6 +8,10 @@ const router = express.Router();
 const pool = require("../db/pool");
 const { mapJobRow } = require("../services/store");
 const { AppError } = require("../errors");
+const { validateRouteParam } = require("../middleware/validate");
+const { uuid: uuidValidator } = require("../validators/schemas");
+
+router.param("id", validateRouteParam(uuidValidator, "id"));
 
 function validateTxHash(h) {
   if (!h || !/^[a-fA-F0-9]{64}$/.test(h)) {

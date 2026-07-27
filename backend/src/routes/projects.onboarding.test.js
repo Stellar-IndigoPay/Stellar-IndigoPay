@@ -11,6 +11,8 @@ const pool = require("../db/pool");
 const projects = require("./projects");
 const { AppError } = require("../errors");
 
+const PROJECT_ID = "11111111-2222-3333-8888-555555555555";
+
 function buildApp() {
   const app = express();
   app.use(express.json());
@@ -43,7 +45,7 @@ describe("Project onboarding checklist API", () => {
       ],
     });
 
-    const res = await request(app).get("/api/projects/123/onboarding");
+    const res = await request(app).get(`/api/projects/${PROJECT_ID}/onboarding`);
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.data).toHaveLength(1);
@@ -65,7 +67,7 @@ describe("Project onboarding checklist API", () => {
       .mockResolvedValueOnce({ rows: [] });
 
     const res = await request(app).patch(
-      "/api/projects/123/onboarding/verify_wallet",
+      `/api/projects/${PROJECT_ID}/onboarding/verify_wallet`,
     );
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
@@ -76,7 +78,7 @@ describe("Project onboarding checklist API", () => {
   test("PATCH returns PROJECT_NOT_FOUND when no onboarding data exists", async () => {
     pool.query.mockResolvedValueOnce({ rows: [] });
     const res = await request(app).patch(
-      "/api/projects/123/onboarding/verify_wallet",
+      `/api/projects/${PROJECT_ID}/onboarding/verify_wallet`,
     );
     expect(res.status).toBe(404);
     expect(res.body.error.code).toBe("PROJECT_NOT_FOUND");

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/router";
 import Link from "next/link";
 import { fetchProjects } from "@/lib/api";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import type { ClimateProject } from "@/utils/types";
 
 interface GlobalSearchModalProps {
@@ -18,6 +19,7 @@ export default function GlobalSearchModal({ onClose }: GlobalSearchModalProps) {
   const modalRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
+  const debouncedQuery = useDebouncedValue(query, 250);
 
   useEffect(() => {
     previousFocusRef.current = document.activeElement as HTMLElement;
@@ -34,31 +36,42 @@ export default function GlobalSearchModal({ onClose }: GlobalSearchModalProps) {
     };
   }, []);
 
+  // Clear results the moment the input empties — no need to wait out the
+  // debounce for a clear.
   useEffect(() => {
     if (!query.trim()) {
       setResults([]);
-      return;
     }
-    const delayDebounceFn = setTimeout(async () => {
+  }, [query]);
+
+  // Fetch keyed on the debounced query so rapid keystrokes collapse into a
+  // single request once typing pauses for 250ms.
+  useEffect(() => {
+    if (!debouncedQuery.trim()) return;
+    let cancelled = false;
+    (async () => {
       setLoading(true);
       try {
         const projects = await fetchProjects({ limit: 10 });
+        if (cancelled) return;
         const filtered = projects.filter((p) =>
-          p.name.toLowerCase().includes(query.toLowerCase()) ||
-          p.description.toLowerCase().includes(query.toLowerCase()) ||
-          p.category.toLowerCase().includes(query.toLowerCase())
+          p.name.toLowerCase().includes(debouncedQuery.toLowerCase()) ||
+          p.description.toLowerCase().includes(debouncedQuery.toLowerCase()) ||
+          p.category.toLowerCase().includes(debouncedQuery.toLowerCase())
         );
         setResults(filtered);
         setSelectedIndex(0);
       } catch (err) {
-        console.error("Search failed:", err);
+        if (!cancelled) console.error("Search failed:", err);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
-    }, 250);
+    })();
 
-    return () => clearTimeout(delayDebounceFn);
-  }, [query]);
+    return () => {
+      cancelled = true;
+    };
+  }, [debouncedQuery]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {

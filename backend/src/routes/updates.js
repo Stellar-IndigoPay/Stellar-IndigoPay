@@ -14,6 +14,11 @@ const { AppError } = require("../errors");
 const { enqueuePushNotification } = require("../services/pushQueue");
 
 const { adminRequired } = require("../middleware/auth");
+const { validateRouteParam } = require("../middleware/validate");
+const { uuid: uuidValidator } = require("../validators/schemas");
+
+router.param("projectId", validateRouteParam(uuidValidator, "projectId"));
+router.param("updateId", validateRouteParam(uuidValidator, "updateId"));
 
 // GET /api/updates/:projectId
 // Cursor pagination by (created_at, id) to support infinite scroll.

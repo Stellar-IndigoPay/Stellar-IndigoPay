@@ -161,6 +161,46 @@ const projectSubmissionSchema = z.object({
       .or(z.literal("")),
   }),
   impactMetrics: z.array(z.string()).optional().default([]),
+  // Tags are stored as a Postgres TEXT[] and feed full-text search, so both
+  // the array length and each entry's length are bounded to prevent database
+  // and search-index bloat. `.trim()` runs before the length checks, so
+  // whitespace-only tags are rejected as empty.
+  tags: z
+    .array(
+      z
+        .string()
+        .trim()
+        .min(1, "each tag must be a non-empty string")
+        .max(50, "each tag must be at most 50 characters"),
+    )
+    .max(10, "tags must contain at most 10 entries")
+    .optional()
+    .default([]),
+});
+
+const campaignSchema = z.object({
+  title: z
+    .string()
+    .trim()
+    .min(3, "title must be between 3 and 120 characters")
+    .max(120, "title must be between 3 and 120 characters"),
+  goalXLM: positiveNumberString,
+  deadline: z
+    .string()
+    .refine((value) => {
+      const deadlineDate = new Date(value);
+      return !Number.isNaN(deadlineDate.getTime());
+    }, "deadline must be a valid ISO date string")
+    .refine((value) => {
+      const deadlineDate = new Date(value);
+      return deadlineDate.getTime() > Date.now();
+    }, "deadline must be in the future"),
+  description: z
+    .string()
+    .trim()
+    .max(500, "description must be 500 characters or fewer")
+    .optional()
+    .or(z.literal("")),
 });
 
 // ── Donation request schema ─────────────────────────────────────────────────
@@ -254,6 +294,7 @@ module.exports = {
   leaderboardQuerySchema,
   profileSchema,
   projectSubmissionSchema,
+  campaignSchema,
   PROJECT_CATEGORIES,
   DONATION_CURRENCIES,
 };

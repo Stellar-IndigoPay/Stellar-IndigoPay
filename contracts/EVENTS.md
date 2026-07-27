@@ -29,6 +29,17 @@ nullifier consumed. No donor address is included.
 
 ---
 
+## `StealthScan`
+
+**Description**: Emitted when an authenticated project wallet scans for its
+stealth donations, including scans that find no donations.
+
+| Event Name    | Topics                              | Data                                         | When Emitted |
+| ------------- | ----------------------------------- | -------------------------------------------- | ------------ |
+| `StealthScan` | `["StealthScan", project_wallet]`   | `(donation_count: u32, timestamp: u64)`      | After `scan_stealth_donations` completes |
+
+---
+
 ## 1. `donated`
 
 **Description**: Emitted after a successful XLM donation to a project.
@@ -512,11 +523,10 @@ model.
 - Events can be queried via Horizon or Soroban RPC tools.
 - Frontend / backend should listen to these for real-time updates, notifications, and leaderboard.
 
-**Last Updated**: July 24, 2026
+**Last Updated**: July 26, 2026
 
 ---
 
 ## Coordination Note for #277 (Matching Pool)
 
 `DataKey::ProjectContractBalance(String, Address)` is the **canonical per-project per-token balance ledger** for all contract-held funds. Any deposit/matching-pool logic (including #277) **must** increment this key on deposit and decrement it on withdrawal. Do not introduce a parallel balance concept — the compound key already supports multi-token per project. See `SECURITY.md` for the full rationale.
-

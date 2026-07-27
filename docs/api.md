@@ -179,7 +179,7 @@ Mutating operations automatically invalidate the relevant cache keys:
 | ------------------------------------ | ------------------------------------------------------------- |
 | `POST /api/v1/donations`             | `cache:v1:projects:detail:<id>`, `cache:v1:leaderboard:*`, `cache:v1:stats:global`, `cache:v1:impact:global` |
 | `POST /api/v1/projects`              | `cache:v1:projects:list:*`, `cache:v1:map:*`                  |
-| `PATCH /api/v1/projects/:id/status`  | `cache:v1:projects:detail:<id>`, `cache:v1:projects:list:*`, `cache:v1:stats:global`, `cache:v1:impact:global` |
+| `PATCH /api/v1/projects/:id/status`  | `cache:v1:projects:detail:<id>`, `cache:v1:projects:list:*`, `cache:v1:stats:global`, `cache:v1:impact:project:<id>`, `cache:v1:impact:global` |
 | `POST /api/v1/profiles`              | `cache:v1:leaderboard:*`                                      |
 
 ### Request coalescing (stampede protection)
@@ -234,7 +234,7 @@ Mutating operations automatically invalidate the relevant cache keys:
 | ------------------------------------ | ------------------------------------------------------------- |
 | `POST /api/v1/donations`             | `cache:v1:projects:detail:<id>`, `cache:v1:leaderboard:*`, `cache:v1:stats:global`, `cache:v1:impact:global` |
 | `POST /api/v1/projects`              | `cache:v1:projects:list:*`, `cache:v1:map:*`                  |
-| `PATCH /api/v1/projects/:id/status`  | `cache:v1:projects:detail:<id>`, `cache:v1:projects:list:*`, `cache:v1:stats:global`, `cache:v1:impact:global` |
+| `PATCH /api/v1/projects/:id/status`  | `cache:v1:projects:detail:<id>`, `cache:v1:projects:list:*`, `cache:v1:stats:global`, `cache:v1:impact:project:<id>`, `cache:v1:impact:global` |
 | `POST /api/v1/profiles`              | `cache:v1:leaderboard:*`                                      |
 
 ### Request coalescing (stampede protection)

@@ -72,7 +72,6 @@ function start() {
   // Run once immediately on startup
   checkAndExpireMatches().catch(() => {});
   _intervalHandle = setInterval(checkAndExpireMatches, INTERVAL_MS);
-  logger.info({ event: "match_expiry_started" }, "Match expiry service started");
 }
 
 /**
@@ -82,7 +81,6 @@ function stop() {
   if (_intervalHandle) {
     clearInterval(_intervalHandle);
     _intervalHandle = null;
-    logger.info({ event: "match_expiry_stopped" }, "Match expiry service stopped");
   }
 }
 

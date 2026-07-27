@@ -50,11 +50,16 @@ const ERROR_CODES = {
   INVALID_TX_HASH: { status: 400, message: "Invalid transaction hash" },
   INVALID_CURSOR: { status: 400, message: "Invalid pagination cursor" },
   TX_FAILED: { status: 400, message: "Transaction failed on Stellar" },
+  GEOCODING_ERROR: {
+    status: 422,
+    message: "Could not geocode the provided location",
+  },
   INVALID_STATE_TRANSITION: {
     status: 400,
     message: "Invalid state transition",
   },
   UNSUPPORTED_FILE_TYPE: { status: 400, message: "Unsupported file type" },
+  CONFLICT: { status: 409, message: "Resource conflict" },
   DUPLICATE_DONATION: { status: 409, message: "Donation already recorded" },
   DUPLICATE_SUBSCRIPTION: { status: 409, message: "Already subscribed" },
 
@@ -101,12 +106,10 @@ class AppError extends Error {
 }
 
 /**
- * Send an AppError as a response directly, for the handful of middleware
- * (auth, CORS, rate limiting) that have always responded inline instead of
- * delegating to the central error handler via `next()`. Kept inline rather
- * than switched to `next()` because these run ahead of route-level error
- * middleware in some mount points, and this keeps their behavior identical
- * regardless of what (if anything) is registered downstream.
+ * Send an AppError as a response directly from middleware and route handlers
+ * that intentionally respond inline instead of delegating to the central error
+ * handler via `next()`. This keeps the canonical error shape independent of
+ * what (if anything) is registered downstream.
  */
 function sendAppError(res, code, metadata) {
   const err = new AppError(code, metadata);

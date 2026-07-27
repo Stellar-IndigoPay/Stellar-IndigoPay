@@ -192,11 +192,6 @@ async function startDLQWorker() {
   if (isRunning) return;
   isRunning = true;
 
-  logger.info(
-    { event: "dlq_worker_started", intervalMs: DLQ_POLL_INTERVAL_MS },
-    `Starting indexer DLQ worker every ${DLQ_POLL_INTERVAL_MS}ms`,
-  );
-
   pollTimer = setInterval(pollDLQ, DLQ_POLL_INTERVAL_MS);
   if (typeof pollTimer.unref === "function") {
     pollTimer.unref();

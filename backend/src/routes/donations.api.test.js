@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 
 jest.mock("../db/pool", () => ({
   query: jest.fn(),
@@ -40,8 +40,8 @@ function makeTxHash(char = "a") {
 }
 
 const MOCK_DONATION_ROW = {
-  id: "donation-1",
-  project_id: "proj-1",
+  id: "8d9ac19b-52eb-42f7-80d9-19a88ba59e43",
+  project_id: "11111111-2222-3333-8888-555555555555",
   donor_address: makePublicKey(),
   amount_xlm: "100",
   amount: "100",
@@ -74,7 +74,7 @@ function buildApp() {
 }
 
 const MOCK_PROJECT_ROW = {
-  id: "proj-1",
+  id: "11111111-2222-3333-8888-555555555555",
   name: "Test Project",
   description: "A test climate project",
   category: "Reforestation",
@@ -180,7 +180,7 @@ describe("GET /api/projects/:id", () => {
     pool.query.mockResolvedValueOnce({ rows: [] }); // milestones
     pool.query.mockResolvedValueOnce({ rows: [{ count: "0" }] }); // follow count
 
-    const res = await request(app).get("/api/projects/proj-1").expect(200);
+    const res = await request(app).get("/api/projects/11111111-2222-3333-8888-555555555555").expect(200);
 
     expect(res.body.success).toBe(true);
     expect(res.body.data.name).toBe("Test Project");
@@ -189,7 +189,7 @@ describe("GET /api/projects/:id", () => {
   test("returns 404 for non-existent project", async () => {
     pool.query.mockResolvedValue({ rows: [] });
 
-    await request(app).get("/api/projects/nonexistent").expect(404);
+    await request(app).get("/api/projects/44444444-4444-4444-8444-444444444444").expect(404);
   });
 });
 
@@ -203,7 +203,7 @@ describe("GET /api/projects/:id/on-chain-donations", () => {
   });
 
   test("returns decoded on-chain donation events", async () => {
-    pool.query.mockResolvedValueOnce({ rows: [{ id: "proj-1" }] });
+    pool.query.mockResolvedValueOnce({ rows: [{ id: "11111111-2222-3333-8888-555555555555" }] });
     stellarService.getProjectDonationEvents.mockResolvedValueOnce([
       {
         donor: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
@@ -216,7 +216,7 @@ describe("GET /api/projects/:id/on-chain-donations", () => {
     ]);
 
     const res = await request(app)
-      .get("/api/projects/proj-1/on-chain-donations?limit=10")
+      .get("/api/projects/11111111-2222-3333-8888-555555555555/on-chain-donations?limit=10")
       .expect(200);
 
     expect(res.body.success).toBe(true);
@@ -236,7 +236,7 @@ describe("GET /api/projects/:id/on-chain-donations", () => {
     pool.query.mockResolvedValueOnce({ rows: [] });
 
     await request(app)
-      .get("/api/projects/unknown/on-chain-donations")
+      .get("/api/projects/44444444-4444-4444-8444-444444444444/on-chain-donations")
       .expect(404);
   });
 });
@@ -299,7 +299,12 @@ describe("GET /api/donations/:id", () => {
   test("returns 400 for invalid UUID", async () => {
     const res = await request(app).get("/api/donations/invalid-id").expect(400);
 
-    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(res.body.error).toBe("Validation failed");
+    expect(res.body.details).toContainEqual({
+      path: "id",
+      message: "Invalid UUID",
+    });
+    expect(pool.query).not.toHaveBeenCalled();
   });
 });
 
@@ -319,7 +324,7 @@ describe("GET /api/donations/recurring/:donorAddress", () => {
           id: "rec-uuid-1",
           donor_address: donor,
           recurring_id: 0,
-          project_id: "proj-1",
+          project_id: "11111111-2222-3333-8888-555555555555",
           project_name: "Amazon Reforestation",
           project_wallet: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
           amount: "10.0000000",

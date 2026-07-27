@@ -126,11 +126,15 @@ describe("Admin projects router", () => {
   });
 
   test("rejects invalid batch input before opening a transaction", async () => {
-    await request(app)
+    const response = await request(app)
       .post("/api/admin/projects/batch")
       .set("X-Admin-Key", "test-admin-key")
       .send({ projectIds: [PROJECT.id], status: "invalid" })
       .expect(400);
+    expect(response.body.error).toMatchObject({
+      code: "VALIDATION_ERROR",
+      field: "status",
+    });
     expect(pool.connect).not.toHaveBeenCalled();
   });
 });

@@ -362,18 +362,14 @@ function startTurretsServer(port = 3001) {
     }
   });
 
-  app.listen(port, () => {
-    console.log(`Turrets server listening on port ${port}`);
-  });
-
-  return app;
+  return app.listen(port);
 }
 
 /**
  * Start a lightweight Turrets-compatible HTTP server exposing matching endpoints.
  *
  * @param {number} [port=3001] - TCP port to listen on.
- * @returns {object} Express app instance.
+ * @returns {import("http").Server} HTTP server instance.
  */
 // exported as `startTurretsServer`
 
