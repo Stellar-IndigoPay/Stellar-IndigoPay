@@ -2,7 +2,19 @@
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
+
 const pool = require("./pool");
+const { seedProjects, seedProjectUpdates, seedJobs } = require("../services/store");
+
+const MIGRATIONS_DIR = path.join(__dirname, "../../migrations");
+const HISTORY_TABLE = "_migrations";
+
+function parseMigration(filePath) {
+  const content = fs.readFileSync(filePath, "utf8");
+
+  const upMatch = content.match(/--\s*UP\s*\n([\s\S]*?)(?:\n--\s*DOWN\s*\n|\n--\s*DOWN\s*$|$)/i);
+  const downMatch = content.match(/--\s*DOWN\s*\n([\s\S]*)/i);
 const {
   seedProjects,
   seedProjectUpdates,
@@ -10,35 +22,38 @@ const {
 } = require("../services/store");
 const { lintMigrations } = require("../../scripts/validate-migrations");
 
-const MIGRATIONS_DIR = path.join(__dirname, "migrations");
+  const up = upMatch?.[1]?.trim();
+  const down = downMatch?.[1]?.trim();
 
-async function ensureMigrationsTable(client) {
+  return { up, down };
+}
+
+async function ensureHistoryTable(client) {
   await client.query(`
-    CREATE TABLE IF NOT EXISTS schema_migrations (
-      version TEXT PRIMARY KEY,
-      name    TEXT        NOT NULL,
-      applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    CREATE TABLE IF NOT EXISTS ${HISTORY_TABLE} (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      checksum TEXT NOT NULL
     )
   `);
 }
 
-function loadMigrationFiles() {
-  if (!fs.existsSync(MIGRATIONS_DIR)) return [];
-  return fs
-    .readdirSync(MIGRATIONS_DIR)
-    .filter((f) => f.endsWith(".js"))
-    .sort()
-    .map((f) => ({
-      version: f.replace(".js", ""),
-      file: path.join(MIGRATIONS_DIR, f),
-    }));
+async function getAppliedMigrations(client) {
+  const result = await client.query(
+    `SELECT id, name, applied_at, checksum FROM ${HISTORY_TABLE} ORDER BY id ASC`,
+  );
+  return result.rows;
 }
 
-async function getAppliedVersions(client) {
-  const result = await client.query(
-    "SELECT version FROM schema_migrations ORDER BY version ASC",
-  );
-  return result.rows.map((r) => r.version);
+function loadSqlMigrationFiles() {
+  if (!fs.existsSync(MIGRATIONS_DIR)) return [];
+
+  return fs
+    .readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.toLowerCase().endsWith(".sql"))
+    .sort((a, b) => a.localeCompare(b))
+    .map((file) => path.join(MIGRATIONS_DIR, file));
 }
 
 async function runMigrations({ dryRun = false } = {}) {
@@ -53,98 +68,106 @@ async function runMigrations({ dryRun = false } = {}) {
 
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
-    await ensureMigrationsTable(client);
+    await ensureHistoryTable(client);
 
-    const applied = await getAppliedVersions(client);
-    const files = loadMigrationFiles();
-    let ran = 0;
+    const appliedRows = await getAppliedMigrations(client);
+    const appliedSet = new Set(appliedRows.map((r) => r.name));
 
-    for (const { version, file } of files) {
-      if (applied.includes(version)) continue;
-      const migration = require(file);
-      console.log(`[DB] Applying migration: ${version}`);
-      if (dryRun) {
-        console.log(`[DB] Dry-run: ${version} would be applied without committing`);
-      } else {
-        await migration.up(client);
+    const migrationPaths = loadSqlMigrationFiles();
+
+    for (const migrationPath of migrationPaths) {
+      const fileName = path.basename(migrationPath);
+      if (appliedSet.has(fileName)) continue;
+
+      const { up } = parseMigration(migrationPath);
+      if (!up) continue;
+
+      const checksum = crypto.createHash("sha256").update(up).digest("hex");
+
+      await client.query("BEGIN");
+      try {
+        await client.query(up);
         await client.query(
-          "INSERT INTO schema_migrations (version, name) VALUES ($1, $2)",
-          [version, migration.name ?? version],
+          `INSERT INTO ${HISTORY_TABLE} (name, checksum) VALUES ($1, $2)`,
+          [fileName, checksum],
         );
+        await client.query("COMMIT");
+        // eslint-disable-next-line no-console
+        console.log(`[DB] Applied migration: ${fileName}`);
+      } catch (err) {
+        await client.query("ROLLBACK");
+        // eslint-disable-next-line no-console
+        console.error(`[DB] Migration failed: ${fileName}: ${err.message}`);
+        throw err;
       }
-      ran++;
     }
-
-    if (ran === 0) {
-      console.log("[DB] No pending migrations");
-    }
-
-    if (!dryRun) {
-      await client.query("COMMIT");
-    } else {
-      await client.query("ROLLBACK");
-      console.log("[DB] Dry-run completed; no changes were committed");
-    }
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
   } finally {
     client.release();
   }
 
-  if (!dryRun) {
-    await seedDatabase();
-    console.log("[DB] Migration complete");
+  await seedDatabase();
+  // eslint-disable-next-line no-console
+  console.log("[DB] Migration complete");
+}
+
+async function getMigrationStatus() {
+  const client = await pool.connect();
+  try {
+    await ensureHistoryTable(client);
+    const rows = await getAppliedMigrations(client);
+    return rows;
+  } finally {
+    client.release();
   }
 }
 
-/**
- * Roll back the last `steps` applied migrations (default: 1).
- * Each migration's `down()` function is called in reverse-applied order.
- */
-async function rollbackMigrations(steps = 1) {
-  if (steps < 1) throw new Error("steps must be >= 1");
-
+async function rollbackMigration({ name, steps = 1 } = {}) {
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
-    await ensureMigrationsTable(client);
+    await ensureHistoryTable(client);
 
-    const result = await client.query(
-      "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT $1",
-      [steps],
-    );
-
-    if (result.rows.length === 0) {
-      console.log("[DB] Nothing to roll back");
-      await client.query("COMMIT");
-      return;
+    let rows;
+    if (name) {
+      rows = await client.query(
+        `SELECT id, name, applied_at, checksum FROM ${HISTORY_TABLE} WHERE name = $1 ORDER BY id DESC`,
+        [name],
+      );
+      rows = rows.rows;
+      if (rows.length === 0) return;
+    } else {
+      const safeSteps = Number(steps) || 1;
+      rows = await client.query(
+        `SELECT id, name, applied_at, checksum FROM ${HISTORY_TABLE} ORDER BY id DESC LIMIT $1`,
+        [safeSteps],
+      );
+      rows = rows.rows;
+      if (rows.length === 0) return;
     }
 
-    for (const row of result.rows) {
-      const file = path.join(MIGRATIONS_DIR, `${row.version}.js`);
-      if (!fs.existsSync(file)) {
-        throw new Error(`Migration file not found for rollback: ${file}`);
+    // Roll back newest-first.
+    for (const row of rows) {
+      const migrationPath = path.join(MIGRATIONS_DIR, row.name);
+      if (!fs.existsSync(migrationPath)) {
+        throw new Error(`Migration file not found for rollback: ${migrationPath}`);
       }
-      const migration = require(file);
-      if (typeof migration.down !== "function") {
-        throw new Error(
-          `Migration ${row.version} does not export a down() function`,
-        );
-      }
-      console.log(`[DB] Rolling back migration: ${row.version}`);
-      await migration.down(client);
-      await client.query("DELETE FROM schema_migrations WHERE version = $1", [
-        row.version,
-      ]);
-    }
 
-    await client.query("COMMIT");
-    console.log(`[DB] Rolled back ${result.rows.length} migration(s)`);
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
+      const { down } = parseMigration(migrationPath);
+      if (!down) {
+        throw new Error(`No DOWN migration for ${row.name}`);
+      }
+
+      await client.query("BEGIN");
+      try {
+        await client.query(down);
+        await client.query(`DELETE FROM ${HISTORY_TABLE} WHERE name = $1`, [row.name]);
+        await client.query("COMMIT");
+        // eslint-disable-next-line no-console
+        console.log(`[DB] Rolled back migration: ${row.name}`);
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      }
+    }
   } finally {
     client.release();
   }
@@ -193,13 +216,7 @@ async function seedDatabase() {
         `INSERT INTO project_updates (id, project_id, title, body, created_at)
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (id) DO NOTHING`,
-        [
-          update.id,
-          update.projectId,
-          update.title,
-          update.body,
-          update.createdAt,
-        ],
+        [update.id, update.projectId, update.title, update.body, update.createdAt],
       );
     }
 
@@ -233,32 +250,10 @@ async function seedDatabase() {
   }
 }
 
-// --- CLI entry point ---
-// node migrate.js [--rollback [N]]
+module.exports = {
+  runMigrations,
+  rollbackMigration,
+  getMigrationStatus,
+};
 
-if (require.main === module) {
-  const args = process.argv.slice(2);
-  const rollbackIdx = args.indexOf("--rollback");
-  const dryRun = args.includes("--dry-run");
 
-  if (rollbackIdx !== -1) {
-    const stepsArg = args[rollbackIdx + 1];
-    const steps =
-      stepsArg && !stepsArg.startsWith("--") ? parseInt(stepsArg, 10) : 1;
-    rollbackMigrations(steps)
-      .then(() => process.exit(0))
-      .catch((err) => {
-        console.error("[DB] Rollback failed:", err.message);
-        process.exit(1);
-      });
-  } else {
-    runMigrations({ dryRun })
-      .then(() => process.exit(0))
-      .catch((err) => {
-        console.error("[DB] Migration failed:", err.message);
-        process.exit(1);
-      });
-  }
-}
-
-module.exports = { runMigrations, rollbackMigrations };
