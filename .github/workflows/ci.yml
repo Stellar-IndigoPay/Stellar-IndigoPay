@@ -126,3 +126,108 @@ jobs:
             report.json
           retention-days: 14
           if-no-files-found: warn
+
+  performance_smoke:
+    name: Performance Smoke Test (k6)
+    runs-on: ubuntu-latest
+    # Informational only — failures are visible in CI but never block merges.
+    continue-on-error: true
+    # Only run after the backend job so the service under test has been built
+    # and validated first.
+    needs: [backend]
+    timeout-minutes: 8
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── 1. Spin up Postgres + Redis ──────────────────────────────────────
+      - name: Start Postgres
+        run: |
+          docker run -d --name pg \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB=indigopay \
+            -p 5432:5432 \
+            postgres:16-alpine
+          # Wait until Postgres accepts connections
+          for i in $(seq 1 20); do
+            docker exec pg pg_isready -U postgres -d indigopay \
+              > /dev/null 2>&1 && echo "Postgres ready." && break
+            echo "  pg not ready yet ($i/20)…"; sleep 2
+          done
+
+      - name: Start Redis
+        run: |
+          docker run -d --name redis -p 6379:6379 redis:7-alpine
+          for i in $(seq 1 10); do
+            docker exec redis redis-cli ping 2>/dev/null | grep -q PONG \
+              && echo "Redis ready." && break
+            echo "  redis not ready yet ($i/10)…"; sleep 1
+          done
+
+      # ── 2. Build the HTTP server image (runner stage, not test stage) ────
+      - name: Build backend server image
+        run: |
+          docker build \
+            --target runner \
+            --tag indigopay-backend-server:ci \
+            ./backend
+
+      # ── 3. Start the backend HTTP server ────────────────────────────────
+      - name: Start backend HTTP server
+        run: |
+          docker run -d --name backend \
+            --network host \
+            -e PORT=4000 \
+            -e NODE_ENV=production \
+            -e DATABASE_URL=postgres://postgres:postgres@localhost:5432/indigopay \
+            -e REDIS_URL=redis://localhost:6379 \
+            -e STELLAR_NETWORK=testnet \
+            -e HORIZON_URL=https://horizon-testnet.stellar.org \
+            -e ALLOWED_ORIGINS=http://localhost:3000 \
+            -e JWT_SECRET=ci-smoke-jwt-secret \
+            -e COOKIE_SECRET=ci-smoke-cookie-secret \
+            -e ANTHROPIC_API_KEY=dummy \
+            -e SOROBAN_CONTRACT_ID=dummy \
+            indigopay-backend-server:ci
+
+      # ── 4. Wait for /api/health ──────────────────────────────────────────
+      - name: Wait for backend to be healthy
+        run: |
+          echo "Waiting for backend health endpoint…"
+          for i in $(seq 1 40); do
+            if curl --silent --fail http://localhost:4000/api/health > /dev/null 2>&1; then
+              echo "Backend is healthy (attempt $i)."
+              exit 0
+            fi
+            echo "  attempt $i/40 — retrying in 3s"
+            sleep 3
+          done
+          echo "::error::Backend did not become healthy after 40 attempts."
+          docker logs backend --tail 50
+          exit 1
+
+      # ── 5. Install k6 ────────────────────────────────────────────────────
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring \
+            --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 \
+            --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update -qq
+          sudo apt-get install -y k6
+
+      # ── 6. Run the smoke test ─────────────────────────────────────────────
+      - name: Run CI performance smoke test
+        run: k6 run scripts/load-test-ci.js
+        env:
+          BASE_URL: http://localhost:4000
+
+      # ── 7. Cleanup ────────────────────────────────────────────────────────
+      - name: Tear down containers
+        if: always()
+        run: |
+          docker rm -f backend pg redis 2>/dev/null || true
