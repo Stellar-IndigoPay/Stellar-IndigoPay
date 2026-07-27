@@ -135,29 +135,79 @@ jobs:
     # Only run after the backend job so the service under test has been built
     # and validated first.
     needs: [backend]
-    timeout-minutes: 5
+    timeout-minutes: 8
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Start backend stack
-        run: docker compose -f docker-compose.test.yml up -d
-        # The test compose file starts the backend + Postgres without the
-        # frontend, keeping spin-up time short.
+      # ── 1. Spin up Postgres + Redis ──────────────────────────────────────
+      - name: Start Postgres
+        run: |
+          docker run -d --name pg \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB=indigopay \
+            -p 5432:5432 \
+            postgres:16-alpine
+          # Wait until Postgres accepts connections
+          for i in $(seq 1 20); do
+            docker exec pg pg_isready -U postgres -d indigopay \
+              > /dev/null 2>&1 && echo "Postgres ready." && break
+            echo "  pg not ready yet ($i/20)…"; sleep 2
+          done
 
+      - name: Start Redis
+        run: |
+          docker run -d --name redis -p 6379:6379 redis:7-alpine
+          for i in $(seq 1 10); do
+            docker exec redis redis-cli ping 2>/dev/null | grep -q PONG \
+              && echo "Redis ready." && break
+            echo "  redis not ready yet ($i/10)…"; sleep 1
+          done
+
+      # ── 2. Build the HTTP server image (runner stage, not test stage) ────
+      - name: Build backend server image
+        run: |
+          docker build \
+            --target runner \
+            --tag indigopay-backend-server:ci \
+            ./backend
+
+      # ── 3. Start the backend HTTP server ────────────────────────────────
+      - name: Start backend HTTP server
+        run: |
+          docker run -d --name backend \
+            --network host \
+            -e PORT=4000 \
+            -e NODE_ENV=production \
+            -e DATABASE_URL=postgres://postgres:postgres@localhost:5432/indigopay \
+            -e REDIS_URL=redis://localhost:6379 \
+            -e STELLAR_NETWORK=testnet \
+            -e HORIZON_URL=https://horizon-testnet.stellar.org \
+            -e ALLOWED_ORIGINS=http://localhost:3000 \
+            -e JWT_SECRET=ci-smoke-jwt-secret \
+            -e COOKIE_SECRET=ci-smoke-cookie-secret \
+            -e ANTHROPIC_API_KEY=dummy \
+            -e SOROBAN_CONTRACT_ID=dummy \
+            indigopay-backend-server:ci
+
+      # ── 4. Wait for /api/health ──────────────────────────────────────────
       - name: Wait for backend to be healthy
         run: |
           echo "Waiting for backend health endpoint…"
-          for i in $(seq 1 30); do
+          for i in $(seq 1 40); do
             if curl --silent --fail http://localhost:4000/api/health > /dev/null 2>&1; then
-              echo "Backend is healthy."
+              echo "Backend is healthy (attempt $i)."
               exit 0
             fi
-            echo "  attempt $i/30 — retrying in 2s"
-            sleep 2
+            echo "  attempt $i/40 — retrying in 3s"
+            sleep 3
           done
-          echo "Backend did not become healthy in time." >&2
+          echo "::error::Backend did not become healthy after 40 attempts."
+          docker logs backend --tail 50
           exit 1
 
+      # ── 5. Install k6 ────────────────────────────────────────────────────
       - name: Install k6
         run: |
           sudo gpg -k
@@ -170,11 +220,14 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y k6
 
+      # ── 6. Run the smoke test ─────────────────────────────────────────────
       - name: Run CI performance smoke test
         run: k6 run scripts/load-test-ci.js
         env:
           BASE_URL: http://localhost:4000
 
-      - name: Tear down backend stack
+      # ── 7. Cleanup ────────────────────────────────────────────────────────
+      - name: Tear down containers
         if: always()
-        run: docker compose -f docker-compose.test.yml down --volumes
+        run: |
+          docker rm -f backend pg redis 2>/dev/null || true
