@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Testing
+
+* **ci:** add performance smoke test job to CI for donation recording pipeline regression detection (closes #551)
+  - New `scripts/load-test-ci.js`: 10 VUs × 30 s with a generous p95 < 2 s threshold for early regression detection
+  - New `performance_smoke` job in `.github/workflows/ci.yml` with `continue-on-error: true` (informational, never blocks merges)
+  - Job runs after the `backend` job, spins up the test Docker stack, installs k6, runs the smoke test, and tears down
+
 ### Performance
 
 * **frontend:** optimize Core Web Vitals with next/image, next/font, and bundle splitting (closes #261)

@@ -126,3 +126,55 @@ jobs:
             report.json
           retention-days: 14
           if-no-files-found: warn
+
+  performance_smoke:
+    name: Performance Smoke Test (k6)
+    runs-on: ubuntu-latest
+    # Informational only — failures are visible in CI but never block merges.
+    continue-on-error: true
+    # Only run after the backend job so the service under test has been built
+    # and validated first.
+    needs: [backend]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start backend stack
+        run: docker compose -f docker-compose.test.yml up -d
+        # The test compose file starts the backend + Postgres without the
+        # frontend, keeping spin-up time short.
+
+      - name: Wait for backend to be healthy
+        run: |
+          echo "Waiting for backend health endpoint…"
+          for i in $(seq 1 30); do
+            if curl --silent --fail http://localhost:4000/api/health > /dev/null 2>&1; then
+              echo "Backend is healthy."
+              exit 0
+            fi
+            echo "  attempt $i/30 — retrying in 2s"
+            sleep 2
+          done
+          echo "Backend did not become healthy in time." >&2
+          exit 1
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring \
+            --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 \
+            --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update -qq
+          sudo apt-get install -y k6
+
+      - name: Run CI performance smoke test
+        run: k6 run scripts/load-test-ci.js
+        env:
+          BASE_URL: http://localhost:4000
+
+      - name: Tear down backend stack
+        if: always()
+        run: docker compose -f docker-compose.test.yml down --volumes
