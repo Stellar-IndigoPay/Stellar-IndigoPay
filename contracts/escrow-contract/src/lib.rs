@@ -1891,6 +1891,51 @@ mod tests {
     }
 
     #[test]
+    fn test_reputation_on_time_completion() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = String::from_str(&env, "job-on-time");
+
+        // Create job and release milestone BEFORE advancing past deadline
+        create_reputation_job(&env, &client, &client_addr, &freelancer, &job_id, 1000i128);
+        client.release_milestone(&client_addr, &job_id, &0u32);
+
+        // Check reputation - on_time_completions should be 1
+        let reputation = client.get_freelancer_reputation(&freelancer);
+        assert_eq!(reputation.on_time_completions, 1);
+        assert_eq!(reputation.completed_jobs, 1);
+    }
+
+    #[test]
+    fn test_reputation_late_completion() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = String::from_str(&env, "job-late");
+
+        // Create job
+        create_reputation_job(&env, &client, &client_addr, &freelancer, &job_id, 1000i128);
+
+        // Advance ledger past deadline
+        env.ledger().set_sequence_number(DEFAULT_DEADLINE_LEDGERS + 100);
+
+        // Release milestone AFTER deadline
+        client.release_milestone(&client_addr, &job_id, &0u32);
+
+        // Check reputation - on_time_completions should still be 0
+        let reputation = client.get_freelancer_reputation(&freelancer);
+        assert_eq!(reputation.on_time_completions, 0);
+        assert_eq!(reputation.completed_jobs, 1);
+    }
+
+    #[test]
     fn test_enumeration_get_job_count_and_ids() {
         let env = Env::default();
         env.mock_all_auths();
