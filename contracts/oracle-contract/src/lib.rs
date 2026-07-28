@@ -138,7 +138,7 @@ fn current_price_raw(env: &Env, asset_pair: &Symbol) -> Option<i128> {
     let count: u32 = env
         .storage()
         .instance()
-        .get(&DataKey::ObservationCount(symbol_short!("XLM/USDC"))(asset_pair.clone()))
+        .get(&DataKey::ObservationCount(asset_pair.clone()))
         .unwrap_or(0);
     if count == 0 {
         return None;
@@ -147,7 +147,7 @@ fn current_price_raw(env: &Env, asset_pair: &Symbol) -> Option<i128> {
     let next_index: u32 = env
         .storage()
         .instance()
-        .get(&DataKey::ObservationIndex(symbol_short!("XLM/USDC"))(asset_pair.clone()))
+        .get(&DataKey::ObservationIndex(asset_pair.clone()))
         .unwrap_or(0);
     let current_ledger = env.ledger().sequence();
 
@@ -212,7 +212,7 @@ fn internal_price(env: &Env, asset_pair: &Symbol) -> i128 {
     let count: u32 = env
         .storage()
         .instance()
-        .get(&DataKey::ObservationCount(symbol_short!("XLM/USDC"))(asset_pair.clone()))
+        .get(&DataKey::ObservationCount(asset_pair.clone()))
         .unwrap_or(0);
     if count == 0 {
         return env
@@ -225,7 +225,7 @@ fn internal_price(env: &Env, asset_pair: &Symbol) -> i128 {
     let next_index: u32 = env
         .storage()
         .instance()
-        .get(&DataKey::ObservationIndex(symbol_short!("XLM/USDC"))(asset_pair.clone()))
+        .get(&DataKey::ObservationIndex(asset_pair.clone()))
         .unwrap_or(0);
     let current_ledger = env.ledger().sequence();
 
@@ -623,6 +623,7 @@ impl SimpleOracle {
 
     pub fn report_price(env: Env, reporter: Address, price: i128, asset_pair: Symbol) {
         reporter.require_auth();
+        require_not_paused(&env);
 
         let is_reporter: bool = env
             .storage()
@@ -652,7 +653,7 @@ impl SimpleOracle {
         let count: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::ObservationCount(symbol_short!("XLM/USDC"))(asset_pair.clone()))
+            .get(&DataKey::ObservationCount(asset_pair.clone()))
             .unwrap_or(0);
 
         // Price deviation circuit breaker: reject a new observation that
@@ -689,7 +690,7 @@ impl SimpleOracle {
         let index: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::ObservationIndex(symbol_short!("XLM/USDC"))(asset_pair.clone()))
+            .get(&DataKey::ObservationIndex(asset_pair.clone()))
             .unwrap_or(0);
         let observation = PriceObservation {
             price,
@@ -701,11 +702,11 @@ impl SimpleOracle {
             .instance()
             .set(&DataKey::Observations(index, asset_pair.clone()), &observation);
         env.storage().instance().set(
-            &DataKey::ObservationCount(symbol_short!("XLM/USDC"))(asset_pair.clone()),
+            &DataKey::ObservationCount(asset_pair.clone()),
             &(count + 1).min(MAX_OBSERVATIONS),
         );
         env.storage().instance().set(
-            &DataKey::ObservationIndex(symbol_short!("XLM/USDC"))(asset_pair.clone()),
+            &DataKey::ObservationIndex(asset_pair.clone()),
             &((index + 1) % MAX_OBSERVATIONS),
         );
         env.events().publish(
