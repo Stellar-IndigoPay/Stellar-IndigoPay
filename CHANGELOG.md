@@ -18,6 +18,9 @@
 
 ### Bug Fixes
 
+* **contracts:** bound per-project donation array size to 10,000 entries (GrantFox OSS, Official Campaign)
+  - Add `MAX_DONATIONS_PER_PROJECT = 10_000` constant and length check in `add_project_donation` to prevent unbounded state growth and ledger entry size overflow
+  - Add unit test verifying that `add_project_donation` panics with `"max donations per project reached"` when the cap is hit
 * **contracts:** add regression tests covering on-time vs late milestone completion reputation tracking
 * **backend:** invalidate impact endpoint caches on project status change (closes #016, grantfox GF-016)
   - `PATCH /api/projects/:id/status` now sweeps `cache:v1:impact:project:<id>` in addition to the existing project detail, list, global stats and `cache:v1:impact:global` keys
