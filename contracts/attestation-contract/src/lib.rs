@@ -817,6 +817,9 @@ impl AttestationContract {
             donor,
             project_id,
             amount_usd,
+            amount_xlm,
+            message_hash,
+        });
 
         record_attestations_internal(&env, &relayer, attestations, false)
             .get(0)
