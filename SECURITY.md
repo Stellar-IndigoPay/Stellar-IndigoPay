@@ -37,7 +37,8 @@ The Stellar-IndigoPay protocol operates on a dual-mode trust model for cross-cha
 
 ### Light Client Proof Verification (Trustless)
 For chains configured with a validator set (`set_light_client_validators`), the attestation contract relies on an M-of-N multisignature scheme to finalize block hashes. Once finalized, anyone can submit an attestation accompanied by an EVM light client proof (Merkle-Patricia Trie receipt/transaction inclusion proof). 
-The contract independently verifies this proof against the finalized block hash on-chain, effectively removing trust in any single relayer entity.
+
+*Note: The MPT inclusion proof cryptographic verifier is currently unimplemented. As such, while the block hash finalization operates trustlessly via M-of-N validators, the contract does not yet independently cryptographically verify the inclusion proofs against it. This path currently acts as a structural stub and should be gated or supplemented by trusted off-chain verification until the full RLP/MPT verifier is shipped.*
 
 ### Trusted Relayer (Fallback)
 For chains without an active validator set, the contract falls back to a Trusted Relayer model. A designated admin-configured relayer address holds the sole authority to record attestations for these specific chains. If the relayer key is compromised, fraudulent attestations could be recorded on these chains until the relayer is cleared via `clear_relayer`.

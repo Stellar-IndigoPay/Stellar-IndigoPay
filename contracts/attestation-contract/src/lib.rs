@@ -194,7 +194,7 @@ pub enum DataKey {
     /// Tracks which validator signed which block hash submission
     BlockHashSubmission(u32, u64, Address),
     /// Tracks total valid signatures for a block hash submission
-    BlockHashSignatureCount(u32, u64),
+    BlockHashSignatureCount(u32, u64, BytesN<32>),
 }
 
 // ─── Default / limit constants ──────────────────────────────────────────────
@@ -716,6 +716,74 @@ impl AttestationContract {
         require_admin(&env, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events().publish((symbol_short!("unpause"),), ());
+    }
+
+    // ─── Light Client ──────────────────────────────────────────────────────
+
+    pub fn set_light_client_validators(
+        env: Env,
+        admin: Address,
+        chain_id: u32,
+        validators: Vec<Address>,
+        threshold: u32,
+    ) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        
+        if threshold == 0 || threshold > validators.len() as u32 {
+            panic!("Invalid threshold");
+        }
+        
+        let config = ValidatorConfig {
+            validators,
+            threshold,
+        };
+        env.storage().instance().set(&DataKey::ValidatorSet(chain_id), &config);
+    }
+
+    pub fn submit_block_hash(
+        env: Env,
+        validator: Address,
+        chain_id: u32,
+        block_number: u64,
+        block_hash: BytesN<32>,
+    ) {
+        validator.require_auth();
+        require_not_paused(&env);
+        
+        let config: ValidatorConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::ValidatorSet(chain_id))
+            .expect("No validators for chain");
+            
+        let mut is_validator = false;
+        for i in 0..config.validators.len() {
+            if config.validators.get(i).unwrap() == validator {
+                is_validator = true;
+                break;
+            }
+        }
+        
+        if !is_validator {
+            panic!("Not an authorised validator");
+        }
+        
+        let sub_key = DataKey::BlockHashSubmission(chain_id, block_number, validator.clone());
+        if env.storage().instance().has(&sub_key) {
+            panic!("Validator already submitted for this block");
+        }
+        env.storage().instance().set(&sub_key, &block_hash);
+        
+        let count_key = DataKey::BlockHashSignatureCount(chain_id, block_number, block_hash.clone());
+        let count: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
+        let new_count = count + 1;
+        env.storage().instance().set(&count_key, &new_count);
+        
+        if new_count >= config.threshold {
+            // Finalize block hash
+            env.storage().instance().set(&DataKey::BlockHash(chain_id, block_number), &block_hash);
+        }
     }
 
     // ─── Attestation lifecycle ─────────────────────────────────────────────
