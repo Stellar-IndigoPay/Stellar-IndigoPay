@@ -2,8 +2,8 @@
 #![allow(deprecated)]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Env, InvokeError, String,
-    Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, token, Address, Env, IntoVal, InvokeError,
+    String, Symbol, Vec,
 };
 
 const MAX_OBSERVATIONS: u32 = 20;
@@ -138,9 +138,7 @@ fn current_price_raw(env: &Env, asset_pair: &Symbol) -> Option<i128> {
     let count: u32 = env
         .storage()
         .instance()
-        .get(&DataKey::ObservationCount(symbol_short!("XLM_USDC"))(
-            asset_pair.clone(),
-        ))
+        .get(&DataKey::ObservationCount(asset_pair.clone()))
         .unwrap_or(0);
     if count == 0 {
         return None;
@@ -149,9 +147,7 @@ fn current_price_raw(env: &Env, asset_pair: &Symbol) -> Option<i128> {
     let next_index: u32 = env
         .storage()
         .instance()
-        .get(&DataKey::ObservationIndex(symbol_short!("XLM_USDC"))(
-            asset_pair.clone(),
-        ))
+        .get(&DataKey::ObservationIndex(asset_pair.clone()))
         .unwrap_or(0);
     let current_ledger = env.ledger().sequence();
 
@@ -216,9 +212,7 @@ fn internal_price(env: &Env, asset_pair: &Symbol) -> i128 {
     let count: u32 = env
         .storage()
         .instance()
-        .get(&DataKey::ObservationCount(symbol_short!("XLM_USDC"))(
-            asset_pair.clone(),
-        ))
+        .get(&DataKey::ObservationCount(asset_pair.clone()))
         .unwrap_or(0);
     if count == 0 {
         return env
@@ -231,9 +225,7 @@ fn internal_price(env: &Env, asset_pair: &Symbol) -> i128 {
     let next_index: u32 = env
         .storage()
         .instance()
-        .get(&DataKey::ObservationIndex(symbol_short!("XLM_USDC"))(
-            asset_pair.clone(),
-        ))
+        .get(&DataKey::ObservationIndex(asset_pair.clone()))
         .unwrap_or(0);
     let current_ledger = env.ledger().sequence();
 
@@ -660,9 +652,7 @@ impl SimpleOracle {
         let count: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::ObservationCount(symbol_short!("XLM_USDC"))(
-                asset_pair.clone(),
-            ))
+            .get(&DataKey::ObservationCount(asset_pair.clone()))
             .unwrap_or(0);
 
         // Price deviation circuit breaker: reject a new observation that
@@ -699,9 +689,7 @@ impl SimpleOracle {
         let index: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::ObservationIndex(symbol_short!("XLM_USDC"))(
-                asset_pair.clone(),
-            ))
+            .get(&DataKey::ObservationIndex(asset_pair.clone()))
             .unwrap_or(0);
         let observation = PriceObservation {
             price,
@@ -714,11 +702,10 @@ impl SimpleOracle {
             &observation,
         );
         env.storage().instance().set(
-            &DataKey::ObservationCount(symbol_short!("XLM_USDC"))(asset_pair.clone()),
+            &DataKey::ObservationCount(asset_pair.clone()),
             &(count + 1).min(MAX_OBSERVATIONS),
         );
         env.storage().instance().set(
-            &DataKey::ObservationIndex(symbol_short!("XLM_USDC"))(asset_pair.clone()),
             &DataKey::ObservationIndex(asset_pair.clone()),
             &((index + 1) % MAX_OBSERVATIONS),
         );
@@ -801,19 +788,19 @@ impl SimpleOracle {
     /// observations or the newest observation exceeds the configured staleness
     /// threshold.
     pub fn get_price(env: Env, asset_pair: Option<Symbol>) -> i128 {
-        let pair = asset_pair.unwrap_or_else(|| Symbol::new(&env, "XLM/USDC"));
+        let pair = asset_pair.unwrap_or_else(|| symbol_short!("XLM_USDC"));
         internal_price(&env, &pair)
     }
 
     pub fn get_aggregated_price(env: Env, asset_pair: Option<Symbol>) -> i128 {
-        let pair = asset_pair.unwrap_or_else(|| Symbol::new(&env, "XLM/USDC"));
+        let pair = asset_pair.unwrap_or_else(|| symbol_short!("XLM_USDC"));
         let sources: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::SourceOracleList)
             .unwrap_or(Vec::new(&env));
         if sources.is_empty() {
-            return internal_price(&env);
+            return internal_price(&env, &pair);
         }
 
         let mut prices: Vec<i128> = Vec::new(&env);
