@@ -30,3 +30,14 @@ The following issues are currently considered out of scope for our security resp
 ## Bug Bounty Scope
 
 At this time, we do not have an active, paid bug bounty program. However, we deeply appreciate community contributions and will gladly provide public acknowledgment or credit to security researchers who responsibly disclose valid vulnerabilities.
+
+## Trust Model
+
+The Stellar-IndigoPay protocol operates on a dual-mode trust model for cross-chain attestations:
+
+### Light Client Proof Verification (Trustless)
+For chains configured with a validator set (`set_light_client_validators`), the attestation contract relies on an M-of-N multisignature scheme to finalize block hashes. Once finalized, anyone can submit an attestation accompanied by an EVM light client proof (Merkle-Patricia Trie receipt/transaction inclusion proof). 
+The contract independently verifies this proof against the finalized block hash on-chain, effectively removing trust in any single relayer entity.
+
+### Trusted Relayer (Fallback)
+For chains without an active validator set, the contract falls back to a Trusted Relayer model. A designated admin-configured relayer address holds the sole authority to record attestations for these specific chains. If the relayer key is compromised, fraudulent attestations could be recorded on these chains until the relayer is cleared via `clear_relayer`.
