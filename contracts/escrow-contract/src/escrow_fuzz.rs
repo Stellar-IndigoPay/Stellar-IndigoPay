@@ -249,17 +249,20 @@ mod fuzz {
 
         // ── Invariant checks ─────────────────────────────────────────────────
 
+        #[allow(dead_code)]
         /// **Invariant 1**: Sum of released amounts per job ≤ total funded amount.
         fn invariant_no_over_release(&self, job: &JobModel) -> bool {
             job.total_released <= job.amount
         }
 
+        #[allow(dead_code)]
         /// **Invariant 2**: Remaining (unreleased) balance ≥ 0.
         fn invariant_remaining_non_negative(&self, job: &JobModel) -> bool {
             let remaining = job.amount - job.total_released;
             remaining >= 0
         }
 
+        #[allow(dead_code)]
         /// **Invariant 3**: If job is not disputed and not resolved, it's either
         /// in Escrowed, PartiallyReleased, or Completed state — which is
         /// consistent with how many milestones are released.
@@ -287,6 +290,7 @@ mod fuzz {
             true // Completed
         }
 
+        #[allow(dead_code)]
         /// **Invariant 4**: Refund amount (amount that could be returned to client)
         /// ≤ remaining balance after all releases.
         fn invariant_refund_within_balance(&self, job: &JobModel) -> bool {
@@ -295,6 +299,7 @@ mod fuzz {
             remaining >= 0 && remaining <= job.amount
         }
 
+        #[allow(dead_code)]
         /// **Invariant 5**: A claimed milestone must first be released in the
         /// reference model (claim == release in our model, but the contract
         /// separates them). This is checked operationally — we verify that

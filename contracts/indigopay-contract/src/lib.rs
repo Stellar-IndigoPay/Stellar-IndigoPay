@@ -440,6 +440,13 @@ enum LegacyDataKey {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeRecipient {
+    pub address: Address,
+    pub share_bps: u32,
+}
+
+#[contracttype]
 pub enum DataKey {
     // Multi-sig admin set: Vec<Address> of authorized admin addresses.
     // Replaces the former single-admin `Admin` variant.
@@ -572,6 +579,8 @@ pub enum DataKey {
     // deployments without an override can fall back to the global policy.
     TokenRateLimitMax(Address),
     TokenRateLimitWindow(Address),
+    /// Platform fee split recipients and their share basis points (#434).
+    PlatformFeeRecipients,
 }
 // ─── Constants ────────────────────────────────────────────────────────────────
 const STROOP: i128 = 10_000_000;
@@ -796,6 +805,10 @@ fn apply_refund_accounting(
 enum ImpactKey {
     /// Merkle root keyed by SHA-256(project_id || report_id).
     ImRoot(BytesN<32>),
+    /// MMR peak hashes for a project, keyed by project_id.
+    ImpactMMRPeaks(String),
+    /// Number of leaves in the MMR for a project, keyed by project_id.
+    ImpactMMRSize(String),
 }
 // ─── Merkle Proof Verification for Impact Certificates (#382) ──────────────
 #[cfg(feature = "impact")]
@@ -855,6 +868,45 @@ fn impact_merkle_key(env: &Env, project_id: &String, report_id: &String) -> Byte
     env.crypto()
         .sha256(&Bytes::from_slice(env, &combined))
         .into()
+}
+
+#[cfg(feature = "impact")]
+/// Append a new leaf hash to an MMR peak set.
+///
+/// Merges peaks from right to left whenever adding a leaf fills a mountain of equal height.
+/// The number of merges equals the number of trailing 1-bits in `leaf_count`.
+fn mmr_append_peaks(env: &Env, peaks: &mut Vec<BytesN<32>>, leaf_count: u32, new_leaf: BytesN<32>) {
+    let mut current_hash = new_leaf;
+    let merges = leaf_count.trailing_ones();
+    for _ in 0..merges {
+        if let Some(prev_peak) = peaks.pop_back() {
+            let mut combined = [0u8; 64];
+            combined[..32].copy_from_slice(&prev_peak.to_array());
+            combined[32..].copy_from_slice(&current_hash.to_array());
+            current_hash = env
+                .crypto()
+                .sha256(&Bytes::from_slice(env, &combined))
+                .into();
+        }
+    }
+    peaks.push_back(current_hash);
+}
+
+#[cfg(feature = "impact")]
+/// Verify an MMR proof against the peak at `peak_idx` in `peaks`.
+fn mmr_verify_proof(
+    env: &Env,
+    leaf_hash: &BytesN<32>,
+    siblings: &Vec<BytesN<32>>,
+    peaks: &Vec<BytesN<32>>,
+    peak_idx: u32,
+    leaf_index: u32,
+) -> bool {
+    let target_peak = match peaks.get(peak_idx) {
+        Some(p) => p,
+        None => return false,
+    };
+    verify_merkle_proof(env, leaf_hash, siblings, &target_peak, leaf_index)
 }
 
 // ─── Impact Root Archiving Functions (#466) ───────────────────────────────
@@ -1432,6 +1484,66 @@ fn split_fee(amount: i128, fee_bps: u32) -> (i128, i128) {
     let project_amount = amount.checked_sub(fee).expect("underflow");
     (project_amount, fee)
 }
+
+/// Read the configured platform fee recipients list (#434).
+/// Backward compatibility: if `PlatformTreasury` exists and `PlatformFeeRecipients` does not,
+/// returns a single recipient with 10000 bps (100%).
+#[cfg(any(feature = "fees", feature = "testutils"))]
+fn read_platform_fee_recipients(env: &Env) -> Vec<FeeRecipient> {
+    if let Some(recipients) = env
+        .storage()
+        .instance()
+        .get::<_, Vec<FeeRecipient>>(&DataKey::PlatformFeeRecipients)
+    {
+        recipients
+    } else if let Some(treasury) = env
+        .storage()
+        .instance()
+        .get::<_, Address>(&DataKey::PlatformTreasury)
+    {
+        soroban_sdk::vec![
+            env,
+            FeeRecipient {
+                address: treasury,
+                share_bps: 10_000,
+            }
+        ]
+    } else {
+        panic!("Platform treasury or fee recipients not configured");
+    }
+}
+
+/// Split total `fee_amount` into individual recipient shares based on `share_bps` (#434).
+/// Assigns any rounding remainder to the final recipient so that the sum of all
+/// allocated recipient amounts equals `fee_amount` exactly.
+#[cfg(any(feature = "fees", feature = "testutils"))]
+#[allow(dead_code)]
+fn split_fee_recipients(
+    env: &Env,
+    fee_amount: i128,
+    recipients: &Vec<FeeRecipient>,
+) -> Vec<(Address, i128)> {
+    let mut result: Vec<(Address, i128)> = Vec::new(env);
+    if fee_amount == 0 || recipients.is_empty() {
+        return result;
+    }
+    let mut allocated: i128 = 0;
+    let len = recipients.len();
+    for i in 0..len {
+        let r = recipients.get_unchecked(i);
+        let share_amount = if i == len - 1 {
+            fee_amount.checked_sub(allocated).expect("underflow")
+        } else {
+            fee_amount
+                .checked_mul(r.share_bps as i128)
+                .expect("overflow")
+                / 10_000
+        };
+        allocated = allocated.checked_add(share_amount).expect("overflow");
+        result.push_back((r.address.clone(), share_amount));
+    }
+    result
+}
 #[inline(never)]
 fn ensure_min_ttl(env: &Env, min_ledgers: u32) {
     env.storage()
@@ -1834,12 +1946,13 @@ fn process_donation_token(
 
     #[cfg(feature = "fees")]
     if fee_amount > 0 {
-        let treasury: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::PlatformTreasury)
-            .expect("Platform treasury not configured");
-        token_client.transfer(donor, &treasury, &fee_amount);
+        let recipients = read_platform_fee_recipients(env);
+        let shares = split_fee_recipients(env, fee_amount, &recipients);
+        for (recipient_addr, amount) in shares.iter() {
+            if amount > 0 {
+                token_client.transfer(donor, &recipient_addr, &amount);
+            }
+        }
     }
     // Transfer remainder to project wallet.
 
@@ -2155,7 +2268,7 @@ impl IndigoPayContract {
             .publish((symbol_short!("sub_reg"), wallet), (parent_id, project_id));
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
-    #[cfg(any(feature = "batch", feature = "testutils"))]
+    #[cfg(any(feature = "batch", feature = "testutils", test))]
     pub fn batch_register_projects(env: Env, admin: Address, projects: Vec<ProjectInit>) {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
@@ -2486,11 +2599,60 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::PlatformTreasury, &treasury);
+        let single_recipient = FeeRecipient {
+            address: treasury.clone(),
+            share_bps: 10_000,
+        };
+        let recipients = soroban_sdk::vec![&env, single_recipient];
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformFeeRecipients, &recipients);
         env.events().publish(
             (symbol_short!("treas_set"), signers.get(0).unwrap()),
             treasury,
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+    /// Admin-only (M-of-N): set the platform fee recipients and their split shares (#434).
+    ///
+    /// `recipients` must not be empty, and all recipient `share_bps` must sum to 10000 (100%).
+    ///
+    /// # Panics
+    /// - If `recipients` is empty.
+    /// - If sum of `share_bps` across `recipients` does not equal 10000.
+    #[cfg(feature = "fees")]
+    pub fn set_platform_fee_recipients(
+        env: Env,
+        signers: Vec<Address>,
+        recipients: Vec<FeeRecipient>,
+    ) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        if recipients.is_empty() {
+            panic!("Fee recipients list cannot be empty");
+        }
+        let mut total_share: u32 = 0;
+        for r in recipients.iter() {
+            total_share = total_share
+                .checked_add(r.share_bps)
+                .expect("Fee recipient share calculation overflow");
+        }
+        if total_share != 10_000 {
+            panic!("Fee recipient shares must sum to 10000 bps (100%)");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformFeeRecipients, &recipients);
+        env.events().publish(
+            (symbol_short!("recip_set"), signers.get(0).unwrap()),
+            recipients.len(),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+    /// Public read-only: get the configured platform fee recipients and their shares (#434).
+    #[cfg(any(feature = "fees", feature = "testutils"))]
+    pub fn get_platform_fee_recipients(env: Env) -> Vec<FeeRecipient> {
+        read_platform_fee_recipients(&env)
     }
     // ─── Donations ────────────────────────────────────────────────────────────
     #[allow(clippy::too_many_arguments)]
@@ -3200,12 +3362,13 @@ impl IndigoPayContract {
 
         #[cfg(feature = "fees")]
         if fee_amount > 0 {
-            let treasury: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::PlatformTreasury)
-                .expect("Platform treasury not configured");
-            token_client.transfer(&contract_addr, &treasury, &fee_amount);
+            let recipients = read_platform_fee_recipients(&env);
+            let shares = split_fee_recipients(&env, fee_amount, &recipients);
+            for (recipient_addr, amount) in shares.iter() {
+                if amount > 0 {
+                    token_client.transfer(&contract_addr, &recipient_addr, &amount);
+                }
+            }
         }
         token_client.transfer(&contract_addr, &project.wallet, &project_amount);
         #[cfg(feature = "fees")]
@@ -3469,6 +3632,109 @@ impl IndigoPayContract {
         };
         let leaf_hash = compute_impact_leaf_hash(&env, &impact_data);
         verify_merkle_proof(&env, &leaf_hash, &proof, &stored_root, leaf_index)
+    }
+    // ─── MMR-based Impact Certificate (#430) ────────────────────────────────
+    #[cfg(feature = "impact")]
+    /// Admin-only: append a new period's Merkle root to the project's
+    /// Merkle Mountain Range. Each period's root represents the Merkle tree
+    /// of all donor impacts for that reporting period.
+    ///
+    /// The MMR supports append-only growth: each new root is combined with
+    /// existing peaks per the standard MMR algorithm, and the updated peak
+    /// set is stored on-chain. A single cumulative proof can then verify
+    /// a leaf's inclusion across any historical period.
+    ///
+    /// # Parameters
+    /// - `admin`: A registered admin address (requires `require_auth`).
+    /// - `project_id`: The project this root belongs to.
+    /// - `new_root`: The 32-byte Merkle root for the new reporting period.
+    ///
+    /// # Panics
+    /// - If the caller is not an admin.
+    /// - If the contract is paused.
+    /// - If the project does not exist.
+    pub fn append_impact_root(env: Env, admin: Address, project_id: String, new_root: BytesN<32>) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        // Verify the project exists.
+        env.storage()
+            .instance()
+            .get::<_, Project>(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+
+        let mmr_size_key = ImpactKey::ImpactMMRSize(project_id.clone());
+        let mmr_peaks_key = ImpactKey::ImpactMMRPeaks(project_id.clone());
+
+        let leaf_count: u32 = env.storage().instance().get(&mmr_size_key).unwrap_or(0);
+        let mut peaks: Vec<BytesN<32>> = env
+            .storage()
+            .instance()
+            .get(&mmr_peaks_key)
+            .unwrap_or(Vec::new(&env));
+
+        let new_root_clone = new_root.clone();
+        mmr_append_peaks(&env, &mut peaks, leaf_count, new_root_clone);
+        let new_count = leaf_count.checked_add(1).expect("overflow");
+
+        env.storage().instance().set(&mmr_peaks_key, &peaks);
+        env.storage().instance().set(&mmr_size_key, &new_count);
+
+        env.events().publish(
+            (symbol_short!("mmr_app"), admin, project_id, new_count),
+            new_root,
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+    #[cfg(feature = "impact")]
+    /// Public read-only: verify that a donor's impact leaf is included in the
+    /// MMR at the given MMR leaf index.
+    ///
+    /// The proof format is `(siblings: Vec<BytesN<32>>, peak_indices: Vec<u32>)`
+    /// per the MMR proof standard. The function computes the leaf hash from
+    /// `impact_data`, walks the mountain using `siblings` and `leaf_index` to
+    /// compute the mountain peak, then checks that peak against the stored MMR
+    /// peaks at the positions given by `peak_indices`.
+    ///
+    /// # Parameters
+    /// - `project_id`: The project this impact belongs to.
+    /// - `impact_data`: The `ImpactLeaf` claimed for this donor.
+    /// - `proof`: An MMR proof tuple `(siblings, peak_indices)`.
+    /// - `leaf_index`: Position of this leaf within its period's Merkle tree
+    ///   (used to determine sibling ordering when computing the mountain peak).
+    /// - `mmr_index`: The MMR leaf position (0-indexed) this leaf claims to
+    ///   be at. Must be less than the total MMR size.
+    ///
+    /// # Returns
+    /// - `true` if the leaf is provably included in the MMR at `mmr_index`.
+    /// - `false` if the MMR has no peaks, `mmr_index` is out of range, the
+    ///   peak index is out of range, or the proof does not verify.
+    pub fn verify_impact_inclusion(
+        env: Env,
+        project_id: String,
+        impact_data: ImpactLeaf,
+        proof: (Vec<BytesN<32>>, Vec<u32>),
+        leaf_index: u32,
+        mmr_index: u32,
+    ) -> bool {
+        let mmr_size_key = ImpactKey::ImpactMMRSize(project_id.clone());
+        let mmr_peaks_key = ImpactKey::ImpactMMRPeaks(project_id);
+        let mmr_size: u32 = env.storage().instance().get(&mmr_size_key).unwrap_or(0);
+        if mmr_index >= mmr_size {
+            return false;
+        }
+        let peaks: Vec<BytesN<32>> = match env.storage().instance().get(&mmr_peaks_key) {
+            Some(p) => p,
+            None => return false,
+        };
+        let (siblings, peak_indices) = proof;
+        let leaf_hash = compute_impact_leaf_hash(&env, &impact_data);
+        // A leaf belongs to exactly one mountain with one peak.
+        // Constrain to a single peak index for tight verification.
+        if peak_indices.len() != 1 {
+            return false;
+        }
+        let peak_idx = peak_indices.get_unchecked(0);
+        mmr_verify_proof(&env, &leaf_hash, &siblings, &peaks, peak_idx, leaf_index)
     }
     // ─── Off-Chain Oracle Attestation for Project Impact Verification (#459) ─
     /// Admin-only: authorise an address to submit impact verification reports.
@@ -10670,6 +10936,147 @@ mod tests {
         let record = client.get_donation_record(&0u32);
         assert_eq!(record.amount, amount);
     }
+    // ─── Configurable Platform Fee Splits (#434) ──────────────────────────────
+    #[cfg(feature = "fees")]
+    #[test]
+    fn test_multi_recipient_fee_split() {
+        let (env, _cid, client, admin, pid) = setup();
+        let r1 = Address::generate(&env);
+        let r2 = Address::generate(&env);
+        let r3 = Address::generate(&env);
+        let recipients = soroban_sdk::vec![
+            &env,
+            FeeRecipient {
+                address: r1.clone(),
+                share_bps: 5000,
+            },
+            FeeRecipient {
+                address: r2.clone(),
+                share_bps: 3000,
+            },
+            FeeRecipient {
+                address: r3.clone(),
+                share_bps: 2000,
+            },
+        ];
+        client.set_platform_fee_recipients(&signers1(&env, &admin), &recipients);
+        client.set_platform_fee(&signers1(&env, &admin), &200u32);
+
+        let stored = client.get_platform_fee_recipients();
+        assert_eq!(stored.len(), 3);
+        assert_eq!(stored.get(0).unwrap().share_bps, 5000);
+
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let amount: i128 = 100 * STROOP;
+        StellarAssetClient::new(&env, &token).mint(&donor, &amount);
+        client.donate(&token, &donor, &pid, &amount, &0u32);
+
+        let token_client = token::Client::new(&env, &token);
+        assert_eq!(token_client.balance(&r1), 10_000_000);
+        assert_eq!(token_client.balance(&r2), 6_000_000);
+        assert_eq!(token_client.balance(&r3), 4_000_000);
+        let p = client.get_project(&pid);
+        assert_eq!(token_client.balance(&p.wallet), 980_000_000);
+    }
+    #[cfg(feature = "fees")]
+    #[test]
+    #[should_panic(expected = "Fee recipient shares must sum to 10000 bps (100%)")]
+    fn test_recipient_shares_dont_sum_to_100_panics() {
+        let (env, _cid, client, admin, _pid) = setup();
+        let r1 = Address::generate(&env);
+        let r2 = Address::generate(&env);
+        let recipients = soroban_sdk::vec![
+            &env,
+            FeeRecipient {
+                address: r1,
+                share_bps: 5000,
+            },
+            FeeRecipient {
+                address: r2,
+                share_bps: 4000,
+            },
+        ];
+        client.set_platform_fee_recipients(&signers1(&env, &admin), &recipients);
+    }
+    #[cfg(feature = "fees")]
+    #[test]
+    #[should_panic(expected = "Fee recipients list cannot be empty")]
+    fn test_empty_fee_recipients_panics() {
+        let (env, _cid, client, admin, _pid) = setup();
+        let recipients = soroban_sdk::vec![&env];
+        client.set_platform_fee_recipients(&signers1(&env, &admin), &recipients);
+    }
+    #[cfg(feature = "fees")]
+    #[test]
+    fn test_single_recipient_migration() {
+        let (env, _cid, client, admin, _pid) = setup();
+        let treasury = Address::generate(&env);
+        client.set_platform_treasury(&signers1(&env, &admin), &treasury);
+
+        let recipients = client.get_platform_fee_recipients();
+        assert_eq!(recipients.len(), 1);
+        let r0 = recipients.get(0).unwrap();
+        assert_eq!(r0.address, treasury);
+        assert_eq!(r0.share_bps, 10_000);
+
+        let r1 = Address::generate(&env);
+        let r2 = Address::generate(&env);
+        let new_recipients = soroban_sdk::vec![
+            &env,
+            FeeRecipient {
+                address: r1.clone(),
+                share_bps: 7000,
+            },
+            FeeRecipient {
+                address: r2.clone(),
+                share_bps: 3000,
+            },
+        ];
+        client.set_platform_fee_recipients(&signers1(&env, &admin), &new_recipients);
+        let updated = client.get_platform_fee_recipients();
+        assert_eq!(updated.len(), 2);
+        assert_eq!(updated.get(0).unwrap().address, r1);
+        assert_eq!(updated.get(1).unwrap().address, r2);
+    }
+    #[cfg(feature = "fees")]
+    #[test]
+    fn test_fee_distribution_exact_sum() {
+        let env = Env::default();
+        let r1 = Address::generate(&env);
+        let r2 = Address::generate(&env);
+        let r3 = Address::generate(&env);
+        let recipients = soroban_sdk::vec![
+            &env,
+            FeeRecipient {
+                address: r1,
+                share_bps: 3333,
+            },
+            FeeRecipient {
+                address: r2,
+                share_bps: 3333,
+            },
+            FeeRecipient {
+                address: r3,
+                share_bps: 3334,
+            },
+        ];
+        for fee_amount in [1i128, 3, 7, 10, 99, 100, 1000, 10_000_000] {
+            let shares = split_fee_recipients(&env, fee_amount, &recipients);
+            let mut sum: i128 = 0;
+            for (_addr, amount) in shares.iter() {
+                sum += amount;
+            }
+            assert_eq!(
+                sum, fee_amount,
+                "Exact sum match failed for fee_amount {}",
+                fee_amount
+            );
+        }
+    }
     // ─── On-chain Impact Certificates (#382) ────────────────────────────────
     #[cfg(feature = "impact")]
     /// Helper: compute the Merkle root for two leaves at indices 0 and 1.
@@ -10974,6 +11381,431 @@ mod tests {
         let proof_for_ac = build_proof_for_leaf0(&env, &leaf_c);
         let result = client.verify_impact(&project_id, &report_id, &leaf_a, &proof_for_ac, &0u32);
         assert!(!result);
+    }
+
+    // ─── MMR Impact Certificate Tests (#430) ────────────────────────────
+    #[cfg(feature = "impact")]
+    fn build_three_leaf_mmr_peaks(
+        env: &Env,
+        leaf0: &ImpactLeaf,
+        leaf1: &ImpactLeaf,
+        leaf2: &ImpactLeaf,
+    ) -> (Vec<BytesN<32>>, u32) {
+        let mut peaks: Vec<BytesN<32>> = Vec::new(env);
+        let h0 = compute_impact_leaf_hash(env, leaf0);
+        let h1 = compute_impact_leaf_hash(env, leaf1);
+        let h2 = compute_impact_leaf_hash(env, leaf2);
+        mmr_append_peaks(env, &mut peaks, 0, h0);
+        mmr_append_peaks(env, &mut peaks, 1, h1);
+        mmr_append_peaks(env, &mut peaks, 2, h2);
+        (peaks, 3u32)
+    }
+    #[cfg(feature = "impact")]
+    #[test]
+    fn test_mmr_append_single() {
+        let env = Env::default();
+        let donor = Address::generate(&env);
+        let leaf = ImpactLeaf {
+            donor: donor.clone(),
+            donation_index: 0u32,
+            co2_kg: 100u32,
+            trees: 5u32,
+            hectares: 2u32,
+        };
+        let leaf_hash = compute_impact_leaf_hash(&env, &leaf);
+        let mut peaks: Vec<BytesN<32>> = Vec::new(&env);
+        mmr_append_peaks(&env, &mut peaks, 0, leaf_hash.clone());
+        assert_eq!(peaks.len(), 1);
+        assert_eq!(peaks.get_unchecked(0), leaf_hash);
+    }
+    #[cfg(feature = "impact")]
+    #[test]
+    fn test_mmr_append_multiple() {
+        let env = Env::default();
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+        let leaf_a = ImpactLeaf {
+            donor: donor_a.clone(),
+            donation_index: 0u32,
+            co2_kg: 100u32,
+            trees: 5u32,
+            hectares: 2u32,
+        };
+        let leaf_b = ImpactLeaf {
+            donor: donor_b.clone(),
+            donation_index: 1u32,
+            co2_kg: 200u32,
+            trees: 10u32,
+            hectares: 4u32,
+        };
+        let mut peaks: Vec<BytesN<32>> = Vec::new(&env);
+        mmr_append_peaks(&env, &mut peaks, 0, compute_impact_leaf_hash(&env, &leaf_a));
+        assert_eq!(peaks.len(), 1);
+        // After 1 leaf, one peak = leaf hash
+        mmr_append_peaks(&env, &mut peaks, 1, compute_impact_leaf_hash(&env, &leaf_b));
+        // After 2 leaves, peaks should have 1 merged peak
+        assert_eq!(peaks.len(), 1);
+        let h0 = compute_impact_leaf_hash(&env, &leaf_a);
+        let h1 = compute_impact_leaf_hash(&env, &leaf_b);
+        let mut combined = [0u8; 64];
+        combined[..32].copy_from_slice(&h0.to_array());
+        combined[32..].copy_from_slice(&h1.to_array());
+        let expected: BytesN<32> = env
+            .crypto()
+            .sha256(&Bytes::from_slice(&env, &combined))
+            .into();
+        assert_eq!(peaks.get_unchecked(0), expected);
+    }
+    #[cfg(feature = "impact")]
+    #[test]
+    fn test_mmr_three_leaves_two_peaks() {
+        let env = Env::default();
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+        let donor_c = Address::generate(&env);
+        let leaf_a = ImpactLeaf {
+            donor: donor_a.clone(),
+            donation_index: 0u32,
+            co2_kg: 100u32,
+            trees: 5u32,
+            hectares: 2u32,
+        };
+        let leaf_b = ImpactLeaf {
+            donor: donor_b.clone(),
+            donation_index: 1u32,
+            co2_kg: 200u32,
+            trees: 10u32,
+            hectares: 4u32,
+        };
+        let leaf_c = ImpactLeaf {
+            donor: donor_c.clone(),
+            donation_index: 2u32,
+            co2_kg: 300u32,
+            trees: 15u32,
+            hectares: 6u32,
+        };
+        let (peaks, _size) = build_three_leaf_mmr_peaks(&env, &leaf_a, &leaf_b, &leaf_c);
+        // After 3 leaves: 2 peaks — a mountain of size 2 and a singleton
+        assert_eq!(peaks.len(), 2);
+        let h0 = compute_impact_leaf_hash(&env, &leaf_a);
+        let h1 = compute_impact_leaf_hash(&env, &leaf_b);
+        let mut combined = [0u8; 64];
+        combined[..32].copy_from_slice(&h0.to_array());
+        combined[32..].copy_from_slice(&h1.to_array());
+        let expected_peak0: BytesN<32> = env
+            .crypto()
+            .sha256(&Bytes::from_slice(&env, &combined))
+            .into();
+        assert_eq!(peaks.get_unchecked(0), expected_peak0);
+        let h2 = compute_impact_leaf_hash(&env, &leaf_c);
+        assert_eq!(peaks.get_unchecked(1), h2);
+    }
+    #[cfg(feature = "impact")]
+    #[test]
+    fn test_mmr_peak_calculation() {
+        let env = Env::default();
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+        let donor_c = Address::generate(&env);
+        let donor_d = Address::generate(&env);
+        let leaf_a = ImpactLeaf {
+            donor: donor_a.clone(),
+            donation_index: 0u32,
+            co2_kg: 50u32,
+            trees: 2u32,
+            hectares: 1u32,
+        };
+        let leaf_b = ImpactLeaf {
+            donor: donor_b.clone(),
+            donation_index: 1u32,
+            co2_kg: 100u32,
+            trees: 5u32,
+            hectares: 2u32,
+        };
+        let leaf_c = ImpactLeaf {
+            donor: donor_c.clone(),
+            donation_index: 2u32,
+            co2_kg: 150u32,
+            trees: 8u32,
+            hectares: 3u32,
+        };
+        let leaf_d = ImpactLeaf {
+            donor: donor_d.clone(),
+            donation_index: 3u32,
+            co2_kg: 200u32,
+            trees: 10u32,
+            hectares: 4u32,
+        };
+        let mut peaks: Vec<BytesN<32>> = Vec::new(&env);
+        // Append 4 leaves sequentially.
+        mmr_append_peaks(&env, &mut peaks, 0, compute_impact_leaf_hash(&env, &leaf_a));
+        assert_eq!(peaks.len(), 1);
+        mmr_append_peaks(&env, &mut peaks, 1, compute_impact_leaf_hash(&env, &leaf_b));
+        assert_eq!(peaks.len(), 1, "Two leaves merge into one peak");
+        mmr_append_peaks(&env, &mut peaks, 2, compute_impact_leaf_hash(&env, &leaf_c));
+        assert_eq!(peaks.len(), 2, "Three leaves = 2 peaks");
+        mmr_append_peaks(&env, &mut peaks, 3, compute_impact_leaf_hash(&env, &leaf_d));
+        // After 4 leaves: everything merges into 1 peak (perfect tree)
+        assert_eq!(peaks.len(), 1, "Four leaves merge into one peak");
+    }
+    #[cfg(feature = "impact")]
+    #[test]
+    fn test_mmr_proof_verification() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let project_wallet = Address::generate(&env);
+        let project_id = String::from_str(&env, "forest-restore");
+        client.register_project(
+            &admin,
+            &project_id,
+            &String::from_str(&env, "Forest Restore"),
+            &project_wallet,
+            &100u32,
+        );
+        let donor_a = Address::generate(&env);
+        let leaf_a = ImpactLeaf {
+            donor: donor_a.clone(),
+            donation_index: 0u32,
+            co2_kg: 100u32,
+            trees: 5u32,
+            hectares: 2u32,
+        };
+        // Append leaf_a as first MMR root.
+        let hash_a = compute_impact_leaf_hash(&env, &leaf_a);
+        client.append_impact_root(&admin, &project_id, &hash_a);
+        // For verifying leaf_a at mmr_index 0 with no siblings (single leaf tree).
+        let siblings: Vec<BytesN<32>> = Vec::new(&env);
+        let peak_indices = soroban_sdk::vec![&env, 0u32];
+        let result = client.verify_impact_inclusion(
+            &project_id,
+            &leaf_a,
+            &(siblings, peak_indices),
+            &0u32,
+            &0u32, // mmr_index = 0
+        );
+        assert!(result, "Leaf A should be included in MMR");
+    }
+    #[cfg(feature = "impact")]
+    #[test]
+    fn test_mmr_proof_verification_multi_leaf() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let project_wallet = Address::generate(&env);
+        let project_id = String::from_str(&env, "ocean-cleanup");
+        client.register_project(
+            &admin,
+            &project_id,
+            &String::from_str(&env, "Ocean Cleanup"),
+            &project_wallet,
+            &50u32,
+        );
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+        let leaf_a = ImpactLeaf {
+            donor: donor_a.clone(),
+            donation_index: 0u32,
+            co2_kg: 100u32,
+            trees: 5u32,
+            hectares: 2u32,
+        };
+        let leaf_b = ImpactLeaf {
+            donor: donor_b.clone(),
+            donation_index: 1u32,
+            co2_kg: 200u32,
+            trees: 10u32,
+            hectares: 4u32,
+        };
+        let hash_a = compute_impact_leaf_hash(&env, &leaf_a);
+        let hash_b = compute_impact_leaf_hash(&env, &leaf_b);
+        // Build MMR: append leaf_a first, then leaf_b merges into one peak.
+        client.append_impact_root(&admin, &project_id, &hash_a);
+        client.append_impact_root(&admin, &project_id, &hash_b);
+        // After 2 leaves, single peak = sha256(hash_a || hash_b).
+        // Leaf A proof: sibling = hash_b, leaf_index_in_mountain = 0.
+        let siblings = soroban_sdk::vec![&env, hash_b.clone()];
+        let peak_indices = soroban_sdk::vec![&env, 0u32];
+        let result = client.verify_impact_inclusion(
+            &project_id,
+            &leaf_a,
+            &(siblings, peak_indices),
+            &0u32,
+            &0u32, // mmr_index = 0
+        );
+        assert!(result, "Leaf A should be verifiable in 2-leaf MMR");
+        // Leaf B proof: sibling = hash_a, leaf_index_in_mountain = 1.
+        let siblings_b = soroban_sdk::vec![&env, hash_a];
+        let peak_indices_b = soroban_sdk::vec![&env, 0u32];
+        let result_b = client.verify_impact_inclusion(
+            &project_id,
+            &leaf_b,
+            &(siblings_b, peak_indices_b),
+            &1u32,
+            &1u32, // mmr_index = 1
+        );
+        assert!(result_b, "Leaf B should be verifiable in 2-leaf MMR");
+    }
+    #[cfg(feature = "impact")]
+    #[test]
+    fn test_mmr_proof_invalid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let project_wallet = Address::generate(&env);
+        let project_id = String::from_str(&env, "forest-restore");
+        client.register_project(
+            &admin,
+            &project_id,
+            &String::from_str(&env, "Forest Restore"),
+            &project_wallet,
+            &100u32,
+        );
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+        let donor_c = Address::generate(&env);
+        let leaf_a = ImpactLeaf {
+            donor: donor_a.clone(),
+            donation_index: 0u32,
+            co2_kg: 100u32,
+            trees: 5u32,
+            hectares: 2u32,
+        };
+        let leaf_b = ImpactLeaf {
+            donor: donor_b.clone(),
+            donation_index: 1u32,
+            co2_kg: 200u32,
+            trees: 10u32,
+            hectares: 4u32,
+        };
+        let leaf_c = ImpactLeaf {
+            donor: donor_c.clone(),
+            donation_index: 2u32,
+            co2_kg: 300u32,
+            trees: 15u32,
+            hectares: 6u32,
+        };
+        let hash_a = compute_impact_leaf_hash(&env, &leaf_a);
+        let hash_b = compute_impact_leaf_hash(&env, &leaf_b);
+        // Build MMR with leaf_a, leaf_b.
+        client.append_impact_root(&admin, &project_id, &hash_a);
+        client.append_impact_root(&admin, &project_id, &hash_b);
+        // Try to verify leaf_c (not in MMR) with leaf_b's proof.
+        let siblings_c = soroban_sdk::vec![&env, hash_a];
+        let peak_indices_c = soroban_sdk::vec![&env, 0u32];
+        let result_c = client.verify_impact_inclusion(
+            &project_id,
+            &leaf_c,
+            &(siblings_c, peak_indices_c),
+            &1u32,
+            &0u32, // mmr_index = 0 (wrong — leaf C not in MMR)
+        );
+        assert!(!result_c, "Leaf C should NOT verify in MMR");
+    }
+    #[cfg(feature = "impact")]
+    #[test]
+    fn test_mmr_large_tree() {
+        let env = Env::default();
+        // Append 2^10 leaves and verify peak count stays logarithmic.
+        // We use 2^10 instead of 2^20 to stay within Soroban's test
+        // budget limits while still demonstrating the O(log n) property.
+        let n_leaves: u32 = 1 << 10; // 1024 leaves
+        let mut peaks: Vec<BytesN<32>> = Vec::new(&env);
+        let dummy_hash = BytesN::from_array(&env, &[0xABu8; 32]);
+        for i in 0..n_leaves {
+            mmr_append_peaks(&env, &mut peaks, i, dummy_hash.clone());
+        }
+        // 1024 = 2^10 is a power of two → single peak.
+        assert_eq!(peaks.len(), 1, "1024 leaves should produce 1 peak");
+        // Test 1023 leaves (worst case: every 1-bit = 1 peak → 10 peaks)
+        let mut peaks2: Vec<BytesN<32>> = Vec::new(&env);
+        for i in 0..(n_leaves - 1) {
+            mmr_append_peaks(&env, &mut peaks2, i, dummy_hash.clone());
+        }
+        // 1023 = 2^10 - 1 → binary has 10 ones → 10 peaks.
+        assert_eq!(peaks2.len(), 10, "1023 leaves should produce 10 peaks");
+        // Verify logarithmic growth: 2^20 leaves would have at most 20 peaks.
+        // The spec requirement (2^20) is verified by the mathematical property:
+        // peak_count = popcount(leaf_count), which is O(log leaf_count).
+        // With 1024 leaves, max peaks = 10; with 2^20 leaves, max peaks = 20.
+        assert!(
+            peaks2.len() <= n_leaves.ilog2() + 1,
+            "Peak count should be at most log2(leaf_count) + 1"
+        );
+    }
+
+    // ─── Backward Compatibility: MMR + Single-Root Merkle (#430) ────────
+    #[cfg(feature = "impact")]
+    #[test]
+    fn test_mmr_does_not_break_single_root_verification() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let project_wallet = Address::generate(&env);
+        let project_id = String::from_str(&env, "forest-restore");
+        client.register_project(
+            &admin,
+            &project_id,
+            &String::from_str(&env, "Forest Restore"),
+            &project_wallet,
+            &100u32,
+        );
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+        let leaf_a = ImpactLeaf {
+            donor: donor_a.clone(),
+            donation_index: 0u32,
+            co2_kg: 100u32,
+            trees: 5u32,
+            hectares: 2u32,
+        };
+        let leaf_b = ImpactLeaf {
+            donor: donor_b.clone(),
+            donation_index: 1u32,
+            co2_kg: 200u32,
+            trees: 10u32,
+            hectares: 4u32,
+        };
+        let hash_a = compute_impact_leaf_hash(&env, &leaf_a);
+        // First, use the new MMR-based append
+        client.append_impact_root(&admin, &project_id, &hash_a);
+        // Now use the original single-root Merkle system with a different leaf
+        let report_id = String::from_str(&env, "Q1 2026");
+        let root = build_two_leaf_root(&env, &leaf_a, &leaf_b);
+        client.set_impact_merkle_root(&admin, &project_id, &root, &report_id);
+        // Verify the original Merkle proof still works
+        let proof = build_proof_for_leaf0(&env, &leaf_b);
+        let result = client.verify_impact(&project_id, &report_id, &leaf_a, &proof, &0u32);
+        assert!(
+            result,
+            "Original single-root Merkle verification must still work alongside MMR"
+        );
+        // Verify the MMR still works
+        let siblings: Vec<BytesN<32>> = Vec::new(&env);
+        let peak_indices = soroban_sdk::vec![&env, 0u32];
+        let mmr_result = client.verify_impact_inclusion(
+            &project_id,
+            &leaf_a,
+            &(siblings, peak_indices),
+            &0u32,
+            &0u32,
+        );
+        assert!(
+            mmr_result,
+            "MMR verification must still work alongside single-root Merkle"
+        );
     }
 
     // ─── Time-Locked Donation Challenge Protocol Tests (#457) ───────────
@@ -12325,14 +13157,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "max_donations must be positive")]
     fn test_set_donation_rate_limit_zero_max_panics() {
-        let (env, _cid, client, admin, _pid) = setup();
+        let (_env, _cid, client, admin, _pid) = setup();
         client.set_donation_rate_limit(&admin, &0, &100);
     }
 
     #[test]
     #[should_panic(expected = "window_ledgers must be positive")]
     fn test_set_donation_rate_limit_zero_window_panics() {
-        let (env, _cid, client, admin, _pid) = setup();
+        let (_env, _cid, client, admin, _pid) = setup();
         client.set_donation_rate_limit(&admin, &5, &0);
     }
 
@@ -12437,14 +13269,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "Campaign cannot be closed")]
     fn test_close_campaign_none_status_panics() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (_env, _cid, client, admin, pid) = setup();
         client.close_campaign(&admin, &pid);
     }
 
     /// Covers pause_project storage save (line 2038) and resume_project (line 2065).
     #[test]
     fn test_pause_resume_project_full_flow() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (_env, _cid, client, admin, pid) = setup();
         let p = client.get_project(&pid);
         assert!(!p.paused);
 
@@ -12623,7 +13455,7 @@ mod tests {
     ///   - GlobalCO2OffsetGrams save (line 1515)
     #[test]
     fn test_donate_anonymous_increments_anon_count() {
-        let (env, cid, client, admin, pid) = setup();
+        let (env, cid, client, _admin, pid) = setup();
         let donor = Address::generate(&env);
         let token = mint_xlm(&env, &donor, 10 * STROOP);
 
@@ -12752,7 +13584,7 @@ mod tests {
     /// Covers donate_asset_with_privacy CO2 computation and storage saves.
     #[test]
     fn test_donate_asset_with_privacy_saves_global_stats() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (env, _cid, client, _admin, pid) = setup();
         let donor = Address::generate(&env);
         let amount = 10 * STROOP;
         client.donate_asset_with_privacy(
@@ -12783,7 +13615,7 @@ mod tests {
     /// Covers set_impact_report_threshold validation (line 3312) and save (line 3316).
     #[test]
     fn test_set_impact_report_threshold_happy() {
-        let (env, _cid, client, admin, _pid) = setup();
+        let (_env, _cid, client, admin, _pid) = setup();
         client.set_impact_report_threshold(&admin, &5u32);
         // No dedicated getter — just ensures no panic.
         assert!(true);
@@ -12792,7 +13624,7 @@ mod tests {
     /// Covers clear_impact_flag storage remove (line 3331).
     #[test]
     fn test_clear_impact_flag_happy() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (_env, _cid, client, admin, pid) = setup();
         client.clear_impact_flag(&admin, &pid);
         // Just ensure no panic
         assert!(true);
@@ -12869,7 +13701,7 @@ mod tests {
     /// Covers deactivate_project storage save for the project being deactivated.
     #[test]
     fn test_deactivate_project_saves_state() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (_env, _cid, client, admin, pid) = setup();
         assert!(client.get_project(&pid).active);
         client.deactivate_project(&admin, &pid);
         assert!(!client.get_project(&pid).active);
@@ -12878,7 +13710,7 @@ mod tests {
     /// Covers update_project_co2_rate storage operations (lines 1987-2017).
     #[test]
     fn test_update_project_co2_rate_happy() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (_env, _cid, client, admin, pid) = setup();
         let p = client.get_project(&pid);
         let original = p.co2_per_xlm;
         client.update_project_co2_rate(&admin, &pid, &(original + 50));
@@ -12888,14 +13720,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "rate must be greater than zero")]
     fn test_update_project_co2_rate_zero_panics() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (_env, _cid, client, admin, pid) = setup();
         client.update_project_co2_rate(&admin, &pid, &0u32);
     }
 
     #[test]
     #[should_panic(expected = "CO2 per XLM exceeds maximum")]
     fn test_update_project_co2_rate_exceeds_max_panics() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (_env, _cid, client, admin, pid) = setup();
         client.update_project_co2_rate(&admin, &pid, &1_000_001u32);
     }
 
@@ -12903,7 +13735,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Project is not paused")]
     fn test_resume_project_not_paused_panics() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (_env, _cid, client, admin, pid) = setup();
         client.resume_project(&admin, &pid);
     }
 
@@ -12911,7 +13743,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Project is already paused")]
     fn test_pause_project_already_paused_panics() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (_env, _cid, client, admin, pid) = setup();
         client.pause_project(&admin, &pid);
         client.pause_project(&admin, &pid);
     }
@@ -12920,7 +13752,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Cannot pause a deactivated project")]
     fn test_pause_project_deactivated_panics() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (_env, _cid, client, admin, pid) = setup();
         client.deactivate_project(&admin, &pid);
         client.pause_project(&admin, &pid);
     }

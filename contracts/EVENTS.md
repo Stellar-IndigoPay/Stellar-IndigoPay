@@ -533,10 +533,34 @@ model.
 - Events can be queried via Horizon or Soroban RPC tools.
 - Frontend / backend should listen to these for real-time updates, notifications, and leaderboard.
 
-**Last Updated**: July 26, 2026
+**Last Updated**: July 28, 2026
 
 ---
 
-## Coordination Note for #277 (Matching Pool)
+## 41. `mmr_app` (MMR Root Appended)
 
-`DataKey::ProjectContractBalance(String, Address)` is the **canonical per-project per-token balance ledger** for all contract-held funds. Any deposit/matching-pool logic (including #277) **must** increment this key on deposit and decrement it on withdrawal. Do not introduce a parallel balance concept — the compound key already supports multi-token per project. See `SECURITY.md` for the full rationale.
+**Description**: Emitted when an admin appends a new period's Merkle root to a
+project's Merkle Mountain Range for cumulative impact certificate verification.
+
+| Event Name | Topics                                          | Data             | When Emitted                               |
+| ---------- | ----------------------------------------------- | ---------------- | ------------------------------------------ |
+| `mmr_app`  | `["mmr_app", admin, project_id, new_leaf_count]` | `new_root: BytesN<32>` | When admin calls `append_impact_root` |
+
+---
+
+## 42. `recip_set` (Platform Fee Recipients Set)
+
+**Description**: Emitted when M-of-N admins configure or update multi-recipient platform fee splits.
+
+| Event Name  | Topics                 | Data                   | When Emitted                              |
+| ----------- | ---------------------- | ---------------------- | ----------------------------------------- |
+| `recip_set` | `["recip_set", admin]` | `recipient_count: u32` | When admin calls `set_platform_fee_recipients` |
+
+## Usage Notes
+
+- All events follow Soroban's standard event format: `topics: Vec<Val>`, `data: Val`.
+- `donor` and `project_id` are usually `Address` or `String` depending on implementation.
+- Events can be queried via Horizon or Soroban RPC tools.
+- Frontend / backend should listen to these for real-time updates, notifications, and leaderboard.
+
+**Last Updated**: July 28, 2026

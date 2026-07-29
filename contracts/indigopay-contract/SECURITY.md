@@ -334,3 +334,12 @@ also mean the donation amount is recoverable from the public commitment.
 - **Per-token rate limit isolation.** `donate_token` keys rate limits on `DataKey::DonorRateLimit(donor, project_id, token_address)`. Each asset can use its own `TokenRateLimitMax` and `TokenRateLimitWindow` policy; missing overrides fall back to the global policy. This guarantees that rate limit windows and policies for distinct assets (e.g. XLM vs USDC vs custom tokens) operate independently.
 - **Backward compatibility.** Legacy `donate` and `donate_usdc` entrypoints seamlessly delegate to `donate_token_with_privacy`, ensuring existing integrations continue to function without state corruption or breakage.
 
+## Multi-Recipient Platform Fee Distribution (#434)
+
+### Security & Invariant Guarantees
+
+- **Share Sum Validation.** `set_platform_fee_recipients` requires M-of-N critical admin authorization (`require_admin_for_critical`) and validates that the sum of `share_bps` across all recipients equals exactly 10,000 basis points (100.00%). Setting an empty recipient list or shares that do not sum to 10,000 panics immediately.
+- **Exact Fee Preservation.** Fee distribution (`split_fee_recipients`) allocates any remainder from integer division to the final recipient, ensuring `sum(recipient_shares) == total_fee_amount` exactly with zero stroop loss.
+- **CEI & Transfer Ordering.** Per-recipient fee transfers execute within the Checks-Effects-Interactions pattern during donation processing before remaining funds are transferred to the project.
+- **Backward Compatibility.** Deployments with legacy single-treasury configuration (`DataKey::PlatformTreasury`) lazily fall back to a single 100% recipient share until `set_platform_fee_recipients` is invoked.
+

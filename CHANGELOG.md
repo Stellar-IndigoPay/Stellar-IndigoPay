@@ -18,6 +18,7 @@
 
 ### Bug Fixes
 
+* **contracts:** deduplicate the escrow `Milestone` struct across feature configurations (closes #511)
 * **contracts:** add regression tests covering on-time vs late milestone completion reputation tracking
 * **backend:** invalidate impact endpoint caches on project status change (closes #016, grantfox GF-016)
   - `PATCH /api/projects/:id/status` now sweeps `cache:v1:impact:project:<id>` in addition to the existing project detail, list, global stats and `cache:v1:impact:global` keys
@@ -300,6 +301,18 @@
 - Added SEP-0007 deep-link support for mobile donations via `web+stellar:pay` URIs, including confirmation, biometric auth, callback handling, and scan-history logging.
 
 All notable changes to this project will be documented in this file.
+
+
+### Tests
+
+* **escrow-contract:** add fuzz target for milestone percentage edge cases in `create_job` (closes #508)
+  - Add dedicated proptest strategy generating random milestone percentage distributions (0-100, 1-10 milestones)
+  - Verify `create_job` panics on invalid sum (sum != 100) and succeeds on valid sum (sum == 100)
+  - Covers edge cases: individual percentages of 0, various distributions, overflow scenarios
+  - Exercise at least 1,000 random milestone distributions with proptest (configured via `ProptestConfig::with_cases(1000)`)
+  - Add regression file `proptest-regressions/escrow_fuzz.txt` for replayable test cases
+  - Test passes locally with `cargo test --features testutils -p escrow-contract`
+
 
 ## [Unreleased]
 
