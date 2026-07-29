@@ -40,6 +40,17 @@ describe("Idempotency Middleware", () => {
 
   const validKey = "550e8400-e29b-41d4-a716-446655440000";
 
+  test("returns 400 when Idempotency-Key is not a valid UUID", async () => {
+    req.headers["idempotency-key"] = "not-a-uuid";
+
+    await idempotencyMiddleware(req, res, next);
+
+    expect(pool.query).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ error: "Idempotency-Key must be a valid UUID" });
+  });
+
   test("works as normal when no Idempotency-Key header is provided", async () => {
     await idempotencyMiddleware(req, res, next);
     

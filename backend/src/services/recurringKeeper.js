@@ -36,8 +36,6 @@ let isExecuting = false;
 async function start() {
   if (intervalId) return;
 
-  logger.info({ event: "recurring_keeper_started" }, "Recurring donation keeper service started");
-
   // Run initial cycle
   runKeeperCycle().catch((err) => {
     logger.error({ event: "recurring_keeper_initial_error", err: err.message }, "Error in initial keeper cycle");
@@ -67,7 +65,6 @@ async function stop() {
   if (intervalId) {
     clearInterval(intervalId);
     intervalId = null;
-    logger.info({ event: "recurring_keeper_stopped" }, "Recurring donation keeper service stopped");
   }
 }
 

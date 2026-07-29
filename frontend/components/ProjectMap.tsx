@@ -12,44 +12,17 @@
  *   ```
  *
  * Tile provider: OpenStreetMap (no API key required, free to use under ODbL).
- * Icons: Leaflet's built-in SVG divIcon so we avoid broken default-icon paths
- * that occur when Leaflet's image assets are bundled through webpack.
+ * Marker icons: each ProjectMapMarker renders its own accessible DivIcon
+ * (inline SVG wrapped in a focusable <button>) so we don't depend on
+ * Leaflet's image assets, which break under webpack/Next.js bundling.
  */
 "use client";
 
 import { useEffect } from "react";
 import { MapContainer, TileLayer, ZoomControl } from "react-leaflet";
-import L from "leaflet";
 import type { ClimateProject } from "@/utils/types";
 import { geocodeLocation, jitterCoords } from "@/utils/geocode";
 import ProjectMapMarker from "./ProjectMapMarker";
-
-// ── Fix Leaflet's broken default-icon asset resolution under webpack ───────────
-// Leaflet resolves icon URLs at runtime from `L.Icon.Default.imagePath`; under
-// webpack/Next.js the image files aren't shipped correctly.  We replace the
-// default with a small inline SVG divIcon so nothing is imported from the
-// leaflet assets directory.
-const DEFAULT_ICON = L.divIcon({
-  className: "",
-  html: `
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 36" width="24" height="36" aria-hidden="true">
-      <path
-        d="M12 0C5.373 0 0 5.373 0 12c0 8.5 12 24 12 24S24 20.5 24 12C24 5.373 18.627 0 12 0z"
-        fill="#4F46E5"
-        stroke="#ffffff"
-        stroke-width="1.5"
-      />
-      <circle cx="12" cy="12" r="5" fill="#ffffff" opacity="0.9"/>
-    </svg>
-  `,
-  iconSize: [24, 36],
-  iconAnchor: [12, 36],
-  popupAnchor: [0, -38],
-});
-
-// Patch the prototype so every Marker in this page gets the custom icon
-// without having to pass it explicitly.
-L.Marker.prototype.options.icon = DEFAULT_ICON;
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 

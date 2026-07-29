@@ -107,7 +107,6 @@ fn test_duplicate_job_id_panics() {
     let token = common::create_token(&env);
     common::fund(&env, &token, &client_addr, 2000i128);
 
-    let job_id = SorobanString::from_str(&env, "dup-job");
     common::create_simple_job(
         &env,
         &client,

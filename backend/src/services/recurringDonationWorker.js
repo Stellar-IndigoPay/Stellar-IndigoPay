@@ -193,6 +193,7 @@ async function buildDonationTemplate({ donor, projectId, amount }) {
  * codebase's convention for batch jobs (see retentionWorker.runAllPolicies).
  *
  * @param {import("socket.io").Server} [io]
+ * @returns {Promise<void>}
  */
 async function checkDueSubscriptions(io) {
   let latestLedger;
@@ -327,6 +328,7 @@ async function processSubscriptionAtIndex(index, latestLedger, io) {
  * @param {import("socket.io").Server} [io] - passed through to
  *   checkDueSubscriptions so it can emit `recurring_due`, matching the
  *   `start(io)` convention used by profileQueue.js / summaryQueue.js.
+ * @returns {Promise<void>}
  */
 async function start(io) {
   const cronOverride = process.env.RECURRING_DONATION_CRON;
@@ -335,7 +337,7 @@ async function start(io) {
       { event: "recurring_worker_disabled" },
       "[recurringDonationWorker] Disabled via env",
     );
-    return;
+    return false;
   }
 
   const cronSchedule = cronOverride || DEFAULT_CRON;
@@ -365,17 +367,12 @@ async function start(io) {
 
 /**
  * Gracefully stop the pg-boss instance so an in-flight check drains.
+ *
+ * @returns {Promise<void>}
  */
 async function stop() {
   if (!boss) return;
-  try {
-    await boss.stop({ graceful: true, timeout: 15_000 });
-  } catch (err) {
-    logger.warn(
-      { event: "recurring_worker_stop_error", err: err.message },
-      "[recurringDonationWorker] graceful stop failed",
-    );
-  }
+  await boss.stop({ graceful: true, timeout: 15_000 });
   boss = null;
 }
 

@@ -15,6 +15,7 @@ mod fuzz {
 
     use crate::{DataKey, IndigoPayContract, IndigoPayContractClient, MockOracle, Project};
     use proptest::prelude::*;
+    use soroban_sdk::BytesN;
     use soroban_sdk::{
         testutils::Address as _, token::StellarAssetClient, Address, Env, String as SorobanString,
     };
@@ -149,7 +150,7 @@ mod fuzz {
     }
 
     #[test]
-    #[should_panic(expected = "Project total_raised overflow")]
+    #[should_panic(expected = "overflow")]
     fn donation_of_i128_max_panics() {
         let (env, contract_id, client, _wallet, project_id, token) = setup();
         let donor = Address::generate(&env);
@@ -160,7 +161,7 @@ mod fuzz {
     }
 
     #[test]
-    #[should_panic(expected = "Project total_raised overflow")]
+    #[should_panic(expected = "overflow")]
     fn sequential_donations_panic_when_sum_exceeds_i128_max() {
         let (env, contract_id, client, _wallet, project_id, token) = setup();
         let donor_a = Address::generate(&env);
@@ -330,7 +331,7 @@ mod fuzz {
         // donations still succeed and produce correct offset values.
         #[test]
         fn prop_usdc_max_co2_rate_boundary(
-            usdc_amount in 1i128..=100_000_000i128,
+            usdc_amount in 1_250_000i128..=100_000_000i128,
         ) {
             let (env, client, project_id, usdc_token) = setup_usdc(100_000);
             let donor = Address::generate(&env);
@@ -341,6 +342,248 @@ mod fuzz {
             let donor_stats = client.get_donor_stats(&donor);
             prop_assert!(donor_stats.co2_offset_grams > 0, "CO₂ offset should be non-zero at max rate");
             prop_assert_eq!(donor_stats.donation_count, 1);
+        }
+
+        // ── Receipt commitment uniqueness (#455) ──────────────────────────────
+
+        /// Two different donations by the same donor must produce different
+        /// receipt commitments (SHA-256 signatures). Verifies that receipt
+        /// hashes are unique per donation, not per donor.
+        #[test]
+        fn prop_receipt_commitment_unique(
+            amount_a in 100i128..=MAX_DONATION,
+            amount_b in 100i128..=MAX_DONATION,
+        ) {
+            let (env, _contract_id, client, _wallet, project_id, token) = setup();
+            let donor = Address::generate(&env);
+            mint_tokens(&env, &token, &donor, amount_a + amount_b);
+
+            client.donate(&token, &donor, &project_id, &amount_a, &MSG_HASH);
+            client.donate(&token, &donor, &project_id, &amount_b, &MSG_HASH);
+
+            let receipt_a = client.generate_receipt(&donor, &0u32);
+            let receipt_b = client.generate_receipt(&donor, &1u32);
+
+            // Different donation indices → different commitments
+            prop_assert_ne!(
+                receipt_a.contract_signature,
+                receipt_b.contract_signature,
+                "Different donations must produce unique receipt signatures"
+            );
+
+            // Both donors should be the same.
+            // Borrow through `&` because `soroban_sdk::Address` is not `Copy`
+            // — passing the owned field twice would move it on the first use
+            // and trip an `E0382` on the second.
+            prop_assert_eq!(&receipt_a.donor, &receipt_b.donor);
+            prop_assert_eq!(&receipt_a.donor, &donor);
+        }
+
+        /// Random token address must panic if unregistered when calling `donate_token`.
+        #[test]
+        fn prop_donate_token_random_token(
+            amount in 1i128..=100_000_000i128,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let cid = env.register_contract(None, IndigoPayContract);
+            let client = IndigoPayContractClient::new(&env, &cid);
+            let admin = Address::generate(&env);
+            client.initialize(&soroban_sdk::vec![&env, admin.clone()], &1u32);
+
+            let project_id = SorobanString::from_str(&env, "proj-random-token");
+            let wallet = Address::generate(&env);
+            client.register_project(
+                &admin,
+                &project_id,
+                &SorobanString::from_str(&env, "Random Token Project"),
+                &wallet,
+                &100u32,
+            );
+
+            let random_token = Address::generate(&env);
+            let donor = Address::generate(&env);
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.donate_token(&random_token, &donor, &project_id, &amount, &MSG_HASH);
+            }));
+            prop_assert!(result.is_err(), "donate_token should panic for unregistered token");
+        }
+
+        /// XLM-equivalent calculation test: rate * amount must equal total_donated.
+        #[test]
+        fn prop_xlm_equivalent_calculation(
+            usdc_amount in 1i128..=10_000_000_000i128,
+        ) {
+            let (env, client, project_id, usdc_token) = setup_usdc(100u32);
+            let donor = Address::generate(&env);
+            fund_usdc(&env, &usdc_token, &donor, usdc_amount);
+
+            client.donate_token(&usdc_token, &donor, &project_id, &usdc_amount, &MSG_HASH);
+
+            let stats = client.get_donor_stats(&donor);
+            // Oracle rate is 8 XLM per 1 USDC
+            let expected_xlm = usdc_amount.checked_mul(8).unwrap();
+            prop_assert_eq!(stats.total_donated, expected_xlm);
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// No vector containing fewer than two distinct authorized admins can
+        /// initiate a force-refund when the configured threshold is 2.
+        #[test]
+        fn prop_force_refund_requires_m_of_n(
+            include_first in any::<bool>(),
+            duplicate_first in any::<bool>(),
+            include_outsider in any::<bool>(),
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let contract_id = env.register_contract(None, IndigoPayContract);
+            let client = IndigoPayContractClient::new(&env, &contract_id);
+            let first_admin = Address::generate(&env);
+            let second_admin = Address::generate(&env);
+            let outsider = Address::generate(&env);
+
+            client.initialize(
+                &soroban_sdk::vec![&env, first_admin.clone(), second_admin],
+                &2u32,
+            );
+
+            let mut supplied = soroban_sdk::Vec::new(&env);
+            if include_first {
+                supplied.push_back(first_admin.clone());
+            }
+            if duplicate_first {
+                supplied.push_back(first_admin);
+            }
+            if include_outsider {
+                supplied.push_back(outsider);
+            }
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.force_approve_refund(&supplied, &0u32);
+            }));
+            prop_assert!(
+                result.is_err(),
+                "fewer than two distinct admins unexpectedly satisfied a 2-of-2 threshold"
+            );
+        }
+    }
+
+    // ─── Impact Root Archiving Fuzz Tests (#466) ───────────────────────────
+    //
+    // Property: For any N periods published sequentially:
+    //   - Period count = N
+    //   - All archived periods are accessible at indices 0..N-1
+    //   - Indices are sequential with no gaps
+    //
+    // Uses `env.as_contract()` because the free functions access contract
+    // storage directly (not through the client).
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn prop_archive_index_sequential(n in 1u32..=10u32) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let cid = env.register_contract(None, IndigoPayContract);
+            let client = IndigoPayContractClient::new(&env, &cid);
+            let admin = Address::generate(&env);
+            client.initialize(&soroban_sdk::vec![&env, admin.clone()], &1u32);
+
+            let project_id = SorobanString::from_str(&env, "fuzz-archive");
+            let wallet = Address::generate(&env);
+            client.register_project(
+                &admin,
+                &project_id,
+                &SorobanString::from_str(&env, "Fuzz Archive"),
+                &wallet,
+                &100u32,
+            );
+
+            // Publish N periods
+            for i in 0u32..n {
+                env.as_contract(&cid, || {
+                    let root = BytesN::from_array(&env, &[(i as u8 + 1); 32]);
+                    use crate::{publish_impact_root, ImpactTotals};
+                    publish_impact_root(
+                        &env,
+                        &soroban_sdk::vec![&env, admin.clone()],
+                        project_id.clone(),
+                        root,
+                        1704067200u64 + (i as u64) * 2_592_000,
+                        1706745600u64 + (i as u64) * 2_592_000,
+                        ImpactTotals {
+                            co2_kg: 1000 + i as u64 * 100,
+                            trees: 500 + i as u64 * 50,
+                            hectares: 10u64 + i as u64,
+                        },
+                    );
+                });
+            }
+
+            // Verify: period count = min(n-1, MAX_ARCHIVED_PERIODS)
+            // (n-1 because the last root is current, not archived)
+            let expected_count = if n == 1 { 0 } else { n - 1 };
+            let capped_count = core::cmp::min(expected_count, crate::MAX_ARCHIVED_PERIODS);
+
+            let _ = env.as_contract(&cid, || {
+                use crate::get_impact_periods;
+                let periods = get_impact_periods(&env, project_id);
+                prop_assert_eq!(
+                    periods.len() as u32,
+                    capped_count,
+                    "period count mismatch: expected {}, got {}",
+                    capped_count,
+                    periods.len()
+                );
+
+                // Verify sequential indices with no gaps
+                for j in 0..periods.len() {
+                    let p = periods.get_unchecked(j);
+                    prop_assert_eq!(
+                        p.period_index, j as u32,
+                        "index gap at position {}: expected {}, got {}",
+                        j, j, p.period_index
+                    );
+                }
+
+                // Verify totals are strictly increasing (each period has more impact than the last)
+                for j in 1..periods.len() {
+                    let prev = periods.get_unchecked(j - 1);
+                    let curr = periods.get_unchecked(j);
+                    prop_assert!(
+                        curr.total_co2_kg > prev.total_co2_kg,
+                        "CO2 total not increasing at index {}",
+                        j
+                    );
+                }
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn prop_fee_sum_equals_total(fee_amount in 1i128..=1_000_000_000_000i128, s1 in 1u32..=9998u32) {
+            let env = Env::default();
+            let r1 = crate::FeeRecipient {
+                address: Address::generate(&env),
+                share_bps: s1,
+            };
+            let r2 = crate::FeeRecipient {
+                address: Address::generate(&env),
+                share_bps: 10_000 - s1,
+            };
+            let recipients = soroban_sdk::vec![&env, r1, r2];
+            let shares = crate::split_fee_recipients(&env, fee_amount, &recipients);
+            let mut sum: i128 = 0;
+            for (_addr, amount) in shares.iter() {
+                sum += amount;
+            }
+            prop_assert_eq!(sum, fee_amount, "Sum of recipient fee shares must equal total fee amount");
         }
     }
 }

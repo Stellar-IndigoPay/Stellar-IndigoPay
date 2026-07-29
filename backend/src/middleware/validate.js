@@ -62,4 +62,29 @@ function validate(schema, source = "body") {
   };
 }
 
-module.exports = { validate };
+/**
+ * Validates a single Express route parameter using a Zod schema.
+ *
+ * @param {import("zod").ZodSchema} schema
+ * @param {string} paramName
+ * @returns {import("express").RequestParamHandler}
+ */
+function validateRouteParam(schema, paramName) {
+  return (req, res, next, value) => {
+    const result = schema.safeParse(value);
+
+    if (!result.success) {
+      const message =
+        result.error.issues[0]?.message || `Invalid ${paramName}`;
+
+      return res.status(400).json({
+        error: "Validation failed",
+        details: [{ path: paramName, message }],
+      });
+    }
+
+    next();
+  };
+}
+
+module.exports = { validate, validateRouteParam };

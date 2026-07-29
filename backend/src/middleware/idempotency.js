@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const pool = require("../db/pool");
+const { UUID_RE } = require("../validators/schemas");
 
 function hashBody(body) {
   return crypto.createHash("sha256").update(JSON.stringify(body || {})).digest("hex");
@@ -8,6 +9,7 @@ function hashBody(body) {
 async function idempotencyMiddleware(req, res, next) {
   const key = req.headers["idempotency-key"];
   if (!key || typeof key !== "string" || key.length > 256) return next();
+  if (!UUID_RE.test(key)) return res.status(400).json({ error: "Idempotency-Key must be a valid UUID" });
 
   const bodyHash = hashBody(req.body);
 

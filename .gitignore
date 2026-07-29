@@ -40,3 +40,8 @@ backend/uploads/*
 # Storybook static build output
 frontend/storybook-static/
 
+# Tarpaulin test coverage outputs
+coverage/
+**/coverage/
+
+

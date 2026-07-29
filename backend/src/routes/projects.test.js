@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 
 jest.mock("../db/pool", () => ({
   query: jest.fn(),
@@ -54,7 +54,7 @@ function buildApp() {
 }
 
 const MOCK_PROJECT_ROW = {
-  id: "proj-1",
+  id: "11111111-2222-3333-8888-555555555555",
   name: "Test Project",
   description: "A test climate project",
   category: "Reforestation",
@@ -201,7 +201,7 @@ describe("GET /api/projects", () => {
   test("falls back to created_at ordering when searching with a cursor", async () => {
     pool.query.mockResolvedValue({ rows: [MOCK_PROJECT_ROW] });
     const cursor = Buffer.from(
-      JSON.stringify({ created_at: new Date().toISOString(), id: "proj-1" }),
+      JSON.stringify({ created_at: new Date().toISOString(), id: "11111111-2222-3333-8888-555555555555" }),
     ).toString("base64");
 
     await request(app)
@@ -317,12 +317,12 @@ describe("GET /api/projects/featured", () => {
 
     const cold = await request(app).get("/api/projects/featured").expect(200);
     expect(cold.body.success).toBe(true);
-    expect(cold.body.data.id).toBe("proj-1");
+    expect(cold.body.data.id).toBe("11111111-2222-3333-8888-555555555555");
     expect(dbSpy).toHaveBeenCalledTimes(1);
 
     const warm = await request(app).get("/api/projects/featured").expect(200);
     expect(warm.body.success).toBe(true);
-    expect(warm.body.data.id).toBe("proj-1");
+    expect(warm.body.data.id).toBe("11111111-2222-3333-8888-555555555555");
     expect(dbSpy).toHaveBeenCalledTimes(1);
 
     nowSpy.mockRestore();
@@ -385,7 +385,7 @@ describe("GET /api/projects/:id", () => {
     pool.query.mockResolvedValueOnce({ rows: [] }); // milestones
     pool.query.mockResolvedValueOnce({ rows: [{ count: "0" }] }); // follow count
 
-    const res = await request(app).get("/api/projects/proj-1").expect(200);
+    const res = await request(app).get("/api/projects/11111111-2222-3333-8888-555555555555").expect(200);
 
     expect(res.body.success).toBe(true);
     expect(res.body.data.name).toBe("Test Project");
@@ -395,7 +395,7 @@ describe("GET /api/projects/:id", () => {
   test("returns 404 for non-existent project", async () => {
     pool.query.mockResolvedValue({ rows: [] });
 
-    await request(app).get("/api/projects/nonexistent").expect(404);
+    await request(app).get("/api/projects/44444444-4444-4444-8444-444444444444").expect(404);
   });
 });
 
@@ -454,7 +454,12 @@ describe("GET /api/projects/:id/badge-holders", () => {
       .get("/api/projects/invalid-uuid/badge-holders")
       .expect(400);
 
-    expect(res.body.error.code).toBe("PROJECT_NOT_FOUND");
+    expect(res.body.error).toBe("Validation failed");
+    expect(res.body.details).toContainEqual({
+      path: "id",
+      message: "Invalid UUID",
+    });
+    expect(pool.query).not.toHaveBeenCalled();
   });
 });
 
@@ -468,7 +473,7 @@ describe("POST /api/projects (admin)", () => {
   });
 
   test("returns decoded on-chain donation events", async () => {
-    pool.query.mockResolvedValueOnce({ rows: [{ id: "proj-1" }] });
+    pool.query.mockResolvedValueOnce({ rows: [{ id: "11111111-2222-3333-8888-555555555555" }] });
     stellarService.getProjectDonationEvents.mockResolvedValueOnce([
       {
         donor: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
@@ -481,7 +486,7 @@ describe("POST /api/projects (admin)", () => {
     ]);
 
     const res = await request(app)
-      .get("/api/projects/proj-1/on-chain-donations?limit=10")
+      .get("/api/projects/11111111-2222-3333-8888-555555555555/on-chain-donations?limit=10")
       .expect(200);
 
     expect(res.body.success).toBe(true);
@@ -501,7 +506,7 @@ describe("POST /api/projects (admin)", () => {
     pool.query.mockResolvedValueOnce({ rows: [] });
 
     await request(app)
-      .get("/api/projects/unknown/on-chain-donations")
+      .get("/api/projects/44444444-4444-4444-8444-444444444444/on-chain-donations")
       .expect(404);
   });
 });
@@ -535,6 +540,40 @@ describe("POST /api/projects (admin)", () => {
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe("VALIDATION_ERROR");
     expect(res.body.error.field).toBe("adminAddress");
+  });
+});
+
+describe("GET /api/projects/admin/pending", () => {
+  let app;
+
+  beforeEach(() => {
+    app = buildApp();
+    jest.resetAllMocks();
+  });
+
+  test("returns 401 without admin auth", async () => {
+    const res = await request(app).get("/api/projects/admin/pending");
+
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe("UNAUTHORIZED");
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  test("returns pending projects with admin auth", async () => {
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ total: 1 }] })
+      .mockResolvedValueOnce({ rows: [{ ...MOCK_PROJECT_ROW, verified: false }] });
+
+    const res = await request(app)
+      .get("/api/projects/admin/pending")
+      .set("X-Admin-Key", "test-admin-key")
+      .expect(200);
+
+    expect(pool.query).toHaveBeenCalledTimes(2);
+    expect(res.body.success).toBe(true);
+    expect(res.body.total).toBe(1);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].verified).toBe(false);
   });
 });
 
@@ -602,7 +641,54 @@ describe("POST /api/projects (create)", () => {
       .expect(201);
 
     expect(res.body.success).toBe(true);
+    expect(res.body.warnings).toEqual([
+      {
+        code: "GEOCODING_ERROR",
+        message: "Could not geocode the provided location",
+      },
+    ]);
     expect(pool.query).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("POST /api/projects/:id/campaigns", () => {
+  let app;
+
+  beforeEach(() => {
+    app = buildApp();
+    jest.clearAllMocks();
+  });
+
+  test("returns structured Zod details for invalid campaign input", async () => {
+    const res = await request(app)
+      .post(`/api/projects/${MOCK_PROJECT_ROW.id}/campaigns`)
+      .send({
+        title: "No",
+        goalXLM: "0",
+        deadline: "not-a-date",
+        description: "x".repeat(501),
+      })
+      .expect(400);
+
+    expect(res.body.error).toBe("Validation failed");
+    expect(res.body.details).toEqual(
+      expect.arrayContaining([
+        {
+          path: "title",
+          message: "title must be between 3 and 120 characters",
+        },
+        { path: "goalXLM", message: "Must be a positive number" },
+        {
+          path: "deadline",
+          message: "deadline must be a valid ISO date string",
+        },
+        {
+          path: "description",
+          message: "description must be 500 characters or fewer",
+        },
+      ]),
+    );
+    expect(pool.query).not.toHaveBeenCalled();
   });
 });
 
@@ -619,7 +705,7 @@ describe("mapCampaignRow", () => {
 
   const getBaseRow = () => ({
     id: "camp-1",
-    project_id: "proj-1",
+    project_id: "11111111-2222-3333-8888-555555555555",
     title: "Test Campaign",
     description: "Testing",
     goal_xlm: "1000",
@@ -628,7 +714,7 @@ describe("mapCampaignRow", () => {
     created_at: new Date("2026-06-01T00:00:00.000Z").toISOString(),
   });
 
-  test("raised_xlm >= goal_xlm → completed: true, active: false", () => {
+  test("raised_xlm >= goal_xlm â†’ completed: true, active: false", () => {
     const row = getBaseRow();
     row.raised_xlm = "1000";
     let mapped = mapCampaignRow(row);
@@ -641,7 +727,7 @@ describe("mapCampaignRow", () => {
     expect(mapped.active).toBe(false);
   });
 
-  test("Current time past deadline → completed: true, active: false", () => {
+  test("Current time past deadline â†’ completed: true, active: false", () => {
     const row = getBaseRow();
     row.deadline = new Date("2026-06-29T00:00:00.000Z").toISOString();
     const mapped = mapCampaignRow(row);
@@ -649,14 +735,14 @@ describe("mapCampaignRow", () => {
     expect(mapped.active).toBe(false);
   });
 
-  test("Neither condition → completed: false, active: true", () => {
+  test("Neither condition â†’ completed: false, active: true", () => {
     const row = getBaseRow();
     const mapped = mapCampaignRow(row);
     expect(mapped.completed).toBe(false);
     expect(mapped.active).toBe(true);
   });
 
-  test("goal_xlm = 0 → progressPercent = 0 (not NaN)", () => {
+  test("goal_xlm = 0 â†’ progressPercent = 0 (not NaN)", () => {
     const row = getBaseRow();
     row.goal_xlm = "0";
     row.raised_xlm = "500";
@@ -666,7 +752,7 @@ describe("mapCampaignRow", () => {
   });
 });
 
-// ── GET /api/projects/:id/impact-certificate ──────────────────────────────────
+// â”€â”€ GET /api/projects/:id/impact-certificate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // A real 56-char Stellar G-address used as the donor in these tests
 const CERT_DONOR = "GAUUCYNO24CCKKNOMT5AS6D73J6QMYC5IJI64H4ZBJL7NQUETW3KOO4J";
@@ -682,7 +768,7 @@ const MOCK_DONATION_ROW = {
 
 // Full project row mock that includes all fields queried by the certificate endpoint
 const MOCK_CERT_PROJECT_ROW = {
-  id: "proj-1",
+  id: "11111111-2222-3333-8888-555555555555",
   name: "Amazon Reforestation",
   category: "Reforestation",
   verified: true,
@@ -712,13 +798,13 @@ describe("GET /api/projects/:id/impact-certificate", () => {
     pool.query.mockResolvedValueOnce({ rows: [MOCK_DONATION_ROW] });
 
     const res = await request(app)
-      .get(`/api/projects/proj-1/impact-certificate?donorAddress=${CERT_DONOR}`)
+      .get(`/api/projects/11111111-2222-3333-8888-555555555555/impact-certificate?donorAddress=${CERT_DONOR}`)
       .expect(200);
 
     expect(res.body.success).toBe(true);
     const d = res.body.data;
     // Core identity
-    expect(d.projectId).toBe("proj-1");
+    expect(d.projectId).toBe("11111111-2222-3333-8888-555555555555");
     expect(d.projectName).toBe("Amazon Reforestation");
     expect(d.donorAddress).toBe(CERT_DONOR);
     // New fields
@@ -748,7 +834,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
     pool.query.mockResolvedValueOnce({ rows: [MOCK_DONATION_ROW] });
 
     const res = await request(app)
-      .get(`/api/projects/proj-1/impact-certificate?donorAddress=${CERT_DONOR}`)
+      .get(`/api/projects/11111111-2222-3333-8888-555555555555/impact-certificate?donorAddress=${CERT_DONOR}`)
       .expect(200);
 
     expect(res.body.data.donorName).toBeNull();
@@ -760,7 +846,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
     pool.query.mockResolvedValueOnce({ rows: [MOCK_DONATION_ROW] });
 
     const res = await request(app)
-      .get(`/api/projects/proj-1/impact-certificate?donorAddress=${CERT_DONOR}`)
+      .get(`/api/projects/11111111-2222-3333-8888-555555555555/impact-certificate?donorAddress=${CERT_DONOR}`)
       .expect(200);
 
     expect(res.body.data.donorName).toBeNull();
@@ -776,7 +862,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
     pool.query.mockResolvedValueOnce({ rows: [MOCK_DONATION_ROW] });
 
     const res = await request(app)
-      .get(`/api/projects/proj-1/impact-certificate?donorAddress=${CERT_DONOR}`)
+      .get(`/api/projects/11111111-2222-3333-8888-555555555555/impact-certificate?donorAddress=${CERT_DONOR}`)
       .expect(200);
 
     expect(res.body.data.projectVerified).toBe(true);
@@ -792,7 +878,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
     pool.query.mockResolvedValueOnce({ rows: [MOCK_DONATION_ROW] });
 
     const res = await request(app)
-      .get(`/api/projects/proj-1/impact-certificate?donorAddress=${CERT_DONOR}`)
+      .get(`/api/projects/11111111-2222-3333-8888-555555555555/impact-certificate?donorAddress=${CERT_DONOR}`)
       .expect(200);
 
     expect(res.body.data.projectVerified).toBe(true);
@@ -808,7 +894,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
     pool.query.mockResolvedValueOnce({ rows: [MOCK_DONATION_ROW] });
 
     const res = await request(app)
-      .get(`/api/projects/proj-1/impact-certificate?donorAddress=${CERT_DONOR}`)
+      .get(`/api/projects/11111111-2222-3333-8888-555555555555/impact-certificate?donorAddress=${CERT_DONOR}`)
       .expect(200);
 
     expect(res.body.data.projectVerified).toBe(false);
@@ -822,7 +908,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
     });
 
     const res = await request(app)
-      .get(`/api/projects/proj-1/impact-certificate?donorAddress=${CERT_DONOR}`)
+      .get(`/api/projects/11111111-2222-3333-8888-555555555555/impact-certificate?donorAddress=${CERT_DONOR}`)
       .expect(200);
 
     expect(res.body.data.badgeTier).toBe("bronze");
@@ -836,7 +922,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
     });
 
     const res = await request(app)
-      .get(`/api/projects/proj-1/impact-certificate?donorAddress=${CERT_DONOR}`)
+      .get(`/api/projects/11111111-2222-3333-8888-555555555555/impact-certificate?donorAddress=${CERT_DONOR}`)
       .expect(200);
 
     expect(res.body.data.badgeTier).toBe("silver");
@@ -858,7 +944,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
     });
 
     const res = await request(app)
-      .get(`/api/projects/proj-1/impact-certificate?donorAddress=${CERT_DONOR}`)
+      .get(`/api/projects/11111111-2222-3333-8888-555555555555/impact-certificate?donorAddress=${CERT_DONOR}`)
       .expect(200);
 
     expect(res.body.data.badgeTier).toBe("gold");
@@ -880,7 +966,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
     });
 
     const res = await request(app)
-      .get(`/api/projects/proj-1/impact-certificate?donorAddress=${CERT_DONOR}`)
+      .get(`/api/projects/11111111-2222-3333-8888-555555555555/impact-certificate?donorAddress=${CERT_DONOR}`)
       .expect(200);
 
     expect(res.body.data.badgeTier).toBe("platinum");
@@ -888,7 +974,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
 
   test("returns 400 when donorAddress is missing", async () => {
     const res = await request(app)
-      .get("/api/projects/proj-1/impact-certificate")
+      .get("/api/projects/11111111-2222-3333-8888-555555555555/impact-certificate")
       .expect(400);
 
     expect(res.body.error.code).toBe("VALIDATION_ERROR");
@@ -897,7 +983,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
 
   test("returns 400 when donorAddress is invalid (too short)", async () => {
     const res = await request(app)
-      .get("/api/projects/proj-1/impact-certificate?donorAddress=GBADKEY")
+      .get("/api/projects/11111111-2222-3333-8888-555555555555/impact-certificate?donorAddress=GBADKEY")
       .expect(400);
 
     expect(res.body.error.code).toBe("INVALID_ADDRESS");
@@ -907,7 +993,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
   test("returns 400 when donorAddress starts with wrong letter", async () => {
     const res = await request(app)
       .get(
-        "/api/projects/proj-1/impact-certificate?donorAddress=XAUUCYNO24CCKKNOMT5AS6D73J6QMYC5IJI64H4ZBJL7NQUETW3KOO4J",
+        "/api/projects/11111111-2222-3333-8888-555555555555/impact-certificate?donorAddress=XAUUCYNO24CCKKNOMT5AS6D73J6QMYC5IJI64H4ZBJL7NQUETW3KOO4J",
       )
       .expect(400);
 
@@ -920,7 +1006,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
 
     const res = await request(app)
       .get(
-        `/api/projects/nonexistent/impact-certificate?donorAddress=${CERT_DONOR}`,
+        `/api/projects/44444444-4444-4444-8444-444444444444/impact-certificate?donorAddress=${CERT_DONOR}`,
       )
       .expect(404);
 
@@ -933,7 +1019,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
     pool.query.mockResolvedValueOnce({ rows: [] }); // no donations
 
     const res = await request(app)
-      .get(`/api/projects/proj-1/impact-certificate?donorAddress=${CERT_DONOR}`)
+      .get(`/api/projects/11111111-2222-3333-8888-555555555555/impact-certificate?donorAddress=${CERT_DONOR}`)
       .expect(404);
 
     expect(res.body.error.code).toBe("DONATION_NOT_FOUND");
@@ -941,8 +1027,8 @@ describe("GET /api/projects/:id/impact-certificate", () => {
   });
 
   test("co2OffsetKg is proportional to donor's share of total raised", async () => {
-    // project raised 1000 XLM, offset 5000 kg → 5 kg/XLM
-    // donor gave 200 XLM → expected 1000 kg
+    // project raised 1000 XLM, offset 5000 kg â†’ 5 kg/XLM
+    // donor gave 200 XLM â†’ expected 1000 kg
     pool.query.mockResolvedValueOnce({ rows: [MOCK_CERT_PROJECT_ROW] });
     pool.query.mockResolvedValueOnce({ rows: [] });
     pool.query.mockResolvedValueOnce({
@@ -950,7 +1036,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
     });
 
     const res = await request(app)
-      .get(`/api/projects/proj-1/impact-certificate?donorAddress=${CERT_DONOR}`)
+      .get(`/api/projects/11111111-2222-3333-8888-555555555555/impact-certificate?donorAddress=${CERT_DONOR}`)
       .expect(200);
 
     expect(res.body.data.co2OffsetKg).toBe(1000);
@@ -968,7 +1054,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
     });
 
     const res = await request(app)
-      .get(`/api/projects/proj-1/impact-certificate?donorAddress=${CERT_DONOR}`)
+      .get(`/api/projects/11111111-2222-3333-8888-555555555555/impact-certificate?donorAddress=${CERT_DONOR}`)
       .expect(200);
 
     expect(res.body.data.co2OffsetKg).toBe(0);
@@ -986,12 +1072,12 @@ describe("GET /api/projects/:id/impact-certificate", () => {
     });
 
     const res = await request(app)
-      .get(`/api/projects/proj-1/impact-certificate?donorAddress=${CERT_DONOR}`)
+      .get(`/api/projects/11111111-2222-3333-8888-555555555555/impact-certificate?donorAddress=${CERT_DONOR}`)
       .expect(200);
 
     expect(res.body.data.donationCount).toBe(2);
     expect(res.body.data.donations).toHaveLength(2);
-    // 300 XLM × (5000/1000 kg/XLM) = 1500 kg
+    // 300 XLM Ã— (5000/1000 kg/XLM) = 1500 kg
     expect(res.body.data.co2OffsetKg).toBe(1500);
   });
 });
@@ -999,7 +1085,7 @@ describe("GET /api/projects/:id/impact-certificate", () => {
 describe("POST /api/projects/admin/confirm", () => {
   let app;
   const transactionHash = "a".repeat(64);
-  const projectId = "proj-1";
+  const projectId = "11111111-2222-3333-8888-555555555555";
 
   beforeEach(() => {
     app = buildApp();
@@ -1035,5 +1121,38 @@ describe("POST /api/projects/admin/confirm", () => {
     expect(res.body.success).toBe(true);
     expect(res.body.data.verified).toBe(true);
     expect(res.body.data.onChainVerified).toBe(true);
+  });
+});
+
+describe("PATCH /api/projects/:id/status", () => {
+  let app;
+  beforeEach(() => {
+    app = buildApp();
+    jest.resetAllMocks();
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue(null);
+    redis.deletePattern.mockResolvedValue(null);
+  });
+  test("invalidates milestones cache when status changes to paused", async () => {
+    pool.query.mockResolvedValueOnce({ rows: [MOCK_PROJECT_ROW] }); // SELECT project
+    pool.query.mockResolvedValueOnce({
+      rows: [{ ...MOCK_PROJECT_ROW, status: "paused" }],
+    }); // UPDATE project
+    const res = await request(app)
+      .patch("/api/projects/11111111-2222-3333-8888-555555555555/status")
+      .send({ status: "paused", adminAddress: "GTESTADMIN" })
+      .expect(200);
+    expect(res.body.success).toBe(true);
+    expect(redis.deletePattern).toHaveBeenCalledWith(
+      "cache:v1:projects:milestones:11111111-2222-3333-8888-555555555555",
+    );
+  });
+  test("returns 404 and does not invalidate cache for non-existent project", async () => {
+    pool.query.mockResolvedValueOnce({ rows: [] }); // SELECT project — not found
+    await request(app)
+      .patch("/api/projects/44444444-4444-4444-8444-444444444444/status")
+      .send({ status: "paused", adminAddress: "GTESTADMIN" })
+      .expect(404);
+    expect(redis.deletePattern).not.toHaveBeenCalled();
   });
 });

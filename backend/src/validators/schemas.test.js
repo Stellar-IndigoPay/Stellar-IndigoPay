@@ -7,6 +7,7 @@ const {
   xlmAmount,
   donationSchema,
   leaderboardQuerySchema,
+  projectSubmissionSchema,
 } = require("./schemas");
 
 const VALID_STELLAR = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -163,6 +164,107 @@ describe("leaderboardQuerySchema", () => {
 
   test("rejects negative limit", () => {
     const result = leaderboardQuerySchema.safeParse({ limit: -1 });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("projectSubmissionSchema tags", () => {
+  const validPayload = {
+    name: "Amazon Reforestation",
+    category: "Reforestation",
+    description: "Restoring native tree cover across degraded land.",
+    location: "Brazil",
+    goalXLM: "10000",
+    walletAddress: VALID_STELLAR,
+    organization: {
+      name: "Rainforest Org",
+      contactEmail: "contact@rainforest.org",
+    },
+    co2Methodology: {
+      name: "Verra VCS",
+      annualTonnesCO2: "1200",
+    },
+  };
+
+  test("accepts a payload with valid tags", () => {
+    const result = projectSubmissionSchema.safeParse({
+      ...validPayload,
+      tags: ["reforestation", "amazon"],
+    });
+    expect(result.success).toBe(true);
+    expect(result.data.tags).toEqual(["reforestation", "amazon"]);
+  });
+
+  test("defaults tags to an empty array when omitted", () => {
+    const result = projectSubmissionSchema.safeParse(validPayload);
+    expect(result.success).toBe(true);
+    expect(result.data.tags).toEqual([]);
+  });
+
+  test("accepts exactly 10 tags (boundary)", () => {
+    const result = projectSubmissionSchema.safeParse({
+      ...validPayload,
+      tags: Array.from({ length: 10 }, (_, i) => `tag-${i}`),
+    });
+    expect(result.success).toBe(true);
+  });
+
+  test("rejects more than 10 tags", () => {
+    const result = projectSubmissionSchema.safeParse({
+      ...validPayload,
+      tags: Array.from({ length: 11 }, (_, i) => `tag-${i}`),
+    });
+    expect(result.success).toBe(false);
+    expect(result.error.issues[0].message).toMatch(/at most 10/);
+  });
+
+  test("accepts a tag of exactly 50 characters (boundary)", () => {
+    const result = projectSubmissionSchema.safeParse({
+      ...validPayload,
+      tags: ["x".repeat(50)],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  test("rejects a tag longer than 50 characters", () => {
+    const result = projectSubmissionSchema.safeParse({
+      ...validPayload,
+      tags: ["x".repeat(51)],
+    });
+    expect(result.success).toBe(false);
+    expect(result.error.issues[0].message).toMatch(/at most 50/);
+  });
+
+  test("rejects an empty-string tag", () => {
+    const result = projectSubmissionSchema.safeParse({
+      ...validPayload,
+      tags: ["valid", ""],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  test("rejects a whitespace-only tag", () => {
+    const result = projectSubmissionSchema.safeParse({
+      ...validPayload,
+      tags: ["   "],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  test("trims surrounding whitespace from tags", () => {
+    const result = projectSubmissionSchema.safeParse({
+      ...validPayload,
+      tags: ["  solar  "],
+    });
+    expect(result.success).toBe(true);
+    expect(result.data.tags).toEqual(["solar"]);
+  });
+
+  test("rejects non-string tag entries", () => {
+    const result = projectSubmissionSchema.safeParse({
+      ...validPayload,
+      tags: [42],
+    });
     expect(result.success).toBe(false);
   });
 });

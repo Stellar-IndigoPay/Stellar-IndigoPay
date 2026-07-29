@@ -1,5 +1,39 @@
 ## [Unreleased]
 
+### Features
+
+* **frontend:** announce `DonateForm` validation errors to screen readers (GrantFox OSS, grantfox GF-a11y-donate-form)
+  - Add a hidden `<div aria-live="assertive" className="sr-only">` in `DonateForm.tsx` alongside the existing `aria-live="polite"` step-status region
+  - Populate the new region with the first message from `useFormValidation`'s `errors` map via a `useEffect`, so invalid-amount and message-too-long errors (previously only conveyed visually via `aria-invalid`/`role="alert"`) are also announced assertively when the user clicks "Donate" with invalid input
+  - No visual changes for sighted users (region is `sr-only`)
+  - Add `frontend/components/__tests__/DonateForm.a11y.test.tsx` cases covering: the live region's presence/`aria-live="assertive"` attribute, announcing the first validation error, and clearing the region once errors are resolved
+
+* **frontend:** add keyboard accessibility for Leaflet map markers on `ProjectMap` (closes #533, grantfox GF-031)
+  - Wrap each marker divIcon in a keyboard-focusable `<button>` with `tabindex="0"`, `role="button"`, and `aria-label="View project: {name}"`
+  - Handle Enter / Space on the marker via `react-leaflet`'s `eventHandlers.keydown` to open the popup, so keyboard-only users can discover project details
+  - HTML-escape the project name before embedding it in the divIcon attribute (defense-in-depth against XSS via project names)
+  - Remove the now-redundant `L.Marker.prototype.options.icon` patch from `ProjectMap.tsx` — each marker provides its own accessible icon
+  - Add visible `:focus-visible` ring on `.indigopay-marker-btn` in `globals.css` (WCAG 2.4.7 Focus Visible)
+  - Add `frontend/components/__tests__/ProjectMapMarker.a11y.test.tsx` with 8 jest cases: focusable button, Enter/Space opens popup, other keys are no-ops, unique aria-label per project, HTML escaping, `jest-axe` reports no violations
+
+### Bug Fixes
+
+* **contracts:** deduplicate the escrow `Milestone` struct across feature configurations (closes #511)
+* **contracts:** add regression tests covering on-time vs late milestone completion reputation tracking
+* **backend:** invalidate impact endpoint caches on project status change (closes #016, grantfox GF-016)
+  - `PATCH /api/projects/:id/status` now sweeps `cache:v1:impact:project:<id>` in addition to the existing project detail, list, global stats and `cache:v1:impact:global` keys
+  - Fixes the transparency/impact dashboard serving pre-change data for up to 300s (the impact cache TTL) after a project is paused, completed or rejected
+  - Invalidation remains best-effort: a Redis outage still logs a warning and returns `200`, matching the behaviour of every other mutation endpoint
+  - Update the "Cache invalidation" tables in `docs/api.md` to document the impact keys
+  - Add 11 regression tests in `backend/src/routes/projects.test.js`, including an end-to-end case that warms `GET /api/impact/project/:id`, verifies `X-Cache: HIT`, pauses the project, and asserts the next read is a `MISS` with fresh figures
+* **backend:** require admin authentication for pending project review endpoint (closes #516)
+* **backend:** surface geocoding failures as project creation warnings (closes #519)
+* **backend:** bound `tags` in the project submission schema — at most 10 tags, each a non-empty trimmed string of at most 50 characters — to prevent database and search-index bloat from unbounded arrays (closes #520)
+
+### Documentation
+
+* **backend:** document key service exports with JSDoc for TypeDoc (closes #548)
+
 ### Performance
 
 * **frontend:** optimize Core Web Vitals with next/image, next/font, and bundle splitting (closes #261)
@@ -17,6 +51,15 @@
   + Add unit test suite in `frontend/components/__tests__/LiveDonationTicker.test.tsx`
 
 ### Features
+
+* **contracts:** enforce Rust formatting via a robust pre-commit hook (closes #60)
+  - Implement reliable Cargo detection in `.husky/check-rust-fmt.sh` with PATH resolution for `$HOME/.cargo/bin` and `$HOME/.cargo/env` compatibility
+  - Optimize pre-commit hook to skip execution overhead and run instantly when no Rust files are staged
+  - Remove redundant `.husky/check-rust-fmt.sh` execution from package.json lint-staged config
+
+* **backend:** standardize structured startup, shutdown, and shutdown-error logging for background workers, with graceful queue draining
+
+* **contracts:** emit `StealthScan` events with the project wallet, donation count, and ledger timestamp after stealth donation scans (closes #514)
 
 * **contracts/backend:** add opt-in anonymous donations and signed, cached tax receipt PDFs with locked XLM/USD values
 
@@ -258,6 +301,18 @@
 - Added SEP-0007 deep-link support for mobile donations via `web+stellar:pay` URIs, including confirmation, biometric auth, callback handling, and scan-history logging.
 
 All notable changes to this project will be documented in this file.
+
+
+### Tests
+
+* **escrow-contract:** add fuzz target for milestone percentage edge cases in `create_job` (closes #508)
+  - Add dedicated proptest strategy generating random milestone percentage distributions (0-100, 1-10 milestones)
+  - Verify `create_job` panics on invalid sum (sum != 100) and succeeds on valid sum (sum == 100)
+  - Covers edge cases: individual percentages of 0, various distributions, overflow scenarios
+  - Exercise at least 1,000 random milestone distributions with proptest (configured via `ProptestConfig::with_cases(1000)`)
+  - Add regression file `proptest-regressions/escrow_fuzz.txt` for replayable test cases
+  - Test passes locally with `cargo test --features testutils -p escrow-contract`
+
 
 ## [Unreleased]
 

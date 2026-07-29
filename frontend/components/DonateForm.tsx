@@ -131,6 +131,19 @@ export default function DonateForm({
   }, [publicKey, currency]);
 
   const { errors, validate, clearField } = useFormValidation(donationSchema);
+  const [validationAnnouncement, setValidationAnnouncement] = useState<string>("");
+
+  // Announce the first validation error to screen reader users whenever the
+  // error map changes (e.g. after clicking "Donate" with invalid input).
+  // Visual error text is already shown inline via role="alert", but that
+  // alone isn't reliably announced for fields like the amount input which
+  // rely on aria-invalid rather than a wrapping FormField.
+  useEffect(() => {
+    const errorValues = Object.values(errors).filter(
+      (value): value is string => Boolean(value),
+    );
+    setValidationAnnouncement(errorValues.length > 0 ? errorValues[0] : "");
+  }, [errors]);
 
   const amountNum = parseFloat(amount);
   const isValid = donationSchema.safeParse({
@@ -495,6 +508,17 @@ export default function DonateForm({
         {step === "submitting" && "Submitting transaction to Stellar."}
         {step === "recording" && "Recording donation. Almost done."}
       </p>
+      {/* Hidden live region that assertively announces validation errors
+          (e.g. invalid amount, message too long) when the user clicks
+          "Donate" with invalid input. Purely for assistive tech; produces
+          no visual output. */}
+      <div
+        aria-live="assertive"
+        className="sr-only"
+        data-testid="validation-live-region"
+      >
+        {validationAnnouncement}
+      </div>
       <h3 className="font-display text-lg font-semibold text-[#0F172A] dark:text-[#E2E8F0] mb-1">
         Make a Donation
       </h3>

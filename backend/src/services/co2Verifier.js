@@ -257,6 +257,15 @@ function verifyCO2Rate(category, co2PerXLM) {
 /**
  * Run verifyCO2Rate() for an approved verification request and stamp the
  * verdict onto the matching projects row(s).
+ *
+ * @param {object} args - Approved CO2 verification request details.
+ * @param {string} args.walletAddress - Project owner wallet address.
+ * @param {string} args.projectName - Project name to match in the database.
+ * @param {string} args.category - Project category used for benchmark lookup.
+ * @param {number|string} args.co2PerXLM - Claimed kg CO2 offset per XLM.
+ * @param {string|number} [args.requestId] - Optional verification request id for logs.
+ * @returns {Promise<{projectIds: Array<string|number>, verification: object}>}
+ *   Updated project ids and the computed verification result.
  */
 async function applyCO2VerificationToProject({
   walletAddress,
@@ -983,6 +992,8 @@ let boss = null;
  * Registers a pg-boss cron job that runs weekly. The schedule can be
  * overridden with the CO2_VERIFICATION_CRON env var (cron syntax).
  * Set CO2_VERIFICATION_CRON="disabled" to turn it off entirely.
+ *
+ * @returns {Promise<void>}
  */
 async function startCO2VerificationCron() {
   const cronOverride = process.env.CO2_VERIFICATION_CRON;
@@ -991,7 +1002,7 @@ async function startCO2VerificationCron() {
       { event: "co2_verification_cron_disabled" },
       "[co2Verifier] Cron disabled via CO2_VERIFICATION_CRON=disabled",
     );
-    return;
+    return false;
   }
 
   const cronSchedule = cronOverride || DEFAULT_CRON;
@@ -1032,28 +1043,27 @@ async function startCO2VerificationCron() {
       `[co2Verifier] Cron scheduled: ${cronSchedule}`,
     );
   } catch (err) {
+    boss = null;
     logger.error(
       {
         event: "co2_verification_cron_startup_error",
         err: err.message,
       },
-      "Failed to start CO₂ verification cron; runs will be manual only",
+      "Failed to start CO2 verification cron; runs will be manual only",
     );
+    return false;
   }
 }
 
 /**
  * Gracefully stop the pg-boss instance.
+ *
+ * @returns {Promise<void>}
  */
 async function stopCO2VerificationCron() {
-  if (boss) {
-    try {
-      await boss.stop({ timeout: 5000 });
-    } catch {
-      // ignore
-    }
-    boss = null;
-  }
+  if (!boss) return;
+  await boss.stop({ timeout: 5000 });
+  boss = null;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
