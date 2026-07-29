@@ -20,6 +20,7 @@ const router = express.Router();
 const { adminRequired } = require("../../middleware/auth");
 const { getStatus, rescan, start, stop } = require("../../services/sorobanEventService");
 const logger = require("../../logger");
+const { sendAppError } = require("../../errors");
 
 // Apply admin authentication to all routes in this router, following the
 // same pattern as webhooks.js, queues.js, and other admin sub-routers.
@@ -40,7 +41,7 @@ router.get("/status", async (req, res) => {
       { event: "admin_events_status_error", err: err.message },
       "Failed to get Soroban event service status",
     );
-    res.status(500).json({ success: false, error: "Internal server error" });
+    return sendAppError(res, "INTERNAL_ERROR");
   }
 });
 
@@ -73,7 +74,7 @@ router.post("/rescan", async (req, res) => {
       { event: "admin_events_rescan_error", err: err.message },
       "Failed to trigger Soroban event rescan",
     );
-    res.status(500).json({ success: false, error: "Internal server error" });
+    return sendAppError(res, "INTERNAL_ERROR");
   }
 });
 
@@ -102,7 +103,7 @@ router.post("/restart", async (req, res) => {
       { event: "admin_events_restart_error", err: err.message },
       "Failed to restart Soroban event service",
     );
-    res.status(500).json({ success: false, error: "Internal server error" });
+    return sendAppError(res, "INTERNAL_ERROR");
   }
 });
 

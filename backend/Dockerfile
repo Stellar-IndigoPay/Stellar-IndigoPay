@@ -1,10 +1,10 @@
 # Test stage — devDependencies for jest in docker-compose.test.yml
-# Pinned to a current LTS (Node 20). For digest pinning (recommended
+# Pinned to a current LTS (Node 22). For digest pinning (recommended
 # for prod), compute the real digest with:
-#   docker buildx imagetools inspect node:20.18.1-alpine
+#   docker buildx imagetools inspect node:22.14.0-alpine
 # and append `@sha256:<digest>` to each `FROM` below. Do NOT fabricate
 # a digest — a fake SHA breaks `docker build` immediately.
-FROM node:20-alpine AS test
+FROM node:22-alpine AS test
 
 WORKDIR /app
 
@@ -17,8 +17,8 @@ COPY . .
 CMD ["npm", "test"]
 
 # 1. Builder Stage
-# Pinned to a current LTS (Node 20) with a SHA256 digest for reproducibility.
-FROM node:20-alpine AS builder
+# Pinned to a current LTS (Node 22) with a SHA256 digest for reproducibility.
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -27,7 +27,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 
 # 2. Production Runner Stage
-FROM node:20-alpine AS runner
+FROM node:22-alpine AS runner
 
 WORKDIR /app
 

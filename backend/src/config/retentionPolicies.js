@@ -51,6 +51,7 @@ const ALLOWED_TABLES = new Set([
   "webhook_deliveries",
   "webhook_dlq",
   "pgboss.archive",
+  "token_blacklist",
 ]);
 
 /**
@@ -68,6 +69,7 @@ const ALLOWED_COLUMNS = new Set([
   "status",
   "anonymised_at",
   "retention_expires_at",
+  "expires_at",
 ]);
 
 function isIdentifier(value) {
@@ -134,6 +136,15 @@ const policies = [
     description: "Delete dead-letter webhook entries older than 180 days.",
   },
   {
+    name: "token-blacklist-delete",
+    table: "token_blacklist",
+    strategy: "delete",
+    retentionPeriod: { value: 0, unit: "hours" },
+    schedule: { cron: "0 * * * *", timezone: "UTC" },
+    condition: "expires_at < now()",
+    description: "Delete expired access-token blacklist entries every hour.",
+  },
+  {
     name: "pgboss-archive-delete",
     table: "pgboss.archive",
     strategy: "delete",
@@ -172,7 +183,7 @@ function validatePolicy(policy, index) {
   if (
     !policy.retentionPeriod ||
     !Number.isFinite(policy.retentionPeriod.value) ||
-    policy.retentionPeriod.value <= 0
+    policy.retentionPeriod.value < 0
   ) {
     throw new Error(`Retention config: ${where} has invalid retentionPeriod`);
   }
@@ -213,7 +224,7 @@ policies.forEach(validatePolicy);
  * by the worker; only the unit is interpolated here and it is validated
  * against a fixed set.
  */
-const VALID_UNITS = new Set(["days", "months", "years"]);
+const VALID_UNITS = new Set(["hours", "days", "months", "years"]);
 function intervalUnit(policy) {
   const unit = policy.retentionPeriod.unit;
   if (!VALID_UNITS.has(unit)) {

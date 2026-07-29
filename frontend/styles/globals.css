@@ -123,6 +123,18 @@
     border-radius: 4px;
   }
 
+  /* ── ProjectMap marker — the SVG icon is wrapped in a <button> rendered
+        via Leaflet's divIcon, so the focus ring lives inside the map
+        container.  Make it visible without altering the SVG itself. ── */
+  .indigopay-marker-btn:focus {
+    outline: none; /* override the global ring on this Leaflet-injected node */
+  }
+  .indigopay-marker-btn:focus-visible {
+    outline: 3px solid var(--primary-light, #818cf8);
+    outline-offset: 3px;
+    border-radius: 9999px;
+  }
+
   /* Respect users who have reduced-motion enabled in their OS settings. */
   @media (prefers-reduced-motion: reduce) {
     *,

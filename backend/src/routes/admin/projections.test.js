@@ -66,7 +66,10 @@ describe("Admin projections router", () => {
       .set("X-Admin-Key", "test-admin-key")
       .expect(409);
     expect(rebuildAllProjections).not.toHaveBeenCalled();
-    expect(res.body.success).toBe(false);
+    expect(res.body.error).toMatchObject({
+      code: "CONFLICT",
+      detail: "A projection rebuild is already in progress",
+    });
   });
 
   test("POST /rebuild/:name rebuilds a single projection", async () => {
@@ -83,7 +86,7 @@ describe("Admin projections router", () => {
       .post("/api/admin/projections/rebuild/nope")
       .set("X-Admin-Key", "test-admin-key")
       .expect(404);
-    expect(res.body.success).toBe(false);
+    expect(res.body.error.code).toBe("NOT_FOUND");
     expect(rebuildProjection).not.toHaveBeenCalled();
   });
 

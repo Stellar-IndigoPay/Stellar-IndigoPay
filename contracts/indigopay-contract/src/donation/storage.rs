@@ -21,11 +21,10 @@ pub fn set_stealth_donation(env: &Env, id: u64, donation: &StealthDonation) {
         .set(&DataKey::StealthDonation(id), donation);
 }
 
-pub fn get_stealth_donation(env: &Env, id: u64) -> StealthDonation {
+pub fn get_stealth_donation(env: &Env, id: u64) -> Option<StealthDonation> {
     env.storage()
         .persistent()
         .get(&DataKey::StealthDonation(id))
-        .expect("stealth donation not found")
 }
 
 pub fn add_project_donation(env: &Env, project: &Address, donation_id: u64) {

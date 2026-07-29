@@ -103,12 +103,44 @@ The current persisted keys are:
 - `DataKey::DonationCO2Offset(u32)` _(#290 donation refund — CO₂ snapshot per donation)_
 - `DataKey::ForceRefund(u32)` _(#429 M-of-N refund escalation timelock; appended to preserve existing discriminants)_
 - `DataKey::SubProjectIds(String)` _(#391 cross-contract project registry — sub-project index per parent)_
+- `DataKey::StealthDonationContract` _(#458 stealth address donation integration)_
 - `DataKey::TokenConfig(Address)` _(#421 dynamic token registry configuration per asset)_
 - `DataKey::TokenList` _(#421 dynamic token registry enumeration list)_
-- `DataKey::DonorRateLimitPerToken(Address, String, Address)` _(#421 per-token donation rate limit window)_
+- `DataKey::DonorRateLimit(Address, String, Address)` _(canonical per-token donation rate limit window)_
+- `DataKey::DonorRateLimitPerToken(Address, String, Address)` _(#421 transitional per-token key; retained for migration)_
+- `DataKey::TokenRateLimitMax(Address)` _(per-token maximum donations override)_
+- `DataKey::TokenRateLimitWindow(Address)` _(per-token window override in ledgers)_
 - **Storage version tracking** _(#379 — Symbol-keyed, not a DataKey variant)_
 
 Do not rename or remove these variants, change their argument order, or reorder/remove fields from stored structs such as `Project`, `DonorStats`, `ImpactNFT`, `ProjectMilestoneNFT`, `VoteProposal`, or `GlobalStats` without adding an explicit migration path. New fields should be handled through a new storage version or a new key namespace so existing v1 values remain decodable.
+
+### Donation rate-limit key migration
+
+The legacy rate-limit window was encoded as
+`DonorRateLimit(Address, String)`, so it has no token discriminator. The
+contract retains a private `LegacyDataKey` representation that produces the
+same raw storage key. The initial #421 implementation also used
+`DataKey::DonorRateLimitPerToken(Address, String, Address)`. New windows use
+the canonical `DataKey::DonorRateLimit(Address, String, Address)`.
+
+Migration is lazy and atomic in the donation path:
+
+1. Read the canonical three-field per-token key first.
+2. If it is absent, read and move the transitional #421 key.
+3. If both are absent, read the legacy two-field key.
+4. When a legacy window exists, remove it and continue with that window under
+   the canonical token-specific key.
+5. If no representation exists, start a new window.
+
+The legacy key is moved only once. This prevents its count from being copied
+into every token window while retaining the donor's active rate-limit state
+for the first post-upgrade token. If the donation fails, Soroban transaction
+rollback also rolls back the key removal.
+
+Token-specific policy values are stored independently. When either per-token
+configuration key is absent, the corresponding global
+`DonationRateLimitMax` or `DonationRateLimitWindow` value is used; if the
+global value is also absent, the compiled default is used.
 
 ## Regression Coverage
 

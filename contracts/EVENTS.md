@@ -29,6 +29,17 @@ nullifier consumed. No donor address is included.
 
 ---
 
+## `StealthScan`
+
+**Description**: Emitted when an authenticated project wallet scans for its
+stealth donations, including scans that find no donations.
+
+| Event Name    | Topics                              | Data                                         | When Emitted |
+| ------------- | ----------------------------------- | -------------------------------------------- | ------------ |
+| `StealthScan` | `["StealthScan", project_wallet]`   | `(donation_count: u32, timestamp: u64)`      | After `scan_stealth_donations` completes |
+
+---
+
 ## 1. `donated`
 
 **Description**: Emitted after a successful XLM donation to a project.
@@ -122,6 +133,16 @@ project-scoped anonymous donation totals.
 | Event Name | Topics        | Data                                      | When Emitted                          |
 | ---------- | ------------- | ----------------------------------------- | ------------------------------------- |
 | `rate_lim` | `["rate_lim"]` | `{ "max_donations": u32, "window_ledgers": u32 }` | When admin calls `set_donation_rate_limit` |
+
+---
+
+## 9a. `tok_rate`
+
+**Description**: Emitted when the admin updates the donation rate limit for one token.
+
+| Event Name | Topics                       | Data                                                   | When Emitted                           |
+| ---------- | ---------------------------- | ------------------------------------------------------ | -------------------------------------- |
+| `tok_rate` | `["tok_rate", token_address]` | `{ "max_donations": u32, "window_ledgers": u32 }`      | When admin calls `set_token_rate_limit` |
 
 ---
 
@@ -512,11 +533,120 @@ model.
 - Events can be queried via Horizon or Soroban RPC tools.
 - Frontend / backend should listen to these for real-time updates, notifications, and leaderboard.
 
-**Last Updated**: July 24, 2026
+**Last Updated**: July 28, 2026
 
 ---
 
-## Coordination Note for #277 (Matching Pool)
+## 41. `mmr_app` (MMR Root Appended)
 
-`DataKey::ProjectContractBalance(String, Address)` is the **canonical per-project per-token balance ledger** for all contract-held funds. Any deposit/matching-pool logic (including #277) **must** increment this key on deposit and decrement it on withdrawal. Do not introduce a parallel balance concept — the compound key already supports multi-token per project. See `SECURITY.md` for the full rationale.
+**Description**: Emitted when an admin appends a new period's Merkle root to a
+project's Merkle Mountain Range for cumulative impact certificate verification.
 
+| Event Name | Topics                                          | Data             | When Emitted                               |
+| ---------- | ----------------------------------------------- | ---------------- | ------------------------------------------ |
+| `mmr_app`  | `["mmr_app", admin, project_id, new_leaf_count]` | `new_root: BytesN<32>` | When admin calls `append_impact_root` |
+
+---
+
+## 42. `recip_set` (Platform Fee Recipients Set)
+
+**Description**: Emitted when M-of-N admins configure or update multi-recipient platform fee splits.
+
+| Event Name  | Topics                 | Data                   | When Emitted                              |
+| ----------- | ---------------------- | ---------------------- | ----------------------------------------- |
+| `recip_set` | `["recip_set", admin]` | `recipient_count: u32` | When admin calls `set_platform_fee_recipients` |
+
+---
+
+# Campaign-to-Escrow Integration Events (#426)
+
+Gated behind the `escrow` Cargo feature (opt-in). Bridges the indigopay-contract
+campaign system with the escrow-contract to enable milestone-based fund release
+for climate projects.
+
+## 43. `esc_set` (Escrow Contract Address Set)
+
+**Description**: Emitted when M-of-N admins configure the escrow contract address
+for campaign escrow integration.
+
+| Event Name | Topics          | Data                   | When Emitted                                     |
+| ---------- | --------------- | ---------------------- | ------------------------------------------------ |
+| `esc_set`  | `["esc_set"]`   | `escrow_contract: Address` | When admins call `set_escrow_contract_address` |
+
+---
+
+## 44. `camp_es` (Campaign with Escrow Created)
+
+**Description**: Emitted when an admin creates a campaign with milestone-based
+escrow for a project. The escrow job is not created yet — it is funded later
+via `fund_campaign_escrow_job` once donations accumulate.
+
+| Event Name | Topics                                 | Data                          | When Emitted                               |
+| ---------- | -------------------------------------- | ----------------------------- | ------------------------------------------ |
+| `camp_es`  | `["camp_es", admin, project_id]`       | `(goal: i128, deadline_ledger: u32)` | When admin calls `create_campaign_with_escrow` |
+
+---
+
+## 45. `esc_fnd` (Campaign Escrow Job Funded)
+
+**Description**: Emitted when an admin funds the escrow job for a campaign.
+The accumulated contract-held donations are transferred to the escrow contract
+and the escrow job is created with the project wallet as the freelancer.
+
+| Event Name | Topics                              | Data                                        | When Emitted                            |
+| ---------- | ----------------------------------- | ------------------------------------------- | --------------------------------------- |
+| `esc_fnd`  | `["esc_fnd", admin, project_id]`    | `(job_id: String, total_raised: i128)`      | When admin calls `fund_campaign_escrow_job` |
+
+---
+
+## 46. `esc_rel` (Campaign Milestone Released)
+
+**Description**: Emitted when an admin releases a milestone for an escrow campaign.
+Proxies through to the escrow contract's `release_milestone`.
+
+| Event Name | Topics                               | Data                       | When Emitted                                |
+| ---------- | ------------------------------------ | -------------------------- | ------------------------------------------- |
+| `esc_rel`  | `["esc_rel", admin, project_id]`     | `milestone_index: u32`     | When admin calls `release_campaign_milestone` |
+
+---
+
+## 47. `esc_clm` (Campaign Milestone Claimed)
+
+**Description**: Emitted when a project wallet claims a released milestone for
+an escrow campaign. Proxies through to the escrow contract's `claim_milestone`.
+
+| Event Name | Topics                                | Data                       | When Emitted                               |
+| ---------- | ------------------------------------- | -------------------------- | ------------------------------------------ |
+| `esc_clm`  | `["esc_clm", project_wallet, project_id]` | `milestone_index: u32` | When project wallet calls `claim_campaign_milestone` |
+
+---
+
+## 48. `esc_dsp` (Campaign Milestone Disputed)
+
+**Description**: Emitted when M-of-N admins dispute a milestone on an escrow
+campaign. Proxies through to the escrow contract's `dispute_milestone`.
+
+| Event Name | Topics                         | Data                       | When Emitted                                |
+| ---------- | ------------------------------ | -------------------------- | ------------------------------------------- |
+| `esc_dsp`  | `["esc_dsp", project_id]`      | `milestone_index: u32`     | When admins call `dispute_campaign_milestone` |
+
+---
+
+## 49. `esc_rsv` (Campaign Milestone Dispute Resolved)
+
+**Description**: Emitted when M-of-N admins resolve a milestone dispute on an
+escrow campaign. Proxies through to the escrow contract's
+`resolve_milestone_dispute`.
+
+| Event Name | Topics                         | Data                                    | When Emitted                                          |
+| ---------- | ------------------------------ | --------------------------------------- | ----------------------------------------------------- |
+| `esc_rsv`  | `["esc_rsv", project_id]`      | `(milestone_index: u32, approve: bool)` | When admins call `resolve_campaign_ms_dispute` |
+
+## Usage Notes
+
+- All events follow Soroban's standard event format: `topics: Vec<Val>`, `data: Val`.
+- `donor` and `project_id` are usually `Address` or `String` depending on implementation.
+- Events can be queried via Horizon or Soroban RPC tools.
+- Frontend / backend should listen to these for real-time updates, notifications, and leaderboard.
+
+**Last Updated**: July 28, 2026

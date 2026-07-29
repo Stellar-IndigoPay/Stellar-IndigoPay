@@ -13,6 +13,7 @@ import { I18nProvider } from "@/lib/i18n";
 import { PriceProvider } from "@/lib/priceContext";
 import { WalletProvider } from "@/lib/WalletProvider";
 import { ErrorBoundary } from "@/lib/ErrorBoundary";
+import { queryRetryPolicy } from "@/lib/queryRetry";
 import useOnlineStatus from "@/hooks/useOnlineStatus";
 import useShortcuts from "@/hooks/useShortcuts";
 import GlobalSearchModal from "@/components/GlobalSearchModal";
@@ -66,7 +67,7 @@ export default function App({ Component, pageProps }: AppProps) {
         defaultOptions: {
           queries: {
             staleTime: 30_000, // 30s default
-            retry: 2,
+            retry: queryRetryPolicy,
             refetchOnWindowFocus: true,
           },
         },
