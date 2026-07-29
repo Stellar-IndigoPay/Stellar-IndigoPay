@@ -40,6 +40,7 @@ fn test_create_amend_then_release_new_milestones() {
         name: SorobanString::from_str(&env, "Design-Wireframes"),
         percentage: 20,
         released: false,
+        partial_release_percentage: 0,
         disputed: false,
         oracle: None,
         verified: false,
@@ -49,6 +50,7 @@ fn test_create_amend_then_release_new_milestones() {
         name: SorobanString::from_str(&env, "Design-Visuals"),
         percentage: 30,
         released: false,
+        partial_release_percentage: 0,
         disputed: false,
         oracle: None,
         verified: false,
@@ -58,6 +60,7 @@ fn test_create_amend_then_release_new_milestones() {
         name: SorobanString::from_str(&env, "Development"),
         percentage: 30,
         released: false,
+        partial_release_percentage: 0,
         disputed: false,
         oracle: None,
         verified: false,
@@ -67,6 +70,7 @@ fn test_create_amend_then_release_new_milestones() {
         name: SorobanString::from_str(&env, "Testing"),
         percentage: 20,
         released: false,
+        partial_release_percentage: 0,
         disputed: false,
         oracle: None,
         verified: false,
@@ -84,16 +88,16 @@ fn test_create_amend_then_release_new_milestones() {
     // Release the new milestones and verify proportional payouts against the
     // *original* locked amount (1000), confirming the amendment reallocated
     // percentages without moving any additional funds.
-    client.release_milestone(&client_addr, &job_id, &0u32); // Design-Wireframes 20%
+    client.release_milestone(&client_addr, &job_id, &0u32, &100u32); // Design-Wireframes 20%
     assert_eq!(common::token_balance(&env, &token, &freelancer), 200i128);
 
-    client.release_milestone(&client_addr, &job_id, &1u32); // Design-Visuals 30%
+    client.release_milestone(&client_addr, &job_id, &1u32, &100u32); // Design-Visuals 30%
     assert_eq!(common::token_balance(&env, &token, &freelancer), 500i128);
 
-    client.release_milestone(&client_addr, &job_id, &2u32); // Development 30%
+    client.release_milestone(&client_addr, &job_id, &2u32, &100u32); // Development 30%
     assert_eq!(common::token_balance(&env, &token, &freelancer), 800i128);
 
-    client.release_milestone(&client_addr, &job_id, &3u32); // Testing 20%
+    client.release_milestone(&client_addr, &job_id, &3u32, &100u32); // Testing 20%
     let final_job = client.get_job(&job_id).unwrap();
     assert_eq!(final_job.status, JobStatus::Completed);
     assert_eq!(common::token_balance(&env, &token, &freelancer), 1000i128);
@@ -123,13 +127,14 @@ fn test_amend_after_release_panics_integration() {
         &milestones,
         &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
-    client.release_milestone(&client_addr, &job_id, &0u32);
+    client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
 
     let mut new_milestones: Vec<Milestone> = Vec::new(&env);
     new_milestones.push_back(Milestone {
         name: SorobanString::from_str(&env, "Whole thing"),
         percentage: 100,
         released: false,
+        partial_release_percentage: 0,
         disputed: false,
         oracle: None,
         verified: false,

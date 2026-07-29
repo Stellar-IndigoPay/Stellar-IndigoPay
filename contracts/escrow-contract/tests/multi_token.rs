@@ -92,7 +92,7 @@ fn test_release_milestone_usdc() {
     );
 
     // Release milestone 0 (50 % of 10_000 = 5_000 USDC)
-    client.release_milestone(&client_addr, &job_id, &0u32);
+    client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
     let bal = common::token_balance(&env, &usdc, &freelancer);
     assert_eq!(
         bal, 5_000i128,
@@ -104,7 +104,7 @@ fn test_release_milestone_usdc() {
     assert!(job.milestones.get(0).unwrap().released);
 
     // Release milestone 1 (30 % = 3_000)  →  8_000 USDC total
-    client.release_milestone(&client_addr, &job_id, &1u32);
+    client.release_milestone(&client_addr, &job_id, &1u32, &100u32);
     let bal = common::token_balance(&env, &usdc, &freelancer);
     assert_eq!(
         bal, 8_000i128,
@@ -112,7 +112,7 @@ fn test_release_milestone_usdc() {
     );
 
     // Release milestone 2 (20 % = 2_000)  →  10_000 USDC total — Completed
-    client.release_milestone(&client_addr, &job_id, &2u32);
+    client.release_milestone(&client_addr, &job_id, &2u32, &100u32);
     let bal = common::token_balance(&env, &usdc, &freelancer);
     assert_eq!(
         bal, 10_000i128,
@@ -143,6 +143,7 @@ fn test_claim_milestone_usdc() {
         name: SorobanString::from_str(&env, "Phase 1"),
         percentage: 40,
         released: false,
+        partial_release_percentage: 0,
         disputed: false,
         oracle: None,
         verified: false,
@@ -152,6 +153,7 @@ fn test_claim_milestone_usdc() {
         name: SorobanString::from_str(&env, "Phase 2"),
         percentage: 60,
         released: false,
+        partial_release_percentage: 0,
         disputed: false,
         oracle: None,
         verified: false,
@@ -214,6 +216,7 @@ fn test_refund_usdc_job() {
         name: SorobanString::from_str(&env, "Full Delivery"),
         percentage: 100,
         released: false,
+        partial_release_percentage: 0,
         disputed: false,
         oracle: None,
         verified: false,
@@ -297,7 +300,7 @@ fn test_two_jobs_different_tokens_isolated() {
     );
 
     // Release the XLM job → freelancer gets 1_000 XLM, 0 USDC
-    client.release_milestone(&client_addr, &job_xlm, &0u32);
+    client.release_milestone(&client_addr, &job_xlm, &0u32, &100u32);
     assert_eq!(
         common::token_balance(&env, &token_xlm, &freelancer),
         1_000i128,
@@ -310,7 +313,7 @@ fn test_two_jobs_different_tokens_isolated() {
     );
 
     // Release the USDC job → freelancer gets 2_000 USDC, XLM stays at 1_000
-    client.release_milestone(&client_addr, &job_usdc, &0u32);
+    client.release_milestone(&client_addr, &job_usdc, &0u32, &100u32);
     assert_eq!(
         common::token_balance(&env, &token_xlm, &freelancer),
         1_000i128,
@@ -401,7 +404,7 @@ fn test_usdc_full_lifecycle_integration() {
     );
 
     // 3. Client releases milestone 1 (30 % = 3_000)
-    client.release_milestone(&client_addr, &job_id, &1u32);
+    client.release_milestone(&client_addr, &job_id, &1u32, &100u32);
     assert_eq!(common::token_balance(&env, &usdc, &freelancer), 8_000i128);
 
     // 4. Freelancer claims milestone 2 (20 % = 2_000) → Completed

@@ -109,6 +109,7 @@ fn test_resolve_dispute_refund_client() {
         name: SorobanString::from_str(&env, "M1"),
         percentage: 50,
         released: false,
+        partial_release_percentage: 0,
         disputed: false,
         oracle: None,
         verified: false,
@@ -118,6 +119,7 @@ fn test_resolve_dispute_refund_client() {
         name: SorobanString::from_str(&env, "M2"),
         percentage: 50,
         released: false,
+        partial_release_percentage: 0,
         disputed: false,
         oracle: None,
         verified: false,
@@ -135,7 +137,7 @@ fn test_resolve_dispute_refund_client() {
     );
 
     // Release first milestone (50 % = 500)
-    client.release_milestone(&client_addr, &job_id, &0u32);
+    client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
 
     // Dispute remaining 500
     client.dispute_job(&common::signers1(&env, &admin), &job_id);

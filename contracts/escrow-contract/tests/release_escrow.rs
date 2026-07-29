@@ -26,7 +26,12 @@ fn release_missing_job_panics() {
     env.mock_all_auths();
     let (_admin, client) = common::setup(&env);
     let addr = Address::generate(&env);
-    client.release_milestone(&addr, &SorobanString::from_str(&env, "no-such-job"), &0u32);
+    client.release_milestone(
+        &addr,
+        &SorobanString::from_str(&env, "no-such-job"),
+        &0u32,
+        &100u32,
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -57,7 +62,7 @@ fn test_milestone_release_pays_proportional_amount() {
     );
 
     // Release milestone 0 (50 %)
-    client.release_milestone(&client_addr, &job_id, &0u32);
+    client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
     // freelancer should have 500
     let bal = common::token_balance(&env, &token, &freelancer);
     assert_eq!(
@@ -66,7 +71,7 @@ fn test_milestone_release_pays_proportional_amount() {
     );
 
     // Release milestone 1 (30 %)
-    client.release_milestone(&client_addr, &job_id, &1u32);
+    client.release_milestone(&client_addr, &job_id, &1u32, &100u32);
     let bal = common::token_balance(&env, &token, &freelancer);
     assert_eq!(
         bal, 800i128,
@@ -74,7 +79,7 @@ fn test_milestone_release_pays_proportional_amount() {
     );
 
     // Release milestone 2 (20 %) → 1000 total
-    client.release_milestone(&client_addr, &job_id, &2u32);
+    client.release_milestone(&client_addr, &job_id, &2u32, &100u32);
     let bal = common::token_balance(&env, &token, &freelancer);
     assert_eq!(
         bal, 1000i128,
@@ -107,7 +112,7 @@ fn test_partial_release_updates_status() {
     assert_eq!(client.get_job(&job_id).unwrap().status, JobStatus::Escrowed);
 
     // Release one milestone → status becomes PartiallyReleased
-    client.release_milestone(&client_addr, &job_id, &0u32);
+    client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
     assert_eq!(
         client.get_job(&job_id).unwrap().status,
         JobStatus::PartiallyReleased
@@ -138,9 +143,9 @@ fn test_full_release_completes_job() {
     );
 
     // Release all three milestones
-    client.release_milestone(&client_addr, &job_id, &0u32);
-    client.release_milestone(&client_addr, &job_id, &1u32);
-    client.release_milestone(&client_addr, &job_id, &2u32);
+    client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
+    client.release_milestone(&client_addr, &job_id, &1u32, &100u32);
+    client.release_milestone(&client_addr, &job_id, &2u32, &100u32);
 
     assert_eq!(
         client.get_job(&job_id).unwrap().status,
@@ -174,7 +179,7 @@ fn test_only_client_can_release() {
     );
 
     // Impersonator tries to release — should panic
-    client.release_milestone(&impersonator, &job_id, &0u32);
+    client.release_milestone(&impersonator, &job_id, &0u32, &100u32);
 }
 
 #[test]
@@ -202,9 +207,9 @@ fn test_release_already_released_milestone_panics() {
     );
 
     // First release succeeds
-    client.release_milestone(&client_addr, &job_id, &0u32);
+    client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
     // Second release of same index should panic
-    client.release_milestone(&client_addr, &job_id, &0u32);
+    client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
 }
 
 #[test]
@@ -232,7 +237,7 @@ fn test_invalid_milestone_index_panics() {
     );
 
     // Index 3 is out of bounds (0..=2 are valid)
-    client.release_milestone(&client_addr, &job_id, &3u32);
+    client.release_milestone(&client_addr, &job_id, &3u32, &100u32);
 }
 
 #[test]
@@ -262,5 +267,5 @@ fn test_release_disputed_job_panics() {
     client.dispute_job(&common::signers1(&env, &admin), &job_id);
 
     // Attempt release while disputed → should panic
-    client.release_milestone(&client_addr, &job_id, &0u32);
+    client.release_milestone(&client_addr, &job_id, &0u32, &100u32);
 }
