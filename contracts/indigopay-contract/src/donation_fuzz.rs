@@ -2,18 +2,19 @@
 #[cfg(all(test, feature = "testutils"))]
 mod fuzz {
     extern crate std;
-    use crate::{BatchDonation, IndigoPayContract, IndigoPayContractClient};
     use crate::MockOracle;
+    use crate::{BatchDonation, IndigoPayContract, IndigoPayContractClient};
     use proptest::prelude::*;
     use soroban_sdk::{
-        testutils::Address as _,
-        token::StellarAssetClient,
-        Address, Env, String as SorobanString, Symbol, Vec,
+        testutils::Address as _, token::StellarAssetClient, Address, Env, String as SorobanString,
+        Symbol, Vec,
     };
 
     const MAX_DONATION: i128 = 1_000_000_000 * 10_000_000; // 10^16
 
-    fn setup(project_id_str: &str) -> (
+    fn setup(
+        project_id_str: &str,
+    ) -> (
         Env,
         IndigoPayContractClient<'static>,
         Address,
@@ -47,7 +48,9 @@ mod fuzz {
         (env, client, wallet, project_id, token)
     }
 
-    fn setup_usdc(project_id_str: &str) -> (
+    fn setup_usdc(
+        project_id_str: &str,
+    ) -> (
         Env,
         IndigoPayContractClient<'static>,
         SorobanString,
@@ -132,7 +135,7 @@ mod fuzz {
                 donors.push(Address::generate(&env));
             }
             let test_donor = &donors[donor_idx];
-            
+
             mint_tokens(&env, &token, test_donor, amount);
 
             client.donate(&token, test_donor, &project_id, &amount, &msg_hash);
@@ -140,7 +143,7 @@ mod fuzz {
             let project = client.get_project(&project_id);
             prop_assert_eq!(project.total_raised, amount);
             prop_assert_eq!(project.donor_count, 1);
-            
+
             let stats = client.get_donor_stats(test_donor);
             prop_assert_eq!(stats.total_donated, amount);
             prop_assert_eq!(stats.donation_count, 1);
@@ -161,7 +164,7 @@ mod fuzz {
                 donors.push(Address::generate(&env));
             }
             let test_donor = &donors[donor_idx];
-            
+
             mint_tokens(&env, &token, test_donor, amount);
 
             let asset_code = Symbol::new(&env, "yXLM");
@@ -193,7 +196,7 @@ mod fuzz {
                 donors.push(Address::generate(&env));
             }
             let test_donor = &donors[donor_idx];
-            
+
             mint_tokens(&env, &usdc_token, test_donor, usdc_amount);
 
             client.donate_usdc(&usdc_token, test_donor, &project_id, &usdc_amount, &msg_hash);
@@ -220,22 +223,22 @@ mod fuzz {
         ) {
             let (env, client, _wallet, project_id, token) = setup(&project_str);
             let mut donations = Vec::new(&env);
-            
+
             let mut expected_total = 0i128;
             for i in 0..amounts.len() {
                 let donor = Address::generate(&env);
                 let amt = amounts[i];
                 mint_tokens(&env, &token, &donor, amt);
-                
+
                 let hash = if i < msg_hashes.len() { msg_hashes[i] } else { 0 };
-                
+
                 donations.push_back(BatchDonation {
                     donor: donor.clone(),
                     project_id: project_id.clone(),
                     amount: amt,
                     msg_hash: hash,
                 });
-                
+
                 expected_total += amt;
             }
 
