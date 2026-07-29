@@ -4,8 +4,6 @@
 //! Escrow contract with milestone-based fund release.
 //! Client locks funds with `create_job`, then releases them per milestone.
 
-#[cfg(feature = "oracle-escrow")]
-use soroban_sdk::BytesN;
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, String, Vec,
 };
@@ -332,6 +330,13 @@ impl EscrowContract {
 
         let deadline = env.ledger().sequence() + DEFAULT_DEADLINE_LEDGERS;
 
+        // release_after is stored as an absolute ledger sequence; compute it
+        // now so we can validate it against the deadline before persisting.
+        let release_after_abs = env.ledger().sequence() + release_after;
+        if release_after_abs > deadline {
+            panic!("release_after must not exceed the job deadline");
+        }
+
         // ── Effects: persist the Job struct BEFORE the external token
         //    transfer so a malicious token contract cannot exploit a
         //    non-CEI ordering to leave the ledger without a `Job` entry
@@ -345,7 +350,7 @@ impl EscrowContract {
             status: JobStatus::Escrowed,
             milestones,
             disputed: false,
-            release_after: env.ledger().sequence() + release_after,
+            release_after: release_after_abs,
             deadline,
         };
         env.storage()
@@ -921,6 +926,9 @@ impl EscrowContract {
             .get(&DataKey::Job(job_id.clone()))
             .expect("Job not found");
 
+        if job.freelancer != freelancer {
+            panic!("Only the job's freelancer can claim");
+        }
         if job.disputed {
             panic!("Job is disputed; cannot claim milestone");
         }
@@ -2088,6 +2096,51 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Only the job's freelancer can claim")]
+    fn test_claim_milestone_wrong_freelancer_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let wrong_freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-wrong-freelancer");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M1"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+
+        // Advance sequence past release_after
+        env.ledger().set_sequence_number(RELEASE_AFTER_LEDGERS + 1);
+
+        // Wrong freelancer tries to claim - should panic
+        client.claim_milestone(&wrong_freelancer, &job_id, &0u32);
+    }
+
+    #[test]
     fn test_refund_expired_job_success() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2925,6 +2978,37 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "release_after must not exceed the job deadline")]
+    fn test_release_after_exceeds_deadline_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-release-after-exceeds-deadline");
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 100));
+
+        // DEFAULT_DEADLINE_LEDGERS is 1_555_200; passing 2_000_000 makes the
+        // absolute release_after exceed the absolute deadline.
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &2_000_000u32,
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "release_after must be at least the minimum")]
     fn test_release_after_below_minimum_panics() {
         let env = Env::default();
@@ -3087,6 +3171,41 @@ mod tests {
         assert_eq!(completed.completed_jobs, 1);
         assert_eq!(completed.total_value_completed, 1_000);
         assert_eq!(completed.on_time_completions, 1);
+    }
+
+    #[test]
+    fn test_reputation_on_time_completion() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, contract) = setup(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = String::from_str(&env, "rep-on-time");
+        create_reputation_job(&env, &contract, &client, &freelancer, &job_id, 1_000);
+
+        contract.release_milestone(&client, &job_id, &0);
+        let reputation = contract.get_freelancer_reputation(&freelancer);
+        assert_eq!(reputation.completed_jobs, 1);
+        assert_eq!(reputation.on_time_completions, 1);
+    }
+
+    #[test]
+    fn test_reputation_late_completion() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, contract) = setup(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = String::from_str(&env, "rep-late");
+        create_reputation_job(&env, &contract, &client, &freelancer, &job_id, 1_000);
+
+        let deadline = contract.get_job(&job_id).unwrap().deadline;
+        env.ledger().set_sequence_number(deadline + 1);
+
+        contract.release_milestone(&client, &job_id, &0);
+        let reputation = contract.get_freelancer_reputation(&freelancer);
+        assert_eq!(reputation.completed_jobs, 1);
+        assert_eq!(reputation.on_time_completions, 0);
     }
 
     #[test]

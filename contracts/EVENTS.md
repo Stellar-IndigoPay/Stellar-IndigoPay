@@ -9,6 +9,37 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 
 ---
 
+## `zk_vk_set`
+
+**Description**: Emitted after M-of-N admins install a new anonymous-donation
+verification key. Event data is the SHA-256 hash of the key.
+
+| Event Name  | Topics          | Data               | When Emitted |
+| ----------- | --------------- | ------------------ | ------------ |
+| `zk_vk_set` | `["zk_vk_set"]` | `BytesN<32>`       | Verification key update |
+
+## `zk_donate`
+
+**Description**: Emitted after an anonymous proof is verified and its
+nullifier consumed. No donor address is included.
+
+| Event Name  | Topics                                      | Data                                      | When Emitted |
+| ----------- | ------------------------------------------- | ----------------------------------------- | ------------ |
+| `zk_donate` | `["zk_donate", project_id, nullifier]`      | `(amount_commitment, co2_offset_grams)`   | Verified anonymous donation |
+
+---
+
+## `StealthScan`
+
+**Description**: Emitted when an authenticated project wallet scans for its
+stealth donations, including scans that find no donations.
+
+| Event Name    | Topics                              | Data                                         | When Emitted |
+| ------------- | ----------------------------------- | -------------------------------------------- | ------------ |
+| `StealthScan` | `["StealthScan", project_wallet]`   | `(donation_count: u32, timestamp: u64)`      | After `scan_stealth_donations` completes |
+
+---
+
 ## 1. `donated`
 
 **Description**: Emitted after a successful XLM donation to a project.
@@ -105,6 +136,16 @@ project-scoped anonymous donation totals.
 
 ---
 
+## 9a. `tok_rate`
+
+**Description**: Emitted when the admin updates the donation rate limit for one token.
+
+| Event Name | Topics                       | Data                                                   | When Emitted                           |
+| ---------- | ---------------------------- | ------------------------------------------------------ | -------------------------------------- |
+| `tok_rate` | `["tok_rate", token_address]` | `{ "max_donations": u32, "window_ledgers": u32 }`      | When admin calls `set_token_rate_limit` |
+
+---
+
 ## 10. `admin_add`
 
 **Description**: Emitted when a new admin address is added to the multi-sig set.
@@ -192,6 +233,40 @@ project-scoped anonymous donation totals.
 | Event Name  | Topics                              | Data                                        | When Emitted                          |
 | ----------- | ----------------------------------- | ------------------------------------------- | ------------------------------------- |
 | `rfnd_rj`   | `["rfnd_rj", refund_id, admin]`    | `(project_id: String, donor: Address)`       | When admin calls `reject_refund`      |
+
+---
+
+## Force-refund escalation events
+
+These lifecycle events use full `Symbol` values because their names exceed the
+nine-character `symbol_short!` limit.
+
+### `rfnd_force_init`
+
+**Description**: Emitted after M-of-N admins schedule a force-refund. No tokens
+or donation accounting move at this point.
+
+| Event Name         | Topics                           | Data                                                     | When Emitted |
+| ------------------ | -------------------------------- | -------------------------------------------------------- | ------------ |
+| `rfnd_force_init`  | `["rfnd_force_init", refund_id]` | `(project_id: String, amount: i128, effective_at: u32)` | When M-of-N admins call `force_approve_refund` |
+
+### `rfnd_force_exec`
+
+**Description**: Emitted after the timelock when a force-refund is paid from
+the project's canonical contract-held token balance.
+
+| Event Name         | Topics                           | Data                                                   | When Emitted |
+| ------------------ | -------------------------------- | ------------------------------------------------------ | ------------ |
+| `rfnd_force_exec`  | `["rfnd_force_exec", refund_id]` | `(project_id: String, amount: i128, donor: Address)`  | After `execute_force_refund` completes |
+
+### `rfnd_force_cncl`
+
+**Description**: Emitted when any current admin cancels an escalation before
+its effective ledger.
+
+| Event Name         | Topics                                  | Data | When Emitted |
+| ------------------ | --------------------------------------- | ---- | ------------ |
+| `rfnd_force_cncl`  | `["rfnd_force_cncl", refund_id, admin]` | `()` | When an admin calls `cancel_force_refund` |
 
 ---
 
@@ -362,6 +437,95 @@ and advances `next_execution`. Shortened from `sub_executed`.
 
 ---
 
+## Off-Chain Multi-Verifier Project Verification Oracle
+
+Gated behind the `project_verification` Cargo feature (on by default). An M-of-N
+committee of admin-appointed verifiers attests that a project has passed
+independent off-chain due diligence; once enough distinct verifiers have
+attested, the project auto-transitions to `Verified` and every `donate*` entry
+point starts accepting donations to it. See `SECURITY.md` for the full trust
+model.
+
+## 33. `ver_add` (Verifier Added)
+
+**Description**: Emitted when M-of-N admins authorise a new address to submit project attestations.
+
+| Event Name | Topics          | Data                | When Emitted                    |
+| ---------- | --------------- | -------------------- | -------------------------------- |
+| `ver_add`  | `["ver_add"]`   | `verifier: Address`  | When admins call `add_verifier` |
+
+---
+
+## 34. `ver_rem` (Verifier Removed)
+
+**Description**: Emitted when M-of-N admins revoke a verifier's ability to submit new attestations. Attestations it already submitted are not affected.
+
+| Event Name | Topics          | Data                | When Emitted                       |
+| ---------- | --------------- | -------------------- | ------------------------------------ |
+| `ver_rem`  | `["ver_rem"]`   | `verifier: Address`  | When admins call `remove_verifier` |
+
+---
+
+## 35. `ver_thr` (Verification Threshold Updated)
+
+**Description**: Emitted when M-of-N admins change the number of distinct verifier attestations required for a project to auto-verify. `0` disables the gate (legacy mode).
+
+| Event Name | Topics          | Data              | When Emitted                                   |
+| ---------- | --------------- | ------------------ | ------------------------------------------------ |
+| `ver_thr`  | `["ver_thr"]`   | `threshold: u32`   | When admins call `set_verification_threshold` |
+
+---
+
+## 36. `proj_att` (Project Attestation Recorded)
+
+**Description**: Emitted when an authorised verifier attests a project. Fired once per (project, verifier) pair — a second attestation from the same verifier for the same project panics instead of re-emitting this event.
+
+| Event Name | Topics                                | Data                                             | When Emitted                       |
+| ---------- | -------------------------------------- | -------------------------------------------------- | ------------------------------------ |
+| `proj_att` | `["proj_att", verifier, project_id]`   | `(attestation_count: u32, evidence_hash: BytesN<32>)` | When a verifier calls `attest_project` |
+
+---
+
+## 37. `proj_vfy` (Project Verified)
+
+**Description**: Emitted the moment a project's distinct-attester count reaches `VerificationThreshold`, in the same invocation as the attestation (or donation) that crossed it. Fires at most once per verification cycle — a `revoke_verification` followed by re-attesting to the threshold fires it again.
+
+| Event Name | Topics                     | Data                    | When Emitted                                          |
+| ---------- | --------------------------- | ------------------------ | -------------------------------------------------------- |
+| `proj_vfy` | `["proj_vfy", project_id]`  | `attestation_count: u32` | When a project's status transitions to `Verified`        |
+
+---
+
+## 38. `proj_rvk` (Project Verification Revoked)
+
+**Description**: Emitted when M-of-N admins clear a project's entire verification state — all accumulated attestations and evidence hashes are removed and the project reverts to `Unverified`.
+
+| Event Name | Topics                          | Data              | When Emitted                                |
+| ---------- | --------------------------------- | ------------------ | ---------------------------------------------- |
+| `proj_rvk` | `["proj_rvk", admin]`            | `project_id: String` | When admins call `revoke_verification`      |
+
+---
+
+## 39. `tok_reg` (Token Registered)
+
+**Description**: Emitted when an admin registers a new token and its oracle into the dynamic token registry.
+
+| Event Name | Topics                 | Data                             | When Emitted                     |
+| ---------- | ---------------------- | -------------------------------- | -------------------------------- |
+| `tok_reg`  | `["tok_reg", admin]`   | `(token: Address, symbol: Symbol)` | When admin calls `register_token` |
+
+---
+
+## 40. `tok_rem` (Token Removed)
+
+**Description**: Emitted when an admin removes a token from active registration in the dynamic token registry.
+
+| Event Name | Topics                 | Data               | When Emitted                   |
+| ---------- | ---------------------- | ------------------ | ------------------------------ |
+| `tok_rem`  | `["tok_rem", admin]`   | `token: Address`   | When admin calls `remove_token` |
+
+---
+
 ## Usage Notes
 
 - All events follow Soroban’s standard event format: `topics: Vec<Val>`, `data: Val`.
@@ -369,11 +533,24 @@ and advances `next_execution`. Shortened from `sub_executed`.
 - Events can be queried via Horizon or Soroban RPC tools.
 - Frontend / backend should listen to these for real-time updates, notifications, and leaderboard.
 
-**Last Updated**: July 19, 2026
+**Last Updated**: July 28, 2026
 
 ---
 
-## Coordination Note for #277 (Matching Pool)
+## 41. `mmr_app` (MMR Root Appended)
 
-`DataKey::ProjectContractBalance(String, Address)` is the **canonical per-project per-token balance ledger** for all contract-held funds. Any deposit/matching-pool logic (including #277) **must** increment this key on deposit and decrement it on withdrawal. Do not introduce a parallel balance concept — the compound key already supports multi-token per project. See `SECURITY.md` for the full rationale.
+**Description**: Emitted when an admin appends a new period's Merkle root to a
+project's Merkle Mountain Range for cumulative impact certificate verification.
 
+| Event Name | Topics                                          | Data             | When Emitted                               |
+| ---------- | ----------------------------------------------- | ---------------- | ------------------------------------------ |
+| `mmr_app`  | `["mmr_app", admin, project_id, new_leaf_count]` | `new_root: BytesN<32>` | When admin calls `append_impact_root` |
+
+## Usage Notes
+
+- All events follow Soroban's standard event format: `topics: Vec<Val>`, `data: Val`.
+- `donor` and `project_id` are usually `Address` or `String` depending on implementation.
+- Events can be queried via Horizon or Soroban RPC tools.
+- Frontend / backend should listen to these for real-time updates, notifications, and leaderboard.
+
+**Last Updated**: July 28, 2026

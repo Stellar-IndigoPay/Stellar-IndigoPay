@@ -57,6 +57,20 @@ describe("retentionWorker", () => {
     expect(del.sql).not.toMatch(/donations/);
   });
 
+  test("token blacklist policy deletes only expired blacklist entries", async () => {
+    const client = makeFakeClient();
+    const policy = config.byName("token-blacklist-delete");
+    const res = await runPolicy(client, policy);
+
+    expect(res.status).toBe("success");
+    expect(res.affectedRows).toBe(3);
+    const del = client.queries.find((q) => /^DELETE FROM/.test(q.sql));
+    expect(del).toBeDefined();
+    expect(del.sql).toContain("token_blacklist");
+    expect(del.sql).toContain("expires_at < now()");
+    expect(del.params).toEqual([0]);
+  });
+
   test("anonymize policy nulls PII fields and stamps anonymised_at", async () => {
     const client = makeFakeClient();
     const policy = config.byName("project-subscriptions-anonymize");

@@ -26,6 +26,7 @@ const {
   getPlatformGrowth,
 } = require("../../services/analyticsService");
 const logger = require("../../logger");
+const { sendAppError } = require("../../errors");
 
 router.use(adminRequired);
 
@@ -130,7 +131,10 @@ router.get("/export", async (req, res, next) => {
       filename = "category-breakdown";
       break;
     default:
-      return res.status(400).json({ error: `Unknown view: ${view}` });
+      return sendAppError(res, "VALIDATION_ERROR", {
+        field: "view",
+        detail: `Unknown view: ${view}`,
+      });
     }
 
     if (format === "csv") {

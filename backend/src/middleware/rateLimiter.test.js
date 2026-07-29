@@ -16,6 +16,7 @@
 const express = require("express");
 const request = require("supertest");
 const { createRateLimiter } = require("./rateLimiter");
+const { getRateLimitConfig } = require("./rateLimitConfig");
 
 /** Build a minimal app that applies the given limiter to GET /ping. */
 function buildApp(maxRequests = 10, windowMinutes = 1) {
@@ -110,5 +111,17 @@ describe("Rate limiting middleware — custom limits", () => {
     const res = await request(customApp).get("/ping");
     expect(res.status).toBe(429);
     expect(res.headers["retry-after"]).toBeDefined();
+  });
+});
+
+describe("Rate limit config lookup", () => {
+  it("returns explicit limits for attestations and oracle endpoints", () => {
+    expect(getRateLimitConfig("POST", "/api/attestations")).toEqual({ points: 10, duration: 60 });
+    expect(getRateLimitConfig("GET", "/api/attestations")).toEqual({ points: 60, duration: 60 });
+    expect(getRateLimitConfig("GET", "/api/oracle/price")).toEqual({ points: 60, duration: 60 });
+  });
+
+  it("keeps the existing map limit configuration", () => {
+    expect(getRateLimitConfig("GET", "/api/map")).toEqual({ points: 60, duration: 60 });
   });
 });

@@ -106,11 +106,6 @@ async function start() {
     }
     await handler(payload || {});
   });
-
-  logger.info(
-    { event: "push_queue_started", queue: QUEUE },
-    "push queue worker registered",
-  );
 }
 
 /**
@@ -129,14 +124,8 @@ async function enqueuePushNotification({ type, payload }) {
 
 async function stop() {
   if (!boss) return;
-  try {
-    await boss.stop({ graceful: true, timeout: 15_000 });
-  } catch (err) {
-    logger.warn(
-      { event: "push_queue_stop_error", err: err.message },
-      "graceful stop failed",
-    );
-  }
+  await boss.stop({ graceful: true, timeout: 15_000 });
+  boss = null;
 }
 
 module.exports = { QUEUE, start, stop, enqueuePushNotification };

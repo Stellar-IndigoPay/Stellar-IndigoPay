@@ -129,7 +129,10 @@ describe("Admin Webhooks Router", () => {
         .set("X-Admin-Key", "test-admin-key")
         .expect(404);
 
-      expect(res.body.error).toMatch(/no dead-lettered delivery/i);
+      expect(res.body.error).toMatchObject({
+        code: "NOT_FOUND",
+        detail: expect.stringMatching(/no dead-lettered delivery/i),
+      });
     });
   });
 
@@ -161,7 +164,11 @@ describe("Admin Webhooks Router", () => {
         .send({})
         .expect(400);
 
-      expect(res.body.error).toMatch(/projectId/i);
+      expect(res.body.error).toMatchObject({
+        code: "VALIDATION_ERROR",
+        field: "projectId",
+        detail: expect.stringMatching(/projectId/i),
+      });
     });
   });
 

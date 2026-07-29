@@ -11,7 +11,7 @@ const logger = require("../logger");
 const pool = require("../db/pool");
 const { AppError } = require("../errors");
 const { createRateLimiter } = require("../middleware/rateLimiter");
-const { validate } = require("../middleware/validate");
+const { validate, validateRouteParam } = require("../middleware/validate");
 const idempotencyMiddleware = require("../middleware/idempotency");
 const {
   donationSchema,
@@ -28,6 +28,9 @@ const oracleService = require("../services/oracleService");
 const { generateReceiptPdf, hashReceiptContent, signReceipt } = require("../services/receiptGenerator");
 const { invalidateProjectRelatedCache } = require("../services/cacheManager");
 const donationLimiter = createRateLimiter(10, 1); // 10 requests per minute
+
+router.param("id", validateRouteParam(uuidValidator, "id"));
+router.param("projectId", validateRouteParam(uuidValidator, "projectId"));
 
 // Local EventEmitter used by both the POST /api/donations handler and the
 // GET /api/donations/stream SSE endpoint to broadcast new donations in

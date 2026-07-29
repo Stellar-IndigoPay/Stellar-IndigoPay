@@ -57,7 +57,7 @@ async function start() {
       { event: "blacklist_cleanup_disabled" },
       "[blacklistCleanup] Cleanup disabled via env",
     );
-    return;
+    return false;
   }
 
   const cronSchedule = cronOverride || DEFAULT_CRON;

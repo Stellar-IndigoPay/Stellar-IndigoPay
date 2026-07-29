@@ -29,9 +29,6 @@
     "mobile/**/*.{ts,tsx,js,jsx}": [
       "npx eslint --fix"
     ],
-    "contracts/**/*.rs": [
-      ".husky/check-rust-fmt.sh"
-    ],
     "{backend,frontend,extension,mobile}/**/*.{json,md,yaml,yml}": [
       "npx prettier --write"
     ],

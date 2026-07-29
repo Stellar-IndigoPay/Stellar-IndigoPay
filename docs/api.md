@@ -89,6 +89,9 @@ When the limit is exceeded (HTTP 429) an additional header is sent:
 | GET    | `/api/stats`                              | Sliding window | 60 req / 60 s                |
 | GET    | `/api/impact/*`                           | Sliding window | 60 req / 60 s                |
 | GET    | `/api/map`                                | Sliding window | 60 req / 60 s                |
+| POST   | `/api/attestations`                      | Sliding window | 10 req / 60 s                |
+| GET    | `/api/attestations`                      | Sliding window | 60 req / 60 s                |
+| GET    | `/api/oracle/price`                      | Sliding window | 60 req / 60 s                |
 | GET    | `/api/analytics/*`                        | **Token bucket** | Capacity: 10, Refill: 0.5/s (~30 req / min sustained) |
 | POST   | `/api/notifications`                      | Sliding window | 30 req / 60 s                |
 | POST   | `/api/subscriptions`                      | Sliding window | 20 req / 60 s                |
@@ -179,7 +182,7 @@ Mutating operations automatically invalidate the relevant cache keys:
 | ------------------------------------ | ------------------------------------------------------------- |
 | `POST /api/v1/donations`             | `cache:v1:projects:detail:<id>`, `cache:v1:leaderboard:*`, `cache:v1:stats:global`, `cache:v1:impact:global` |
 | `POST /api/v1/projects`              | `cache:v1:projects:list:*`, `cache:v1:map:*`                  |
-| `PATCH /api/v1/projects/:id/status`  | `cache:v1:projects:detail:<id>`, `cache:v1:projects:list:*`, `cache:v1:stats:global`, `cache:v1:impact:global` |
+| `PATCH /api/v1/projects/:id/status`  | `cache:v1:projects:detail:<id>`, `cache:v1:projects:list:*`, `cache:v1:stats:global`, `cache:v1:impact:project:<id>`, `cache:v1:impact:global` |
 | `POST /api/v1/profiles`              | `cache:v1:leaderboard:*`                                      |
 
 ### Request coalescing (stampede protection)
@@ -234,7 +237,7 @@ Mutating operations automatically invalidate the relevant cache keys:
 | ------------------------------------ | ------------------------------------------------------------- |
 | `POST /api/v1/donations`             | `cache:v1:projects:detail:<id>`, `cache:v1:leaderboard:*`, `cache:v1:stats:global`, `cache:v1:impact:global` |
 | `POST /api/v1/projects`              | `cache:v1:projects:list:*`, `cache:v1:map:*`                  |
-| `PATCH /api/v1/projects/:id/status`  | `cache:v1:projects:detail:<id>`, `cache:v1:projects:list:*`, `cache:v1:stats:global`, `cache:v1:impact:global` |
+| `PATCH /api/v1/projects/:id/status`  | `cache:v1:projects:detail:<id>`, `cache:v1:projects:list:*`, `cache:v1:stats:global`, `cache:v1:impact:project:<id>`, `cache:v1:impact:global` |
 | `POST /api/v1/profiles`              | `cache:v1:leaderboard:*`                                      |
 
 ### Request coalescing (stampede protection)

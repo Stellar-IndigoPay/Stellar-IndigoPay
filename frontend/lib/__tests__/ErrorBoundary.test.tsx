@@ -64,7 +64,9 @@ describe("ErrorBoundary", () => {
     const region = screen.getByRole("alert");
     expect(region).toBeInTheDocument();
     expect(region.textContent).toMatch(/intentional render error/i);
-    expect(screen.getByRole("button", { name: /try again/i }));
+    expect(
+      screen.getByRole("button", { name: /try again/i }),
+    ).toBeInTheDocument();
     consoleErrorSpy.mockRestore();
   });
 
@@ -187,5 +189,73 @@ describe("ErrorBoundary", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByTestId("ok")).toBeInTheDocument();
     consoleErrorSpy.mockRestore();
+  });
+
+  describe("error reporting via captureError", () => {
+    /**
+     * The boundary requires "@sentry/nextjs" lazily at capture time, so to
+     * swap in a mock we must (a) reset the module registry, (b) register the
+     * mock with doMock, and (c) re-require ErrorBoundary so its lazy require
+     * resolves against the new registry. The top-of-file import is bound to
+     * the original registry and would keep seeing the real module.
+     */
+    function loadBoundaryWithSentryMock(
+      factory: () => unknown,
+    ): typeof ErrorBoundary {
+      jest.resetModules();
+      jest.doMock("@sentry/nextjs", factory);
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+      return require("@/lib/ErrorBoundary").ErrorBoundary;
+    }
+
+    afterEach(() => {
+      jest.resetModules();
+      jest.dontMock("@sentry/nextjs");
+    });
+
+    it("reports the error to Sentry when @sentry/nextjs is available", () => {
+      const captureException = jest.fn();
+      const FreshBoundary = loadBoundaryWithSentryMock(() => ({
+        captureException,
+      }));
+      const consoleErrorSpy = jest
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
+
+      render(
+        <FreshBoundary>
+          <Bomb shouldThrow={true} />
+        </FreshBoundary>,
+      );
+
+      expect(captureException).toHaveBeenCalledTimes(1);
+      const [reportedError, context] = captureException.mock.calls[0];
+      expect(reportedError).toBeInstanceOf(Error);
+      expect(reportedError.message).toBe("intentional render error");
+      expect(typeof context.extra.componentStack).toBe("string");
+      consoleErrorSpy.mockRestore();
+    });
+
+    it("falls back to console.error when @sentry/nextjs is not available", () => {
+      const FreshBoundary = loadBoundaryWithSentryMock(() => {
+        throw new Error("module not found");
+      });
+      const consoleErrorSpy = jest
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
+
+      render(
+        <FreshBoundary>
+          <Bomb shouldThrow={true} />
+        </FreshBoundary>,
+      );
+
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        "[ErrorBoundary]",
+        expect.any(Error),
+        expect.any(String),
+      );
+      consoleErrorSpy.mockRestore();
+    });
   });
 });

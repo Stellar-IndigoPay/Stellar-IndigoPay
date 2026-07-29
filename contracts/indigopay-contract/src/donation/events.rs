@@ -1,4 +1,4 @@
-use soroban_sdk::{symbol_short, Address, BytesN, Env};
+use soroban_sdk::{symbol_short, Address, BytesN, Env, Symbol};
 
 pub fn emit_stealth_donation(
     env: &Env,
@@ -18,5 +18,12 @@ pub fn emit_stealth_donation(
             msg_hash.clone(),
             timestamp,
         ),
+    );
+}
+
+pub fn emit_stealth_scan(env: &Env, project_wallet: &Address, donation_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "StealthScan"), project_wallet.clone()),
+        (donation_count, env.ledger().timestamp()),
     );
 }
