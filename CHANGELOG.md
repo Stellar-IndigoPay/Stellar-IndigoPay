@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Changed
+
+* **backend:** standardize Zod validation error response shape across the API (closes #550, grantfox GF-050)
+  - `backend/src/middleware/validate.js` now forwards a `SCHEMA_VALIDATION_ERROR` `AppError` (HTTP 422) to the central error handler instead of the legacy `{ error: "Validation failed", details }` shape at HTTP 400
+  - Response is now `{ error: { code: "SCHEMA_VALIDATION_ERROR", message: "Validation failed", details: [...] } }`, matching every other error in the AppError taxonomy and unblocking the frontend's `classifyError`
+  - Pattern matches the sibling `backend/src/middleware/validation.js` so both Zod validators route through the central error handler and emit the structured `request_error` log line
+  - `details` shape also unified in this PR: the legacy `validateBody` middleware in `validation.js` was deleted; `backend/src/routes/profiles.js` switched to `validate(profileBodySchema)`. Every Zod-validated route now emits `error.details` as `[{ path, message, code }, ...]` (the `code` field is Zod's per-issue code such as `invalid_type`, `too_small`, `custom` — forward-compatible with the status `toJSON()` contract and strictly more informative than the legacy object-map form). Frontend consumers should treat `code` as **advisory** rather than stable across Zod majors: prefer loose matches such as `code.startsWith("invalid_")` or branch on `path` / `message`, since Zod has historically renamed and added codes between majors (e.g. the `unrecognized_keys` introduction in Zod 4)
+  - No client-side change required (`frontend/lib/queryErrors.ts` classifies by HTTP status only). The unified shape is now safe to consume client-side too, so future frontend work can branch on `error.code` to render per-code copy
+  - **BREAKING**: clients that pattern-match on the legacy `HTTP 400` + flat-string `error` shape will need to branch on `error.code === "SCHEMA_VALIDATION_ERROR"` instead; the new status is `422`. Affects every Zod-validated route — including but not limited to `POST /api/donations`, `POST /api/projects`, `POST /api/profiles`, `POST /api/subscriptions`, `POST /api/jobs`, the query/params validators on `GET /api/leaderboard`, `GET /api/stats`, `GET /api/projects/:id`, the admin verification/CO₂/attestation/matches endpoints, and any other mount of `validate(schema)` — see the route files under `backend/src/routes/` for the exhaustive list. Per the project's "follows Semantic Versioning" footer, this wire-format break requires a **major version bump** on the next release
+
 ### Features
 
 * **frontend:** announce `DonateForm` validation errors to screen readers (GrantFox OSS, grantfox GF-a11y-donate-form)

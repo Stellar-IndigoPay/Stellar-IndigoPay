@@ -350,12 +350,14 @@ describe("GET /api/donations/recurring/:donorAddress", () => {
     expect(res.body.data[0].active).toBe(true);
   });
 
-  test("returns 400 for invalid donor address", async () => {
+  test("returns 422 SCHEMA_VALIDATION_ERROR for invalid donor address", async () => {
     const res = await request(app)
       .get("/api/donations/recurring/invalid-address")
-      .expect(400);
+      .expect(422);
 
-    expect(res.body.error).toBe("Validation failed");
+    expect(res.body.error.code).toBe("SCHEMA_VALIDATION_ERROR");
+    expect(res.body.error.message).toBe("Validation failed");
+    expect(Array.isArray(res.body.error.details)).toBe(true);
   });
 });
 

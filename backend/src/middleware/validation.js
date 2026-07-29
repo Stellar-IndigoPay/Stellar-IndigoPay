@@ -1,7 +1,18 @@
 "use strict";
 
+/**
+ * src/middleware/validation.js
+ *
+ * Request-body sanitisation helpers (used when *building* Zod schemas that
+ * strip / reject HTML from user-supplied text fields).
+ *
+ * Middleware entry points live in `validate.js`. Use `validate(schema)` for
+ * every body / query / params shape — the older `validateBody` alias has been
+ * removed so the whole API emits the same `{ error: { code, message, details } }`
+ * shape with `details` as an array `[{ path, message }]` (closes #550).
+ */
+
 const { z } = require("zod");
-const { AppError } = require("../errors");
 
 function containsHtml(value) {
   return /<[^>]+>/i.test(value || "");
@@ -46,28 +57,8 @@ function sanitizedStringField({
   return schema;
 }
 
-function validateBody(schema) {
-  return (req, _res, next) => {
-    const result = schema.safeParse(req.body);
-
-    if (!result.success) {
-      const details = {};
-      for (const issue of result.error.issues) {
-        const path = issue.path.length ? issue.path.join(".") : "body";
-        details[path] = issue.message;
-      }
-
-      return next(new AppError("SCHEMA_VALIDATION_ERROR", { details }));
-    }
-
-    req.body = result.data;
-    next();
-  };
-}
-
 module.exports = {
   containsHtml,
   sanitizedStringField,
   stripHtml,
-  validateBody,
 };
