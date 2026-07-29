@@ -23,7 +23,8 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run migration:lint
-      - uses: docker/setup-buildx-action@v4
+      - run: npm run docs
+      - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v7
         with:
           context: ./backend

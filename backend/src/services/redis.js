@@ -188,7 +188,7 @@ function shardCount() {
  * Test-only: reset internal state so tests can re-initialise with
  * different environment variables.
  *
- * @package
+ * @internal
  */
 function _reset() {
   clients = [];
