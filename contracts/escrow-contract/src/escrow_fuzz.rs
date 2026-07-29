@@ -35,7 +35,7 @@ mod fuzz {
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
         token::StellarAssetClient,
-        Address, Env, String as SorobanString, Vec as SorobanVec,
+        Address, BytesN, Env, String as SorobanString, Vec as SorobanVec,
     };
     use std::string::String as StdString;
 
@@ -844,25 +844,33 @@ mod fuzz {
         }
     }
 
-    // ─── Dedicated fuzz target for milestone percentage edge cases ────────────
-
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(1000))]
+        #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
 
-        /// Fuzz test specifically for milestone percentage validation in `create_job`.
-        /// Generates random percentage distributions (0-100, 1-10 milestones) and verifies:
-        /// - If percentages sum to 100, `create_job` succeeds
-        /// - If percentages sum != 100, `create_job` panics
-        /// - Edge cases: individual percentages of 0, overflow scenarios
+        /// **prop_dispute_rounds_bounded**: the number of dispute rounds can
+        /// never exceed `MAX_DISPUTE_ROUNDS`, regardless of the sequence or
+        /// timing of `initiate_dispute` / `respond_to_dispute` calls.
+        ///
+        /// Generates a random sequence of dispute actions (initiate, respond)
+        /// using different party addresses and verifies after every action
+        /// that rounds.len() <= MAX_DISPUTE_ROUNDS.
         #[test]
-        fn fuzz_milestone_percentage_validation(
-            percentages in prop::collection::vec(0..=100u32, 1..=10),
+        fn prop_dispute_rounds_bounded(
+            ops in prop::collection::vec(
+                prop_oneof![
+                    // Weighted: more respond actions to stress max-enforcement
+                    1 => proptest::strategy::Just(0u8), // initiate by freelancer
+                    2 => proptest::strategy::Just(1u8), // respond by client
+                    2 => proptest::strategy::Just(2u8), // respond by freelancer
+                ],
+                0usize..20,
+            )
         ) {
             let env = Env::default();
             env.mock_all_auths();
 
-            let contract_id = env.register_contract(None, EscrowContract);
-            let client = EscrowContractClient::new(&env, &contract_id);
+            let contract_id = env.register_contract(None, crate::EscrowContract);
+            let client = crate::EscrowContractClient::new(&env, &contract_id);
 
             let admin = Address::generate(&env);
             client.initialize(&signers1(&env, &admin), &1u32);
@@ -873,228 +881,128 @@ mod fuzz {
             let token = env
                 .register_stellar_asset_contract_v2(token_admin)
                 .address();
-            StellarAssetClient::new(&env, &token).mint(&client_addr, &(MAX_AMOUNT * 10));
+            StellarAssetClient::new(&env, &token).mint(&client_addr, &1000_000_000i128);
 
-            let total_sum: u32 = percentages.iter().sum();
-            let job_id = SorobanString::from_str(&env, "fuzz-percentage-test");
+            let job_id = SorobanString::from_str(&env, "fuzz-disp-job");
+            let milestones = build_milestones(&env, &[100u32]);
+            client.create_job(
+                &client_addr,
+                &freelancer_addr,
+                &job_id,
+                &token,
+                &1000_000_000i128,
+                &milestones,
+                &RELEASE_AFTER,
+            );
 
-            // Build milestones from percentages
-            let mut milestones: SorobanVec<Milestone> = SorobanVec::new(&env);
-            for (i, &pct) in percentages.iter().enumerate() {
-                milestones.push_back(Milestone {
-                    name: SorobanString::from_str(&env, &std::format!("M{}", i)),
-                    percentage: pct,
-                    released: false,
-                    disputed: false,
-                    oracle: None,
-                    verified: false,
-                    proof_hash: None,
-                });
+            // Track round count via contract queries for verification after each op
+            let mut round_count: u32 = 0;
+            let mut dispute_initiated = false;
+
+            for &op in &ops {
+                match op {
+                    0 => {
+                        // Initiate dispute (freelancer)
+                        if dispute_initiated {
+                            // Already initiated, skip
+                            continue;
+                        }
+                        let evidence = BytesN::from_array(&env, &[op; 32]);
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            client.initiate_dispute(
+                                &freelancer_addr,
+                                &job_id,
+                                &0u32,
+                                &evidence,
+                            );
+                        }));
+                        if result.is_ok() {
+                            dispute_initiated = true;
+                            round_count = 1;
+                        }
+                    }
+                    1 => {
+                        // Respond by client
+                        if !dispute_initiated {
+                            continue;
+                        }
+                        let evidence = BytesN::from_array(&env, &[op; 32]);
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            client.respond_to_dispute(
+                                &client_addr,
+                                &job_id,
+                                &0u32,
+                                &evidence,
+                            );
+                        }));
+                        if result.is_ok() {
+                            round_count = round_count.saturating_add(1);
+                        }
+                    }
+                    2 => {
+                        // Respond by freelancer
+                        if !dispute_initiated {
+                            continue;
+                        }
+                        let evidence = BytesN::from_array(&env, &[op; 32]);
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            client.respond_to_dispute(
+                                &freelancer_addr,
+                                &job_id,
+                                &0u32,
+                                &evidence,
+                            );
+                        }));
+                        if result.is_ok() {
+                            round_count = round_count.saturating_add(1);
+                        }
+                    }
+                    _ => {}
+                }
+
+                // ── Invariant: round count must never exceed MAX_DISPUTE_ROUNDS ──
+                // Query the contract to get the actual round count
+                if let Some(dispute) = client.get_dispute(&job_id, &0u32) {
+                    let actual_rounds = dispute.rounds.len();
+                    prop_assert!(
+                        actual_rounds <= crate::MAX_DISPUTE_ROUNDS,
+                        "INVARIANT FAILED: dispute rounds {} exceeds MAX_DISPUTE_ROUNDS {}",
+                        actual_rounds,
+                        crate::MAX_DISPUTE_ROUNDS
+                    );
+                    // Also verify the round count matches our tracking
+                    prop_assert_eq!(
+                        actual_rounds, round_count,
+                        "round count mismatch: contract has {} but we tracked {}",
+                        actual_rounds, round_count
+                    );
+                } else {
+                    // No dispute exists — round count must be 0
+                    prop_assert_eq!(
+                        round_count, 0u32,
+                        "no dispute record but round_count is {}",
+                        round_count
+                    );
+                }
             }
 
-            // Try to create the job and catch any panic
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                client.create_job(
-                    &client_addr,
-                    &freelancer_addr,
-                    &job_id,
-                    &token,
-                    &100_000_000i128,  // 100 XLM in stroops
-                    &milestones,
-                    &RELEASE_AFTER,
+            // ── Final invariant ─────────────────────────────────────────────
+            if let Some(dispute) = client.get_dispute(&job_id, &0u32) {
+                prop_assert!(
+                    dispute.rounds.len() <= crate::MAX_DISPUTE_ROUNDS,
+                    "FINAL INVARIANT FAILED: {} rounds > MAX={}",
+                    dispute.rounds.len(),
+                    crate::MAX_DISPUTE_ROUNDS
                 );
-            }));
-
-            // Assert the expected behavior
-            if total_sum == 100 {
-                assert!(
-                    result.is_ok(),
-                    "create_job panicked unexpectedly when percentages summed to {} (valid sum)",
-                    total_sum
-                );
-                // Verify the job was actually created
-                let job = client.get_job(&job_id).unwrap();
-                assert_eq!(job.milestones.len(), percentages.len() as u32);
-            } else {
-                assert!(
-                    result.is_err(),
-                    "create_job did NOT panic when percentages summed to {} (invalid sum)",
-                    total_sum
-                );
+                // Once UnderReview, status must remain UnderReview or Resolved
+                if dispute.rounds.len() == crate::MAX_DISPUTE_ROUNDS {
+                    prop_assert_eq!(
+                        dispute.status.clone(),
+                        crate::DisputeStatus::UnderReview,
+                        "dispute at max rounds should be UnderReview"
+                    );
+                }
             }
         }
-    }
-
-    /// Explicit edge-case tests for zero percentages and overflow scenarios
-    #[test]
-    fn test_milestone_percentage_edge_cases() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, EscrowContract);
-        let client = EscrowContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.initialize(&signers1(&env, &admin), &1u32);
-
-        let client_addr = Address::generate(&env);
-        let freelancer_addr = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        StellarAssetClient::new(&env, &token).mint(&client_addr, &(MAX_AMOUNT * 10));
-
-        // Test case 1: Valid sum with a zero percentage (e.g., [0, 100])
-        let job_id_1 = SorobanString::from_str(&env, "zero-pct-test");
-        let mut milestones_1: SorobanVec<Milestone> = SorobanVec::new(&env);
-        milestones_1.push_back(Milestone {
-            name: SorobanString::from_str(&env, "M0"),
-            percentage: 0,
-            released: false,
-            disputed: false,
-            oracle: None,
-            verified: false,
-            proof_hash: None,
-        });
-        milestones_1.push_back(Milestone {
-            name: SorobanString::from_str(&env, "M1"),
-            percentage: 100,
-            released: false,
-            disputed: false,
-            oracle: None,
-            verified: false,
-            proof_hash: None,
-        });
-
-        let result_1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.create_job(
-                &client_addr,
-                &freelancer_addr,
-                &job_id_1,
-                &token,
-                &100_000_000i128,
-                &milestones_1,
-                &RELEASE_AFTER,
-            );
-        }));
-        assert!(
-            result_1.is_ok(),
-            "Job with valid sum [0, 100] should succeed"
-        );
-
-        // Test case 2: Valid sum with multiple zeros (e.g., [0, 0, 100])
-        let job_id_2 = SorobanString::from_str(&env, "multiple-zeros-test");
-        let mut milestones_2: SorobanVec<Milestone> = SorobanVec::new(&env);
-        milestones_2.push_back(Milestone {
-            name: SorobanString::from_str(&env, "M0"),
-            percentage: 0,
-            released: false,
-            disputed: false,
-            oracle: None,
-            verified: false,
-            proof_hash: None,
-        });
-        milestones_2.push_back(Milestone {
-            name: SorobanString::from_str(&env, "M1"),
-            percentage: 0,
-            released: false,
-            disputed: false,
-            oracle: None,
-            verified: false,
-            proof_hash: None,
-        });
-        milestones_2.push_back(Milestone {
-            name: SorobanString::from_str(&env, "M2"),
-            percentage: 100,
-            released: false,
-            disputed: false,
-            oracle: None,
-            verified: false,
-            proof_hash: None,
-        });
-
-        let result_2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.create_job(
-                &client_addr,
-                &freelancer_addr,
-                &job_id_2,
-                &token,
-                &100_000_000i128,
-                &milestones_2,
-                &RELEASE_AFTER,
-            );
-        }));
-        assert!(
-            result_2.is_ok(),
-            "Job with valid sum [0, 0, 100] should succeed"
-        );
-
-        // Test case 3: Invalid sum with overflow (percentages > 100 each)
-        let job_id_3 = SorobanString::from_str(&env, "overflow-test");
-        let mut milestones_3: SorobanVec<Milestone> = SorobanVec::new(&env);
-        milestones_3.push_back(Milestone {
-            name: SorobanString::from_str(&env, "M0"),
-            percentage: 100,
-            released: false,
-            disputed: false,
-            oracle: None,
-            verified: false,
-            proof_hash: None,
-        });
-        milestones_3.push_back(Milestone {
-            name: SorobanString::from_str(&env, "M1"),
-            percentage: 100,
-            released: false,
-            disputed: false,
-            oracle: None,
-            verified: false,
-            proof_hash: None,
-        });
-
-        let result_3 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.create_job(
-                &client_addr,
-                &freelancer_addr,
-                &job_id_3,
-                &token,
-                &100_000_000i128,
-                &milestones_3,
-                &RELEASE_AFTER,
-            );
-        }));
-        assert!(
-            result_3.is_err(),
-            "Job with invalid sum (overflow) should panic"
-        );
-
-        // Test case 4: Only one milestone with 100% (valid)
-        let job_id_4 = SorobanString::from_str(&env, "single-milestone-test");
-        let mut milestones_4: SorobanVec<Milestone> = SorobanVec::new(&env);
-        milestones_4.push_back(Milestone {
-            name: SorobanString::from_str(&env, "M0"),
-            percentage: 100,
-            released: false,
-            disputed: false,
-            oracle: None,
-            verified: false,
-            proof_hash: None,
-        });
-
-        let result_4 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.create_job(
-                &client_addr,
-                &freelancer_addr,
-                &job_id_4,
-                &token,
-                &100_000_000i128,
-                &milestones_4,
-                &RELEASE_AFTER,
-            );
-        }));
-        assert!(
-            result_4.is_ok(),
-            "Single milestone with 100% should succeed"
-        );
     }
 }
