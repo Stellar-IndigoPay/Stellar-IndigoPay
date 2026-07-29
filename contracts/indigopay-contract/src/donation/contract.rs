@@ -164,19 +164,18 @@ impl DonationContract {
         }
 
         let current_ledger = env.ledger().sequence() as u64;
-        let mut catch_up_amount = 0i128;
 
         if catch_up {
             let missed_ledgers = current_ledger.saturating_sub(donation.paused_at);
             let missed_cycles = missed_ledgers / donation.interval_ledgers;
 
             if missed_cycles > 0 {
-                catch_up_amount = donation.amount * (missed_cycles as i128);
+                let catch_up_amount = donation.amount * (missed_cycles as i128);
                 let token_client = token::Client::new(&env, &token);
                 token_client.transfer(&donor, &donation.project_wallet, &catch_up_amount);
             }
         }
-
+        
         donation.paused = false;
         donation.paused_at = 0;
         donation.next_execution_ledger = current_ledger + donation.interval_ledgers;
