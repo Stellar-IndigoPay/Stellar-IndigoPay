@@ -7,6 +7,15 @@
 pub mod donation;
 #[cfg(all(test, feature = "testutils"))]
 mod fuzz_tests;
+#[cfg(any(
+    feature = "usdc",
+    feature = "donation",
+    feature = "testutils",
+    feature = "zk",
+    feature = "impact",
+    feature = "escrow"
+))]
+use soroban_sdk::contractclient;
 /**
  * contracts/indigopay-contract/src/lib.rs
  *
@@ -32,6 +41,8 @@ mod fuzz_tests;
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec,
 };
+#[cfg(feature = "project_verification")]
+use soroban_sdk::{contracterror, panic_with_error};
 #[cfg(any(
     feature = "usdc",
     feature = "donation",
@@ -39,9 +50,7 @@ use soroban_sdk::{
     feature = "zk",
     feature = "impact"
 ))]
-use soroban_sdk::{contractclient, token, Bytes};
-#[cfg(feature = "project_verification")]
-use soroban_sdk::{contracterror, panic_with_error};
+use soroban_sdk::{token, Bytes};
 
 // ─── Oracle interface ─────────────────────────────────────────────────────────
 /// External price oracle interface.
@@ -481,6 +490,49 @@ enum LegacyDataKey {
 pub struct FeeRecipient {
     pub address: Address,
     pub share_bps: u32,
+}
+
+// ─── Campaign Escrow (#426) ────────────────────────────────────────────────
+/// Input type for milestone-based campaign escrow.
+/// Layout MUST match the escrow-contract's `Milestone` struct exactly for
+/// cross-contract XDR encoding compatibility.
+#[cfg(feature = "escrow")]
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct EscrowMilestone {
+    pub name: String,
+    pub percentage: u32,
+    pub released: bool,
+    pub disputed: bool,
+    pub oracle: Option<Address>,
+    pub verified: bool,
+    pub proof_hash: Option<BytesN<32>>,
+}
+
+/// Cross-contract client for the escrow contract.
+#[cfg(feature = "escrow")]
+#[contractclient(name = "EscrowClient")]
+pub trait EscrowInterface {
+    fn create_job(
+        env: Env,
+        client: Address,
+        freelancer: Address,
+        job_id: String,
+        token: Address,
+        amount: i128,
+        milestones: Vec<EscrowMilestone>,
+        release_after: u32,
+    );
+    fn release_milestone(env: Env, client: Address, job_id: String, milestone_index: u32);
+    fn claim_milestone(env: Env, freelancer: Address, job_id: String, milestone_index: u32);
+    fn dispute_milestone(env: Env, signers: Vec<Address>, job_id: String, milestone_index: u32);
+    fn resolve_milestone_dispute(
+        env: Env,
+        signers: Vec<Address>,
+        job_id: String,
+        milestone_index: u32,
+        approve: bool,
+    );
 }
 
 #[contracttype]
@@ -2141,9 +2193,31 @@ fn process_donation_token(
             }
         }
     }
-    // Transfer remainder to project wallet.
+    // Transfer remainder — for escrow campaigns, route to contract-held
+    // balance instead of the project wallet, so funds can be escrowed.
+    #[cfg(feature = "escrow")]
+    let is_escrow_campaign = env
+        .storage()
+        .instance()
+        .has(&DataKey::CampaignEscrowMilestones(project_id.clone()));
+    #[cfg(not(feature = "escrow"))]
+    let is_escrow_campaign = false;
 
-    token_client.transfer(donor, &project.wallet, &project_amount);
+    if is_escrow_campaign {
+        // Hold funds in this contract for later escrow job funding.
+        token_client.transfer(donor, env.current_contract_address(), &project_amount);
+        let balance_key = DataKey::ProjectContractBalance(project_id.clone(), token.clone());
+        let current_balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
+        env.storage().instance().set(
+            &balance_key,
+            &current_balance
+                .checked_add(project_amount)
+                .expect("overflow"),
+        );
+    } else {
+        // Standard direct-to-wallet transfer.
+        token_client.transfer(donor, &project.wallet, &project_amount);
+    }
     #[cfg(feature = "fees")]
     env.events().publish(
         (symbol_short!("donated"), donor.clone(), project_id.clone()),
@@ -2754,6 +2828,320 @@ impl IndigoPayContract {
         env.events().publish(
             (symbol_short!("camp_cls"), admin, project_id),
             project.campaign_status.clone(),
+        );
+    }
+    // ─── Campaign-to-Escrow Integration (#426) ────────────────────────────────
+    /// M-of-N admin: set the escrow contract address for campaign escrow.
+    #[cfg(feature = "escrow")]
+    pub fn set_escrow_contract_address(env: Env, signers: Vec<Address>, escrow_contract: Address) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::EscrowContractAddress, &escrow_contract);
+        env.events()
+            .publish((symbol_short!("esc_set"),), escrow_contract);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+    /// Admin-only: create a campaign with milestone-based escrow.
+    /// Validates milestones sum to 100%, creates the campaign, and stores
+    /// the escrow configuration for later funding via `fund_campaign_escrow_job`.
+    /// Donations to this campaign are held by the contract until the escrow job is funded.
+    #[cfg(feature = "escrow")]
+    pub fn create_campaign_with_escrow(
+        env: Env,
+        admin: Address,
+        project_id: String,
+        goal: i128,
+        deadline_ledger: u32,
+        milestones: Vec<EscrowMilestone>,
+    ) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+
+        // Validate escrow contract is configured
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::EscrowContractAddress)
+        {
+            panic!("Escrow contract not configured");
+        }
+
+        if goal <= 0 {
+            panic!("Campaign goal must be positive");
+        }
+        let current = env.ledger().sequence();
+        if deadline_ledger <= current {
+            panic!("Campaign deadline must be in the future");
+        }
+
+        // Validate milestones sum to 100%
+        let mut total_pct: u32 = 0;
+        for m in milestones.iter() {
+            total_pct = total_pct.checked_add(m.percentage).expect("overflow");
+        }
+        if total_pct != 100 {
+            panic!("Milestones must sum to 100%");
+        }
+
+        let mut project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+
+        if !project.active {
+            panic!("Project is not active");
+        }
+        match project.campaign_status {
+            CampaignStatus::None | CampaignStatus::Closed | CampaignStatus::Expired => {}
+            CampaignStatus::Active | CampaignStatus::GoalReached => {
+                panic!("Project already has an open campaign");
+            }
+        }
+        if goal <= project.total_raised {
+            panic!("Campaign goal must exceed amount already raised");
+        }
+
+        project.goal = goal;
+        project.deadline_ledger = deadline_ledger;
+        project.campaign_status = CampaignStatus::Active;
+        env.storage()
+            .instance()
+            .set(&DataKey::Project(project_id.clone()), &project);
+
+        // Store escrow milestones
+        env.storage().instance().set(
+            &DataKey::CampaignEscrowMilestones(project_id.clone()),
+            &milestones,
+        );
+
+        env.events().publish(
+            (symbol_short!("camp_es"), admin, project_id),
+            (goal, deadline_ledger),
+        );
+    }
+    /// Minimum release_after ledgers for campaign escrow jobs.
+    /// Must match the escrow contract's `RELEASE_AFTER_LEDGERS` (10).
+    #[cfg(feature = "escrow")]
+    pub const CAMPAIGN_ESCROW_MIN_RELEASE_AFTER: u32 = 10;
+
+    /// Admin-only: fund the escrow job for a campaign that has received donations.
+    /// Transfers accumulated contract-held funds to the escrow contract and
+    /// creates the escrow job with the project wallet as the freelancer.
+    ///
+    /// The escrow job is NOT created at campaign creation time because the
+    /// total raised amount is unknown until the campaign receives donations.
+    /// Instead, donations are held by this contract and the escrow job is
+    /// funded retroactively once sufficient funds have accumulated.
+    #[cfg(feature = "escrow")]
+    pub fn fund_campaign_escrow_job(
+        env: Env,
+        admin: Address,
+        project_id: String,
+        token: Address,
+        release_after: u32,
+    ) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        if release_after < Self::CAMPAIGN_ESCROW_MIN_RELEASE_AFTER {
+            panic!(
+                "release_after must be at least {} ledgers",
+                Self::CAMPAIGN_ESCROW_MIN_RELEASE_AFTER
+            );
+        }
+
+        let escrow_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::EscrowContractAddress)
+            .expect("Escrow contract not configured");
+
+        let project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+
+        // Verify the campaign is in a fundable state
+        if project.campaign_status != CampaignStatus::GoalReached
+            && project.campaign_status != CampaignStatus::Active
+        {
+            panic!("Campaign must be Active or GoalReached to fund escrow");
+        }
+
+        // Check that escrow job hasn't already been funded
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::CampaignEscrowJobId(project_id.clone()))
+        {
+            panic!("Escrow job already funded");
+        }
+
+        // Read stored milestones
+        let milestones: Vec<EscrowMilestone> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CampaignEscrowMilestones(project_id.clone()))
+            .expect("Campaign escrow milestones not found");
+
+        let total_raised = project.total_raised;
+        if total_raised <= 0 {
+            panic!("No funds raised to escrow");
+        }
+
+        // Use project_id as the escrow job ID for a deterministic link
+        let job_id = project_id.clone();
+
+        // Call escrow contract to create the job.
+        // The escrow's create_job will transfer `total_raised` from the
+        // indigopay contract (which holds the escrow-routed funds) to itself.
+        let escrow_client = EscrowClient::new(&env, &escrow_addr);
+        escrow_client.create_job(
+            &env.current_contract_address(), // client = this contract
+            &project.wallet,                 // freelancer = project wallet
+            &job_id,
+            &token,
+            &total_raised,
+            &milestones,
+            &release_after,
+        );
+
+        // Store the escrow job ID
+        env.storage()
+            .instance()
+            .set(&DataKey::CampaignEscrowJobId(project_id.clone()), &job_id);
+
+        env.events().publish(
+            (symbol_short!("esc_fnd"), admin, project_id),
+            (job_id, total_raised),
+        );
+    }
+    /// Admin-only: release a specific milestone for an escrow campaign.
+    /// Calls through to the escrow contract's `release_milestone`.
+    #[cfg(feature = "escrow")]
+    pub fn release_campaign_milestone(
+        env: Env,
+        admin: Address,
+        project_id: String,
+        milestone_index: u32,
+    ) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+
+        let escrow_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::EscrowContractAddress)
+            .expect("Escrow contract not configured");
+
+        let job_id: String = env
+            .storage()
+            .instance()
+            .get(&DataKey::CampaignEscrowJobId(project_id.clone()))
+            .expect("Campaign does not have an escrow job");
+
+        let escrow_client = EscrowClient::new(&env, &escrow_addr);
+        escrow_client.release_milestone(&admin, &job_id, &milestone_index);
+
+        env.events().publish(
+            (symbol_short!("esc_rel"), admin, project_id),
+            milestone_index,
+        );
+    }
+    /// Project wallet: claim a released milestone for an escrow campaign.
+    /// Calls through to the escrow contract's `claim_milestone`.
+    #[cfg(feature = "escrow")]
+    pub fn claim_campaign_milestone(
+        env: Env,
+        project_wallet: Address,
+        project_id: String,
+        milestone_index: u32,
+    ) {
+        project_wallet.require_auth();
+        require_not_paused(&env);
+
+        let escrow_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::EscrowContractAddress)
+            .expect("Escrow contract not configured");
+
+        let job_id: String = env
+            .storage()
+            .instance()
+            .get(&DataKey::CampaignEscrowJobId(project_id.clone()))
+            .expect("Campaign does not have an escrow job");
+
+        let escrow_client = EscrowClient::new(&env, &escrow_addr);
+        escrow_client.claim_milestone(&project_wallet, &job_id, &milestone_index);
+
+        env.events().publish(
+            (symbol_short!("esc_clm"), project_wallet, project_id),
+            milestone_index,
+        );
+    }
+    /// M-of-N admin: dispute a milestone for an escrow campaign.
+    /// Calls through to the escrow contract's `dispute_milestone`.
+    #[cfg(feature = "escrow")]
+    pub fn dispute_campaign_milestone(
+        env: Env,
+        signers: Vec<Address>,
+        project_id: String,
+        milestone_index: u32,
+    ) {
+        require_not_paused(&env);
+
+        let escrow_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::EscrowContractAddress)
+            .expect("Escrow contract not configured");
+
+        let job_id: String = env
+            .storage()
+            .instance()
+            .get(&DataKey::CampaignEscrowJobId(project_id.clone()))
+            .expect("Campaign does not have an escrow job");
+
+        let escrow_client = EscrowClient::new(&env, &escrow_addr);
+        escrow_client.dispute_milestone(&signers, &job_id, &milestone_index);
+
+        env.events()
+            .publish((symbol_short!("esc_dsp"), project_id), milestone_index);
+    }
+    /// M-of-N admin: resolve a milestone dispute for an escrow campaign.
+    /// Calls through to the escrow contract's `resolve_milestone_dispute`.
+    #[cfg(feature = "escrow")]
+    pub fn resolve_campaign_ms_dispute(
+        env: Env,
+        signers: Vec<Address>,
+        project_id: String,
+        milestone_index: u32,
+        approve: bool,
+    ) {
+        require_not_paused(&env);
+
+        let escrow_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::EscrowContractAddress)
+            .expect("Escrow contract not configured");
+
+        let job_id: String = env
+            .storage()
+            .instance()
+            .get(&DataKey::CampaignEscrowJobId(project_id.clone()))
+            .expect("Campaign does not have an escrow job");
+
+        let escrow_client = EscrowClient::new(&env, &escrow_addr);
+        escrow_client.resolve_milestone_dispute(&signers, &job_id, &milestone_index, &approve);
+
+        env.events().publish(
+            (symbol_short!("esc_rsv"), project_id),
+            (milestone_index, approve),
         );
     }
     // ─── Platform Fee Configuration (#385) ────────────────────────────────────

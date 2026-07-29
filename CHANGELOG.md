@@ -18,6 +18,7 @@
 
 ### Bug Fixes
 
+* **contracts:** skip missing persistent stealth donation entries during scans (closes #506)
 * **contracts:** deduplicate the escrow `Milestone` struct across feature configurations (closes #511)
 * **contracts:** add regression tests covering on-time vs late milestone completion reputation tracking
 * **backend:** invalidate impact endpoint caches on project status change (closes #016, grantfox GF-016)
