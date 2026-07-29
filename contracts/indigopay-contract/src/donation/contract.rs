@@ -1,11 +1,13 @@
 use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, Vec};
 
 use crate::donation::{
-    events::{emit_stealth_donation, emit_stealth_scan},
+    events::{
+        emit_pause_recurring, emit_resume_recurring, emit_stealth_donation, emit_stealth_scan,
+    },
     storage::{
-        add_project_donation, get_project_donations, get_recurring_counter,
-        get_recurring_donation, get_stealth_counter, get_stealth_donation,
-        set_recurring_counter, set_recurring_donation, set_stealth_counter, set_stealth_donation,
+        add_project_donation, get_project_donations, get_recurring_counter, get_recurring_donation,
+        get_stealth_counter, get_stealth_donation, set_recurring_counter, set_recurring_donation,
+        set_stealth_counter, set_stealth_donation,
     },
     types::{RecurringDonation, StealthDonation},
 };
@@ -141,7 +143,7 @@ impl DonationContract {
         donation.paused_at = current_ledger;
 
         set_recurring_donation(&env, recurring_id, &donation);
-        emit_pause_recurring(&env, recurring_id, &donor, current_ledger);
+        emit_pause_recurring(&env, recurring_id, &donor);
     }
 
     pub fn resume_recurring(
@@ -180,7 +182,7 @@ impl DonationContract {
         donation.next_execution_ledger = current_ledger + donation.interval_ledgers;
 
         set_recurring_donation(&env, recurring_id, &donation);
-        emit_resume_recurring(&env, recurring_id, &donor, catch_up, catch_up_amount);
+        emit_resume_recurring(&env, recurring_id, &donor);
     }
 }
 
