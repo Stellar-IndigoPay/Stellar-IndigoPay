@@ -35,7 +35,7 @@ mod fuzz {
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
         token::StellarAssetClient,
-        Address, Env, String as SorobanString, Vec as SorobanVec,
+        Address, BytesN, Env, String as SorobanString, Vec as SorobanVec,
     };
     use std::string::String as StdString;
 
@@ -836,6 +836,168 @@ mod fuzz {
             let bounded_disputed = disputed_jobs.min(total_jobs);
             prop_assert!(bounded_completed <= total_jobs);
             prop_assert!(bounded_disputed <= total_jobs);
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
+
+        /// **prop_dispute_rounds_bounded**: the number of dispute rounds can
+        /// never exceed `MAX_DISPUTE_ROUNDS`, regardless of the sequence or
+        /// timing of `initiate_dispute` / `respond_to_dispute` calls.
+        ///
+        /// Generates a random sequence of dispute actions (initiate, respond)
+        /// using different party addresses and verifies after every action
+        /// that rounds.len() <= MAX_DISPUTE_ROUNDS.
+        #[test]
+        fn prop_dispute_rounds_bounded(
+            ops in prop::collection::vec(
+                prop_oneof![
+                    // Weighted: more respond actions to stress max-enforcement
+                    1 => proptest::strategy::Just(0u8), // initiate by freelancer
+                    2 => proptest::strategy::Just(1u8), // respond by client
+                    2 => proptest::strategy::Just(2u8), // respond by freelancer
+                ],
+                0usize..20,
+            )
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let contract_id = env.register_contract(None, crate::EscrowContract);
+            let client = crate::EscrowContractClient::new(&env, &contract_id);
+
+            let admin = Address::generate(&env);
+            client.initialize(&signers1(&env, &admin), &1u32);
+
+            let client_addr = Address::generate(&env);
+            let freelancer_addr = Address::generate(&env);
+            let token_admin = Address::generate(&env);
+            let token = env
+                .register_stellar_asset_contract_v2(token_admin)
+                .address();
+            StellarAssetClient::new(&env, &token).mint(&client_addr, &1000_000_000i128);
+
+            let job_id = SorobanString::from_str(&env, "fuzz-disp-job");
+            let milestones = build_milestones(&env, &[100u32]);
+            client.create_job(
+                &client_addr,
+                &freelancer_addr,
+                &job_id,
+                &token,
+                &1000_000_000i128,
+                &milestones,
+                &RELEASE_AFTER,
+            );
+
+            // Track round count via contract queries for verification after each op
+            let mut round_count: u32 = 0;
+            let mut dispute_initiated = false;
+
+            for &op in &ops {
+                match op {
+                    0 => {
+                        // Initiate dispute (freelancer)
+                        if dispute_initiated {
+                            // Already initiated, skip
+                            continue;
+                        }
+                        let evidence = BytesN::from_array(&env, &[op; 32]);
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            client.initiate_dispute(
+                                &freelancer_addr,
+                                &job_id,
+                                &0u32,
+                                &evidence,
+                            );
+                        }));
+                        if result.is_ok() {
+                            dispute_initiated = true;
+                            round_count = 1;
+                        }
+                    }
+                    1 => {
+                        // Respond by client
+                        if !dispute_initiated {
+                            continue;
+                        }
+                        let evidence = BytesN::from_array(&env, &[op; 32]);
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            client.respond_to_dispute(
+                                &client_addr,
+                                &job_id,
+                                &0u32,
+                                &evidence,
+                            );
+                        }));
+                        if result.is_ok() {
+                            round_count = round_count.saturating_add(1);
+                        }
+                    }
+                    2 => {
+                        // Respond by freelancer
+                        if !dispute_initiated {
+                            continue;
+                        }
+                        let evidence = BytesN::from_array(&env, &[op; 32]);
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            client.respond_to_dispute(
+                                &freelancer_addr,
+                                &job_id,
+                                &0u32,
+                                &evidence,
+                            );
+                        }));
+                        if result.is_ok() {
+                            round_count = round_count.saturating_add(1);
+                        }
+                    }
+                    _ => {}
+                }
+
+                // ── Invariant: round count must never exceed MAX_DISPUTE_ROUNDS ──
+                // Query the contract to get the actual round count
+                if let Some(dispute) = client.get_dispute(&job_id, &0u32) {
+                    let actual_rounds = dispute.rounds.len();
+                    prop_assert!(
+                        actual_rounds <= crate::MAX_DISPUTE_ROUNDS,
+                        "INVARIANT FAILED: dispute rounds {} exceeds MAX_DISPUTE_ROUNDS {}",
+                        actual_rounds,
+                        crate::MAX_DISPUTE_ROUNDS
+                    );
+                    // Also verify the round count matches our tracking
+                    prop_assert_eq!(
+                        actual_rounds, round_count,
+                        "round count mismatch: contract has {} but we tracked {}",
+                        actual_rounds, round_count
+                    );
+                } else {
+                    // No dispute exists — round count must be 0
+                    prop_assert_eq!(
+                        round_count, 0u32,
+                        "no dispute record but round_count is {}",
+                        round_count
+                    );
+                }
+            }
+
+            // ── Final invariant ─────────────────────────────────────────────
+            if let Some(dispute) = client.get_dispute(&job_id, &0u32) {
+                prop_assert!(
+                    dispute.rounds.len() <= crate::MAX_DISPUTE_ROUNDS,
+                    "FINAL INVARIANT FAILED: {} rounds > MAX={}",
+                    dispute.rounds.len(),
+                    crate::MAX_DISPUTE_ROUNDS
+                );
+                // Once UnderReview, status must remain UnderReview or Resolved
+                if dispute.rounds.len() == crate::MAX_DISPUTE_ROUNDS {
+                    prop_assert_eq!(
+                        dispute.status.clone(),
+                        crate::DisputeStatus::UnderReview,
+                        "dispute at max rounds should be UnderReview"
+                    );
+                }
+            }
         }
     }
 }

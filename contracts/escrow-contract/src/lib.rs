@@ -72,6 +72,36 @@ pub struct FreelancerReputation {
     pub created_at: u32,
 }
 
+/// Status of a multi-round dispute.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum DisputeStatus {
+    Open,
+    AwaitingResponse,
+    UnderReview,
+    Resolved,
+}
+
+/// A single round of evidence submission in a dispute.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DisputeRound {
+    pub submitter: Address,
+    pub evidence_hash: BytesN<32>,
+    pub submitted_at: u32,
+}
+
+/// Multi-round dispute tracking a milestone disagreement.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Dispute {
+    pub milestone_index: u32,
+    pub initiator: Address,
+    pub initiated_at: u32,
+    pub rounds: Vec<DisputeRound>,
+    pub status: DisputeStatus,
+}
+
 #[contracttype]
 pub enum DataKey {
     Job(String),
@@ -87,6 +117,8 @@ pub enum DataKey {
     FreelancerReputation(Address),
     // Ensures multiple milestone disputes on one job count only once.
     ReputationDisputeCounted(String),
+    // Dispute record keyed by (job_id, milestone_index).
+    Dispute(String, u32),
 }
 
 /// Minimum number of ledgers a job's release period may specify. Jobs
@@ -95,6 +127,14 @@ pub enum DataKey {
 /// to `create_job`.
 pub const RELEASE_AFTER_LEDGERS: u32 = 10;
 pub const DEFAULT_DEADLINE_LEDGERS: u32 = 1_555_200; // 90 days @ 5s/ledger
+
+/// Maximum number of dispute rounds (initiation + response + optional surrebuttal).
+pub const MAX_DISPUTE_ROUNDS: u32 = 3;
+
+/// Time window (in ledger seconds) for a party to respond in a dispute round.
+/// 86_400 ledgers ~= 5 days @ 5s/ledger, consistent with the contract's
+/// use of ledger-sequence-based timeouts (e.g. `release_after`, `deadline`).
+pub const DISPUTE_RESPONSE_WINDOW: u32 = 86_400;
 
 fn compute_remaining_funds(job: &Job) -> i128 {
     let mut remaining_amount: i128 = 0;
@@ -247,6 +287,42 @@ fn verify_m_of_n(env: &Env, signers: &Vec<Address>, required_threshold: u32) {
 fn require_admin(env: &Env, signers: &Vec<Address>) {
     let threshold: u32 = read_admin_threshold(env);
     verify_m_of_n(env, signers, threshold);
+}
+
+// ─── Dispute helpers ─────────────────────────────────────────────────────────
+
+fn read_dispute(env: &Env, job_id: &String, milestone_index: u32) -> Option<Dispute> {
+    env.storage()
+        .instance()
+        .get(&DataKey::Dispute(job_id.clone(), milestone_index))
+}
+
+fn store_dispute(env: &Env, job_id: &String, milestone_index: u32, dispute: &Dispute) {
+    env.storage()
+        .instance()
+        .set(&DataKey::Dispute(job_id.clone(), milestone_index), dispute);
+}
+
+/// Verify `who` is either the client or freelancer on the job.
+/// Panics with a clear message if not.
+fn require_job_party(who: &Address, job: &Job, label: &str) {
+    if who != &job.client && who != &job.freelancer {
+        panic!("{} must be the client or freelancer on the job", label);
+    }
+}
+
+/// Return the ledger sequence at which the dispute response window expires
+/// for the most recent round. If there are no rounds yet, returns 0.
+fn dispute_response_deadline(dispute: &Dispute) -> u32 {
+    if dispute.rounds.is_empty() {
+        return 0;
+    }
+    let last_idx = dispute.rounds.len() - 1;
+    let last_round = dispute.rounds.get(last_idx).unwrap();
+    last_round
+        .submitted_at
+        .checked_add(DISPUTE_RESPONSE_WINDOW)
+        .expect("response deadline overflow")
 }
 
 #[contract]
@@ -752,6 +828,11 @@ impl EscrowContract {
     /// M-of-N admin: Resolve a single milestone dispute.
     /// If `approve` is true -> release funds for that milestone to freelancer.
     /// If `approve` is false -> refund funds for that milestone to client.
+    ///
+    /// Extended: now requires at least two dispute rounds (both parties have
+    /// submitted) OR a timeout has occurred (DISPUTE_RESPONSE_WINDOW elapsed
+    /// since the last round). This ensures admin cannot short-circuit the
+    /// multi-round evidence process.
     pub fn resolve_milestone_dispute(
         env: Env,
         signers: Vec<Address>,
@@ -776,6 +857,30 @@ impl EscrowContract {
         if !milestone.disputed {
             panic!("Milestone is not disputed");
         }
+
+        // ── Multi-round precondition ────────────────────────────────────────
+        // Admin can resolve only if:
+        //   (a) both parties have submitted at least one round each, OR
+        //   (b) the dispute response window has elapsed since the last round.
+        let mut dispute_resolved = false;
+        if let Some(mut dispute) = read_dispute(&env, &job_id, milestone_index) {
+            let timeout_elapsed = {
+                let deadline = dispute_response_deadline(&dispute);
+                env.ledger().sequence() >= deadline
+            };
+            let both_submitted = dispute.rounds.len() >= 2;
+            if !both_submitted && !timeout_elapsed {
+                panic!(
+                    "Dispute resolution requires both parties to submit evidence OR a timeout"
+                );
+            }
+            // Transition dispute to Resolved so history remains queryable.
+            dispute.status = DisputeStatus::Resolved;
+            store_dispute(&env, &job_id, milestone_index, &dispute);
+            dispute_resolved = true;
+        }
+        // If no dispute record exists (legacy path from dispute_milestone),
+        // we skip the precondition check for backward compatibility.
 
         let proportion = milestone.percentage as i128;
         let release_amount = (job.amount * proportion) / 100i128;
@@ -804,8 +909,16 @@ impl EscrowContract {
 
         env.events().publish(
             (symbol_short!("ms_reslv"),),
-            (job_id, milestone_index, approve),
+            (job_id.clone(), milestone_index, approve),
         );
+
+        // Emit additional event for multi-round dispute resolution.
+        if dispute_resolved {
+            env.events().publish(
+                (symbol_short!("disp_res"),),
+                (job_id.clone(), milestone_index, approve),
+            );
+        }
 
         if release_amount > 0 {
             let token_client = token::Client::new(&env, &job.token);
@@ -817,6 +930,223 @@ impl EscrowContract {
             };
             token_client.transfer(&contract_addr, &recipient, &release_amount);
         }
+    }
+
+    // ─── Multi-Round Dispute Arbitration ────────────────────────────────────
+
+    /// Initiate a multi-round dispute for a specific milestone.
+    /// Called by the client or freelancer (must be one of the two parties on
+    /// the job). Creates a new `Dispute` record with the first evidence round
+    /// and marks the milestone as disputed.
+    ///
+    /// This replaces the party-facing dispute path. The admin-only
+    /// `dispute_milestone` is retained as an emergency override for
+    /// administrative intervention (e.g. when both parties are unable to
+    /// initiate due to wallet issues).
+    pub fn initiate_dispute(
+        env: Env,
+        initiator: Address,
+        job_id: String,
+        milestone_index: u32,
+        evidence_hash: BytesN<32>,
+    ) {
+        initiator.require_auth();
+
+        let mut job: Job = env
+            .storage()
+            .instance()
+            .get(&DataKey::Job(job_id.clone()))
+            .expect("Job not found");
+
+        require_job_party(&initiator, &job, "Initiator");
+
+        if milestone_index >= job.milestones.len() {
+            panic!("Invalid milestone index");
+        }
+
+        let mut milestones = job.milestones.clone();
+        let mut milestone = milestones.get(milestone_index).unwrap().clone();
+        if milestone.released {
+            panic!("Milestone already released");
+        }
+        if milestone.disputed {
+            panic!("Milestone already disputed");
+        }
+
+        // Check no existing dispute record for this milestone.
+        if read_dispute(&env, &job_id, milestone_index).is_some() {
+            panic!("Dispute already exists for this milestone");
+        }
+
+        let now = env.ledger().sequence();
+
+        // Create first dispute round.
+        let mut rounds: Vec<DisputeRound> = Vec::new(&env);
+        rounds.push_back(DisputeRound {
+            submitter: initiator.clone(),
+            evidence_hash: evidence_hash.clone(),
+            submitted_at: now,
+        });
+
+        let dispute = Dispute {
+            milestone_index,
+            initiator: initiator.clone(),
+            initiated_at: now,
+            rounds,
+            status: DisputeStatus::AwaitingResponse,
+        };
+
+        // Mark milestone as disputed.
+        milestone.disputed = true;
+        #[cfg(feature = "oracle-escrow")]
+        {
+            milestone.verified = false;
+            milestone.proof_hash = None;
+        }
+        milestones.set(milestone_index, milestone);
+        job.milestones = milestones;
+        job.status = JobStatus::Disputed;
+        reputation_job_disputed(&env, &job);
+
+        // ── Effects: write state before events ──────────────────────────────
+        store_dispute(&env, &job_id, milestone_index, &dispute);
+        env.storage()
+            .instance()
+            .set(&DataKey::Job(job_id.clone()), &job);
+
+        // Event: dispute initiated with first round
+        env.events().publish(
+            (symbol_short!("disp_init"),),
+            (
+                job_id,
+                milestone_index,
+                initiator,
+                evidence_hash,
+            ),
+        );
+    }
+
+    /// Respond to a dispute with evidence.
+    /// Called by the party that did NOT submit the last round.
+    /// Adds a `DisputeRound` and transitions the status:
+    /// - If total rounds >= `MAX_DISPUTE_ROUNDS` → `UnderReview` (no more
+    ///   rounds possible).
+    /// - Otherwise → `AwaitingResponse` (other party may respond again).
+    ///
+    /// Enforces `MAX_DISPUTE_ROUNDS` — rejects if already at max.
+    pub fn respond_to_dispute(
+        env: Env,
+        responder: Address,
+        job_id: String,
+        milestone_index: u32,
+        evidence_hash: BytesN<32>,
+    ) {
+        responder.require_auth();
+
+        let job: Job = env
+            .storage()
+            .instance()
+            .get(&DataKey::Job(job_id.clone()))
+            .expect("Job not found");
+
+        require_job_party(&responder, &job, "Responder");
+
+        if milestone_index >= job.milestones.len() {
+            panic!("Invalid milestone index");
+        }
+
+        let mut dispute = read_dispute(&env, &job_id, milestone_index)
+            .expect("No dispute found for this milestone");
+
+        if dispute.status == DisputeStatus::Resolved {
+            panic!("Dispute is already resolved");
+        }
+
+        // Must not be the same as the last round's submitter.
+        let last_idx = dispute
+            .rounds
+            .len()
+            .checked_sub(1)
+            .expect("dispute has no rounds");
+        let last_submitter = dispute.rounds.get(last_idx).unwrap().submitter;
+        if responder == last_submitter {
+            panic!("Responder cannot be the same as the last round submitter");
+        }
+
+        // Enforce MAX_DISPUTE_ROUNDS.
+        if dispute.rounds.len() >= MAX_DISPUTE_ROUNDS {
+            panic!("Maximum dispute rounds reached");
+        }
+
+        let now = env.ledger().sequence();
+
+        let round = DisputeRound {
+            submitter: responder.clone(),
+            evidence_hash: evidence_hash.clone(),
+            submitted_at: now,
+        };
+        dispute.rounds.push_back(round);
+
+        // Transition status.
+        if dispute.rounds.len() >= MAX_DISPUTE_ROUNDS {
+            dispute.status = DisputeStatus::UnderReview;
+        } else {
+            dispute.status = DisputeStatus::AwaitingResponse;
+        }
+
+        // Persist.
+        store_dispute(&env, &job_id, milestone_index, &dispute);
+
+        // Event: dispute round submitted
+        env.events().publish(
+            (symbol_short!("disp_rsp"),),
+            (
+                job_id,
+                milestone_index,
+                dispute.rounds.len() - 1,
+                responder,
+                evidence_hash,
+            ),
+        );
+    }
+
+    /// Time out an unresponsive party in a dispute.
+    /// Callable by anyone. If the `DISPUTE_RESPONSE_WINDOW` has elapsed since
+    /// the last round without a response, transitions the dispute to
+    /// `UnderReview` so the admin may resolve it. This does NOT auto-favor
+    /// either party — the admin must still decide.
+    pub fn timeout_dispute(
+        env: Env,
+        job_id: String,
+        milestone_index: u32,
+    ) {
+        let mut dispute = read_dispute(&env, &job_id, milestone_index)
+            .expect("No dispute found for this milestone");
+
+        if dispute.status == DisputeStatus::Resolved
+            || dispute.status == DisputeStatus::UnderReview
+        {
+            panic!("Dispute is not awaiting a response");
+        }
+
+        let deadline = dispute_response_deadline(&dispute);
+        if env.ledger().sequence() < deadline {
+            panic!("Response window has not yet elapsed");
+        }
+
+        dispute.status = DisputeStatus::UnderReview;
+        store_dispute(&env, &job_id, milestone_index, &dispute);
+
+        env.events().publish(
+            (symbol_short!("disp_to"),),
+            (job_id, milestone_index),
+        );
+    }
+
+    /// Query the full dispute history (including all evidence rounds)
+    /// for a specific milestone on a job.
+    pub fn get_dispute(env: Env, job_id: String, milestone_index: u32) -> Option<Dispute> {
+        read_dispute(&env, &job_id, milestone_index)
     }
 
     /// Client can request full refund after job deadline passes if no milestone has been claimed.
@@ -2881,6 +3211,343 @@ mod tests {
                 created_at: 0,
             }
         );
+    }
+
+    // ─── Multi-Round Dispute Arbitration Unit Tests ────────────────────────
+
+    fn setup_job_with_single_milestone(
+        env: &Env,
+        client: &EscrowContractClient<'_>,
+        client_addr: &Address,
+        freelancer: &Address,
+        job_id_str: &str,
+        amount: i128,
+    ) -> String {
+        let token_admin = Address::generate(env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(env, &token).mint(client_addr, &amount);
+        let job_id = String::from_str(env, job_id_str);
+        let mut milestones = Vec::new(env);
+        milestones.push_back(Milestone {
+            name: String::from_str(env, "Delivery"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+        client.create_job(
+            client_addr,
+            freelancer,
+            &job_id,
+            &token,
+            &amount,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+        job_id
+    }
+
+    #[test]
+    fn test_initiate_dispute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = setup_job_with_single_milestone(
+            &env,
+            &client,
+            &client_addr,
+            &freelancer,
+            "job-disp-init",
+            1000i128,
+        );
+
+        let evidence = BytesN::from_array(&env, &[1u8; 32]);
+        client.initiate_dispute(&freelancer, &job_id, &0u32, &evidence);
+
+        // Verify milestone is disputed
+        let job = client.get_job(&job_id).unwrap();
+        assert_eq!(job.status, JobStatus::Disputed);
+        assert!(job.milestones.get(0).unwrap().disputed);
+
+        // Verify dispute record exists
+        let dispute = client
+            .get_dispute(&job_id, &0u32)
+            .expect("Dispute should exist");
+        assert_eq!(dispute.status, DisputeStatus::AwaitingResponse);
+        assert_eq!(dispute.initiator, freelancer);
+        assert_eq!(dispute.rounds.len(), 1);
+        assert_eq!(dispute.rounds.get(0).unwrap().submitter, freelancer);
+    }
+
+    #[test]
+    fn test_respond_to_dispute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = setup_job_with_single_milestone(
+            &env,
+            &client,
+            &client_addr,
+            &freelancer,
+            "job-disp-rsp",
+            1000i128,
+        );
+
+        // Freelancer initiates
+        let evidence1 = BytesN::from_array(&env, &[1u8; 32]);
+        client.initiate_dispute(&freelancer, &job_id, &0u32, &evidence1);
+
+        // Client responds
+        let evidence2 = BytesN::from_array(&env, &[2u8; 32]);
+        client.respond_to_dispute(&client_addr, &job_id, &0u32, &evidence2);
+
+        let dispute = client
+            .get_dispute(&job_id, &0u32)
+            .expect("Dispute should exist");
+        assert_eq!(dispute.rounds.len(), 2);
+        assert_eq!(dispute.rounds.get(0).unwrap().submitter, freelancer);
+        assert_eq!(dispute.rounds.get(1).unwrap().submitter, client_addr);
+        // MAX_DISPUTE_ROUNDS is 3, and we have 2, so still awaiting response
+        assert_eq!(dispute.status, DisputeStatus::AwaitingResponse);
+    }
+
+    #[test]
+    fn test_resolve_after_rounds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = setup_job_with_single_milestone(
+            &env,
+            &client,
+            &client_addr,
+            &freelancer,
+            "job-disp-resolve",
+            1000i128,
+        );
+
+        // Both parties submit evidence (2 rounds)
+        let evidence1 = BytesN::from_array(&env, &[1u8; 32]);
+        client.initiate_dispute(&freelancer, &job_id, &0u32, &evidence1);
+        let evidence2 = BytesN::from_array(&env, &[2u8; 32]);
+        client.respond_to_dispute(&client_addr, &job_id, &0u32, &evidence2);
+
+        // Admin can now resolve (both parties have submitted)
+        client.resolve_milestone_dispute(&signers1(&env, &admin), &job_id, &0u32, &true);
+
+        let job = client.get_job(&job_id).unwrap();
+        assert_eq!(job.status, JobStatus::Completed);
+        assert!(job.milestones.get(0).unwrap().released);
+
+        // Dispute record should be preserved with Resolved status
+        let resolved_dispute = client
+            .get_dispute(&job_id, &0u32)
+            .expect("Dispute should still exist after resolution");
+        assert_eq!(resolved_dispute.status, DisputeStatus::Resolved);
+        assert_eq!(resolved_dispute.rounds.len(), 2);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Dispute resolution requires both parties to submit evidence OR a timeout"
+    )]
+    fn test_resolve_before_rounds_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = setup_job_with_single_milestone(
+            &env,
+            &client,
+            &client_addr,
+            &freelancer,
+            "job-disp-early",
+            1000i128,
+        );
+
+        // Initiate but don't respond yet
+        let evidence1 = BytesN::from_array(&env, &[1u8; 32]);
+        client.initiate_dispute(&freelancer, &job_id, &0u32, &evidence1);
+
+        // Admin tries to resolve before the other party responds — should panic
+        client.resolve_milestone_dispute(&signers1(&env, &admin), &job_id, &0u32, &true);
+    }
+
+    #[test]
+    fn test_timeout_dispute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = setup_job_with_single_milestone(
+            &env,
+            &client,
+            &client_addr,
+            &freelancer,
+            "job-disp-to",
+            1000i128,
+        );
+
+        // Freelancer initiates
+        let evidence1 = BytesN::from_array(&env, &[1u8; 32]);
+        client.initiate_dispute(&freelancer, &job_id, &0u32, &evidence1);
+
+        // Advance ledger past the response window
+        let now = env.ledger().sequence();
+        env.ledger()
+            .set_sequence_number(now + DISPUTE_RESPONSE_WINDOW + 1);
+
+        // Anyone can timeout
+        client.timeout_dispute(&job_id, &0u32);
+
+        let dispute = client
+            .get_dispute(&job_id, &0u32)
+            .expect("Dispute should exist");
+        assert_eq!(dispute.status, DisputeStatus::UnderReview);
+    }
+
+    #[test]
+    #[should_panic(expected = "Maximum dispute rounds reached")]
+    fn test_max_rounds_enforced() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = setup_job_with_single_milestone(
+            &env,
+            &client,
+            &client_addr,
+            &freelancer,
+            "job-max-rnds",
+            1000i128,
+        );
+
+        // Round 1: freelancer initiates
+        client.initiate_dispute(&freelancer, &job_id, &0u32, &BytesN::from_array(&env, &[1u8; 32]));
+        // Round 2: client responds
+        client.respond_to_dispute(&client_addr, &job_id, &0u32, &BytesN::from_array(&env, &[2u8; 32]));
+        // Round 3: freelancer surrebuts
+        client.respond_to_dispute(&freelancer, &job_id, &0u32, &BytesN::from_array(&env, &[3u8; 32]));
+
+        // MAX_DISPUTE_ROUNDS is 3, so this should panic
+        client.respond_to_dispute(&client_addr, &job_id, &0u32, &BytesN::from_array(&env, &[4u8; 32]));
+    }
+
+    #[test]
+    fn test_dispute_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = setup_job_with_single_milestone(
+            &env,
+            &client,
+            &client_addr,
+            &freelancer,
+            "job-hist",
+            1000i128,
+        );
+
+        // Initiate and respond
+        let ev1 = BytesN::from_array(&env, &[10u8; 32]);
+        let ev2 = BytesN::from_array(&env, &[20u8; 32]);
+        client.initiate_dispute(&freelancer, &job_id, &0u32, &ev1);
+        client.respond_to_dispute(&client_addr, &job_id, &0u32, &ev2);
+
+        // Query dispute history
+        let dispute = client
+            .get_dispute(&job_id, &0u32)
+            .expect("Dispute should be queryable");
+
+        assert_eq!(dispute.milestone_index, 0);
+        assert_eq!(dispute.initiator, freelancer);
+        assert_eq!(dispute.rounds.len(), 2);
+
+        // Check first round
+        let r0 = dispute.rounds.get(0).unwrap();
+        assert_eq!(r0.submitter, freelancer);
+        assert_eq!(r0.evidence_hash, ev1);
+
+        // Check second round
+        let r1 = dispute.rounds.get(1).unwrap();
+        assert_eq!(r1.submitter, client_addr);
+        assert_eq!(r1.evidence_hash, ev2);
+
+        // Non-existent dispute returns None
+        assert!(client.get_dispute(&String::from_str(&env, "no-such-job"), &0u32).is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "Initiator must be the client or freelancer on the job")]
+    fn test_initiate_dispute_not_party_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        let job_id = setup_job_with_single_milestone(
+            &env,
+            &client,
+            &client_addr,
+            &freelancer,
+            "job-stranger",
+            1000i128,
+        );
+
+        // Stranger tries to initiate dispute
+        client.initiate_dispute(
+            &stranger,
+            &job_id,
+            &0u32,
+            &BytesN::from_array(&env, &[1u8; 32]),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Responder cannot be the same as the last round submitter")]
+    fn test_same_party_cannot_respond_twice() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = setup_job_with_single_milestone(
+            &env,
+            &client,
+            &client_addr,
+            &freelancer,
+            "job-same-responder",
+            1000i128,
+        );
+
+        // Freelancer initiates
+        client.initiate_dispute(&freelancer, &job_id, &0u32, &BytesN::from_array(&env, &[1u8; 32]));
+
+        // Freelancer tries to respond again (same party as last submitter) — should panic
+        client.respond_to_dispute(&freelancer, &job_id, &0u32, &BytesN::from_array(&env, &[2u8; 32]));
     }
 
     #[cfg(feature = "oracle-escrow")]
