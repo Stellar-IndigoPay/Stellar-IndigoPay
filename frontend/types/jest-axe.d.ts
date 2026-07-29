@@ -32,3 +32,15 @@ declare module "jest-axe" {
 
   export const toHaveNoViolations: () => void;
 }
+
+/**
+ * Register the custom matcher on Jest's global Matchers interface so
+ * `expect(results).toHaveNoViolations()` type-checks in test files.
+ * (jest.setup.ts wires the runtime implementation via expect.extend.)
+ */
+declare namespace jest {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  interface Matchers<R> {
+    toHaveNoViolations(): R;
+  }
+}

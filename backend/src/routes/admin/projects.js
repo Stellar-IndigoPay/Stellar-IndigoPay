@@ -7,6 +7,7 @@ const redis = require("../../services/redis");
 const { adminRequired } = require("../../middleware/auth");
 const { logAdminAction } = require("../../services/audit");
 const { mapProjectRow } = require("../../services/store");
+const { sendAppError } = require("../../errors");
 
 const PROJECTS_LIST_CACHE_PREFIX = "projects:list:";
 const VALID_STATUSES = ["active", "completed", "paused", "inactive"];
@@ -123,7 +124,7 @@ router.get("/", async (req, res, next) => {
 router.get("/:id", async (req, res, next) => {
   try {
     const result = await pool.query("SELECT * FROM projects WHERE id = $1", [req.params.id]);
-    if (!result.rows[0]) return res.status(404).json({ error: "Project not found" });
+    if (!result.rows[0]) return sendAppError(res, "PROJECT_NOT_FOUND");
     return res.json({ success: true, data: mapAdminProject(result.rows[0]) });
   } catch (error) {
     next(error);
@@ -133,7 +134,9 @@ router.get("/:id", async (req, res, next) => {
 /** PATCH /api/admin/projects/:id updates administrative project fields. */
 router.patch("/:id", async (req, res, next) => {
   const validationError = validatePatch(req.body);
-  if (validationError) return res.status(400).json({ error: validationError });
+  if (validationError) {
+    return sendAppError(res, "VALIDATION_ERROR", { detail: validationError });
+  }
   try {
     const actor = actorFor(req);
     const values = [];
@@ -158,7 +161,7 @@ router.patch("/:id", async (req, res, next) => {
     const result = await pool.query(
       `UPDATE projects SET ${updates.join(", ")} WHERE id = $${values.length} RETURNING *`, values,
     );
-    if (!result.rows[0]) return res.status(404).json({ error: "Project not found" });
+    if (!result.rows[0]) return sendAppError(res, "PROJECT_NOT_FOUND");
     await clearProjectCache();
     await logAdminAction({ actor, action: "project.update", targetType: "project", targetId: req.params.id, metadata: { changes: req.body }, ipAddress: ipFor(req) });
     return res.json({ success: true, data: mapAdminProject(result.rows[0]) });
@@ -175,7 +178,7 @@ router.delete("/:id", async (req, res, next) => {
       "UPDATE projects SET status = 'inactive', deactivated_at = NOW(), deactivated_by = $1, updated_at = NOW() WHERE id = $2 RETURNING *",
       [actor, req.params.id],
     );
-    if (!result.rows[0]) return res.status(404).json({ error: "Project not found" });
+    if (!result.rows[0]) return sendAppError(res, "PROJECT_NOT_FOUND");
     await clearProjectCache();
     await logAdminAction({ actor, action: "project.deactivate", targetType: "project", targetId: req.params.id, metadata: {}, ipAddress: ipFor(req) });
     return res.json({ success: true, data: mapAdminProject(result.rows[0]) });
@@ -191,11 +194,28 @@ router.delete("/:id", async (req, res, next) => {
 router.post("/batch", async (req, res, next) => {
   const { projectIds, status, co2OffsetKg } = req.body || {};
   if (!Array.isArray(projectIds) || !projectIds.length || projectIds.length > 500 || !projectIds.every((id) => typeof id === "string" && id)) {
-    return res.status(400).json({ error: "projectIds must be an array of 1 to 500 project IDs" });
+    return sendAppError(res, "VALIDATION_ERROR", {
+      field: "projectIds",
+      detail: "projectIds must be an array of 1 to 500 project IDs",
+    });
   }
-  if (status === undefined && co2OffsetKg === undefined) return res.status(400).json({ error: "Provide status and/or co2OffsetKg" });
-  if (status !== undefined && !validStatus(status)) return res.status(400).json({ error: `status must be one of: ${VALID_STATUSES.join(", ")}` });
-  if (co2OffsetKg !== undefined && (!Number.isInteger(co2OffsetKg) || co2OffsetKg < 0)) return res.status(400).json({ error: "co2OffsetKg must be a non-negative integer" });
+  if (status === undefined && co2OffsetKg === undefined) {
+    return sendAppError(res, "VALIDATION_ERROR", {
+      detail: "Provide status and/or co2OffsetKg",
+    });
+  }
+  if (status !== undefined && !validStatus(status)) {
+    return sendAppError(res, "VALIDATION_ERROR", {
+      field: "status",
+      detail: `status must be one of: ${VALID_STATUSES.join(", ")}`,
+    });
+  }
+  if (co2OffsetKg !== undefined && (!Number.isInteger(co2OffsetKg) || co2OffsetKg < 0)) {
+    return sendAppError(res, "VALIDATION_ERROR", {
+      field: "co2OffsetKg",
+      detail: "co2OffsetKg must be a non-negative integer",
+    });
+  }
 
   const client = await pool.connect();
   try {
@@ -225,7 +245,9 @@ router.post("/batch", async (req, res, next) => {
     );
     if (result.rows.length !== uniqueIds.length) {
       await client.query("ROLLBACK");
-      return res.status(404).json({ error: "One or more projects were not found" });
+      return sendAppError(res, "PROJECT_NOT_FOUND", {
+        detail: "One or more projects were not found",
+      });
     }
     await client.query("COMMIT");
     await clearProjectCache();

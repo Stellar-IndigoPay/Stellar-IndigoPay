@@ -22,6 +22,7 @@ const express = require("express");
 const router = express.Router();
 const pool = require("../../db/pool");
 const { adminRequired } = require("../../middleware/auth");
+const { sendAppError } = require("../../errors");
 
 // All SQL below is built from fixed SQL fragments with $N placeholders;
 // every user-supplied value is passed via the parameterized `values` array
@@ -144,8 +145,8 @@ router.get("/export/csv", adminRequired, async (req, res, next) => {
     const limiter = checkExportRateLimit(adminKey);
     if (!limiter.allowed) {
       res.set("Retry-After", String(limiter.retryAfterSeconds));
-      return res.status(429).json({
-        error: "Export rate limit exceeded — 1 export per 5 minutes per admin.",
+      return sendAppError(res, "RATE_LIMITED", {
+        detail: "Export rate limit exceeded — 1 export per 5 minutes per admin.",
         retryAfter: limiter.retryAfterSeconds,
       });
     }
@@ -176,8 +177,8 @@ router.get("/export/json", adminRequired, async (req, res, next) => {
     const limiter = checkExportRateLimit(adminKey);
     if (!limiter.allowed) {
       res.set("Retry-After", String(limiter.retryAfterSeconds));
-      return res.status(429).json({
-        error: "Export rate limit exceeded — 1 export per 5 minutes per admin.",
+      return sendAppError(res, "RATE_LIMITED", {
+        detail: "Export rate limit exceeded — 1 export per 5 minutes per admin.",
         retryAfter: limiter.retryAfterSeconds,
       });
     }

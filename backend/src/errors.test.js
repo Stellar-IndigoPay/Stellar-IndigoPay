@@ -61,6 +61,10 @@ describe("ERROR_CODES", () => {
       status: 429,
       message: "Too many requests",
     });
+    expect(ERROR_CODES.CONFLICT).toEqual({
+      status: 409,
+      message: "Resource conflict",
+    });
     expect(ERROR_CODES.RPC_ERROR).toEqual({
       status: 502,
       message: "Soroban RPC unavailable",

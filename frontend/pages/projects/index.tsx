@@ -16,6 +16,7 @@ import { PROJECT_CATEGORIES, CATEGORY_ICONS } from "@/utils/format";
 import type { ClimateProject } from "@/utils/types";
 import { useAutocomplete } from "@/hooks/useAutocomplete";
 import { trackEvent } from "@/lib/analytics";
+import EmptyState from "@/components/EmptyState";
 import clsx from "clsx";
 
 const ProjectComparison = dynamic(
@@ -584,27 +585,29 @@ export default function ProjectsPage() {
               ))}
             </div>
           ) : projects.length === 0 ? (
-            <div className="card text-center py-16">
-              <p className="text-4xl mb-3">🌿</p>
-              <p className="font-display text-xl text-forest-900 mb-2">
-                {hasActiveFilters
+            <EmptyState
+              variant={hasActiveFilters ? "search" : "empty"}
+              title={
+                hasActiveFilters
                   ? "No projects match your filters"
-                  : "No projects available yet"}
-              </p>
-              <p className="text-[#5a7a5a] dark:text-[#8aaa8a] text-sm font-body mb-4">
-                {hasActiveFilters
+                  : "No projects available yet"
+              }
+              description={
+                hasActiveFilters
                   ? "Try adjusting your search or filters."
-                  : "Check back soon, or apply to list a project."}
-              </p>
-              {hasActiveFilters && (
-                <button
-                  onClick={clearAllFilters}
-                  className="btn-secondary text-sm py-2 px-4"
-                >
-                  Clear filters
-                </button>
-              )}
-            </div>
+                  : "Check back soon, or apply to list a project."
+              }
+              action={
+                hasActiveFilters ? (
+                  <button
+                    onClick={clearAllFilters}
+                    className="btn-secondary text-sm py-2 px-4"
+                  >
+                    Clear filters
+                  </button>
+                ) : undefined
+              }
+            />
           ) : (
             <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {projects.map((p) => (

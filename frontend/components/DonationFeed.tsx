@@ -8,6 +8,7 @@ import { formatXLM, timeAgo, shortenAddress } from "@/utils/format";
 import { explorerUrl, streamProjectPayments } from "@/lib/stellar";
 import type { Donation } from "@/utils/types";
 import { SkeletonList } from "./Skeleton";
+import EmptyState from "./EmptyState";
 
 interface DonationFeedProps {
   projectId: string;
@@ -133,9 +134,13 @@ export default function DonationFeed({
             Listening for live donationsâ€¦
           </div>
         )}
-        <p className="text-center text-[#475569] dark:text-[#94A3B8] text-sm py-6 font-body">
-          No donations yet â€” be the first! ðŸŒ±
-        </p>
+        <EmptyState
+          variant="empty"
+          title="No donations yet"
+          description="Be the first to support this project!"
+          className="py-6"
+          headingLevel="h3"
+        />
       </div>
     );
 

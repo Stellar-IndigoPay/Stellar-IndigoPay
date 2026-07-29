@@ -137,6 +137,10 @@ describe("GET /api/admin/audit-log/export/json", () => {
       .get("/api/admin/audit-log/export/json")
       .set("Authorization", `Bearer ${token}`);
     expect(second.status).toBe(429);
-    expect(second.body.retryAfter).toBeGreaterThan(0);
+    expect(second.body.error).toMatchObject({
+      code: "RATE_LIMITED",
+      retryAfter: expect.any(Number),
+    });
+    expect(second.body.error.retryAfter).toBeGreaterThan(0);
   });
 });
