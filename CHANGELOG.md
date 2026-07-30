@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Tests
+
+* **contracts:** add unit and property-based fuzz tests for aggregate query helpers (closes #GF-aggregate-tests)
+  - Implement comprehensive unit tests inside `contracts/attestation-contract/src/fuzz_tests.rs` for `update_aggregates_on_record`, `update_aggregates_on_verify`, and `update_aggregates_on_revoke`
+  - Verify aggregates are zero-initialized initially (0 attestations case) and calculate correctly with 1 and multiple attestations (including same and different source chains)
+  - Add end-to-end integration and custom donor-project query filtering logic verification to assert sum and count calculations
+  - Implement property-based fuzz test `prop_aggregate_math_consistency` using `proptest` to verify mathematical invariant consistency over 100 test cases
+  - Ensure cargo formatting and clippy run clean with no warnings
+
 ### Features
 
 * **frontend:** announce `DonateForm` validation errors to screen readers (GrantFox OSS, grantfox GF-a11y-donate-form)
