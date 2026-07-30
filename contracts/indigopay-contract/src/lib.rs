@@ -239,6 +239,18 @@ pub struct ProjectMilestoneNFT {
 }
 /// One entry of an NFT metadata `attributes` array — a key/value pair such as
 /// `{ "trait_type": "Tier", "value": "Forest" }` (#438).
+///
+/// Gated to the builds that can actually read or write tier metadata. The slim
+/// `--no-default-features` build keeps `ImpactNFT.metadata_uri` (storage layout
+/// is not feature-dependent) but drops the metadata types and their generated
+/// XDR spec entries, which the 64 KB WASM budget has no room for.
+#[cfg(any(
+    feature = "impact",
+    feature = "donation",
+    feature = "usdc",
+    feature = "zk",
+    feature = "testutils"
+))]
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Attribute {
@@ -249,7 +261,14 @@ pub struct Attribute {
 ///
 /// Mirrors the fields wallets and marketplaces expect in the off-chain
 /// metadata JSON, so a client can render an NFT straight from the contract
-/// without dereferencing `uri` first.
+/// without dereferencing `uri` first. Gated like [`Attribute`].
+#[cfg(any(
+    feature = "impact",
+    feature = "donation",
+    feature = "usdc",
+    feature = "zk",
+    feature = "testutils"
+))]
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct NFTMetadata {
@@ -1757,6 +1776,13 @@ pub fn calculate_badge(total_stroops: i128) -> BadgeTier {
 /// Upper bound on any admin-supplied metadata string and on a resolved token
 /// URI. Bounds the stack buffer used by `UriBuf` and keeps the instance
 /// storage footprint of per-tier metadata predictable.
+#[cfg(any(
+    feature = "impact",
+    feature = "donation",
+    feature = "usdc",
+    feature = "zk",
+    feature = "testutils"
+))]
 const MAX_NFT_URI_LEN: usize = 256;
 /// Upper bound on the number of attributes stored for a single tier.
 #[cfg(feature = "impact")]
@@ -1765,11 +1791,25 @@ const MAX_NFT_ATTRIBUTES: u32 = 16;
 /// Fixed-capacity byte buffer for assembling a token URI without `alloc`.
 /// Every push is bounds-checked so a mis-sized base URI panics with a clear
 /// message rather than truncating the URI silently.
+#[cfg(any(
+    feature = "impact",
+    feature = "donation",
+    feature = "usdc",
+    feature = "zk",
+    feature = "testutils"
+))]
 struct UriBuf {
     buf: [u8; MAX_NFT_URI_LEN],
     len: usize,
 }
 
+#[cfg(any(
+    feature = "impact",
+    feature = "donation",
+    feature = "usdc",
+    feature = "zk",
+    feature = "testutils"
+))]
 impl UriBuf {
     fn new() -> Self {
         UriBuf {
@@ -1819,6 +1859,13 @@ fn tier_slug(tier: &BadgeTier) -> &'static [u8] {
     }
 }
 
+#[cfg(any(
+    feature = "impact",
+    feature = "donation",
+    feature = "usdc",
+    feature = "zk",
+    feature = "testutils"
+))]
 fn read_nft_base_uri(env: &Env) -> Option<String> {
     env.storage()
         .instance()
@@ -1872,6 +1919,7 @@ fn resolve_tier_uri(env: &Env, tier: &BadgeTier) -> String {
 
 /// Resolve the token URI for a project milestone NFT: `base_uri +
 /// "milestone/" + project_id + ".json"`. Empty when no base URI is set.
+#[cfg(feature = "impact")]
 fn resolve_project_nft_uri(env: &Env, project_id: &String) -> String {
     match read_nft_base_uri(env) {
         Some(base) => {
@@ -5358,6 +5406,13 @@ impl IndigoPayContract {
     /// Mint a project milestone NFT when a donor's cumulative donation to a
     /// specific project exceeds 100 XLM. Minting is idempotent-blocked: a second
     /// call for the same (donor, project_id) pair panics.
+    ///
+    /// Gated on `impact` alongside `has_nft` / `get_nft` and the tier metadata
+    /// endpoints — these three were the only NFT entrypoints still ungated, so
+    /// the slim `--no-default-features` build was carrying the whole
+    /// `ProjectMilestoneNFT` surface against its 64 KB budget. `impact` is a
+    /// default feature, so every shipped build is unaffected.
+    #[cfg(feature = "impact")]
     pub fn mint_project_nft(env: Env, donor: Address, project_id: String) {
         donor.require_auth();
         require_not_paused(&env);
@@ -5395,11 +5450,13 @@ impl IndigoPayContract {
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
+    #[cfg(feature = "impact")]
     pub fn has_project_nft(env: Env, donor: Address, project_id: String) -> bool {
         env.storage()
             .instance()
             .has(&DataKey::ProjectMilestoneNFT(project_id, donor))
     }
+    #[cfg(feature = "impact")]
     pub fn get_project_nft(env: Env, donor: Address, project_id: String) -> ProjectMilestoneNFT {
         env.storage()
             .instance()
