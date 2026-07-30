@@ -1,29 +1,37 @@
 use soroban_sdk::{symbol_short, Address, BytesN, Env, Symbol};
 
 pub fn emit_stealth_donation(
-    env: &Env,
-    donation_id: u64,
-    project_wallet: &Address,
+    e: &Env,
+    id: u64,
+    wallet: &Address,
     amount: i128,
-    ephemeral_pubkey: &BytesN<33>,
+    pubkey: &BytesN<33>,
     msg_hash: &BytesN<32>,
 ) {
-    let timestamp = env.ledger().timestamp();
-    env.events().publish(
-        (symbol_short!("StelthDn"), project_wallet.clone()),
-        (
-            donation_id,
-            amount,
-            ephemeral_pubkey.clone(),
-            msg_hash.clone(),
-            timestamp,
-        ),
+    let ts = e.ledger().timestamp();
+    e.events().publish(
+        (symbol_short!("StelthDn"), wallet.clone()),
+        (id, amount, pubkey.clone(), msg_hash.clone(), ts),
     );
 }
 
-pub fn emit_stealth_scan(env: &Env, project_wallet: &Address, donation_count: u32) {
-    env.events().publish(
-        (Symbol::new(env, "StealthScan"), project_wallet.clone()),
-        (donation_count, env.ledger().timestamp()),
+pub fn emit_stealth_scan(e: &Env, wallet: &Address, count: u32) {
+    e.events().publish(
+        (Symbol::new(e, "StealthScan"), wallet.clone()),
+        (count, e.ledger().timestamp()),
+    );
+}
+
+pub fn emit_pause_recurring(e: &Env, rec_id: u64, wallet: &Address) {
+    e.events().publish(
+        (symbol_short!("PauseRec"), wallet.clone()),
+        (rec_id, e.ledger().timestamp()),
+    );
+}
+
+pub fn emit_resume_recurring(e: &Env, rec_id: u64, wallet: &Address) {
+    e.events().publish(
+        (symbol_short!("ResumRec"), wallet.clone()),
+        (rec_id, e.ledger().timestamp()),
     );
 }

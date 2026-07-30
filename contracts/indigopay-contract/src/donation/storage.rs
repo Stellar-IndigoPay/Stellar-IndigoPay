@@ -1,6 +1,6 @@
 use soroban_sdk::{Address, Env, Vec};
 
-use crate::donation::types::{DataKey, StealthDonation};
+use crate::donation::types::{DataKey, RecurringDonation, StealthDonation};
 
 pub fn get_stealth_counter(env: &Env) -> u64 {
     env.storage()
@@ -44,4 +44,30 @@ pub fn get_project_donations(env: &Env, project: &Address) -> Vec<u64> {
         .persistent()
         .get(&DataKey::ProjectDonations(project.clone()))
         .unwrap_or(Vec::new(env))
+}
+
+pub fn get_recurring_counter(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::RecurringCounter)
+        .unwrap_or(0u64)
+}
+
+pub fn set_recurring_counter(env: &Env, counter: u64) {
+    env.storage()
+        .instance()
+        .set(&DataKey::RecurringCounter, &counter);
+}
+
+pub fn set_recurring_donation(env: &Env, id: u64, donation: &RecurringDonation) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::RecurringDonation(id), donation);
+}
+
+pub fn get_recurring_donation(env: &Env, id: u64) -> RecurringDonation {
+    env.storage()
+        .persistent()
+        .get(&DataKey::RecurringDonation(id))
+        .expect("recurring donation not found")
 }
