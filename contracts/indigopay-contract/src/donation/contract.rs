@@ -89,8 +89,9 @@ impl DonationContract {
         let mut donations = Vec::new(&env);
         for i in 0..donation_ids.len() {
             let id = donation_ids.get(i).unwrap();
-            let donation = get_stealth_donation(&env, id);
-            donations.push_back(donation);
+            if let Some(donation) = get_stealth_donation(&env, id) {
+                donations.push_back(donation);
+            }
         }
         emit_stealth_scan(&env, &project_wallet, donations.len());
         donations
@@ -149,7 +150,7 @@ mod tests {
             DonationContract::scan_stealth_donations(env, project_wallet, viewing_key)
         }
 
-        pub fn get_stealth_donation(env: Env, donation_id: u64) -> StealthDonation {
+        pub fn get_stealth_donation(env: Env, donation_id: u64) -> Option<StealthDonation> {
             crate::donation::storage::get_stealth_donation(&env, donation_id)
         }
     }
@@ -216,7 +217,7 @@ mod tests {
 
         assert_eq!(donation_id, 1u64);
 
-        let stored = client.get_stealth_donation(&1);
+        let stored = client.get_stealth_donation(&1).unwrap();
         assert_eq!(stored.amount, amount);
         assert_eq!(stored.project_wallet, project);
         assert_eq!(stored.ephemeral_pubkey, ephem);
@@ -302,6 +303,37 @@ mod tests {
 
         assert_eq!(donations.len(), 0);
         assert_stealth_scan_event(&env, &contract_id, &project, 0, 7_654_321);
+    }
+
+    #[test]
+    fn test_scan_with_missing_donation_is_graceful() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, TestHarness);
+        let client = TestHarnessClient::new(&env, &contract_id);
+
+        let donor1 = Address::generate(&env);
+        let donor2 = Address::generate(&env);
+        let project = Address::generate(&env);
+        let viewing_key = BytesN::from_array(&env, &[99u8; 32]);
+        let token = create_token(&env, &donor1, 10_000_000);
+        StellarAssetClient::new(&env, &token).mint(&donor2, &10_000_000);
+        let ephem1 = BytesN::from_array(&env, &[10u8; 33]);
+        let ephem2 = BytesN::from_array(&env, &[20u8; 33]);
+        let msg_hash = BytesN::from_array(&env, &[0u8; 32]);
+
+        client.donate_stealth(&donor1, &token, &ephem1, &project, &3_000_000, &msg_hash);
+        env.as_contract(&contract_id, || {
+            crate::donation::storage::add_project_donation(&env, &project, 999);
+        });
+        client.donate_stealth(&donor2, &token, &ephem2, &project, &7_000_000, &msg_hash);
+        assert!(client.get_stealth_donation(&999).is_none());
+
+        let donations = client.scan_stealth_donations(&project, &viewing_key);
+
+        assert_eq!(donations.len(), 2);
+        assert_eq!(donations.get(0).unwrap().amount, 3_000_000);
+        assert_eq!(donations.get(1).unwrap().amount, 7_000_000);
     }
 
     #[test]
