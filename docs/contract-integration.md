@@ -8,6 +8,7 @@ This guide enables third-party developers to integrate with the **Stellar-Indigo
 - [Contract Addresses](#contract-addresses)
 - [Core Concepts](#core-concepts)
 - [Recording Donations (Cross-Contract Calls)](#recording-donations-cross-contract-calls)
+- [Settling Cross-Chain Donations](#settling-cross-chain-donations)
 - [Querying Donor Statistics](#querying-donor-statistics)
 - [On-Chain Donation Receipts](#on-chain-donation-receipts)
 - [Badge Tiers & Thresholds](#badge-tiers--thresholds)
@@ -236,6 +237,126 @@ impl YourContract {
 If you're submitting a transaction from a frontend app or server, use TypeScript with the Stellar SDK:
 
 See [TypeScript Client Examples](#typescript-client-examples) below for a complete implementation.
+
+---
+
+## Settling Cross-Chain Donations
+
+Donations that originate on another chain (Ethereum, Polygon, …) are recorded on the **attestation contract**, which knows nothing about projects, donor badges, or the global CO₂ counter. `settle_attestation` is the bridge that credits a verified attestation into the main contract's donation stats, so bridged and Stellar-native donations share one set of totals.
+
+### Flow
+
+```
+relayer                        anyone
+   │                              │
+   ▼                              ▼
+attestation.record_attestation → attestation.verify_attestation → indigopay.settle_attestation
+        (Pending)                        (Verified)                    (donation stats updated)
+```
+
+1. The relayer watches the source chain and, after finality, calls `record_attestation(...)` on the attestation contract. The attestation is `Pending`.
+2. Anyone calls `verify_attestation(id)` once the proof checks out. The attestation becomes `Verified`.
+3. Anyone calls `settle_attestation(attestation_contract, attestation_id)` on the IndigoPay contract.
+
+### `settle_attestation`
+
+```rust
+pub fn settle_attestation(
+    env: Env,
+    attestation_contract: Address,  // address of the attestation contract to read from
+    attestation_id: u64,            // id returned by record_attestation
+);
+```
+
+The call makes a **read-only** cross-contract call to `attestation_contract.get_attestation(attestation_id)` and then applies the attestation's `amount_xlm` exactly as a native donation of the same size would be applied:
+
+| Effect | Value |
+| ------ | ----- |
+| `Project.total_raised` | `+ amount_xlm` |
+| `Project.donor_count` | `+ 1` on the donor's first donation to that project |
+| `DonorStats.total_donated` | `+ amount_xlm` |
+| `DonorStats.donation_count` | `+ 1` |
+| `DonorStats.co2_offset_grams` | `+ amount_xlm / STROOP * project.co2_per_xlm` |
+| `DonorStats.badge` | recalculated; an Impact NFT is minted on a tier upgrade |
+| `GlobalTotalRaised` / `GlobalCO2OffsetGrams` | `+ amount_xlm` / `+ co2_grams` |
+| `DonationRecord` | appended with currency symbol `XCHAIN` |
+
+No tokens move — the funds already settled on the source chain. The attestation contract's state is never mutated.
+
+### Rules
+
+- **Verified only.** A `Pending` attestation panics with `"Attestation is not verified"`; a `Revoked` one with `"Attestation was revoked"`.
+- **Settled once.** `SettlementKey::SettledAttestation(id)` is written before any donation effect, so a second call panics with `"Attestation already settled"`. Query it with `is_attestation_settled(attestation_id) -> bool`. The key lives on its own feature-gated enum rather than on `DataKey` so it stays out of the slim `--no-default-features` build that CI size-checks; the wire encoding is the same either way, since `#[contracttype]` encodes an enum value by variant name plus payload.
+- **Project must exist.** The attestation's `project_id` must match a registered project, or the call panics with `"Attestation project is not registered"`. A failed settlement writes nothing, so registering the project and retrying works.
+- **Permissionless.** There is nothing to gate — the relayer already authorised the underlying record, and each attestation can only ever be credited once. Anyone may pay the fee to push a settlement through.
+- **Pausable.** The contract-wide pause flag blocks settlement like every other donation-path write.
+
+### Cross-contract call pattern
+
+The IndigoPay contract declares only the read it needs and generates a typed client for it. Mirror this pattern if you call the attestation contract yourself — the `Attestation` and `AttestationStatus` layouts must match the attestation contract's field names and order exactly, since that is what the XDR encoding carries:
+
+```rust
+use soroban_sdk::{contractclient, contracttype, Address, Env, String};
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum AttestationStatus {
+    Pending,
+    Verified,
+    Revoked,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Attestation {
+    pub id: u64,
+    pub source_chain: String,
+    pub source_tx_hash: String,
+    pub donor: Address,
+    pub project_id: String,
+    pub amount_usd: i128,
+    pub amount_xlm: i128,
+    pub message_hash: u32,
+    pub status: AttestationStatus,
+    pub created_at_ledger: u32,
+    pub verified_at_ledger: u32,
+    pub created_by: Address,
+}
+
+#[contractclient(name = "AttestationClient")]
+pub trait AttestationInterface {
+    fn get_attestation(env: Env, id: u64) -> Attestation;
+}
+
+// At the call site:
+let attestation = AttestationClient::new(&env, &attestation_contract).get_attestation(&id);
+```
+
+### CEI ordering
+
+`settle_attestation` follows Checks-Effects-Interactions with the external call placed so that reentrancy cannot double-credit:
+
+1. **Checks (pre-call)** — pause flag, then a cheap `SettledAttestation` lookup to fail fast on an obvious replay.
+2. **Interaction** — the read-only `get_attestation` call. Nothing has been written yet, so a malicious `attestation_contract` that reenters here finds storage untouched.
+3. **Checks (post-call)** — status, positive amount, project registration, and a second `SettledAttestation` lookup. If a reentrant frame settled the id while the external call was in flight, this re-check panics and the whole transaction reverts.
+4. **Effects** — the settled marker is written *before* the donation effects, so any nested frame sees the guard.
+
+### TypeScript
+
+```ts
+const tx = new TransactionBuilder(account, { fee, networkPassphrase })
+  .addOperation(
+    indigopayContract.call(
+      "settle_attestation",
+      new Address(ATTESTATION_CONTRACT_ID).toScVal(),
+      nativeToScVal(attestationId, { type: "u64" })
+    )
+  )
+  .setTimeout(30)
+  .build();
+```
+
+Check `is_attestation_settled` first to skip attestations a previous run already bridged.
 
 ---
 
@@ -1163,3 +1284,4 @@ test("Generate and verify donation receipt", async () => {
 | Date       | Change                                         |
 | ---------- | ---------------------------------------------- |
 | 2026-07-24 | Added `On-Chain Donation Receipts` section with `generate_receipt` and `verify_receipt` functions and TypeScript examples |
+| 2026-07-30 | Added `Settling Cross-Chain Donations` section covering `settle_attestation`, `is_attestation_settled`, the attestation client pattern, and CEI ordering |
