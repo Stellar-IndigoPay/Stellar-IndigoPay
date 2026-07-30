@@ -9158,7 +9158,11 @@ mod tests {
             &String::from_str(&env, "ipfs://bafyimage/forest.png"),
             &attrs(
                 &env,
-                &[("Tier", "Forest"), ("Threshold", "500 XLM"), ("Soulbound", "true")],
+                &[
+                    ("Tier", "Forest"),
+                    ("Threshold", "500 XLM"),
+                    ("Soulbound", "true"),
+                ],
             ),
         );
         let metadata = client.get_tier_metadata(&BadgeTier::Forest);
@@ -9266,7 +9270,8 @@ mod tests {
         assert!(client.get_nft_metadata_base_uri().is_empty());
 
         // 2. Base URI only → base + slug + ".json", per tier.
-        client.set_nft_metadata_base_uri(&admin, &String::from_str(&env, "https://cdn.indigo/nft/"));
+        client
+            .set_nft_metadata_base_uri(&admin, &String::from_str(&env, "https://cdn.indigo/nft/"));
         assert_eq!(
             client.get_tier_metadata(&BadgeTier::Tree).uri,
             String::from_str(&env, "https://cdn.indigo/nft/tree.json")
