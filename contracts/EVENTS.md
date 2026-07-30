@@ -707,6 +707,36 @@ event — no tokens moved on Stellar.
 
 ---
 
+## 51. `nft_meta` (Impact NFT Metadata Updated)
+
+**Description**: Emitted when an admin updates Impact NFT display metadata —
+either the contract-wide base URI or the metadata/token URI of a single badge
+tier. The two forms are distinguished by topic arity: the base-URI form carries
+no tier topic.
+
+| Event Name | Topics                          | Data              | When Emitted                                                    |
+| ---------- | ------------------------------- | ----------------- | --------------------------------------------------------------- |
+| `nft_meta` | `["nft_meta", admin]`           | `base_uri: String` | When admin calls `set_nft_metadata_base_uri`                    |
+| `nft_meta` | `["nft_meta", admin, tier]`     | `uri: String`      | When admin calls `set_nft_metadata` or `set_nft_metadata_uri`   |
+
+`tier` is a `BadgeTier` (`Seedling`, `Tree`, `Forest`, `EarthGuardian`). The
+`uri` in the data is the tier's explicit token URI, which is empty when the
+tier resolves its URI from the base URI instead.
+
+Token URI resolution order, applied at read time:
+
+1. The tier's explicit URI, set via `set_nft_metadata_uri`.
+2. `base_uri + tier_slug + ".json"` — slugs are `seedling`, `tree`, `forest`,
+   `earth-guardian`.
+3. The URI stamped onto the NFT at mint time (`ImpactNFT.metadata_uri`).
+   `get_nft_metadata` only — `get_tier_metadata` takes no donor and has no
+   stored NFT to fall back to, so it goes straight from step 2 to step 4.
+4. The empty string, when no metadata has been configured.
+
+Project milestone NFTs resolve to `base_uri + "milestone/" + project_id + ".json"`.
+
+---
+
 ## Usage Notes
 
 - All events follow Soroban's standard event format: `topics: Vec<Val>`, `data: Val`.

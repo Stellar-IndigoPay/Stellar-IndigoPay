@@ -222,6 +222,15 @@ pub struct ImpactNFT {
     pub tier: BadgeTier,
     pub total_donated: i128,
     pub minted_at_ledger: u32,
+    /// Token URI resolved at mint time — points at the off-chain metadata
+    /// JSON that wallets and marketplaces render (#438).
+    ///
+    /// Appended (not inserted) so the wire-encoded layout stays
+    /// backward-compatible with any `ImpactNFT` already on chain before
+    /// this field existed. Values written by an older WASM decode with an
+    /// empty `metadata_uri`; `get_nft_metadata` re-resolves the URI from
+    /// the admin-configured tier metadata in that case.
+    pub metadata_uri: String,
 }
 /// Per-project milestone NFT awarded when a donor's cumulative donation to a
 /// single project exceeds 100 XLM. One NFT per (donor, project_id) pair.
@@ -233,6 +242,55 @@ pub struct ProjectMilestoneNFT {
     pub amount_donated: i128,
     pub co2_offset_grams: i128,
     pub minted_at_ledger: u32,
+    /// Token URI resolved at mint time. Appended for backward
+    /// compatibility — see `ImpactNFT::metadata_uri` (#438).
+    pub metadata_uri: String,
+}
+/// One entry of an NFT metadata `attributes` array — a key/value pair such as
+/// `{ "trait_type": "Tier", "value": "Forest" }` (#438).
+///
+/// Gated to the builds that can actually read or write tier metadata. The slim
+/// `--no-default-features` build keeps `ImpactNFT.metadata_uri` (storage layout
+/// is not feature-dependent) but drops the metadata types and their generated
+/// XDR spec entries, which the 64 KB WASM budget has no room for.
+#[cfg(any(
+    feature = "impact",
+    feature = "donation",
+    feature = "recurring",
+    feature = "usdc",
+    feature = "zk",
+    feature = "testutils"
+))]
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Attribute {
+    pub trait_type: String,
+    pub value: String,
+}
+/// Standard display metadata for an Impact NFT tier (#438).
+///
+/// Mirrors the fields wallets and marketplaces expect in the off-chain
+/// metadata JSON, so a client can render an NFT straight from the contract
+/// without dereferencing `uri` first. Gated like [`Attribute`].
+#[cfg(any(
+    feature = "impact",
+    feature = "donation",
+    feature = "recurring",
+    feature = "usdc",
+    feature = "zk",
+    feature = "testutils"
+))]
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct NFTMetadata {
+    pub name: String,
+    pub description: String,
+    /// Image reference (`ipfs://…`, `https://…`, or a data URI).
+    pub image: String,
+    /// Resolved token URI. Empty when neither an explicit per-tier URI nor a
+    /// base URI has been configured.
+    pub uri: String,
+    pub attributes: Vec<Attribute>,
 }
 /// A community voting proposal to verify a project.
 #[cfg(feature = "governance")]
@@ -711,6 +769,12 @@ pub enum DataKey {
     CampaignEscrowMilestones(String),
     /// Escrow job ID for a project's campaign: (project_id) -> String.
     CampaignEscrowJobId(String),
+    /// Base URI used to construct token URIs when a tier has no explicit
+    /// URI of its own — e.g. `ipfs://bafy…/`. Resolution appends the tier
+    /// slug plus `.json` (#438).
+    NFTMetadataBaseURI,
+    /// Admin-configured display metadata for one badge tier (#438).
+    NFTMetadata(BadgeTier),
 }
 
 /// Storage keys for cross-chain attestation settlement (#439).
@@ -1805,6 +1869,185 @@ pub fn calculate_badge(total_stroops: i128) -> BadgeTier {
         BadgeTier::None
     }
 }
+// ─── Impact NFT metadata (#438) ───────────────────────────────────────────
+/// Upper bound on any admin-supplied metadata string and on a resolved token
+/// URI. Bounds the stack buffer used by `UriBuf` and keeps the instance
+/// storage footprint of per-tier metadata predictable.
+#[cfg(any(
+    feature = "impact",
+    feature = "donation",
+    feature = "recurring",
+    feature = "usdc",
+    feature = "zk",
+    feature = "testutils"
+))]
+const MAX_NFT_URI_LEN: usize = 256;
+/// Upper bound on the number of attributes stored for a single tier.
+#[cfg(feature = "impact")]
+const MAX_NFT_ATTRIBUTES: u32 = 16;
+
+/// Fixed-capacity byte buffer for assembling a token URI without `alloc`.
+/// Every push is bounds-checked so a mis-sized base URI panics with a clear
+/// message rather than truncating the URI silently.
+#[cfg(any(
+    feature = "impact",
+    feature = "donation",
+    feature = "recurring",
+    feature = "usdc",
+    feature = "zk",
+    feature = "testutils"
+))]
+struct UriBuf {
+    buf: [u8; MAX_NFT_URI_LEN],
+    len: usize,
+}
+
+#[cfg(any(
+    feature = "impact",
+    feature = "donation",
+    feature = "recurring",
+    feature = "usdc",
+    feature = "zk",
+    feature = "testutils"
+))]
+impl UriBuf {
+    fn new() -> Self {
+        UriBuf {
+            buf: [0u8; MAX_NFT_URI_LEN],
+            len: 0,
+        }
+    }
+    fn reserve(&mut self, extra: usize) -> usize {
+        let start = self.len;
+        let end = start.checked_add(extra).expect("overflow");
+        if end > MAX_NFT_URI_LEN {
+            panic!("Resolved token URI too long");
+        }
+        self.len = end;
+        start
+    }
+    fn push_slice(&mut self, s: &[u8]) {
+        let start = self.reserve(s.len());
+        self.buf[start..self.len].copy_from_slice(s);
+    }
+    fn push_string(&mut self, s: &String) {
+        let start = self.reserve(s.len() as usize);
+        s.copy_into_slice(&mut self.buf[start..self.len]);
+    }
+    fn finish(&self, env: &Env) -> String {
+        String::from_bytes(env, &self.buf[..self.len])
+    }
+}
+
+/// Stable, lowercase path segment for a badge tier. Used to build tier token
+/// URIs from the base URI, so `ipfs://bafy…/` becomes
+/// `ipfs://bafy…/forest.json` for `BadgeTier::Forest`.
+#[cfg(any(
+    feature = "impact",
+    feature = "donation",
+    feature = "recurring",
+    feature = "usdc",
+    feature = "zk",
+    feature = "testutils"
+))]
+fn tier_slug(tier: &BadgeTier) -> &'static [u8] {
+    match tier {
+        BadgeTier::None => b"none",
+        BadgeTier::Seedling => b"seedling",
+        BadgeTier::Tree => b"tree",
+        BadgeTier::Forest => b"forest",
+        BadgeTier::EarthGuardian => b"earth-guardian",
+    }
+}
+
+#[cfg(any(
+    feature = "impact",
+    feature = "donation",
+    feature = "recurring",
+    feature = "usdc",
+    feature = "zk",
+    feature = "testutils"
+))]
+fn read_nft_base_uri(env: &Env) -> Option<String> {
+    env.storage()
+        .instance()
+        .get(&DataKey::NFTMetadataBaseURI)
+        .filter(|uri: &String| !uri.is_empty())
+}
+
+#[cfg(any(
+    feature = "impact",
+    feature = "donation",
+    feature = "recurring",
+    feature = "usdc",
+    feature = "zk",
+    feature = "testutils"
+))]
+fn read_tier_metadata(env: &Env, tier: &BadgeTier) -> Option<NFTMetadata> {
+    env.storage()
+        .instance()
+        .get(&DataKey::NFTMetadata(tier.clone()))
+}
+
+/// Resolve the token URI for an Impact NFT tier.
+///
+/// Precedence: the explicit per-tier URI set via `set_nft_metadata_uri`,
+/// then `base_uri + tier_slug + ".json"`, then the empty string when neither
+/// is configured. Callers persist the result on the NFT at mint time; reads
+/// re-resolve so metadata configured after a mint still surfaces.
+#[cfg(any(
+    feature = "impact",
+    feature = "donation",
+    feature = "recurring",
+    feature = "usdc",
+    feature = "zk",
+    feature = "testutils"
+))]
+fn resolve_tier_uri(env: &Env, tier: &BadgeTier) -> String {
+    if let Some(meta) = read_tier_metadata(env, tier) {
+        if !meta.uri.is_empty() {
+            return meta.uri;
+        }
+    }
+    match read_nft_base_uri(env) {
+        Some(base) => {
+            let mut buf = UriBuf::new();
+            buf.push_string(&base);
+            buf.push_slice(tier_slug(tier));
+            buf.push_slice(b".json");
+            buf.finish(env)
+        }
+        None => String::from_str(env, ""),
+    }
+}
+
+/// Resolve the token URI for a project milestone NFT: `base_uri +
+/// "milestone/" + project_id + ".json"`. Empty when no base URI is set.
+#[cfg(feature = "donation")]
+fn resolve_project_nft_uri(env: &Env, project_id: &String) -> String {
+    match read_nft_base_uri(env) {
+        Some(base) => {
+            let mut buf = UriBuf::new();
+            buf.push_string(&base);
+            buf.push_slice(b"milestone/");
+            buf.push_string(project_id);
+            buf.push_slice(b".json");
+            buf.finish(env)
+        }
+        None => String::from_str(env, ""),
+    }
+}
+
+#[cfg(feature = "impact")]
+fn validate_metadata_string(value: &String, allow_empty: bool) {
+    if !allow_empty && value.is_empty() {
+        panic!("Metadata field must not be empty");
+    }
+    if value.len() as usize > MAX_NFT_URI_LEN {
+        panic!("Metadata field too long");
+    }
+}
+
 /// Reject donations when the project's campaign is not accepting them.
 #[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
 fn require_campaign_accepts_donation(project: &Project, current_ledger: u32) {
@@ -2022,6 +2265,7 @@ fn apply_donation_effects(
                 tier: donor_stats.badge.clone(),
                 total_donated: donor_stats.total_donated,
                 minted_at_ledger: env.ledger().sequence(),
+                metadata_uri: resolve_tier_uri(env, &donor_stats.badge),
             };
             env.storage().instance().set(&nft_key, &nft);
             env.events().publish(
@@ -3566,6 +3810,7 @@ impl IndigoPayContract {
                     tier: donor_stats.badge.clone(),
                     total_donated: donor_stats.total_donated,
                     minted_at_ledger: env.ledger().sequence(),
+                    metadata_uri: resolve_tier_uri(&env, &donor_stats.badge),
                 };
                 env.storage().instance().set(&nft_key, &nft);
                 env.events().publish(
@@ -3998,6 +4243,7 @@ impl IndigoPayContract {
                     tier: donor_stats.badge.clone(),
                     total_donated: donor_stats.total_donated,
                     minted_at_ledger: env.ledger().sequence(),
+                    metadata_uri: resolve_tier_uri(&env, &donor_stats.badge),
                 };
                 env.storage().instance().set(&nft_key, &nft);
                 env.events().publish(
@@ -5267,6 +5513,7 @@ impl IndigoPayContract {
             tier: tier.clone(),
             total_donated: stats.total_donated,
             minted_at_ledger: env.ledger().sequence(),
+            metadata_uri: resolve_tier_uri(&env, &tier),
         };
         env.storage().instance().set(&key, &nft);
         env.events()
@@ -5279,6 +5526,164 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .has(&DataKey::ImpactNFT(donor, tier))
+    }
+
+    #[cfg(feature = "impact")]
+    pub fn get_nft(env: Env, donor: Address, tier: BadgeTier) -> ImpactNFT {
+        env.storage()
+            .instance()
+            .get(&DataKey::ImpactNFT(donor, tier))
+            .expect("Impact NFT not found")
+    }
+    // ─── Impact NFT metadata standard (#438) ─────────────────────────────────
+    /// Admin sets the base URI that token URIs are constructed from.
+    ///
+    /// A tier without an explicit URI resolves to
+    /// `base_uri + tier_slug + ".json"`; a project milestone NFT resolves to
+    /// `base_uri + "milestone/" + project_id + ".json"`. Pass an empty string
+    /// to clear the base URI.
+    #[cfg(feature = "impact")]
+    pub fn set_nft_metadata_base_uri(env: Env, admin: Address, base_uri: String) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        validate_metadata_string(&base_uri, true);
+        env.storage()
+            .instance()
+            .set(&DataKey::NFTMetadataBaseURI, &base_uri);
+        env.events()
+            .publish((symbol_short!("nft_meta"), admin), base_uri);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    #[cfg(feature = "impact")]
+    pub fn get_nft_metadata_base_uri(env: Env) -> String {
+        env.storage()
+            .instance()
+            .get(&DataKey::NFTMetadataBaseURI)
+            .unwrap_or_else(|| String::from_str(&env, ""))
+    }
+
+    /// Admin configures the display metadata for one badge tier. Every NFT of
+    /// that tier — already minted or not — renders from this record, so a
+    /// single call updates the whole batch.
+    ///
+    /// The tier's explicit URI is preserved across calls; use
+    /// `set_nft_metadata_uri` to change it.
+    #[cfg(feature = "impact")]
+    pub fn set_nft_metadata(
+        env: Env,
+        admin: Address,
+        tier: BadgeTier,
+        name: String,
+        description: String,
+        image: String,
+        attributes: Vec<Attribute>,
+    ) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        if tier == BadgeTier::None {
+            panic!("Cannot set metadata for None tier");
+        }
+        validate_metadata_string(&name, false);
+        validate_metadata_string(&description, true);
+        validate_metadata_string(&image, true);
+        if attributes.len() > MAX_NFT_ATTRIBUTES {
+            panic!("Too many attributes");
+        }
+        for attribute in attributes.iter() {
+            validate_metadata_string(&attribute.trait_type, false);
+            validate_metadata_string(&attribute.value, true);
+        }
+        let uri = match read_tier_metadata(&env, &tier) {
+            Some(existing) => existing.uri,
+            None => String::from_str(&env, ""),
+        };
+        let metadata = NFTMetadata {
+            name,
+            description,
+            image,
+            uri,
+            attributes,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::NFTMetadata(tier.clone()), &metadata);
+        env.events()
+            .publish((symbol_short!("nft_meta"), admin, tier), metadata.uri);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Admin sets the token URI for every NFT in a tier at once.
+    ///
+    /// `nft_key` is the badge tier the URI applies to. Setting an explicit URI
+    /// overrides base-URI resolution for that tier; passing an empty string
+    /// clears the override and falls back to the base URI.
+    #[cfg(feature = "impact")]
+    pub fn set_nft_metadata_uri(env: Env, admin: Address, nft_key: BadgeTier, uri: String) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        if nft_key == BadgeTier::None {
+            panic!("Cannot set metadata for None tier");
+        }
+        validate_metadata_string(&uri, true);
+        let mut metadata = read_tier_metadata(&env, &nft_key).unwrap_or_else(|| NFTMetadata {
+            name: String::from_str(&env, ""),
+            description: String::from_str(&env, ""),
+            image: String::from_str(&env, ""),
+            uri: String::from_str(&env, ""),
+            attributes: Vec::new(&env),
+        });
+        metadata.uri = uri.clone();
+        env.storage()
+            .instance()
+            .set(&DataKey::NFTMetadata(nft_key.clone()), &metadata);
+        env.events()
+            .publish((symbol_short!("nft_meta"), admin, nft_key), uri);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Full display metadata for a donor's Impact NFT of the given tier.
+    ///
+    /// Panics when the donor holds no NFT for that tier. The returned `uri` is
+    /// resolved at read time — an NFT minted before any metadata was
+    /// configured still reports the current URI — and falls back to the URI
+    /// stored on the NFT itself when nothing is configured now.
+    #[cfg(feature = "impact")]
+    pub fn get_nft_metadata(env: Env, donor: Address, tier: BadgeTier) -> NFTMetadata {
+        let nft: ImpactNFT = env
+            .storage()
+            .instance()
+            .get(&DataKey::ImpactNFT(donor, tier.clone()))
+            .expect("Impact NFT not found");
+        let mut metadata = read_tier_metadata(&env, &tier).unwrap_or_else(|| NFTMetadata {
+            name: String::from_str(&env, ""),
+            description: String::from_str(&env, ""),
+            image: String::from_str(&env, ""),
+            uri: String::from_str(&env, ""),
+            attributes: Vec::new(&env),
+        });
+        let resolved = resolve_tier_uri(&env, &tier);
+        metadata.uri = if resolved.is_empty() {
+            nft.metadata_uri
+        } else {
+            resolved
+        };
+        metadata
+    }
+
+    /// Tier metadata without requiring a donor to own the NFT — for wallet and
+    /// marketplace previews of a tier that has not been earned yet.
+    #[cfg(feature = "impact")]
+    pub fn get_tier_metadata(env: Env, tier: BadgeTier) -> NFTMetadata {
+        let mut metadata = read_tier_metadata(&env, &tier).unwrap_or_else(|| NFTMetadata {
+            name: String::from_str(&env, ""),
+            description: String::from_str(&env, ""),
+            image: String::from_str(&env, ""),
+            uri: String::from_str(&env, ""),
+            attributes: Vec::new(&env),
+        });
+        metadata.uri = resolve_tier_uri(&env, &tier);
+        metadata
     }
     // ─── Project milestone NFT (#205) ────────────────────────────────────────
     /// Mint a project milestone NFT when a donor's cumulative donation to a
@@ -5313,6 +5718,7 @@ impl IndigoPayContract {
             amount_donated: proj_total,
             co2_offset_grams: co2_offset,
             minted_at_ledger: env.ledger().sequence(),
+            metadata_uri: resolve_project_nft_uri(&env, &project_id),
         };
         env.storage().instance().set(&nft_key, &nft);
         env.events().publish(
@@ -7538,6 +7944,7 @@ impl IndigoPayContract {
                     tier: donor_stats.badge.clone(),
                     total_donated: donor_stats.total_donated,
                     minted_at_ledger: env.ledger().sequence(),
+                    metadata_uri: resolve_tier_uri(&env, &donor_stats.badge),
                 };
                 env.storage().instance().set(&nft_key, &nft);
                 env.events().publish(
@@ -9176,6 +9583,283 @@ mod tests {
         let proposal = client.get_proposal(&pid);
         assert_eq!(proposal.votes_for, 10);
     }
+    // ─── Impact NFT metadata tests (#438) ────────────────────────────────────
+    /// Donate enough to reach a given badge tier, auto-minting its Impact NFT.
+    fn donate_to_tier(
+        env: &Env,
+        client: &IndigoPayContractClient<'static>,
+        pid: &String,
+        amount: i128,
+    ) -> Address {
+        let donor = Address::generate(env);
+        let token_admin = Address::generate(env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(env, &token).mint(&donor, &amount);
+        client.donate(&token, &donor, pid, &amount, &0u32);
+        donor
+    }
+
+    fn attrs(env: &Env, pairs: &[(&str, &str)]) -> Vec<Attribute> {
+        let mut v = Vec::new(env);
+        for (trait_type, value) in pairs {
+            v.push_back(Attribute {
+                trait_type: String::from_str(env, trait_type),
+                value: String::from_str(env, value),
+            });
+        }
+        v
+    }
+
+    #[test]
+    fn test_set_nft_metadata() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.set_nft_metadata(
+            &admin,
+            &BadgeTier::Forest,
+            &String::from_str(&env, "IndigoPay Forest Guardian"),
+            &String::from_str(&env, "Awarded for donating at least 500 XLM."),
+            &String::from_str(&env, "ipfs://bafyimage/forest.png"),
+            &attrs(
+                &env,
+                &[
+                    ("Tier", "Forest"),
+                    ("Threshold", "500 XLM"),
+                    ("Soulbound", "true"),
+                ],
+            ),
+        );
+        let metadata = client.get_tier_metadata(&BadgeTier::Forest);
+        assert_eq!(
+            metadata.name,
+            String::from_str(&env, "IndigoPay Forest Guardian")
+        );
+        assert_eq!(
+            metadata.image,
+            String::from_str(&env, "ipfs://bafyimage/forest.png")
+        );
+        assert_eq!(metadata.attributes.len(), 3);
+        assert_eq!(
+            metadata.attributes.get(0).unwrap().trait_type,
+            String::from_str(&env, "Tier")
+        );
+        assert_eq!(
+            metadata.attributes.get(2).unwrap().value,
+            String::from_str(&env, "true")
+        );
+        // No base URI and no explicit URI configured yet.
+        assert!(metadata.uri.is_empty());
+
+        // Metadata is per tier — an unconfigured tier stays empty.
+        let other = client.get_tier_metadata(&BadgeTier::Seedling);
+        assert!(other.name.is_empty());
+        assert_eq!(other.attributes.len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot set metadata for None tier")]
+    fn test_set_nft_metadata_rejects_none_tier() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.set_nft_metadata(
+            &admin,
+            &BadgeTier::None,
+            &String::from_str(&env, "Nothing"),
+            &String::from_str(&env, ""),
+            &String::from_str(&env, ""),
+            &Vec::new(&env),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_set_nft_metadata_requires_admin() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let stranger = Address::generate(&env);
+        client.set_nft_metadata(
+            &stranger,
+            &BadgeTier::Tree,
+            &String::from_str(&env, "Tree"),
+            &String::from_str(&env, ""),
+            &String::from_str(&env, ""),
+            &Vec::new(&env),
+        );
+    }
+
+    #[test]
+    fn test_get_nft_metadata() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.set_nft_metadata_base_uri(&admin, &String::from_str(&env, "ipfs://bafybase/"));
+        client.set_nft_metadata(
+            &admin,
+            &BadgeTier::Seedling,
+            &String::from_str(&env, "IndigoPay Seedling"),
+            &String::from_str(&env, "First 10 XLM donated."),
+            &String::from_str(&env, "ipfs://bafyimage/seedling.png"),
+            &attrs(&env, &[("Tier", "Seedling")]),
+        );
+        // 10 XLM auto-mints the Seedling Impact NFT.
+        let donor = donate_to_tier(&env, &client, &pid, 10 * STROOP);
+        assert!(client.has_nft(&donor, &BadgeTier::Seedling));
+
+        let metadata = client.get_nft_metadata(&donor, &BadgeTier::Seedling);
+        assert_eq!(metadata.name, String::from_str(&env, "IndigoPay Seedling"));
+        assert_eq!(
+            metadata.description,
+            String::from_str(&env, "First 10 XLM donated.")
+        );
+        assert_eq!(
+            metadata.image,
+            String::from_str(&env, "ipfs://bafyimage/seedling.png")
+        );
+        assert_eq!(
+            metadata.uri,
+            String::from_str(&env, "ipfs://bafybase/seedling.json")
+        );
+        assert_eq!(metadata.attributes.len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Impact NFT not found")]
+    fn test_get_nft_metadata_without_nft_panics() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let stranger = Address::generate(&env);
+        client.get_nft_metadata(&stranger, &BadgeTier::Forest);
+    }
+
+    #[test]
+    fn test_metadata_uri_resolution() {
+        let (env, _cid, client, admin, pid) = setup();
+        // 1. No base URI, no explicit URI → empty.
+        assert!(client.get_tier_metadata(&BadgeTier::Tree).uri.is_empty());
+        assert!(client.get_nft_metadata_base_uri().is_empty());
+
+        // 2. Base URI only → base + slug + ".json", per tier.
+        client
+            .set_nft_metadata_base_uri(&admin, &String::from_str(&env, "https://cdn.indigo/nft/"));
+        assert_eq!(
+            client.get_tier_metadata(&BadgeTier::Tree).uri,
+            String::from_str(&env, "https://cdn.indigo/nft/tree.json")
+        );
+        assert_eq!(
+            client.get_tier_metadata(&BadgeTier::EarthGuardian).uri,
+            String::from_str(&env, "https://cdn.indigo/nft/earth-guardian.json")
+        );
+
+        // 3. An explicit per-tier URI overrides the base URI for that tier only.
+        client.set_nft_metadata_uri(
+            &admin,
+            &BadgeTier::Tree,
+            &String::from_str(&env, "ipfs://bafyoverride/tree-v2.json"),
+        );
+        assert_eq!(
+            client.get_tier_metadata(&BadgeTier::Tree).uri,
+            String::from_str(&env, "ipfs://bafyoverride/tree-v2.json")
+        );
+        assert_eq!(
+            client.get_tier_metadata(&BadgeTier::Forest).uri,
+            String::from_str(&env, "https://cdn.indigo/nft/forest.json")
+        );
+
+        // 4. Clearing the override falls back to the base URI again.
+        client.set_nft_metadata_uri(&admin, &BadgeTier::Tree, &String::from_str(&env, ""));
+        assert_eq!(
+            client.get_tier_metadata(&BadgeTier::Tree).uri,
+            String::from_str(&env, "https://cdn.indigo/nft/tree.json")
+        );
+
+        // 5. Setting tier metadata preserves the explicit URI.
+        client.set_nft_metadata_uri(
+            &admin,
+            &BadgeTier::Tree,
+            &String::from_str(&env, "ipfs://bafykeep/tree.json"),
+        );
+        client.set_nft_metadata(
+            &admin,
+            &BadgeTier::Tree,
+            &String::from_str(&env, "IndigoPay Tree"),
+            &String::from_str(&env, ""),
+            &String::from_str(&env, ""),
+            &Vec::new(&env),
+        );
+        assert_eq!(
+            client.get_tier_metadata(&BadgeTier::Tree).uri,
+            String::from_str(&env, "ipfs://bafykeep/tree.json")
+        );
+
+        // 6. The URI is stamped onto the NFT at mint time.
+        let donor = donate_to_tier(&env, &client, &pid, 100 * STROOP);
+        assert_eq!(
+            client.get_nft(&donor, &BadgeTier::Tree).metadata_uri,
+            String::from_str(&env, "ipfs://bafykeep/tree.json")
+        );
+
+        // 7. Milestone NFTs resolve under the "milestone/" path.
+        client.mint_project_nft(&donor, &pid);
+        assert_eq!(
+            client.get_project_nft(&donor, &pid).metadata_uri,
+            String::from_str(&env, "https://cdn.indigo/nft/milestone/proj-001.json")
+        );
+    }
+
+    #[test]
+    fn test_backward_compatible_nft_storage() {
+        let (env, cid, client, admin, _pid) = setup();
+        let donor = Address::generate(&env);
+        // An Impact NFT as written before #438 existed: no metadata URI.
+        env.as_contract(&cid, || {
+            env.storage().instance().set(
+                &DataKey::ImpactNFT(donor.clone(), BadgeTier::Forest),
+                &ImpactNFT {
+                    owner: donor.clone(),
+                    tier: BadgeTier::Forest,
+                    total_donated: 500 * STROOP,
+                    minted_at_ledger: 1,
+                    metadata_uri: String::from_str(&env, ""),
+                },
+            );
+        });
+        // Pre-existing reads keep working untouched.
+        assert!(client.has_nft(&donor, &BadgeTier::Forest));
+        let nft = client.get_nft(&donor, &BadgeTier::Forest);
+        assert_eq!(nft.owner, donor);
+        assert_eq!(nft.total_donated, 500 * STROOP);
+        assert!(nft.metadata_uri.is_empty());
+
+        // Metadata configured after the mint still resolves for that NFT —
+        // no re-mint or storage rewrite required.
+        client.set_nft_metadata_base_uri(&admin, &String::from_str(&env, "ipfs://bafylate/"));
+        client.set_nft_metadata(
+            &admin,
+            &BadgeTier::Forest,
+            &String::from_str(&env, "IndigoPay Forest"),
+            &String::from_str(&env, "Legacy holder."),
+            &String::from_str(&env, "ipfs://bafylate/forest.png"),
+            &attrs(&env, &[("Tier", "Forest")]),
+        );
+        let metadata = client.get_nft_metadata(&donor, &BadgeTier::Forest);
+        assert_eq!(metadata.name, String::from_str(&env, "IndigoPay Forest"));
+        assert_eq!(
+            metadata.uri,
+            String::from_str(&env, "ipfs://bafylate/forest.json")
+        );
+        // The stored NFT itself is unchanged — resolution happens at read time.
+        assert!(client
+            .get_nft(&donor, &BadgeTier::Forest)
+            .metadata_uri
+            .is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "Resolved token URI too long")]
+    fn test_metadata_uri_resolution_rejects_oversized_uri() {
+        let (env, _cid, client, admin, _pid) = setup();
+        // 254 bytes of base URI + "tree.json" overflows the 256-byte buffer.
+        let long_base = String::from_bytes(&env, &[b'a'; 254]);
+        client.set_nft_metadata_base_uri(&admin, &long_base);
+        client.get_tier_metadata(&BadgeTier::Tree);
+    }
+
     // ─── Cross-chain attestation settlement (#439) ───────────────────────────
     //
     // These deploy the real attestation-contract next to this one rather than a
