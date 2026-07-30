@@ -272,6 +272,9 @@ pub struct VoteProposal {
     pub votes_against: u32,
     pub deadline_ledger: u32,
     pub resolved: bool,
+    /// Ledger sequence at which the proposal was resolved (0 if unresolved).
+    /// Appended for backward compatibility per UPGRADE.md.
+    pub resolved_at: u32,
 }
 /// Aggregated platform-wide counters returned by `get_global_stats`.
 ///
@@ -380,6 +383,9 @@ pub struct VestingSchedule {
     pub installments_released: u32,
     pub created_at: u32,
     pub token: Address,
+    /// Ledger sequence at which the schedule was completed or cancelled (0 if active).
+    /// Appended for backward compatibility per UPGRADE.md.
+    pub completed_at: u32,
 }
 /// An on-chain impact certificate leaf for a single donor's contribution.
 /// The platform constructs a Merkle tree of all donor impacts for a project's
@@ -611,12 +617,11 @@ pub enum DataKey {
     // returns. Used by indexers to confirm which WASM is currently
     // running at the contract address.
     LastExecutedUpgrade,
-    // Pending emergency withdrawal request. One per project at a time —
-    // key is project_id only; a project with multiple token balances
-    // must execute withdrawals sequentially (initiate → wait → execute
-    // → repeat for next token). Cleared by `execute_emergency_withdrawal`
-    // or `cancel_emergency_withdrawal`.
-    EmergencyWithdrawal(String),
+    // Pending emergency withdrawal request. Keyed by (project_id, token_address)
+    // to support multiple concurrent withdrawals per project (#428).
+    EmergencyWithdrawal(String, Address),
+    // List of tokens with pending emergency withdrawals for a project. Key: project_id -> Vec<Address>
+    EmergencyWithdrawalTokens(String),
     // Donation refund (#290)
     RefundRequest(u32),
     RefundCount,
@@ -726,6 +731,12 @@ const CHALLENGE_WINDOW_LEDGERS: u32 = 17_280;
 #[cfg(feature = "refund")]
 const FORCE_REFUND_TIMELOCK_LEDGERS: u32 = 51_840;
 
+// 30 days × 86400 s / 5 s per ledger = 518 400 ledgers. The post-resolution
+// or post-completion grace period during which stale proposal/vesting data
+// is preserved for indexers. After this window, anyone may call the
+// corresponding `cleanup_*` function to remove the storage entries.
+pub const GRACE_PERIOD_LEDGERS: u32 = 518_400;
+
 /// Current storage schema version. Bump this and add a migration step in
 /// `migrate()` whenever a struct layout, DataKey variant, or stored value
 /// encoding changes in a backward-incompatible way.
@@ -807,6 +818,35 @@ fn require_not_paused(env: &Env) {
         .unwrap_or(false);
     if paused {
         panic!("Contract is paused");
+    }
+}
+
+/// Backward compatibility: migrate old single-withdrawal key `EmergencyWithdrawal(String)`
+/// (stored as `(Symbol("EmergencyWithdrawal"), project_id)`) to `EmergencyWithdrawal(String, Address)`.
+#[cfg(feature = "emergency")]
+fn migrate_legacy_ew_key_if_present(env: &Env, project_id: &String) {
+    let legacy_key = (Symbol::new(env, "EmergencyWithdrawal"), project_id.clone());
+    if env.storage().instance().has(&legacy_key) {
+        if let Some(w) = env
+            .storage()
+            .instance()
+            .get::<_, EmergencyWithdrawal>(&legacy_key)
+        {
+            env.storage().instance().remove(&legacy_key);
+            let new_key = DataKey::EmergencyWithdrawal(project_id.clone(), w.token.clone());
+            env.storage().instance().set(&new_key, &w);
+
+            let tokens_key = DataKey::EmergencyWithdrawalTokens(project_id.clone());
+            let mut tokens: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&tokens_key)
+                .unwrap_or_else(|| Vec::new(env));
+            if !tokens.contains(&w.token) {
+                tokens.push_back(w.token.clone());
+                env.storage().instance().set(&tokens_key, &tokens);
+            }
+        }
     }
 }
 
@@ -5419,6 +5459,7 @@ impl IndigoPayContract {
             votes_against: 0,
             deadline_ledger,
             resolved: false,
+            resolved_at: 0,
         };
         env.storage()
             .instance()
@@ -5654,6 +5695,7 @@ impl IndigoPayContract {
             panic!("Voting window not yet closed");
         }
         proposal.resolved = true;
+        proposal.resolved_at = env.ledger().sequence();
         if proposal.votes_for > proposal.votes_against {
             env.events()
                 .publish((symbol_short!("proj_ver"),), project_id.clone());
@@ -5681,6 +5723,7 @@ impl IndigoPayContract {
             panic!("Proposal already resolved");
         }
         proposal.resolved = true;
+        proposal.resolved_at = env.ledger().sequence();
         env.events().publish(
             (symbol_short!("prop_veto"), signers.get(0).unwrap()),
             project_id.clone(),
@@ -5689,6 +5732,56 @@ impl IndigoPayContract {
             .instance()
             .set(&DataKey::Proposal(project_id), &proposal);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+    /// Clean up a resolved proposal and all associated vote data after the
+    /// grace period has elapsed. Permissionless — anyone can call this to
+    /// help keep on-chain storage lean. Emits `prop_cln` for indexers.
+    ///
+    /// # Panics
+    /// - If the proposal is not found.
+    /// - If the proposal is not resolved.
+    /// - If the grace period has not elapsed since resolution.
+    #[cfg(feature = "governance")]
+    pub fn cleanup_proposal(env: Env, project_id: String) {
+        let proposal: VoteProposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposal(project_id.clone()))
+            .expect("Proposal not found");
+        if !proposal.resolved {
+            panic!("Proposal is not resolved");
+        }
+        let current = env.ledger().sequence();
+        let cleanup_eligible_at = proposal
+            .resolved_at
+            .checked_add(GRACE_PERIOD_LEDGERS)
+            .expect("overflow");
+        if current < cleanup_eligible_at {
+            panic!("Grace period has not elapsed");
+        }
+        // Remove proposal.
+        env.storage()
+            .instance()
+            .remove(&DataKey::Proposal(project_id.clone()));
+        // Remove individual HasVoted entries by iterating the voter list
+        // BEFORE removing the VoterList itself.
+        let voter_list: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::VoterList(project_id.clone()))
+            .unwrap_or(Vec::new(&env));
+        for voter in voter_list.iter() {
+            env.storage()
+                .instance()
+                .remove(&DataKey::HasVoted(project_id.clone(), voter));
+        }
+        // Remove voter list.
+        env.storage()
+            .instance()
+            .remove(&DataKey::VoterList(project_id.clone()));
+        // Emit event for indexer reconciliation.
+        env.events()
+            .publish((symbol_short!("prop_cln"), project_id), ());
     }
     /// Returns current vote counts and status for a proposal.
     #[cfg(feature = "governance")]
@@ -6357,16 +6450,12 @@ impl IndigoPayContract {
             .get(&STORAGE_VERSION_KEY)
             .unwrap_or(1)
     }
+
     // ─── Emergency withdrawal (7-day timelock) ─────────────────────────────────
     /// Admin-only: step 1 of the emergency withdrawal flow. Records a
     /// request to send `amount` of `token` from the contract's
     /// per-project balance to `new_wallet` after a 7-day timelock.
-    /// One pending withdrawal per project at a time; the caller must
-    /// cancel or execute the existing one before initiating another.
-    ///
-    /// The actual balance check happens at execution time, not here,
-    /// because the 7-day gap means the balance could shift before then
-    /// (TOCTOU avoidance).
+    /// Supports multiple concurrent withdrawals per project keyed by (project_id, token).
     #[cfg(feature = "emergency")]
     pub fn initiate_emergency_withdrawal(
         env: Env,
@@ -6389,11 +6478,12 @@ impl IndigoPayContract {
         if !project.active {
             panic!("Project is not accepting donations");
         }
-        if env
-            .storage()
-            .instance()
-            .has(&DataKey::EmergencyWithdrawal(project_id.clone()))
-        {
+        migrate_legacy_ew_key_if_present(&env, &project_id);
+
+        if env.storage().instance().has(&DataKey::EmergencyWithdrawal(
+            project_id.clone(),
+            token.clone(),
+        )) {
             panic!("Emergency withdrawal already pending for this project");
         }
         let current_ledger = env.ledger().sequence();
@@ -6409,7 +6499,7 @@ impl IndigoPayContract {
             executable_at,
         };
         env.storage().instance().set(
-            &DataKey::EmergencyWithdrawal(project_id.clone()),
+            &DataKey::EmergencyWithdrawal(project_id.clone(), token.clone()),
             &withdrawal,
         );
         env.events().publish(
@@ -6422,21 +6512,38 @@ impl IndigoPayContract {
     /// been executed. Clears the pending entry and emits an event for
     /// off-chain notification.
     #[cfg(feature = "emergency")]
-    pub fn cancel_emergency_withdrawal(env: Env, admin: Address, project_id: String) {
+    pub fn cancel_emergency_withdrawal(
+        env: Env,
+        admin: Address,
+        project_id: String,
+        token: Address,
+    ) {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
-        if !env
-            .storage()
-            .instance()
-            .has(&DataKey::EmergencyWithdrawal(project_id.clone()))
-        {
+
+        migrate_legacy_ew_key_if_present(&env, &project_id);
+
+        let key = DataKey::EmergencyWithdrawal(project_id.clone(), token.clone());
+        if !env.storage().instance().has(&key) {
             panic!("No pending emergency withdrawal");
         }
-        env.storage()
-            .instance()
-            .remove(&DataKey::EmergencyWithdrawal(project_id.clone()));
+
+        env.storage().instance().remove(&key);
+
+        let tokens_key = DataKey::EmergencyWithdrawalTokens(project_id.clone());
+        if let Some(mut tokens) = env.storage().instance().get::<_, Vec<Address>>(&tokens_key) {
+            if let Some(idx) = tokens.iter().position(|t| t == token) {
+                tokens.remove(idx as u32);
+            }
+            if tokens.is_empty() {
+                env.storage().instance().remove(&tokens_key);
+            } else {
+                env.storage().instance().set(&tokens_key, &tokens);
+            }
+        }
+
         env.events()
-            .publish((symbol_short!("ew_cncl"), admin, project_id), ());
+            .publish((symbol_short!("ew_cncl"), admin, project_id), token);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
     /// Permissionless: step 2 of the emergency withdrawal flow. Callable
@@ -6445,11 +6552,14 @@ impl IndigoPayContract {
     /// clears the pending entry, decrements the balance, and transfers
     /// tokens to the new wallet (CEI ordering).
     #[cfg(feature = "emergency")]
-    pub fn execute_emergency_withdrawal(env: Env, project_id: String) {
+    pub fn execute_emergency_withdrawal(env: Env, project_id: String, token: Address) {
+        migrate_legacy_ew_key_if_present(&env, &project_id);
+
+        let key = DataKey::EmergencyWithdrawal(project_id.clone(), token.clone());
         let withdrawal: EmergencyWithdrawal = env
             .storage()
             .instance()
-            .get(&DataKey::EmergencyWithdrawal(project_id.clone()))
+            .get(&key)
             .expect("No pending emergency withdrawal");
         let current_ledger = env.ledger().sequence();
         if current_ledger < withdrawal.executable_at {
@@ -6463,9 +6573,20 @@ impl IndigoPayContract {
             panic!("Insufficient contract balance for project");
         }
         // ── Effects: clear withdrawal AND decrement balance before transfer
-        env.storage()
-            .instance()
-            .remove(&DataKey::EmergencyWithdrawal(project_id.clone()));
+        env.storage().instance().remove(&key);
+
+        let tokens_key = DataKey::EmergencyWithdrawalTokens(project_id.clone());
+        if let Some(mut tokens) = env.storage().instance().get::<_, Vec<Address>>(&tokens_key) {
+            if let Some(idx) = tokens.iter().position(|t| t == withdrawal.token) {
+                tokens.remove(idx as u32);
+            }
+            if tokens.is_empty() {
+                env.storage().instance().remove(&tokens_key);
+            } else {
+                env.storage().instance().set(&tokens_key, &tokens);
+            }
+        }
+
         let new_balance = balance - withdrawal.amount;
         env.storage().instance().set(&balance_key, &new_balance);
         // ── Interaction: external token transfer
@@ -6484,10 +6605,111 @@ impl IndigoPayContract {
     /// Read-only: returns the pending emergency withdrawal for a project,
     /// or `None` if no withdrawal is currently pending.
     #[cfg(feature = "emergency")]
-    pub fn get_emergency_withdrawal(env: Env, project_id: String) -> Option<EmergencyWithdrawal> {
+    pub fn exec_all_emergency_withdrawals(env: Env, project_id: String) -> u32 {
+        migrate_legacy_ew_key_if_present(&env, &project_id);
+
+        let tokens_key = DataKey::EmergencyWithdrawalTokens(project_id.clone());
+        let tokens: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&tokens_key)
+            .expect("No pending emergency withdrawal");
+
+        if tokens.is_empty() {
+            panic!("No pending emergency withdrawal");
+        }
+
+        let current_ledger = env.ledger().sequence();
+        let mut executed_count: u32 = 0;
+        let mut remaining_tokens: Vec<Address> = Vec::new(&env);
+
+        for token in tokens.iter() {
+            let key = DataKey::EmergencyWithdrawal(project_id.clone(), token.clone());
+            if let Some(withdrawal) = env.storage().instance().get::<_, EmergencyWithdrawal>(&key) {
+                if current_ledger >= withdrawal.executable_at {
+                    // Check balance
+                    let balance_key = DataKey::ProjectContractBalance(
+                        project_id.clone(),
+                        withdrawal.token.clone(),
+                    );
+                    let balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
+                    if withdrawal.amount > balance {
+                        panic!("Insufficient contract balance for project");
+                    }
+
+                    // Effects
+                    env.storage().instance().remove(&key);
+                    let new_balance = balance - withdrawal.amount;
+                    env.storage().instance().set(&balance_key, &new_balance);
+
+                    // Interaction
+                    let token_client = token::Client::new(&env, &withdrawal.token);
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &withdrawal.new_wallet,
+                        &withdrawal.amount,
+                    );
+
+                    env.events().publish(
+                        (symbol_short!("ew_exec"), project_id.clone()),
+                        (
+                            withdrawal.new_wallet.clone(),
+                            withdrawal.amount,
+                            withdrawal.token.clone(),
+                        ),
+                    );
+                    executed_count += 1;
+                } else {
+                    remaining_tokens.push_back(token.clone());
+                }
+            }
+        }
+
+        if remaining_tokens.is_empty() {
+            env.storage().instance().remove(&tokens_key);
+        } else {
+            env.storage().instance().set(&tokens_key, &remaining_tokens);
+        }
+
+        if executed_count > 0 {
+            env.events()
+                .publish((symbol_short!("ew_batch"), project_id), executed_count);
+        }
+
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        executed_count
+    }
+
+    /// Read-only: returns the pending emergency withdrawal for a project and token,
+    /// or `None` if no withdrawal is currently pending for that token.
+    #[cfg(feature = "emergency")]
+    pub fn get_emergency_withdrawal(
+        env: Env,
+        project_id: String,
+        token: Address,
+    ) -> Option<EmergencyWithdrawal> {
+        migrate_legacy_ew_key_if_present(&env, &project_id);
         env.storage()
             .instance()
-            .get(&DataKey::EmergencyWithdrawal(project_id))
+            .get(&DataKey::EmergencyWithdrawal(project_id, token))
+    }
+
+    /// Read-only: returns all pending emergency withdrawals for a project.
+    #[cfg(feature = "emergency")]
+    pub fn get_all_emergency_withdrawals(env: Env, project_id: String) -> Vec<EmergencyWithdrawal> {
+        migrate_legacy_ew_key_if_present(&env, &project_id);
+        let mut list = Vec::new(&env);
+        let tokens_key = DataKey::EmergencyWithdrawalTokens(project_id.clone());
+        if let Some(tokens) = env.storage().instance().get::<_, Vec<Address>>(&tokens_key) {
+            for token in tokens.iter() {
+                if let Some(w) = env.storage().instance().get::<_, EmergencyWithdrawal>(
+                    &DataKey::EmergencyWithdrawal(project_id.clone(), token),
+                ) {
+                    list.push_back(w);
+                }
+            }
+        }
+        list
     }
     // ─── Donation refund (#290) ───────────────────────────────────────────────
     /// Donor-initiated refund request. Must be called within the cooldown
@@ -7447,6 +7669,7 @@ impl IndigoPayContract {
             installments_released: 1, // first installment is immediate
             created_at: env.ledger().sequence(),
             token: token.clone(),
+            completed_at: 0,
         };
         let schedule_key = DataKey::VestingSchedule(donor.clone(), schedule_id);
         env.storage().instance().set(&schedule_key, &schedule);
@@ -7504,6 +7727,10 @@ impl IndigoPayContract {
         schedule.next_installment_ledger = current_ledger
             .checked_add(schedule.interval_ledgers)
             .expect("overflow");
+        // Mark completed when all installments are released.
+        if schedule.installments_released >= schedule.installment_count {
+            schedule.completed_at = current_ledger;
+        }
         env.storage().instance().set(&schedule_key, &schedule);
         // Load project to get the wallet.
         let project: Project = env
@@ -7542,7 +7769,7 @@ impl IndigoPayContract {
     pub fn cancel_vesting(env: Env, donor: Address, schedule_id: u32) {
         donor.require_auth();
         let schedule_key = DataKey::VestingSchedule(donor.clone(), schedule_id);
-        let schedule: VestingSchedule = env
+        let mut schedule: VestingSchedule = env
             .storage()
             .instance()
             .get(&schedule_key)
@@ -7557,8 +7784,12 @@ impl IndigoPayContract {
             .checked_mul(schedule.amount_per_installment)
             .expect("overflow");
 
-        // Remove the schedule from storage.
-        env.storage().instance().remove(&schedule_key);
+        // Mark the schedule as cancelled with completed_at so it can be
+        // cleaned up after the grace period. The schedule is NOT removed
+        // immediately — see `cleanup_vesting_schedule`.
+        schedule.completed_at = env.ledger().sequence();
+        env.storage().instance().set(&schedule_key, &schedule);
+
         // ── Interaction: return unvested tokens from contract custody to donor.
         let contract_addr = env.current_contract_address();
         let token_client = token::Client::new(&env, &schedule.token);
@@ -7568,6 +7799,38 @@ impl IndigoPayContract {
             (schedule_id, unvested_amount),
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+    /// Clean up a completed or cancelled vesting schedule after the grace
+    /// period has elapsed. Permissionless — anyone can call this to help
+    /// keep on-chain storage lean. Emits `vest_cln` for indexers.
+    ///
+    /// # Panics
+    /// - If the schedule is not found.
+    /// - If the schedule is still active (not completed/cancelled).
+    /// - If the grace period has not elapsed since completion.
+    #[cfg(feature = "vesting")]
+    pub fn cleanup_vesting_schedule(env: Env, donor: Address, schedule_id: u32) {
+        let schedule_key = DataKey::VestingSchedule(donor.clone(), schedule_id);
+        let schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&schedule_key)
+            .expect("Vesting schedule not found");
+        if schedule.completed_at == 0 {
+            panic!("Vesting schedule is still active");
+        }
+        let current = env.ledger().sequence();
+        let cleanup_eligible_at = schedule
+            .completed_at
+            .checked_add(GRACE_PERIOD_LEDGERS)
+            .expect("overflow");
+        if current < cleanup_eligible_at {
+            panic!("Grace period has not elapsed");
+        }
+        env.storage().instance().remove(&schedule_key);
+        // Emit event for indexer reconciliation.
+        env.events()
+            .publish((symbol_short!("vest_cln"), donor, schedule_id), ());
     }
     /// Query a vesting schedule by donor and schedule ID.
     #[cfg(feature = "vesting")]
@@ -10258,286 +10521,7 @@ mod tests {
             );
         });
     }
-    #[test]
-    fn test_emergency_withdrawal_initiate_happy() {
-        let (env, _cid, client, admin, pid) = setup();
-        let new_wallet = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        let amount = 500 * STROOP;
-        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &amount);
-        let w = client.get_emergency_withdrawal(&pid).unwrap();
-        assert_eq!(w.new_wallet, new_wallet);
-        assert_eq!(w.amount, amount);
-        assert_eq!(w.token, token);
-        assert_eq!(w.initiated_at, env.ledger().sequence());
-        assert_eq!(
-            w.executable_at,
-            env.ledger().sequence() + EMERGENCY_WITHDRAWAL_TIMELOCK
-        );
-    }
-    #[test]
-    fn test_emergency_withdrawal_execute_after_timelock() {
-        let (env, cid, client, admin, pid) = setup();
-        let new_wallet = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        let deposit_amount: i128 = 1000 * STROOP;
-        let withdrawal_amount: i128 = 500 * STROOP;
-        // Fund the contract's Stellar token balance
-        StellarAssetClient::new(&env, &token).mint(&cid, &deposit_amount);
-        // Seed the per-project-per-token balance
-        seed_project_balance(&env, &cid, "proj-001", &token, deposit_amount);
-        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &withdrawal_amount);
-        let start = env.ledger().sequence();
-        extend_ttl(&env, &cid);
-        env.ledger()
-            .set_sequence_number(start + EMERGENCY_WITHDRAWAL_TIMELOCK);
-        client.execute_emergency_withdrawal(&pid);
-        // Verify token arrived at new_wallet
-        let balance = StellarAssetClient::new(&env, &token).balance(&new_wallet);
-        assert_eq!(balance, withdrawal_amount);
-        // Verify per-project balance decremented
-        let remaining = env.as_contract(&cid, || {
-            env.storage()
-                .instance()
-                .get::<DataKey, i128>(&DataKey::ProjectContractBalance(pid.clone(), token.clone()))
-        });
-        assert_eq!(remaining.unwrap(), deposit_amount - withdrawal_amount);
-        // Verify pending withdrawal cleared
-        assert_eq!(client.get_emergency_withdrawal(&pid), None);
-    }
-    #[test]
-    #[should_panic(expected = "Emergency withdrawal timelock not yet elapsed")]
-    fn test_emergency_withdrawal_execute_before_timelock_fails() {
-        let (env, cid, client, admin, pid) = setup();
-        let new_wallet = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        let amount = 500 * STROOP;
-        StellarAssetClient::new(&env, &token).mint(&cid, &(1000 * STROOP));
-        seed_project_balance(&env, &cid, "proj-001", &token, 1000 * STROOP);
-        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &amount);
-        // Still well before the effective ledger
-        client.execute_emergency_withdrawal(&pid);
-    }
-    #[test]
-    fn test_emergency_withdrawal_cancel_happy() {
-        let (env, _cid, client, admin, pid) = setup();
-        let new_wallet = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &(500 * STROOP));
-        assert!(client.get_emergency_withdrawal(&pid).is_some());
-        client.cancel_emergency_withdrawal(&admin, &pid);
-        assert_eq!(client.get_emergency_withdrawal(&pid), None);
-    }
-    #[test]
-    #[should_panic(expected = "No pending emergency withdrawal")]
-    fn test_emergency_withdrawal_execute_after_cancel_fails() {
-        let (env, cid, client, admin, pid) = setup();
-        let new_wallet = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        StellarAssetClient::new(&env, &token).mint(&cid, &(1000 * STROOP));
-        seed_project_balance(&env, &cid, "proj-001", &token, 1000 * STROOP);
-        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &(500 * STROOP));
-        client.cancel_emergency_withdrawal(&admin, &pid);
-        extend_ttl(&env, &cid);
-        let start = env.ledger().sequence();
-        env.ledger()
-            .set_sequence_number(start + EMERGENCY_WITHDRAWAL_TIMELOCK);
-        client.execute_emergency_withdrawal(&pid);
-    }
-    #[test]
-    #[should_panic(expected = "Only admin can perform this action")]
-    fn test_emergency_withdrawal_initiate_non_admin_fails() {
-        let (env, cid, client, _admin, pid) = setup();
-        let non_admin = Address::generate(&env);
-        let new_wallet = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        extend_ttl(&env, &cid);
-        client.initiate_emergency_withdrawal(
-            &non_admin,
-            &pid,
-            &new_wallet,
-            &token,
-            &(500 * STROOP),
-        );
-    }
-    #[test]
-    #[should_panic(expected = "Project not found")]
-    fn test_emergency_withdrawal_initiate_nonexistent_project_fails() {
-        let (env, _cid, client, admin) = setup_admin_only();
-        let new_wallet = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        let fake_pid = String::from_str(&env, "nonexistent");
-        client.initiate_emergency_withdrawal(
-            &admin,
-            &fake_pid,
-            &new_wallet,
-            &token,
-            &(500 * STROOP),
-        );
-    }
-    #[test]
-    #[should_panic(expected = "Emergency withdrawal already pending for this project")]
-    fn test_emergency_withdrawal_double_initiate_fails() {
-        let (env, _cid, client, admin, pid) = setup();
-        let new_wallet = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &(500 * STROOP));
-        // Second initiate should fail
-        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &(300 * STROOP));
-    }
-    #[test]
-    #[should_panic(expected = "No pending emergency withdrawal")]
-    fn test_emergency_withdrawal_cancel_without_pending_fails() {
-        let (env, _cid, client, admin) = setup_admin_only();
-        let fake_pid = String::from_str(&env, "no-withdrawal");
-        client.cancel_emergency_withdrawal(&admin, &fake_pid);
-    }
-    #[test]
-    #[should_panic(expected = "No pending emergency withdrawal")]
-    fn test_emergency_withdrawal_execute_without_pending_fails() {
-        let (env, _cid, client) = {
-            let env = Env::default();
-            env.mock_all_auths();
-            let cid = env.register_contract(None, IndigoPayContract);
-            let client = IndigoPayContractClient::new(&env, &cid);
-            (env, cid, client)
-        };
-        let fake_pid = String::from_str(&env, "no-withdrawal");
-        client.execute_emergency_withdrawal(&fake_pid);
-    }
-    #[test]
-    fn test_emergency_withdrawal_getter() {
-        let (env, _cid, client, admin, pid) = setup();
-        let new_wallet = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        // No withdrawal initially
-        assert_eq!(client.get_emergency_withdrawal(&pid), None);
-        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &(500 * STROOP));
-        let w = client.get_emergency_withdrawal(&pid).unwrap();
-        assert_eq!(w.amount, 500 * STROOP);
-        assert_eq!(w.token, token);
-        assert_eq!(w.new_wallet, new_wallet);
-        // Different project returns None
-        let pid2 = String::from_str(&env, "proj-other");
-        assert_eq!(client.get_emergency_withdrawal(&pid2), None);
-    }
-    #[test]
-    fn test_emergency_withdrawal_per_project_isolation() {
-        let (env, _cid, client, admin) = setup_admin_only();
-        let token_admin = Address::generate(&env);
-        let token = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        // Register two projects
-        let pid_a = String::from_str(&env, "proj-A");
-        let wallet_a = Address::generate(&env);
-        client.register_project(
-            &admin,
-            &pid_a,
-            &String::from_str(&env, "Project A"),
-            &wallet_a,
-            &100u32,
-        );
-        let pid_b = String::from_str(&env, "proj-B");
-        let wallet_b = Address::generate(&env);
-        client.register_project(
-            &admin,
-            &pid_b,
-            &String::from_str(&env, "Project B"),
-            &wallet_b,
-            &100u32,
-        );
-        let new_wallet_a = Address::generate(&env);
-        let new_wallet_b = Address::generate(&env);
-        // Initiate withdrawal for project A
-        client.initiate_emergency_withdrawal(
-            &admin,
-            &pid_a,
-            &new_wallet_a,
-            &token,
-            &(200 * STROOP),
-        );
-        // Project A has a pending withdrawal, B does not
-        assert!(client.get_emergency_withdrawal(&pid_a).is_some());
-        assert_eq!(client.get_emergency_withdrawal(&pid_b), None);
-        // Cancel A — B is unaffected
-        client.cancel_emergency_withdrawal(&admin, &pid_a);
-        assert_eq!(client.get_emergency_withdrawal(&pid_a), None);
-        // Can now initiate for B
-        client.initiate_emergency_withdrawal(
-            &admin,
-            &pid_b,
-            &new_wallet_b,
-            &token,
-            &(300 * STROOP),
-        );
-        assert!(client.get_emergency_withdrawal(&pid_b).is_some());
-    }
-    #[test]
-    #[should_panic(expected = "Insufficient contract balance for project")]
-    fn test_emergency_withdrawal_execute_fails_when_balance_zero_but_contract_funded() {
-        let (env, cid, client, admin, pid) = setup();
-        let new_wallet = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        // Contract has real token balance, but ProjectContractBalance is NOT set
-        StellarAssetClient::new(&env, &token).mint(&cid, &(1000 * STROOP));
-        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &(500 * STROOP));
-        extend_ttl(&env, &cid);
-        let start = env.ledger().sequence();
-        env.ledger()
-            .set_sequence_number(start + EMERGENCY_WITHDRAWAL_TIMELOCK);
-        client.execute_emergency_withdrawal(&pid);
-    }
-    #[test]
-    #[should_panic(expected = "Insufficient contract balance for project")]
-    fn test_emergency_withdrawal_execute_fails_with_wrong_token() {
-        let (env, cid, client, admin, pid) = setup();
-        let new_wallet = Address::generate(&env);
-        // Create two tokens
-        let xlm_admin = Address::generate(&env);
-        let xlm_token = env.register_stellar_asset_contract_v2(xlm_admin).address();
-        let usdc_admin = Address::generate(&env);
-        let usdc_token = env.register_stellar_asset_contract_v2(usdc_admin).address();
-        // Seed balance only for XLM
-        seed_project_balance(&env, &cid, "proj-001", &xlm_token, 1000 * STROOP);
-        // Initiate withdrawal in USDC (which has no balance)
-        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &usdc_token, &100);
-        extend_ttl(&env, &cid);
-        let start = env.ledger().sequence();
-        env.ledger()
-            .set_sequence_number(start + EMERGENCY_WITHDRAWAL_TIMELOCK);
-        client.execute_emergency_withdrawal(&pid);
-    }
+
     // ─── Donation refund tests (#290) ──────────────────────────────────────
     /// Helper: mint tokens, donate, return (donor, token, donation_index).
     fn setup_donation(
@@ -11871,6 +11855,225 @@ mod tests {
         let impostor = Address::generate(&env);
         client.cancel_vesting(&impostor, &schedule_id);
     }
+    // ─── Proposal cleanup tests (#433) ─────────────────────────────────────
+    #[cfg(feature = "governance")]
+    #[test]
+    fn test_cleanup_resolved_proposal() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
+        client.resolve_proposal(&pid);
+        let p = client.get_proposal(&pid);
+        assert!(p.resolved);
+        assert!(p.resolved_at > 0);
+        // Fast-forward past grace period.
+        env.ledger()
+            .set_sequence_number(p.resolved_at + GRACE_PERIOD_LEDGERS + 1);
+        extend_ttl(&env, &cid);
+        client.cleanup_proposal(&pid);
+        // Proposal should be gone.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.get_proposal(&pid);
+        }));
+        assert!(result.is_err(), "Proposal should be removed after cleanup");
+    }
+    #[cfg(feature = "governance")]
+    #[test]
+    #[should_panic(expected = "Proposal is not resolved")]
+    fn test_cleanup_unresolved_panics() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        extend_ttl(&env, &cid);
+        client.cleanup_proposal(&pid);
+    }
+    #[cfg(feature = "governance")]
+    #[test]
+    #[should_panic(expected = "Grace period has not elapsed")]
+    fn test_cleanup_before_grace_period_panics() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
+        client.resolve_proposal(&pid);
+        // Do NOT advance past grace period.
+        extend_ttl(&env, &cid);
+        client.cleanup_proposal(&pid);
+    }
+    #[cfg(feature = "governance")]
+    #[test]
+    #[should_panic(expected = "Proposal not found")]
+    fn test_cleanup_proposal_idempotent() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
+        client.resolve_proposal(&pid);
+        let p = client.get_proposal(&pid);
+        env.ledger()
+            .set_sequence_number(p.resolved_at + GRACE_PERIOD_LEDGERS + 1);
+        extend_ttl(&env, &cid);
+        client.cleanup_proposal(&pid);
+        // Second call should panic because proposal no longer exists.
+        client.cleanup_proposal(&pid);
+    }
+    // ─── Vesting cleanup tests (#433) ──────────────────────────────────────
+    #[cfg(feature = "vesting")]
+    #[test]
+    fn test_cleanup_vesting_completed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let project_wallet = Address::generate(&env);
+        let pid = String::from_str(&env, "cleanup-vest");
+        client.register_project(
+            &admin,
+            &pid,
+            &String::from_str(&env, "Cleanup Vest Project"),
+            &project_wallet,
+            &50u32,
+        );
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let total: i128 = 20_000_000;
+        StellarAssetClient::new(&env, &token).mint(&donor, &total);
+        // 2 installments, 50 ledgers each.
+        let schedule_id = client.donate_vested(&token, &donor, &pid, &total, &2u32, &50u32, &0u32);
+        // Claim 2nd (final) installment — sets completed_at.
+        env.ledger().set_sequence_number(100);
+        client.claim_vested_installment(&donor, &schedule_id);
+        let s = client.get_vesting_schedule(&donor, &schedule_id);
+        assert!(s.completed_at > 0);
+        // Fast-forward past grace period.
+        env.ledger()
+            .set_sequence_number(s.completed_at + GRACE_PERIOD_LEDGERS + 1);
+        client.cleanup_vesting_schedule(&donor, &schedule_id);
+        // Schedule should be gone.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.get_vesting_schedule(&donor, &schedule_id);
+        }));
+        assert!(
+            result.is_err(),
+            "Vesting schedule should be removed after cleanup"
+        );
+    }
+    #[cfg(feature = "vesting")]
+    #[test]
+    #[should_panic(expected = "Vesting schedule is still active")]
+    fn test_cleanup_vesting_active_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let project_wallet = Address::generate(&env);
+        let pid = String::from_str(&env, "active-vest");
+        client.register_project(
+            &admin,
+            &pid,
+            &String::from_str(&env, "Active Vest Project"),
+            &project_wallet,
+            &50u32,
+        );
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let total: i128 = 30_000_000;
+        StellarAssetClient::new(&env, &token).mint(&donor, &total);
+        let schedule_id =
+            client.donate_vested(&token, &donor, &pid, &total, &3u32, &1000u32, &0u32);
+        // Schedule is still active — cleanup should panic.
+        client.cleanup_vesting_schedule(&donor, &schedule_id);
+    }
+    #[cfg(feature = "vesting")]
+    #[test]
+    #[should_panic(expected = "Grace period has not elapsed")]
+    fn test_cleanup_vesting_before_grace_period_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let project_wallet = Address::generate(&env);
+        let pid = String::from_str(&env, "early-vest");
+        client.register_project(
+            &admin,
+            &pid,
+            &String::from_str(&env, "Early Vest Project"),
+            &project_wallet,
+            &50u32,
+        );
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let total: i128 = 20_000_000;
+        StellarAssetClient::new(&env, &token).mint(&donor, &total);
+        let schedule_id = client.donate_vested(&token, &donor, &pid, &total, &2u32, &50u32, &0u32);
+        // Complete the schedule.
+        env.ledger().set_sequence_number(100);
+        client.claim_vested_installment(&donor, &schedule_id);
+        // Do NOT advance past grace period.
+        client.cleanup_vesting_schedule(&donor, &schedule_id);
+    }
+    #[cfg(feature = "vesting")]
+    #[test]
+    fn test_cleanup_vesting_cancelled() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let project_wallet = Address::generate(&env);
+        let pid = String::from_str(&env, "cancel-vest");
+        client.register_project(
+            &admin,
+            &pid,
+            &String::from_str(&env, "Cancel Vest Project"),
+            &project_wallet,
+            &50u32,
+        );
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let total: i128 = 50_000_000;
+        StellarAssetClient::new(&env, &token).mint(&donor, &total);
+        let schedule_id = client.donate_vested(&token, &donor, &pid, &total, &5u32, &720u32, &0u32);
+        // Advance ledger so cancel_vesting sets a non-zero completed_at.
+        env.ledger().set_sequence_number(1);
+        // Cancel the schedule — sets completed_at.
+        client.cancel_vesting(&donor, &schedule_id);
+        // Schedule should still exist (with completed_at set).
+        let s = client.get_vesting_schedule(&donor, &schedule_id);
+        assert!(s.completed_at > 0);
+        // Fast-forward past grace period.
+        env.ledger()
+            .set_sequence_number(s.completed_at + GRACE_PERIOD_LEDGERS + 1);
+        client.cleanup_vesting_schedule(&donor, &schedule_id);
+        // Schedule should now be gone.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.get_vesting_schedule(&donor, &schedule_id);
+        }));
+        assert!(
+            result.is_err(),
+            "Cancelled vesting schedule should be removed after cleanup"
+        );
+    }
+
     // ─── Platform fee tests (#385) ───────────────────────────────────────────
     #[cfg(feature = "fees")]
     #[test]

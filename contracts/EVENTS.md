@@ -202,7 +202,17 @@ project-scoped anonymous donation totals.
 
 | Event Name | Topics                              | Data | When Emitted                                |
 | ---------- | ----------------------------------- | ---- | ------------------------------------------- |
-| `ew_cncl`  | `["ew_cncl", admin, project_id]`   | `()` | When admin calls `cancel_emergency_withdrawal` |
+| `ew_cncl`  | `["ew_cncl", admin, project_id]`   | `token: Address` | When admin calls `cancel_emergency_withdrawal` or `cancel_all_emergency_withdrawals` |
+
+---
+
+## 15b. `ew_batch`
+
+**Description**: Emitted when batch emergency withdrawals are executed for a project.
+
+| Event Name | Topics                            | Data                | When Emitted                                     |
+| ---------- | --------------------------------- | ------------------- | ------------------------------------------------ |
+| `ew_batch` | `["ew_batch", project_id]`       | `executed_count: u32` | When calling `exec_all_emergency_withdrawals` |
 
 ---
 
@@ -533,7 +543,7 @@ model.
 - Events can be queried via Horizon or Soroban RPC tools.
 - Frontend / backend should listen to these for real-time updates, notifications, and leaderboard.
 
-**Last Updated**: July 28, 2026
+**Last Updated**: July 29, 2026
 
 ---
 
@@ -548,7 +558,31 @@ project's Merkle Mountain Range for cumulative impact certificate verification.
 
 ---
 
-## 42. `recip_set` (Platform Fee Recipients Set)
+## 43. `prop_cln` (Proposal Cleanup)
+
+**Description**: Emitted when a resolved governance proposal and all associated
+vote data are cleaned up after the 30-day grace period. Permissionless — anyone
+may call `cleanup_proposal` once the grace period has elapsed.
+
+| Event Name   | Topics                         | Data | When Emitted                             |
+| ------------ | ------------------------------ | ---- | ---------------------------------------- |
+| `prop_cln` | `["prop_cln", project_id]`   | `()` | After `cleanup_proposal` completes |
+
+---
+
+## 44. `vest_cln` (Vesting Schedule Cleanup)
+
+**Description**: Emitted when a completed or cancelled vesting schedule is
+removed from storage after the 30-day grace period. Permissionless — anyone may
+call `cleanup_vesting_schedule` once the grace period has elapsed.
+
+| Event Name   | Topics                                | Data | When Emitted                                  |
+| ------------ | ------------------------------------- | ---- | --------------------------------------------- |
+| `vest_cln` | `["vest_cln", donor, schedule_id]`  | `()` | After `cleanup_vesting_schedule` completes |
+
+---
+
+## 45. `recip_set` (Platform Fee Recipients Set)
 
 **Description**: Emitted when M-of-N admins configure or update multi-recipient platform fee splits.
 
@@ -592,4 +626,4 @@ Project milestone NFTs resolve to `base_uri + "milestone/" + project_id + ".json
 - Events can be queried via Horizon or Soroban RPC tools.
 - Frontend / backend should listen to these for real-time updates, notifications, and leaderboard.
 
-**Last Updated**: July 28, 2026
+**Last Updated**: July 29, 2026

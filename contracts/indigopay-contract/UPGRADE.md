@@ -85,6 +85,11 @@ The current persisted keys are:
 - `DataKey::GlobalCO2OffsetGrams`
 - `DataKey::HasDonated(String, Address)`
 - `DataKey::Proposal(String)`
+  - `VoteProposal` now includes `resolved_at: u32` (appended for backward compatibility).
+    Legacy proposals stored before this field existed will decode with `resolved_at == 0`.
+    Resolution functions (`resolve_proposal`, `veto_proposal`) always set this field;
+    older resolved proposals that lack it are treated as having `resolved_at == 0`
+    and become eligible for cleanup immediately after upgrade.
 - `DataKey::HasVoted(String, Address)`
 - `DataKey::DonorProjectTotal(String, Address)` _(v1.1 milestone-NFT support)_
 - `DataKey::ProjectMilestoneNFT(String, Address)` _(v1.1 milestone-NFT support)_
@@ -110,6 +115,13 @@ The current persisted keys are:
 - `DataKey::DonorRateLimitPerToken(Address, String, Address)` _(#421 transitional per-token key; retained for migration)_
 - `DataKey::TokenRateLimitMax(Address)` _(per-token maximum donations override)_
 - `DataKey::TokenRateLimitWindow(Address)` _(per-token window override in ledgers)_
+- `DataKey::VestingSchedule(Address, u32)` _(#386 time-locked donation vesting)_
+  - `VestingSchedule` now includes `completed_at: u32` (appended for backward compatibility).
+    Legacy schedules stored before this field existed will decode with `completed_at == 0`.
+    Cancellation (`cancel_vesting`) and full claim (`claim_vested_installment` when all
+    installments are released) set this field. Active schedules with `completed_at == 0`
+    are not eligible for cleanup.
+- `DataKey::DonorVestingCount(Address)` _(#386 per-donor vesting count)_
 - **Storage version tracking** _(#379 — Symbol-keyed, not a DataKey variant)_
 
 Do not rename or remove these variants, change their argument order, or reorder/remove fields from stored structs such as `Project`, `DonorStats`, `ImpactNFT`, `ProjectMilestoneNFT`, `VoteProposal`, or `GlobalStats` without adding an explicit migration path. New fields should be handled through a new storage version or a new key namespace so existing v1 values remain decodable.
