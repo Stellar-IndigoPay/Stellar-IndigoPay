@@ -704,6 +704,11 @@ pub enum DataKey {
     TokenRateLimitWindow(Address),
     /// Platform fee split recipients and their share basis points (#434).
     PlatformFeeRecipients,
+    // ─── Governance-configurable timelock / cooldown parameters (#460) ───
+    UpgradeTimelockLedgers,
+    EmergencyWithdrawalTimelock,
+    RefundCooldownLedgers,
+    DefaultVotingWindowLedgers,
     // Campaign-to-Escrow Integration (#426)
     /// Address of the deployed escrow contract (instance storage).
     EscrowContractAddress,
@@ -738,18 +743,38 @@ const STROOP: i128 = 10_000_000;
 #[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
 const PRICE_SCALE: i128 = 1;
 
-// 7 days × 24 h × 3600 s ÷ 5 s per ledger ≈ 120_960 ledgers — used as the
-// default when `create_proposal` is called without an explicit duration.
-const VOTING_WINDOW_LEDGERS: u32 = 120_960;
 const DEFAULT_DONATION_RATE_LIMIT_MAX: u32 = 10;
 const DEFAULT_DONATION_RATE_LIMIT_WINDOW: u32 = 720;
+
+// Upper bound on co2_per_xlm at registration — prevents donate-time CO₂ overflow
+// panics and misleading impact figures from misconfigured projects.
+const MAX_CO2_PER_XLM: u32 = 100_000;
+
+// ─── Hard bounds (NOT configurable) ──────────────────────────────────────
 // Bounds on caller-supplied voting durations. Floor (~1 hour) keeps the
 // window long enough to be observed; ceiling (~30 days) bounds storage TTL
 // pressure and prevents proposals from sitting open indefinitely.
-#[cfg(feature = "governance")]
 const MIN_VOTING_WINDOW_LEDGERS: u32 = 720; // 1 hour @ 5s/ledger
-#[cfg(feature = "governance")]
 const MAX_VOTING_WINDOW_LEDGERS: u32 = 518_400; // 30 days @ 5s/ledger
+
+// Absolute bounds on upgrade timelock.
+const ABS_MIN_UPGRADE_TIMELOCK: u32 = 17_280; // 24h
+const ABS_MAX_UPGRADE_TIMELOCK: u32 = 518_400; // 30 days
+
+// Absolute bounds on emergency withdrawal timelock.
+const ABS_MIN_EMERGENCY_TIMELOCK: u32 = 34_560; // 48h
+const ABS_MAX_EMERGENCY_TIMELOCK: u32 = 518_400; // 30 days
+
+// Absolute bounds on refund cooldown.
+const ABS_MIN_REFUND_COOLDOWN: u32 = 720; // 1h
+const ABS_MAX_REFUND_COOLDOWN: u32 = 120_960; // 7 days
+
+// ─── Default values (used at initialization; governance-configurable) ─────
+const DEFAULT_VOTING_WINDOW_LEDGERS: u32 = 120_960; // 7 days
+const DEFAULT_UPGRADE_TIMELOCK_LEDGERS: u32 = 34_560; // 48h
+const DEFAULT_EMERGENCY_WITHDRAWAL_TIMELOCK: u32 = 120_960; // 7 days
+const DEFAULT_REFUND_COOLDOWN_LEDGERS: u32 = 17_280; // 24h
+const CHALLENGE_WINDOW_LEDGERS: u32 = 17_280; // 24h
                                                 // Upper bound on co2_per_xlm at registration — prevents donate-time CO₂ overflow
                                                 // panics and misleading impact figures from misconfigured projects.
 const MAX_CO2_PER_XLM: u32 = 100_000;
@@ -795,8 +820,9 @@ pub const GRACE_PERIOD_LEDGERS: u32 = 518_400;
 ///
 /// v1: original schema (no version tracking)
 /// v2: Symbol-keyed storage version added (#379)
+/// v3: Governance-configurable timelock / cooldown parameters (#460)
 #[cfg(feature = "upgrade")]
-const CURRENT_STORAGE_VERSION: u32 = 2;
+const CURRENT_STORAGE_VERSION: u32 = 3;
 /// Storage key for the schema version. Uses a Symbol (not a DataKey variant)
 /// to avoid XDR codegen overhead in the slim WASM build.
 #[cfg(feature = "upgrade")]
@@ -819,6 +845,41 @@ fn read_admin_threshold(env: &Env) -> u32 {
         .get(&DataKey::AdminThreshold)
         .expect("Admin threshold not set")
 }
+
+/// Read the governance-configurable upgrade timelock from storage.
+/// Falls back to the compile-time default when unset (backward-compatible
+/// with pre-#460 deployments).
+fn read_upgrade_timelock(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::UpgradeTimelockLedgers)
+        .unwrap_or(DEFAULT_UPGRADE_TIMELOCK_LEDGERS)
+}
+
+/// Read the governance-configurable emergency withdrawal timelock.
+fn read_emergency_withdrawal_timelock(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::EmergencyWithdrawalTimelock)
+        .unwrap_or(DEFAULT_EMERGENCY_WITHDRAWAL_TIMELOCK)
+}
+
+/// Read the governance-configurable refund cooldown.
+fn read_refund_cooldown(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::RefundCooldownLedgers)
+        .unwrap_or(DEFAULT_REFUND_COOLDOWN_LEDGERS)
+}
+
+/// Read the governance-configurable default voting window.
+fn read_default_voting_window(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::DefaultVotingWindowLedgers)
+        .unwrap_or(DEFAULT_VOTING_WINDOW_LEDGERS)
+}
+
 /// Verify M-of-N threshold signatures for critical admin actions.
 ///
 /// Iterates the supplied `signers` vec, calling `require_auth()` on each
@@ -1756,7 +1817,11 @@ fn migrate(env: &Env) {
         migrate_v1_to_v2(env);
         env.storage().instance().set(&STORAGE_VERSION_KEY, &2u32);
     }
-    // if current < 3 { migrate_v2_to_v3(env); ... }
+    if current < 3 {
+        migrate_v2_to_v3(env);
+        env.storage().instance().set(&STORAGE_VERSION_KEY, &3u32);
+    }
+
     // After all migrations, StorageVersion must equal CURRENT_STORAGE_VERSION.
     // If a deployer forgot to bump CURRENT_STORAGE_VERSION after adding a
     // migration, this assertion catches it at upgrade time.
@@ -1783,6 +1848,51 @@ fn migrate_v1_to_v2(_env: &Env) {
     //   let old_value = env.storage().instance().get(&OldKey);
     //   env.storage().instance().set(&NewKey, &transformed_value);
     //   env.storage().instance().remove(&OldKey);
+}
+
+/// v2 → v3: Backfill governance-configurable timelock / cooldown parameters.
+#[cfg(feature = "upgrade")]
+fn migrate_v2_to_v3(env: &Env) {
+    if !env
+        .storage()
+        .instance()
+        .has(&DataKey::UpgradeTimelockLedgers)
+    {
+        env.storage().instance().set(
+            &DataKey::UpgradeTimelockLedgers,
+            &DEFAULT_UPGRADE_TIMELOCK_LEDGERS,
+        );
+    }
+    if !env
+        .storage()
+        .instance()
+        .has(&DataKey::EmergencyWithdrawalTimelock)
+    {
+        env.storage().instance().set(
+            &DataKey::EmergencyWithdrawalTimelock,
+            &DEFAULT_EMERGENCY_WITHDRAWAL_TIMELOCK,
+        );
+    }
+    if !env
+        .storage()
+        .instance()
+        .has(&DataKey::RefundCooldownLedgers)
+    {
+        env.storage().instance().set(
+            &DataKey::RefundCooldownLedgers,
+            &DEFAULT_REFUND_COOLDOWN_LEDGERS,
+        );
+    }
+    if !env
+        .storage()
+        .instance()
+        .has(&DataKey::DefaultVotingWindowLedgers)
+    {
+        env.storage().instance().set(
+            &DataKey::DefaultVotingWindowLedgers,
+            &DEFAULT_VOTING_WINDOW_LEDGERS,
+        );
+    }
 }
 
 #[cfg(any(
@@ -2397,7 +2507,25 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&STORAGE_VERSION_KEY, &CURRENT_STORAGE_VERSION);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        // Initialize governance-configurable timelock / cooldown parameters
+        // with their compile-time defaults so they can be read back immediately.
+        env.storage().instance().set(
+            &DataKey::UpgradeTimelockLedgers,
+            &DEFAULT_UPGRADE_TIMELOCK_LEDGERS,
+        );
+        env.storage().instance().set(
+            &DataKey::EmergencyWithdrawalTimelock,
+            &DEFAULT_EMERGENCY_WITHDRAWAL_TIMELOCK,
+        );
+        env.storage().instance().set(
+            &DataKey::RefundCooldownLedgers,
+            &DEFAULT_REFUND_COOLDOWN_LEDGERS,
+        );
+        env.storage().instance().set(
+            &DataKey::DefaultVotingWindowLedgers,
+            &DEFAULT_VOTING_WINDOW_LEDGERS,
+        );
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     // ─── Project management ───────────────────────────────────────────────────
     pub fn register_project(
@@ -2459,7 +2587,7 @@ impl IndigoPayContract {
         env.storage().instance().set(&DataKey::ProjectIdsAll, &ids);
         env.events()
             .publish((symbol_short!("proj_reg"), admin), project_id);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Register a sub-project under an existing parent project.
     /// The caller must be the parent project's wallet (require_auth).
@@ -2541,7 +2669,7 @@ impl IndigoPayContract {
         env.storage().instance().set(&DataKey::ProjectIdsAll, &ids);
         env.events()
             .publish((symbol_short!("sub_reg"), wallet), (parent_id, project_id));
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     #[cfg(any(feature = "batch", feature = "testutils", test))]
     pub fn batch_register_projects(env: Env, admin: Address, projects: Vec<ProjectInit>) {
@@ -2593,7 +2721,7 @@ impl IndigoPayContract {
                 .publish((symbol_short!("proj_reg"), admin.clone()), project_id);
         }
         env.storage().instance().set(&DataKey::ProjectIdsAll, &ids);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Admin-only: deactivate every registered project in one call.
     /// Iterates `DataKey::ProjectIdsAll` and flips `active=false`. Useful
@@ -2622,7 +2750,7 @@ impl IndigoPayContract {
         }
         env.events()
             .publish((symbol_short!("deact_all"), signers.get(0).unwrap()), ids);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     pub fn deactivate_project(env: Env, admin: Address, project_id: String) {
         require_admin_for_routine(&env, &admin);
@@ -2653,7 +2781,7 @@ impl IndigoPayContract {
                 .instance()
                 .set(&DataKey::Project(sub_id), &sub);
         }
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     pub fn update_project_co2_rate(env: Env, admin: Address, project_id: String, co2_per_xlm: u32) {
         require_admin_for_routine(&env, &admin);
@@ -2680,7 +2808,7 @@ impl IndigoPayContract {
             (symbol_short!("co2_rate"), admin),
             (project_id, co2_per_xlm),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     pub fn pause_project(env: Env, admin: Address, project_id: String) {
         require_admin_for_routine(&env, &admin);
@@ -2703,7 +2831,7 @@ impl IndigoPayContract {
             .set(&DataKey::Project(project_id.clone()), &project);
         env.events()
             .publish((symbol_short!("prj_pause"), admin), project_id);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Admin-only: lift a temporary pause on a project. Mirrors
     /// `pause_project` — symmetric admin authorization, events emitted
@@ -2729,7 +2857,7 @@ impl IndigoPayContract {
             .set(&DataKey::Project(project_id.clone()), &project);
         env.events()
             .publish((symbol_short!("prj_resm"), admin), project_id);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     // ─── Time-bound campaigns ─────────────────────────────────────────────────
     /// Admin-only: start a time-bound fundraising campaign on a project.
@@ -2854,6 +2982,8 @@ impl IndigoPayContract {
             .instance()
             .set(&DataKey::EscrowContractAddress, &escrow_contract);
         env.events()
+            .publish((symbol_short!("fee_set"), signers.get(0).unwrap()), fee_bps);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
             .publish((symbol_short!("esc_set"),), escrow_contract);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
@@ -3200,7 +3330,7 @@ impl IndigoPayContract {
             (symbol_short!("treas_set"), signers.get(0).unwrap()),
             treasury,
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Admin-only (M-of-N): set the platform fee recipients and their split shares (#434).
     ///
@@ -3236,7 +3366,7 @@ impl IndigoPayContract {
             (symbol_short!("recip_set"), signers.get(0).unwrap()),
             recipients.len(),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Public read-only: get the configured platform fee recipients and their shares (#434).
     #[cfg(any(feature = "fees", feature = "testutils"))]
@@ -3282,7 +3412,7 @@ impl IndigoPayContract {
             msg_hash,
             anonymous,
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
 
     // ─── Cross-chain attestation settlement (#439) ────────────────────────────
@@ -3425,7 +3555,7 @@ impl IndigoPayContract {
                 false,
             );
         }
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     // ─── DEX Path-Payment Donation (any Stellar asset → XLM) ──────────────────
     /// Donate any Stellar asset via DEX path payment.
@@ -3656,8 +3786,8 @@ impl IndigoPayContract {
             ),
             (xlm_amount, donor_stats.badge.clone(), msg_hash),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     // ─── zk-SNARK Anonymous Donations (#390) ─────────────────────────────────
 
@@ -3674,7 +3804,7 @@ impl IndigoPayContract {
             .set(&DataKey::ZkVerificationKey, &vk);
         env.events()
             .publish((symbol_short!("zk_vk_set"),), env.crypto().sha256(&vk));
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Query the current Groth16 verification key, if set.
     #[cfg(feature = "zk")]
@@ -3810,7 +3940,7 @@ impl IndigoPayContract {
             (symbol_short!("zk_donate"), project_id, nullifier),
             (amount_commitment, co2),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
 
     #[cfg(feature = "zk")]
@@ -4089,7 +4219,7 @@ impl IndigoPayContract {
             ),
             (amount, donor_stats.badge.clone(), msg_hash),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Check if a nullifier has already been spent.
     #[cfg(feature = "zk")]
@@ -4109,7 +4239,7 @@ impl IndigoPayContract {
             .set(&DataKey::StealthDonationContract, &contract_address);
         env.events()
             .publish((symbol_short!("stlth_set"), admin), contract_address);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
 
     /// Query the configured stealth donation contract address.
@@ -4245,7 +4375,7 @@ impl IndigoPayContract {
             (symbol_short!("stlth_don"), stealth_pool_donor, project_id),
             (donation_id, amount, msg_hash_u32),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
 
         donation_id
     }
@@ -4292,7 +4422,7 @@ impl IndigoPayContract {
             (symbol_short!("impact_rt"), admin, project_id, report_id),
             merkle_root,
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     #[cfg(feature = "impact")]
     /// Public read-only: verify a donor's impact claim against a stored Merkle root.
@@ -4383,7 +4513,7 @@ impl IndigoPayContract {
             (symbol_short!("mmr_app"), admin, project_id, new_count),
             new_root,
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     #[cfg(feature = "impact")]
     /// Public read-only: verify that a donor's impact leaf is included in the
@@ -4448,7 +4578,7 @@ impl IndigoPayContract {
         );
         env.events()
             .publish((symbol_short!("impv_add"), admin), verifier);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Admin-only: revoke a verifier's ability to submit new reports.
     /// Reports it already submitted, and any flag/adjustment they caused,
@@ -4462,7 +4592,7 @@ impl IndigoPayContract {
             .remove(&ImpactVerificationKey::ImpactVerifier(verifier.clone()));
         env.events()
             .publish((symbol_short!("impv_rem"), admin), verifier);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     #[cfg(feature = "impact_verification")]
     pub fn is_impact_verifier(env: Env, verifier: Address) -> bool {
@@ -4485,7 +4615,7 @@ impl IndigoPayContract {
             .set(&ImpactVerificationKey::ImpactReportThreshold, &threshold);
         env.events()
             .publish((symbol_short!("impv_thr"), admin), threshold);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Admin-only: clear a project's deviation flag, e.g. after investigating
     /// and confirming the discrepancy was a reporting error rather than
@@ -4499,7 +4629,7 @@ impl IndigoPayContract {
             .remove(&ImpactVerificationKey::ImpactFlagged(project_id.clone()));
         env.events()
             .publish((symbol_short!("impv_clr"), admin), project_id);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Authorised verifier: submit (or update) an independent CO2-impact
     /// attestation for a project.
@@ -4631,7 +4761,7 @@ impl IndigoPayContract {
                     .publish((symbol_short!("impv_adj"), project_id.clone()), median);
             }
         }
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
         report_id
     }
     #[cfg(feature = "impact_verification")]
@@ -4702,7 +4832,7 @@ impl IndigoPayContract {
             .instance()
             .set(&ProjectVerificationKey::VerifierSet, &verifiers);
         env.events().publish((symbol_short!("ver_add"),), verifier);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
 
     /// M-of-N admin: revoke a verifier's ability to submit new
@@ -4730,7 +4860,7 @@ impl IndigoPayContract {
             .instance()
             .set(&ProjectVerificationKey::VerifierSet, &new_set);
         env.events().publish((symbol_short!("ver_rem"),), verifier);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
 
     /// M-of-N admin: configure how many distinct verifier attestations are
@@ -4750,7 +4880,7 @@ impl IndigoPayContract {
             .instance()
             .set(&ProjectVerificationKey::VerificationThreshold, &threshold);
         env.events().publish((symbol_short!("ver_thr"),), threshold);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
 
     /// Authorised verifier: attest that `project_id` has passed this
@@ -4818,7 +4948,7 @@ impl IndigoPayContract {
         // May itself emit `proj_vfy` if this attestation crosses the
         // configured threshold.
         refresh_verification_status(&env, &project_id);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
         count
     }
 
@@ -4864,7 +4994,7 @@ impl IndigoPayContract {
             (symbol_short!("proj_rvk"), signers.get(0).unwrap()),
             project_id,
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
 
     #[cfg(feature = "project_verification")]
@@ -5271,7 +5401,7 @@ impl IndigoPayContract {
         env.storage().instance().set(&key, &nft);
         env.events()
             .publish((symbol_short!("nft_mint"), donor), tier);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
 
     #[cfg(feature = "impact")]
@@ -5319,7 +5449,7 @@ impl IndigoPayContract {
             (symbol_short!("pnft_mnt"), donor.clone()),
             (project_id, proj_total),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     #[cfg(feature = "donation")]
     pub fn has_project_nft(env: Env, donor: Address, project_id: String) -> bool {
@@ -5334,12 +5464,123 @@ impl IndigoPayContract {
             .get(&DataKey::ProjectMilestoneNFT(project_id, donor))
             .expect("Project milestone NFT not found")
     }
+
+    // ─── Governance-configurable timelock / cooldown parameters (#460) ──────
+
+    /// Admin-only (M-of-N): set the upgrade timelock in ledgers.
+    ///
+    /// Bounds: [`ABS_MIN_UPGRADE_TIMELOCK` (24h), `ABS_MAX_UPGRADE_TIMELOCK` (30 days)].
+    /// New value applies to future `propose_upgrade` calls only — already-pending
+    /// upgrades keep their original `UpgradeEffectiveAt`.
+    pub fn set_upgrade_timelock(env: Env, signers: Vec<Address>, ledgers: u32) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        if ledgers < ABS_MIN_UPGRADE_TIMELOCK {
+            panic!("Upgrade timelock too short (minimum 24h)");
+        }
+        if ledgers > ABS_MAX_UPGRADE_TIMELOCK {
+            panic!("Upgrade timelock too long (maximum 30 days)");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeTimelockLedgers, &ledgers);
+        env.events().publish(
+            (symbol_short!("ug_tl_set"), signers.get(0).unwrap()),
+            ledgers,
+        );
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
+    }
+
+    /// Admin-only (M-of-N): set the emergency withdrawal timelock in ledgers.
+    ///
+    /// Bounds: [`ABS_MIN_EMERGENCY_TIMELOCK` (48h), `ABS_MAX_EMERGENCY_TIMELOCK` (30 days)].
+    pub fn set_emergency_timelock(env: Env, signers: Vec<Address>, ledgers: u32) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        if ledgers < ABS_MIN_EMERGENCY_TIMELOCK {
+            panic!("Emergency withdrawal timelock too short (minimum 48h)");
+        }
+        if ledgers > ABS_MAX_EMERGENCY_TIMELOCK {
+            panic!("Emergency withdrawal timelock too long (maximum 30 days)");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::EmergencyWithdrawalTimelock, &ledgers);
+        env.events().publish(
+            (symbol_short!("ew_tl_set"), signers.get(0).unwrap()),
+            ledgers,
+        );
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
+    }
+
+    /// Admin-only (M-of-N): set the refund cooldown in ledgers.
+    ///
+    /// Bounds: [`ABS_MIN_REFUND_COOLDOWN` (1h), `ABS_MAX_REFUND_COOLDOWN` (7 days)].
+    pub fn set_refund_cooldown(env: Env, signers: Vec<Address>, ledgers: u32) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        if ledgers < ABS_MIN_REFUND_COOLDOWN {
+            panic!("Refund cooldown too short (minimum 1h)");
+        }
+        if ledgers > ABS_MAX_REFUND_COOLDOWN {
+            panic!("Refund cooldown too long (maximum 7 days)");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RefundCooldownLedgers, &ledgers);
+        env.events().publish(
+            (symbol_short!("rf_cd_set"), signers.get(0).unwrap()),
+            ledgers,
+        );
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
+    }
+
+    /// Admin-only (M-of-N): set the default voting window in ledgers.
+    ///
+    /// Bounds: [`MIN_VOTING_WINDOW_LEDGERS` (1h), `MAX_VOTING_WINDOW_LEDGERS` (30 days)].
+    pub fn set_default_voting_window(env: Env, signers: Vec<Address>, ledgers: u32) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        if ledgers < MIN_VOTING_WINDOW_LEDGERS {
+            panic!("Voting window too short (minimum 1h)");
+        }
+        if ledgers > MAX_VOTING_WINDOW_LEDGERS {
+            panic!("Voting window too long (maximum 30 days)");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultVotingWindowLedgers, &ledgers);
+        env.events()
+            .publish((symbol_short!("vw_set"), signers.get(0).unwrap()), ledgers);
+        ensure_min_ttl(&env, ledgers * 4);
+    }
+
+    /// Read the current upgrade timelock (ledgers).
+    pub fn get_upgrade_timelock(env: Env) -> u32 {
+        read_upgrade_timelock(&env)
+    }
+
+    /// Read the current emergency withdrawal timelock (ledgers).
+    pub fn get_emergency_timelock(env: Env) -> u32 {
+        read_emergency_withdrawal_timelock(&env)
+    }
+
+    /// Read the current refund cooldown (ledgers).
+    pub fn get_refund_cooldown(env: Env) -> u32 {
+        read_refund_cooldown(&env)
+    }
+
+    /// Read the current default voting window (ledgers).
+    pub fn get_default_voting_window(env: Env) -> u32 {
+        read_default_voting_window(&env)
+    }
+
     // ─── Governance ───────────────────────────────────────────────────────────
     /// Admin creates a voting proposal for a project to be community-verified.
     ///
     /// `duration_ledgers` is the length of the voting window in Stellar
-    /// ledgers (≈5 s each). Pass `0` to use the default 7-day window;
-    /// any other value must be within
+    /// ledgers (≈5 s each). Pass `0` to use the governance-configured
+    /// default window; any other value must be within
     /// [`MIN_VOTING_WINDOW_LEDGERS`, `MAX_VOTING_WINDOW_LEDGERS`].
     #[cfg(feature = "governance")]
     pub fn create_proposal(
@@ -5365,7 +5606,7 @@ impl IndigoPayContract {
             panic!("Proposal already exists for this project");
         }
         let window = if duration_ledgers == 0 {
-            VOTING_WINDOW_LEDGERS
+            read_default_voting_window(&env)
         } else {
             if duration_ledgers < MIN_VOTING_WINDOW_LEDGERS {
                 panic!("Voting duration too short");
@@ -5396,7 +5637,7 @@ impl IndigoPayContract {
             (symbol_short!("prop_new"), signers.get(0).unwrap()),
             (project_id, window),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     #[cfg(feature = "governance")]
     #[cfg(feature = "delegation")]
@@ -5464,7 +5705,7 @@ impl IndigoPayContract {
         env.storage().instance().set(&del_key, &delegate);
         env.events()
             .publish((symbol_short!("delegate"), donor), delegate);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     #[cfg(feature = "delegation")]
     pub fn revoke_delegation(env: Env, donor: Address) {
@@ -5490,7 +5731,7 @@ impl IndigoPayContract {
             env.storage().instance().set(&old_del_key, &old_weight);
             env.storage().instance().remove(&del_key);
             env.events().publish((symbol_short!("revoke"), donor), ());
-            ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+            ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
         } else {
             panic!("No active delegation to revoke");
         }
@@ -5697,6 +5938,12 @@ impl IndigoPayContract {
             .expect("credits underflow");
         env.storage()
             .instance()
+            .set(&DataKey::Proposal(project_id.clone()), &proposal);
+        env.events().publish(
+            (symbol_short!("voted"), voter, project_id),
+            (approve, credits, weight_delta),
+        );
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
             .set(&DataKey::VoterCredits(voter), &remaining);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
@@ -5755,7 +6002,7 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::Proposal(project_id), &proposal);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Admin-only immediate veto. Marks the proposal resolved & rejected.
     /// Required for incident response when a proposal is based on fraudulent data.
@@ -5780,7 +6027,7 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::Proposal(project_id), &proposal);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Clean up a resolved proposal and all associated vote data after the
     /// grace period has elapsed. Permissionless — anyone can call this to
@@ -5938,7 +6185,7 @@ impl IndigoPayContract {
 
         env.events()
             .publish((symbol_short!("tok_reg"), admin), (token_address, symbol));
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
 
     /// Admin-only: Remove a token from active registration in the registry.
@@ -5973,7 +6220,7 @@ impl IndigoPayContract {
 
         env.events()
             .publish((symbol_short!("tok_rem"), admin), token_address);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
 
     /// Query configuration for a registered token.
@@ -6056,7 +6303,7 @@ impl IndigoPayContract {
             msg_hash,
             anonymous,
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Admin-only: Set the USDC token address for multi-currency donations.
     #[cfg(feature = "usdc")]
@@ -6096,7 +6343,7 @@ impl IndigoPayContract {
 
         env.events()
             .publish((symbol_short!("usdc_set"),), usdc_token);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Get the configured USDC token address.
     pub fn get_usdc_token(env: Env) -> Option<Address> {
@@ -6218,7 +6465,7 @@ impl IndigoPayContract {
         }
 
         env.events().publish((symbol_short!("oracle"),), oracle);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Get the configured price oracle address.
     #[cfg(feature = "usdc")]
@@ -6252,7 +6499,7 @@ impl IndigoPayContract {
         );
         env.events()
             .publish((symbol_short!("ad_xfer"), old_admin), new_admin);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Step 2 of the two-step transfer. The caller must be the `new_admin`
     /// recorded by a prior `transfer_admin`. On success `old_admin` is
@@ -6283,7 +6530,7 @@ impl IndigoPayContract {
         env.storage().instance().set(&DataKey::AdminSet, &new_set);
         env.storage().instance().remove(&DataKey::PendingAdmin);
         env.events().publish((symbol_short!("ad_acc"),), new_admin);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Admin-only: cancel a pending admin transfer without performing the swap.
     /// Useful when the proposed recipient lost their key or the transfer
@@ -6295,7 +6542,7 @@ impl IndigoPayContract {
         }
         env.storage().instance().remove(&DataKey::PendingAdmin);
         env.events().publish((symbol_short!("ad_xfc"),), ());
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Returns `(old_admin, new_admin)` if a transfer is pending, or `None`.
     pub fn get_pending_admin(env: Env) -> Option<(Address, Address)> {
@@ -6313,7 +6560,7 @@ impl IndigoPayContract {
         env.storage().instance().set(&DataKey::AdminSet, &admin_set);
         env.events()
             .publish((symbol_short!("admin_add"),), new_admin);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// M-of-N: remove an address from the admin set. Panics if this would
     /// leave the set empty, or if the resulting set is smaller than the
@@ -6344,7 +6591,7 @@ impl IndigoPayContract {
         env.storage().instance().set(&DataKey::AdminSet, &new_set);
         env.events()
             .publish((symbol_short!("admin_rmv"),), admin_to_remove);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// M-of-N: update the threshold for critical actions. Must satisfy
     /// 1 <= new_threshold <= admin_set.len().
@@ -6359,7 +6606,7 @@ impl IndigoPayContract {
             .set(&DataKey::AdminThreshold, &new_threshold);
         env.events()
             .publish((symbol_short!("thresh_up"),), new_threshold);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     // ─── Contract-level pause ─────────────────────────────────────────────────
     /// Admin-only: pause the entire contract. While paused, every state-
@@ -6373,7 +6620,7 @@ impl IndigoPayContract {
             .set(&DataKey::ContractPaused, &true);
         env.events()
             .publish((symbol_short!("paused"), signers.get(0).unwrap()), ());
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Admin-only: lift the contract-level pause.
     pub fn unpause_contract(env: Env, signers: Vec<Address>) {
@@ -6383,7 +6630,7 @@ impl IndigoPayContract {
             .set(&DataKey::ContractPaused, &false);
         env.events()
             .publish((symbol_short!("unpause"), signers.get(0).unwrap()), ());
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Read-only: returns the contract-level pause state.
     pub fn is_contract_paused(env: Env) -> bool {
@@ -6406,8 +6653,8 @@ impl IndigoPayContract {
         let effective_at = env
             .ledger()
             .sequence()
-            .checked_add(UPGRADE_TIMELOCK_LEDGERS)
-            .expect("overflow");
+            .checked_add(read_upgrade_timelock(&env))
+            .expect("Upgrade effective-at overflow");
         env.storage()
             .instance()
             .set(&DataKey::PendingUpgrade, &new_wasm_hash);
@@ -6418,7 +6665,7 @@ impl IndigoPayContract {
             (symbol_short!("upg_prop"), signers.get(0).unwrap()),
             (new_wasm_hash, effective_at),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Permissionless: step 2 of the upgrade timelock. Callable by anyone
     /// after the 48-hour delay has elapsed. On success the contract
@@ -6458,7 +6705,7 @@ impl IndigoPayContract {
         // Run storage migrations so any schema changes in the new WASM are
         // applied before the next contract invocation.
         migrate(&env);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Admin-only: cancel a pending upgrade without executing it. Use
     /// during incident response if the proposed WASM turns out to be
@@ -6475,7 +6722,7 @@ impl IndigoPayContract {
             .remove(&DataKey::UpgradeEffectiveAt);
         env.events()
             .publish((symbol_short!("upg_cncl"), signers.get(0).unwrap()), ());
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Read-only: returns `(hash, effective_at_ledger)` for the pending
     /// upgrade, or `None` if no upgrade is currently proposed.
@@ -6542,8 +6789,8 @@ impl IndigoPayContract {
         }
         let current_ledger = env.ledger().sequence();
         let executable_at = current_ledger
-            .checked_add(EMERGENCY_WITHDRAWAL_TIMELOCK)
-            .expect("overflow");
+            .checked_add(read_emergency_withdrawal_timelock(&env))
+            .expect("Emergency withdrawal timelock overflow");
 
         let withdrawal = EmergencyWithdrawal {
             new_wallet: new_wallet.clone(),
@@ -6560,7 +6807,7 @@ impl IndigoPayContract {
             (symbol_short!("ew_init"), admin, project_id),
             (new_wallet, amount, token, executable_at),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Admin-only: cancel a pending emergency withdrawal before it has
     /// been executed. Clears the pending entry and emits an event for
@@ -6597,6 +6844,8 @@ impl IndigoPayContract {
         }
 
         env.events()
+            .publish((symbol_short!("ew_cncl"), admin, project_id), ());
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
             .publish((symbol_short!("ew_cncl"), admin, project_id), token);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
@@ -6654,7 +6903,7 @@ impl IndigoPayContract {
             (symbol_short!("ew_exec"), project_id),
             (withdrawal.new_wallet, withdrawal.amount, withdrawal.token),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Read-only: returns the pending emergency withdrawal for a project,
     /// or `None` if no withdrawal is currently pending.
@@ -6767,7 +7016,7 @@ impl IndigoPayContract {
     }
     // ─── Donation refund (#290) ───────────────────────────────────────────────
     /// Donor-initiated refund request. Must be called within the cooldown
-    /// window (`REFUND_COOLDOWN_LEDGERS`) after the original donation.
+    /// window (`refund_cooldown`) after the original donation.
     /// Creates a `RefundRequest` with status `Pending` for admin + project
     /// wallet approval.
     #[cfg(feature = "refund")]
@@ -6785,8 +7034,8 @@ impl IndigoPayContract {
         let current_ledger = env.ledger().sequence();
         let deadline = record
             .ledger
-            .checked_add(REFUND_COOLDOWN_LEDGERS)
-            .expect("overflow");
+            .checked_add(read_refund_cooldown(&env))
+            .expect("Refund deadline overflow");
         if current_ledger > deadline {
             panic!("Refund cooldown expired");
         }
@@ -6881,7 +7130,7 @@ impl IndigoPayContract {
             (symbol_short!("rfnd_ap"), refund_id, admin),
             (request.project_id, request.amount, request.donor),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
 
     /// Admin-only: reject a pending refund request. The donation stands;
@@ -6959,7 +7208,7 @@ impl IndigoPayContract {
             (Symbol::new(&env, "rfnd_force_init"), refund_id),
             (request.project_id, request.amount, effective_at),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
 
     /// Cancel a pending force-refund during its 72-hour review window.
@@ -6981,7 +7230,7 @@ impl IndigoPayContract {
         env.storage().instance().remove(&force_key);
         env.events()
             .publish((Symbol::new(&env, "rfnd_force_cncl"), refund_id, admin), ());
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
 
     /// Permissionless execution of a matured force-refund.
@@ -7046,7 +7295,7 @@ impl IndigoPayContract {
             (Symbol::new(&env, "rfnd_force_exec"), refund_id),
             (request.project_id, request.amount, request.donor),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
 
     /// Returns the pending force-refund escalation, if one exists.
@@ -7084,7 +7333,7 @@ impl IndigoPayContract {
             (symbol_short!("chg_thrsh"), signers.get(0).unwrap()),
             threshold,
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
 
     /// Read-only: get the configured challenge threshold in stroops (0 if disabled).
@@ -7155,7 +7404,7 @@ impl IndigoPayContract {
             (symbol_short!("chg_sub"), donation_index, challenger),
             (donation.amount, reason),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
 
     /// Admin-only: resolve a pending challenge by either approving or rejecting (refunding) the donation.
@@ -7274,7 +7523,7 @@ impl IndigoPayContract {
                 .publish((symbol_short!("chg_res"), donation_index, admin), false);
         }
 
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
 
     /// Read-only: get the challenge status for a donation index.
@@ -7621,7 +7870,7 @@ impl IndigoPayContract {
                 recurring.next_execution_ledger,
             ),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
 
     #[cfg(feature = "recurring")]
@@ -7750,7 +7999,8 @@ impl IndigoPayContract {
                 msg_hash,
             ),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
+
         schedule_id
     }
     /// Claims the next vested installment for a project.
@@ -7813,7 +8063,7 @@ impl IndigoPayContract {
             (symbol_short!("vest_clm"), schedule.project_id),
             (schedule_id, schedule.amount_per_installment, remaining),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Cancels a vesting schedule, returning unvested tokens to the donor.
     ///
@@ -7858,7 +8108,7 @@ impl IndigoPayContract {
             (symbol_short!("vest_can"), donor, schedule.project_id),
             (schedule_id, unvested_amount),
         );
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     /// Clean up a completed or cancelled vesting schedule after the grace
     /// period has elapsed. Permissionless — anyone can call this to help
@@ -7906,7 +8156,7 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::NativeTokenAddress, &native_token);
-        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+        ensure_min_ttl(&env, read_default_voting_window(&env) * 4);
     }
     pub fn get_native_token(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::NativeTokenAddress)
@@ -8192,9 +8442,10 @@ mod tests {
     /// Extend instance TTL before a large ledger jump so storage isn't archived.
     fn extend_ttl(env: &Env, cid: &soroban_sdk::Address) {
         env.as_contract(cid, || {
-            env.storage()
-                .instance()
-                .extend_ttl(VOTING_WINDOW_LEDGERS * 4, VOTING_WINDOW_LEDGERS * 4);
+            env.storage().instance().extend_ttl(
+                DEFAULT_VOTING_WINDOW_LEDGERS * 4,
+                DEFAULT_VOTING_WINDOW_LEDGERS * 4,
+            );
         });
     }
 
@@ -8949,7 +9200,8 @@ mod tests {
             client.vote_verify_project(&voter, &pid, &(i < 2));
         }
         extend_ttl(&env, &cid);
-        env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
+        env.ledger()
+            .set_sequence_number(DEFAULT_VOTING_WINDOW_LEDGERS + 2);
         client.resolve_proposal(&pid);
         let p = client.get_proposal(&pid);
         assert!(p.resolved);
@@ -8967,7 +9219,8 @@ mod tests {
             client.vote_verify_project(&voter, &pid, &(i == 0));
         }
         extend_ttl(&env, &cid);
-        env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
+        env.ledger()
+            .set_sequence_number(DEFAULT_VOTING_WINDOW_LEDGERS + 2);
         client.resolve_proposal(&pid);
         let p = client.get_proposal(&pid);
         assert!(p.resolved);
@@ -8984,7 +9237,8 @@ mod tests {
             client.vote_verify_project(&voter, &pid, &(i == 0));
         }
         extend_ttl(&env, &cid);
-        env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
+        env.ledger()
+            .set_sequence_number(DEFAULT_VOTING_WINDOW_LEDGERS + 2);
         client.resolve_proposal(&pid);
         let p = client.get_proposal(&pid);
         assert!(p.resolved);
@@ -9009,7 +9263,8 @@ mod tests {
         let (env, cid, client, admin, pid) = setup();
         client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         extend_ttl(&env, &cid);
-        env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
+        env.ledger()
+            .set_sequence_number(DEFAULT_VOTING_WINDOW_LEDGERS + 2);
         client.resolve_proposal(&pid);
         // Extend again so the second call reaches our panic, not an archive error
         extend_ttl(&env, &cid);
@@ -9073,7 +9328,7 @@ mod tests {
         let start = env.ledger().sequence();
         client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let p = client.get_proposal(&pid);
-        assert_eq!(p.deadline_ledger, start + VOTING_WINDOW_LEDGERS);
+        assert_eq!(p.deadline_ledger, start + DEFAULT_VOTING_WINDOW_LEDGERS);
     }
     #[test]
     #[should_panic(expected = "Voting duration too short")]
@@ -9138,7 +9393,9 @@ mod tests {
         grant_badge(&env, &cid, &voter);
         // Advance ledger past the deadline
         extend_ttl(&env, &cid);
-        env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
+        env.ledger()
+            .set_sequence_number(DEFAULT_VOTING_WINDOW_LEDGERS + 2);
+
         // Attempt to vote after deadline — should panic with "Voting window has closed"
         client.vote_verify_project(&voter, &pid, &true);
     }
@@ -9150,10 +9407,12 @@ mod tests {
         client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
-        // Vote at ledger start + VOTING_WINDOW_LEDGERS - 1 (last valid ledger)
+
+        // Vote at ledger start + DEFAULT_VOTING_WINDOW_LEDGERS - 1 (last valid ledger)
         extend_ttl(&env, &cid);
         env.ledger()
-            .set_sequence_number(start + VOTING_WINDOW_LEDGERS - 1);
+            .set_sequence_number(start + DEFAULT_VOTING_WINDOW_LEDGERS - 1);
+
         // Should succeed
         client.vote_verify_project(&voter, &pid, &true);
         let proposal = client.get_proposal(&pid);
@@ -10454,7 +10713,10 @@ mod tests {
         client.propose_upgrade(&signers1(&env, &admin), &fake_hash);
         let (h, eff) = client.get_pending_upgrade().expect("pending upgrade");
         assert_eq!(h, fake_hash);
-        assert_eq!(eff, env.ledger().sequence() + UPGRADE_TIMELOCK_LEDGERS);
+        assert_eq!(
+            eff,
+            env.ledger().sequence() + DEFAULT_UPGRADE_TIMELOCK_LEDGERS
+        );
     }
     #[test]
     #[should_panic(expected = "Insufficient admin signatures")]
@@ -10491,7 +10753,8 @@ mod tests {
         // Verify timelock state is recorded correctly (effective_at).
         let (hash, effective_at) = client.get_pending_upgrade().unwrap();
         assert_eq!(hash, fake_hash);
-        assert_eq!(effective_at, start + UPGRADE_TIMELOCK_LEDGERS);
+        assert_eq!(effective_at, start + DEFAULT_UPGRADE_TIMELOCK_LEDGERS);
+
         // The actual WASM swap (execute_upgrade) requires a valid Soroban
         // contract WASM to be uploaded first, which isn't available in the
         // unit-test host environment.  The timelock state machine is
@@ -10554,6 +10817,290 @@ mod tests {
                 &amount,
             );
         });
+    }
+    #[test]
+    fn test_emergency_withdrawal_initiate_happy() {
+        let (env, _cid, client, admin, pid) = setup();
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let amount = 500 * STROOP;
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &amount);
+        let w = client.get_emergency_withdrawal(&pid).unwrap();
+        assert_eq!(w.new_wallet, new_wallet);
+        assert_eq!(w.amount, amount);
+        assert_eq!(w.token, token);
+        assert_eq!(w.initiated_at, env.ledger().sequence());
+        assert_eq!(
+            w.executable_at,
+            env.ledger().sequence() + DEFAULT_EMERGENCY_WITHDRAWAL_TIMELOCK
+        );
+    }
+    #[test]
+    fn test_emergency_withdrawal_execute_after_timelock() {
+        let (env, cid, client, admin, pid) = setup();
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let deposit_amount: i128 = 1000 * STROOP;
+        let withdrawal_amount: i128 = 500 * STROOP;
+        // Fund the contract's Stellar token balance
+        StellarAssetClient::new(&env, &token).mint(&cid, &deposit_amount);
+        // Seed the per-project-per-token balance
+        seed_project_balance(&env, &cid, "proj-001", &token, deposit_amount);
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &withdrawal_amount);
+        let start = env.ledger().sequence();
+        extend_ttl(&env, &cid);
+        env.ledger()
+            .set_sequence_number(start + DEFAULT_EMERGENCY_WITHDRAWAL_TIMELOCK);
+
+        client.execute_emergency_withdrawal(&pid);
+        // Verify token arrived at new_wallet
+        let balance = StellarAssetClient::new(&env, &token).balance(&new_wallet);
+        assert_eq!(balance, withdrawal_amount);
+        // Verify per-project balance decremented
+        let remaining = env.as_contract(&cid, || {
+            env.storage()
+                .instance()
+                .get::<DataKey, i128>(&DataKey::ProjectContractBalance(pid.clone(), token.clone()))
+        });
+        assert_eq!(remaining.unwrap(), deposit_amount - withdrawal_amount);
+        // Verify pending withdrawal cleared
+        assert_eq!(client.get_emergency_withdrawal(&pid), None);
+    }
+    #[test]
+    #[should_panic(expected = "Emergency withdrawal timelock not yet elapsed")]
+    fn test_emergency_withdrawal_execute_before_timelock_fails() {
+        let (env, cid, client, admin, pid) = setup();
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let amount = 500 * STROOP;
+        StellarAssetClient::new(&env, &token).mint(&cid, &(1000 * STROOP));
+        seed_project_balance(&env, &cid, "proj-001", &token, 1000 * STROOP);
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &amount);
+        // Still well before the effective ledger
+        client.execute_emergency_withdrawal(&pid);
+    }
+    #[test]
+    fn test_emergency_withdrawal_cancel_happy() {
+        let (env, _cid, client, admin, pid) = setup();
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &(500 * STROOP));
+        assert!(client.get_emergency_withdrawal(&pid).is_some());
+        client.cancel_emergency_withdrawal(&admin, &pid);
+        assert_eq!(client.get_emergency_withdrawal(&pid), None);
+    }
+    #[test]
+    #[should_panic(expected = "No pending emergency withdrawal")]
+    fn test_emergency_withdrawal_execute_after_cancel_fails() {
+        let (env, cid, client, admin, pid) = setup();
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&cid, &(1000 * STROOP));
+        seed_project_balance(&env, &cid, "proj-001", &token, 1000 * STROOP);
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &(500 * STROOP));
+        client.cancel_emergency_withdrawal(&admin, &pid);
+        extend_ttl(&env, &cid);
+        let start = env.ledger().sequence();
+        env.ledger()
+            .set_sequence_number(start + DEFAULT_EMERGENCY_WITHDRAWAL_TIMELOCK);
+
+        client.execute_emergency_withdrawal(&pid);
+    }
+    #[test]
+    #[should_panic(expected = "Only admin can perform this action")]
+    fn test_emergency_withdrawal_initiate_non_admin_fails() {
+        let (env, cid, client, _admin, pid) = setup();
+        let non_admin = Address::generate(&env);
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        extend_ttl(&env, &cid);
+        client.initiate_emergency_withdrawal(
+            &non_admin,
+            &pid,
+            &new_wallet,
+            &token,
+            &(500 * STROOP),
+        );
+    }
+    #[test]
+    #[should_panic(expected = "Project not found")]
+    fn test_emergency_withdrawal_initiate_nonexistent_project_fails() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let fake_pid = String::from_str(&env, "nonexistent");
+        client.initiate_emergency_withdrawal(
+            &admin,
+            &fake_pid,
+            &new_wallet,
+            &token,
+            &(500 * STROOP),
+        );
+    }
+    #[test]
+    #[should_panic(expected = "Emergency withdrawal already pending for this project")]
+    fn test_emergency_withdrawal_double_initiate_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &(500 * STROOP));
+        // Second initiate should fail
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &(300 * STROOP));
+    }
+    #[test]
+    #[should_panic(expected = "No pending emergency withdrawal")]
+    fn test_emergency_withdrawal_cancel_without_pending_fails() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        let fake_pid = String::from_str(&env, "no-withdrawal");
+        client.cancel_emergency_withdrawal(&admin, &fake_pid);
+    }
+    #[test]
+    #[should_panic(expected = "No pending emergency withdrawal")]
+    fn test_emergency_withdrawal_execute_without_pending_fails() {
+        let (env, _cid, client) = {
+            let env = Env::default();
+            env.mock_all_auths();
+            let cid = env.register_contract(None, IndigoPayContract);
+            let client = IndigoPayContractClient::new(&env, &cid);
+            (env, cid, client)
+        };
+        let fake_pid = String::from_str(&env, "no-withdrawal");
+        client.execute_emergency_withdrawal(&fake_pid);
+    }
+    #[test]
+    fn test_emergency_withdrawal_getter() {
+        let (env, _cid, client, admin, pid) = setup();
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        // No withdrawal initially
+        assert_eq!(client.get_emergency_withdrawal(&pid), None);
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &(500 * STROOP));
+        let w = client.get_emergency_withdrawal(&pid).unwrap();
+        assert_eq!(w.amount, 500 * STROOP);
+        assert_eq!(w.token, token);
+        assert_eq!(w.new_wallet, new_wallet);
+        // Different project returns None
+        let pid2 = String::from_str(&env, "proj-other");
+        assert_eq!(client.get_emergency_withdrawal(&pid2), None);
+    }
+    #[test]
+    fn test_emergency_withdrawal_per_project_isolation() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        // Register two projects
+        let pid_a = String::from_str(&env, "proj-A");
+        let wallet_a = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &pid_a,
+            &String::from_str(&env, "Project A"),
+            &wallet_a,
+            &100u32,
+        );
+        let pid_b = String::from_str(&env, "proj-B");
+        let wallet_b = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &pid_b,
+            &String::from_str(&env, "Project B"),
+            &wallet_b,
+            &100u32,
+        );
+        let new_wallet_a = Address::generate(&env);
+        let new_wallet_b = Address::generate(&env);
+        // Initiate withdrawal for project A
+        client.initiate_emergency_withdrawal(
+            &admin,
+            &pid_a,
+            &new_wallet_a,
+            &token,
+            &(200 * STROOP),
+        );
+        // Project A has a pending withdrawal, B does not
+        assert!(client.get_emergency_withdrawal(&pid_a).is_some());
+        assert_eq!(client.get_emergency_withdrawal(&pid_b), None);
+        // Cancel A — B is unaffected
+        client.cancel_emergency_withdrawal(&admin, &pid_a);
+        assert_eq!(client.get_emergency_withdrawal(&pid_a), None);
+        // Can now initiate for B
+        client.initiate_emergency_withdrawal(
+            &admin,
+            &pid_b,
+            &new_wallet_b,
+            &token,
+            &(300 * STROOP),
+        );
+        assert!(client.get_emergency_withdrawal(&pid_b).is_some());
+    }
+    #[test]
+    #[should_panic(expected = "Insufficient contract balance for project")]
+    fn test_emergency_withdrawal_execute_fails_when_balance_zero_but_contract_funded() {
+        let (env, cid, client, admin, pid) = setup();
+        let new_wallet = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        // Contract has real token balance, but ProjectContractBalance is NOT set
+        StellarAssetClient::new(&env, &token).mint(&cid, &(1000 * STROOP));
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &token, &(500 * STROOP));
+        extend_ttl(&env, &cid);
+        let start = env.ledger().sequence();
+        env.ledger()
+            .set_sequence_number(start + DEFAULT_EMERGENCY_WITHDRAWAL_TIMELOCK);
+
+        client.execute_emergency_withdrawal(&pid);
+    }
+    #[test]
+    #[should_panic(expected = "Insufficient contract balance for project")]
+    fn test_emergency_withdrawal_execute_fails_with_wrong_token() {
+        let (env, cid, client, admin, pid) = setup();
+        let new_wallet = Address::generate(&env);
+        // Create two tokens
+        let xlm_admin = Address::generate(&env);
+        let xlm_token = env.register_stellar_asset_contract_v2(xlm_admin).address();
+        let usdc_admin = Address::generate(&env);
+        let usdc_token = env.register_stellar_asset_contract_v2(usdc_admin).address();
+        // Seed balance only for XLM
+        seed_project_balance(&env, &cid, "proj-001", &xlm_token, 1000 * STROOP);
+        // Initiate withdrawal in USDC (which has no balance)
+        client.initiate_emergency_withdrawal(&admin, &pid, &new_wallet, &usdc_token, &100);
+        extend_ttl(&env, &cid);
+        let start = env.ledger().sequence();
+        env.ledger()
+            .set_sequence_number(start + DEFAULT_EMERGENCY_WITHDRAWAL_TIMELOCK);
+
+        client.execute_emergency_withdrawal(&pid);
     }
 
     // ─── Donation refund tests (#290) ──────────────────────────────────────
@@ -10630,7 +11177,8 @@ mod tests {
         let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
         extend_ttl(&env, &cid);
         env.ledger()
-            .set_sequence_number(env.ledger().sequence() + REFUND_COOLDOWN_LEDGERS + 1);
+            .set_sequence_number(env.ledger().sequence() + DEFAULT_REFUND_COOLDOWN_LEDGERS + 1);
+
         client.request_refund(&donor, &donation_index, &token);
     }
     #[test]
@@ -15334,6 +15882,244 @@ mod tests {
         });
     }
 
+    // ─── Governance-configurable timelock / cooldown tests (#460) ──────────
+
+    #[test]
+    fn test_default_governance_params_after_initialize() {
+        let (_env, _cid, client, _admin, _pid) = setup();
+        assert_eq!(
+            client.get_upgrade_timelock(),
+            DEFAULT_UPGRADE_TIMELOCK_LEDGERS
+        );
+        assert_eq!(
+            client.get_emergency_timelock(),
+            DEFAULT_EMERGENCY_WITHDRAWAL_TIMELOCK
+        );
+        assert_eq!(
+            client.get_refund_cooldown(),
+            DEFAULT_REFUND_COOLDOWN_LEDGERS
+        );
+        assert_eq!(
+            client.get_default_voting_window(),
+            DEFAULT_VOTING_WINDOW_LEDGERS
+        );
+    }
+
+    // ── Upgrade timelock ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_set_upgrade_timelock_valid() {
+        let (env, _cid, client, admin, _pid) = setup();
+        let new_val: u32 = 50_000;
+        client.set_upgrade_timelock(&signers1(&env, &admin), &new_val);
+        assert_eq!(client.get_upgrade_timelock(), new_val);
+    }
+
+    #[test]
+    #[should_panic(expected = "Upgrade timelock too short")]
+    fn test_set_upgrade_timelock_below_minimum() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.set_upgrade_timelock(&signers1(&env, &admin), &(ABS_MIN_UPGRADE_TIMELOCK - 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "Upgrade timelock too long")]
+    fn test_set_upgrade_timelock_above_maximum() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.set_upgrade_timelock(&signers1(&env, &admin), &(ABS_MAX_UPGRADE_TIMELOCK + 1));
+    }
+
+    #[test]
+    fn test_set_upgrade_timelock_boundary_min() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.set_upgrade_timelock(&signers1(&env, &admin), &ABS_MIN_UPGRADE_TIMELOCK);
+        assert_eq!(client.get_upgrade_timelock(), ABS_MIN_UPGRADE_TIMELOCK);
+    }
+
+    #[test]
+    fn test_set_upgrade_timelock_boundary_max() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.set_upgrade_timelock(&signers1(&env, &admin), &ABS_MAX_UPGRADE_TIMELOCK);
+        assert_eq!(client.get_upgrade_timelock(), ABS_MAX_UPGRADE_TIMELOCK);
+    }
+
+    // ── Emergency withdrawal timelock ────────────────────────────────────
+
+    #[test]
+    fn test_set_emergency_timelock_valid() {
+        let (env, _cid, client, admin, _pid) = setup();
+        let new_val: u32 = 80_000;
+        client.set_emergency_timelock(&signers1(&env, &admin), &new_val);
+        assert_eq!(client.get_emergency_timelock(), new_val);
+    }
+
+    #[test]
+    #[should_panic(expected = "Emergency withdrawal timelock too short")]
+    fn test_set_emergency_timelock_below_minimum() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.set_emergency_timelock(&signers1(&env, &admin), &(ABS_MIN_EMERGENCY_TIMELOCK - 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "Emergency withdrawal timelock too long")]
+    fn test_set_emergency_timelock_above_maximum() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.set_emergency_timelock(&signers1(&env, &admin), &(ABS_MAX_EMERGENCY_TIMELOCK + 1));
+    }
+
+    #[test]
+    fn test_set_emergency_timelock_boundary_min() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.set_emergency_timelock(&signers1(&env, &admin), &ABS_MIN_EMERGENCY_TIMELOCK);
+        assert_eq!(client.get_emergency_timelock(), ABS_MIN_EMERGENCY_TIMELOCK);
+    }
+
+    #[test]
+    fn test_set_emergency_timelock_boundary_max() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.set_emergency_timelock(&signers1(&env, &admin), &ABS_MAX_EMERGENCY_TIMELOCK);
+        assert_eq!(client.get_emergency_timelock(), ABS_MAX_EMERGENCY_TIMELOCK);
+    }
+
+    // ── Refund cooldown ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_set_refund_cooldown_valid() {
+        let (env, _cid, client, admin, _pid) = setup();
+        let new_val: u32 = 50_000;
+        client.set_refund_cooldown(&signers1(&env, &admin), &new_val);
+        assert_eq!(client.get_refund_cooldown(), new_val);
+    }
+
+    #[test]
+    #[should_panic(expected = "Refund cooldown too short")]
+    fn test_set_refund_cooldown_below_minimum() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.set_refund_cooldown(&signers1(&env, &admin), &(ABS_MIN_REFUND_COOLDOWN - 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "Refund cooldown too long")]
+    fn test_set_refund_cooldown_above_maximum() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.set_refund_cooldown(&signers1(&env, &admin), &(ABS_MAX_REFUND_COOLDOWN + 1));
+    }
+
+    #[test]
+    fn test_set_refund_cooldown_boundary_min() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.set_refund_cooldown(&signers1(&env, &admin), &ABS_MIN_REFUND_COOLDOWN);
+        assert_eq!(client.get_refund_cooldown(), ABS_MIN_REFUND_COOLDOWN);
+    }
+
+    #[test]
+    fn test_set_refund_cooldown_boundary_max() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.set_refund_cooldown(&signers1(&env, &admin), &ABS_MAX_REFUND_COOLDOWN);
+        assert_eq!(client.get_refund_cooldown(), ABS_MAX_REFUND_COOLDOWN);
+    }
+
+    // ── Default voting window ────────────────────────────────────────────
+
+    #[test]
+    fn test_set_default_voting_window_valid() {
+        let (env, _cid, client, admin, _pid) = setup();
+        let new_val: u32 = 50_000;
+        client.set_default_voting_window(&signers1(&env, &admin), &new_val);
+        assert_eq!(client.get_default_voting_window(), new_val);
+    }
+
+    #[test]
+    #[should_panic(expected = "Voting window too short")]
+    fn test_set_default_voting_window_below_minimum() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.set_default_voting_window(&signers1(&env, &admin), &(MIN_VOTING_WINDOW_LEDGERS - 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "Voting window too long")]
+    fn test_set_default_voting_window_above_maximum() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.set_default_voting_window(&signers1(&env, &admin), &(MAX_VOTING_WINDOW_LEDGERS + 1));
+    }
+
+    #[test]
+    fn test_set_default_voting_window_boundary_min() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.set_default_voting_window(&signers1(&env, &admin), &MIN_VOTING_WINDOW_LEDGERS);
+        assert_eq!(
+            client.get_default_voting_window(),
+            MIN_VOTING_WINDOW_LEDGERS
+        );
+    }
+
+    #[test]
+    fn test_set_default_voting_window_boundary_max() {
+        let (env, _cid, client, admin, _pid) = setup();
+        client.set_default_voting_window(&signers1(&env, &admin), &MAX_VOTING_WINDOW_LEDGERS);
+        assert_eq!(
+            client.get_default_voting_window(),
+            MAX_VOTING_WINDOW_LEDGERS
+        );
+    }
+
+    // ── Governance authorization ─────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Insufficient admin signatures")]
+    fn test_set_upgrade_timelock_non_admin_fails() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let imposter = Address::generate(&env);
+        client.set_upgrade_timelock(&signers1(&env, &imposter), &50_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "Insufficient admin signatures")]
+    fn test_set_emergency_timelock_non_admin_fails() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let imposter = Address::generate(&env);
+        client.set_emergency_timelock(&signers1(&env, &imposter), &50_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "Insufficient admin signatures")]
+    fn test_set_refund_cooldown_non_admin_fails() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let imposter = Address::generate(&env);
+        client.set_refund_cooldown(&signers1(&env, &imposter), &50_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "Insufficient admin signatures")]
+    fn test_set_default_voting_window_non_admin_fails() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let imposter = Address::generate(&env);
+        client.set_default_voting_window(&signers1(&env, &imposter), &50_000);
+    }
+
+    // ── New values apply to future operations only ───────────────────────
+
+    #[test]
+    fn test_changed_upgrade_timelock_applies_to_new_proposals() {
+        let (env, _cid, client, admin, _pid) = setup();
+        let new_timelock: u32 = 50_000;
+        client.set_upgrade_timelock(&signers1(&env, &admin), &new_timelock);
+        let wasm_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let start = env.ledger().sequence();
+        client.propose_upgrade(&signers1(&env, &admin), &wasm_hash);
+        let (_, eff) = client.get_pending_upgrade().unwrap();
+        assert_eq!(eff, start + new_timelock);
+    }
+
+    #[test]
+    fn test_changed_voting_window_applies_to_new_proposals() {
+        let (env, _cid, client, admin, pid) = setup();
+        let new_window: u32 = 10_000;
+        client.set_default_voting_window(&signers1(&env, &admin), &new_window);
+        let start = env.ledger().sequence();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.deadline_ledger, start + new_window);
     // ─── Quadratic Voting tests (#424) ─────────────────────────────────────────
 
     #[test]

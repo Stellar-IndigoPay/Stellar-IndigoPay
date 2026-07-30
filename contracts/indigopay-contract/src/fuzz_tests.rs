@@ -364,17 +364,12 @@ mod fuzz {
             let receipt_a = client.generate_receipt(&donor, &0u32);
             let receipt_b = client.generate_receipt(&donor, &1u32);
 
-            // Different donation indices → different commitments
             prop_assert_ne!(
                 receipt_a.contract_signature,
                 receipt_b.contract_signature,
                 "Different donations must produce unique receipt signatures"
             );
 
-            // Both donors should be the same.
-            // Borrow through `&` because `soroban_sdk::Address` is not `Copy`
-            // — passing the owned field twice would move it on the first use
-            // and trip an `E0382` on the second.
             prop_assert_eq!(&receipt_a.donor, &receipt_b.donor);
             prop_assert_eq!(&receipt_a.donor, &donor);
         }
@@ -422,9 +417,56 @@ mod fuzz {
             client.donate_token(&usdc_token, &donor, &project_id, &usdc_amount, &MSG_HASH);
 
             let stats = client.get_donor_stats(&donor);
-            // Oracle rate is 8 XLM per 1 USDC
             let expected_xlm = usdc_amount.checked_mul(8).unwrap();
             prop_assert_eq!(stats.total_donated, expected_xlm);
+        }
+
+        /// All governance-configurable parameters must enforce their hard
+        /// bounds: any value outside the allowed range must be rejected.
+        #[test]
+        fn prop_bounds_enforced_for_all_parameters(
+            upgrade_tl in any::<u32>()
+                .prop_filter("out of bounds", |v| *v < crate::ABS_MIN_UPGRADE_TIMELOCK || *v > crate::ABS_MAX_UPGRADE_TIMELOCK),
+            ew_tl in any::<u32>()
+                .prop_filter("out of bounds", |v| *v < crate::ABS_MIN_EMERGENCY_TIMELOCK || *v > crate::ABS_MAX_EMERGENCY_TIMELOCK),
+            refund_cd in any::<u32>()
+                .prop_filter("out of bounds", |v| *v < crate::ABS_MIN_REFUND_COOLDOWN || *v > crate::ABS_MAX_REFUND_COOLDOWN),
+            voting_w in any::<u32>()
+                .prop_filter("out of bounds", |v| *v < crate::MIN_VOTING_WINDOW_LEDGERS || *v > crate::MAX_VOTING_WINDOW_LEDGERS),
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let cid = env.register_contract(None, IndigoPayContract);
+            let client = IndigoPayContractClient::new(&env, &cid);
+            let admin = Address::generate(&env);
+            client.initialize(&soroban_sdk::vec![&env, admin.clone()], &1u32);
+
+            let signers = soroban_sdk::vec![&env, admin.clone()];
+
+            let r1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.set_upgrade_timelock(&signers, &upgrade_tl);
+            }));
+            prop_assert!(r1.is_err(), "set_upgrade_timelock should reject {}", upgrade_tl);
+
+            let r2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.set_emergency_timelock(&signers, &ew_tl);
+            }));
+            prop_assert!(r2.is_err(), "set_emergency_timelock should reject {}", ew_tl);
+
+            let r3 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.set_refund_cooldown(&signers, &refund_cd);
+            }));
+            prop_assert!(r3.is_err(), "set_refund_cooldown should reject {}", refund_cd);
+
+            let r4 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.set_default_voting_window(&signers, &voting_w);
+            }));
+            prop_assert!(r4.is_err(), "set_default_voting_window should reject {}", voting_w);
+
+            prop_assert_eq!(client.get_upgrade_timelock(), crate::DEFAULT_UPGRADE_TIMELOCK_LEDGERS);
+            prop_assert_eq!(client.get_emergency_timelock(), crate::DEFAULT_EMERGENCY_WITHDRAWAL_TIMELOCK);
+            prop_assert_eq!(client.get_refund_cooldown(), crate::DEFAULT_REFUND_COOLDOWN_LEDGERS);
+            prop_assert_eq!(client.get_default_voting_window(), crate::DEFAULT_VOTING_WINDOW_LEDGERS);
         }
     }
 
