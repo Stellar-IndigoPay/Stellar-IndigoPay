@@ -2,8 +2,8 @@
 #![allow(deprecated)]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Env, InvokeError, String,
-    Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, token, Address, Env, IntoVal, InvokeError,
+    String, Symbol, Vec,
 };
 
 const MAX_OBSERVATIONS: u32 = 20;
@@ -12,6 +12,13 @@ const DEFAULT_TWAP_WINDOW: u32 = 10;
 const DEFAULT_STALENESS_THRESHOLD: u32 = 720;
 const PRICE_SCALE: i128 = 10_000_000;
 pub const DEFAULT_UNSTAKE_COOLDOWN: u32 = 120_960;
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OracleMode {
+    Twap,
+    Median,
+}
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -34,11 +41,12 @@ pub struct SlashEvent {
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
-    Observations(u32),
-    ObservationCount,
-    ObservationIndex,
+    Mode,
+    Observations(u32, Symbol),
+    ObservationCount(Symbol),
+    ObservationIndex(Symbol),
     Reporter(Address),
-    FallbackPrice,
+    FallbackPrice(Symbol),
     MaxPriceDeviationBps,
     TwapWindow,
     StalenessThreshold,
@@ -108,6 +116,13 @@ fn read_staleness_threshold(env: &Env) -> u32 {
         .unwrap_or(DEFAULT_STALENESS_THRESHOLD)
 }
 
+fn read_mode(env: &Env) -> OracleMode {
+    env.storage()
+        .instance()
+        .get(&DataKey::Mode)
+        .unwrap_or(OracleMode::Twap)
+}
+
 /// Time-weighted current price in the same raw scale as `PriceObservation
 /// ::price` / `report_price`'s `price` argument (i.e. *not* divided by
 /// `PRICE_SCALE`, unlike the public `get_price`). Used exclusively as the
@@ -119,11 +134,11 @@ fn read_staleness_threshold(env: &Env) -> u32 {
 /// deviation check is skipped rather than falling back to a configured
 /// fallback price (a fallback price is a display/consumption concern for
 /// `get_price`, not a valid deviation baseline for a fresh report).
-fn current_price_raw(env: &Env) -> Option<i128> {
+fn current_price_raw(env: &Env, asset_pair: &Symbol) -> Option<i128> {
     let count: u32 = env
         .storage()
         .instance()
-        .get(&DataKey::ObservationCount)
+        .get(&DataKey::ObservationCount(asset_pair.clone()))
         .unwrap_or(0);
     if count == 0 {
         return None;
@@ -132,7 +147,7 @@ fn current_price_raw(env: &Env) -> Option<i128> {
     let next_index: u32 = env
         .storage()
         .instance()
-        .get(&DataKey::ObservationIndex)
+        .get(&DataKey::ObservationIndex(asset_pair.clone()))
         .unwrap_or(0);
     let current_ledger = env.ledger().sequence();
 
@@ -140,7 +155,7 @@ fn current_price_raw(env: &Env) -> Option<i128> {
     let latest: PriceObservation = env
         .storage()
         .instance()
-        .get(&DataKey::Observations(latest_index))
+        .get(&DataKey::Observations(latest_index, asset_pair.clone()))
         .expect("Oracle observation missing");
 
     if current_ledger.saturating_sub(latest.ledger) > read_staleness_threshold(env) {
@@ -155,7 +170,7 @@ fn current_price_raw(env: &Env) -> Option<i128> {
         let obs: PriceObservation = env
             .storage()
             .instance()
-            .get(&DataKey::Observations(index))
+            .get(&DataKey::Observations(index, asset_pair.clone()))
             .expect("Oracle observation missing");
         observations.push_back(obs);
     }
@@ -193,24 +208,24 @@ fn current_price_raw(env: &Env) -> Option<i128> {
 /// This is kept separate from external-source aggregation so the public
 /// `get_price` entry point remains backward compatible and aggregation can
 /// fall back to the exact same internal calculation.
-fn internal_price(env: &Env) -> i128 {
+fn internal_price(env: &Env, asset_pair: &Symbol) -> i128 {
     let count: u32 = env
         .storage()
         .instance()
-        .get(&DataKey::ObservationCount)
+        .get(&DataKey::ObservationCount(asset_pair.clone()))
         .unwrap_or(0);
     if count == 0 {
         return env
             .storage()
             .instance()
-            .get(&DataKey::FallbackPrice)
+            .get(&DataKey::FallbackPrice(asset_pair.clone()))
             .expect("Oracle has no observations and no fallback");
     }
 
     let next_index: u32 = env
         .storage()
         .instance()
-        .get(&DataKey::ObservationIndex)
+        .get(&DataKey::ObservationIndex(asset_pair.clone()))
         .unwrap_or(0);
     let current_ledger = env.ledger().sequence();
 
@@ -219,14 +234,14 @@ fn internal_price(env: &Env) -> i128 {
     let latest: PriceObservation = env
         .storage()
         .instance()
-        .get(&DataKey::Observations(latest_index))
+        .get(&DataKey::Observations(latest_index, asset_pair.clone()))
         .expect("Oracle observation missing");
 
     if current_ledger.saturating_sub(latest.ledger) > read_staleness_threshold(env) {
         return env
             .storage()
             .instance()
-            .get(&DataKey::FallbackPrice)
+            .get(&DataKey::FallbackPrice(asset_pair.clone()))
             .expect("Oracle price is stale and no fallback configured");
     }
 
@@ -240,9 +255,36 @@ fn internal_price(env: &Env) -> i128 {
         let obs: PriceObservation = env
             .storage()
             .instance()
-            .get(&DataKey::Observations(index))
+            .get(&DataKey::Observations(index, asset_pair.clone()))
             .expect("Oracle observation missing");
         observations.push_back(obs);
+    }
+
+    let mode = read_mode(env);
+    if mode == OracleMode::Median {
+        let mut prices: Vec<i128> = Vec::new(env);
+        for i in 0..window {
+            prices.push_back(observations.get(i).unwrap().price);
+        }
+        // Insertion sort
+        for i in 1..prices.len() {
+            let price = prices.get_unchecked(i);
+            let mut j = i;
+            while j > 0 && prices.get_unchecked(j - 1) > price {
+                let previous = prices.get_unchecked(j - 1);
+                prices.set(j, previous);
+                j -= 1;
+            }
+            prices.set(j, price);
+        }
+        let middle = prices.len() / 2;
+        if prices.len().is_multiple_of(2) {
+            let lower = prices.get_unchecked(middle - 1);
+            let upper = prices.get_unchecked(middle);
+            return (lower + (upper - lower) / 2) / PRICE_SCALE;
+        } else {
+            return prices.get_unchecked(middle) / PRICE_SCALE;
+        }
     }
 
     // TWAP: Σ(price_i × weight_i) / Σ(weight_i × PRICE_SCALE)
@@ -275,7 +317,7 @@ fn internal_price(env: &Env) -> i128 {
         return env
             .storage()
             .instance()
-            .get(&DataKey::FallbackPrice)
+            .get(&DataKey::FallbackPrice(asset_pair.clone()))
             .expect("Zero-weight TWAP — fallback required");
     }
 
@@ -291,16 +333,19 @@ impl SimpleOracle {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
             .instance()
-            .set(&DataKey::ObservationCount, &0_u32);
-        env.storage()
-            .instance()
-            .set(&DataKey::ObservationIndex, &0_u32);
+            .set(&DataKey::Mode, &OracleMode::Twap);
         env.storage()
             .instance()
             .set(&DataKey::TwapWindow, &DEFAULT_TWAP_WINDOW);
         env.storage()
             .instance()
             .set(&DataKey::StalenessThreshold, &DEFAULT_STALENESS_THRESHOLD);
+    }
+
+    pub fn set_mode(env: Env, admin: Address, mode: OracleMode) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::Mode, &mode);
     }
 
     pub fn add_reporter(env: Env, admin: Address, reporter: Address) {
@@ -576,7 +621,7 @@ impl SimpleOracle {
             .set(&DataKey::SourceOracleList, &sources);
     }
 
-    pub fn report_price(env: Env, reporter: Address, price: i128) {
+    pub fn report_price(env: Env, reporter: Address, price: i128, asset_pair: Symbol) {
         reporter.require_auth();
 
         let is_reporter: bool = env
@@ -607,7 +652,7 @@ impl SimpleOracle {
         let count: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::ObservationCount)
+            .get(&DataKey::ObservationCount(asset_pair.clone()))
             .unwrap_or(0);
 
         // Price deviation circuit breaker: reject a new observation that
@@ -622,7 +667,7 @@ impl SimpleOracle {
             .get(&DataKey::MaxPriceDeviationBps)
             .unwrap_or(0);
         if max_deviation_bps > 0 && count >= 2 {
-            if let Some(current_price) = current_price_raw(&env) {
+            if let Some(current_price) = current_price_raw(&env, &asset_pair) {
                 let deviation_bps = calculate_deviation_bps(price, current_price);
                 if deviation_bps > max_deviation_bps {
                     // Reject by dropping the observation rather than panicking:
@@ -644,7 +689,7 @@ impl SimpleOracle {
         let index: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::ObservationIndex)
+            .get(&DataKey::ObservationIndex(asset_pair.clone()))
             .unwrap_or(0);
         let observation = PriceObservation {
             price,
@@ -652,32 +697,34 @@ impl SimpleOracle {
             ledger: env.ledger().sequence(),
         };
 
-        env.storage()
-            .instance()
-            .set(&DataKey::Observations(index), &observation);
         env.storage().instance().set(
-            &DataKey::ObservationCount,
+            &DataKey::Observations(index, asset_pair.clone()),
+            &observation,
+        );
+        env.storage().instance().set(
+            &DataKey::ObservationCount(asset_pair.clone()),
             &(count + 1).min(MAX_OBSERVATIONS),
         );
         env.storage().instance().set(
-            &DataKey::ObservationIndex,
+            &DataKey::ObservationIndex(asset_pair.clone()),
             &((index + 1) % MAX_OBSERVATIONS),
         );
         env.events().publish(
             (symbol_short!("price_upd"), reporter),
-            (price, env.ledger().sequence()),
+            (price, env.ledger().sequence(), asset_pair),
         );
     }
 
-    pub fn set_fallback_price(env: Env, admin: Address, price: i128) {
+    pub fn set_fallback_price(env: Env, admin: Address, price: i128, asset_pair: Option<Symbol>) {
         admin.require_auth();
         require_admin(&env, &admin);
         if price <= 0 {
             panic!("Fallback price must be positive");
         }
+        let pair = asset_pair.unwrap_or_else(|| Symbol::new(&env, "XLM_USDC"));
         env.storage()
             .instance()
-            .set(&DataKey::FallbackPrice, &price);
+            .set(&DataKey::FallbackPrice(pair), &price);
     }
 
     /// Configures the price deviation circuit breaker threshold, in basis
@@ -740,26 +787,30 @@ impl SimpleOracle {
     /// Falls back to the configured `FallbackPrice` when there are no
     /// observations or the newest observation exceeds the configured staleness
     /// threshold.
-    pub fn get_price(env: Env) -> i128 {
-        internal_price(&env)
+    pub fn get_price(env: Env, asset_pair: Option<Symbol>) -> i128 {
+        let pair = asset_pair.unwrap_or_else(|| Symbol::new(&env, "XLM/USDC"));
+        internal_price(&env, &pair)
     }
 
-    pub fn get_aggregated_price(env: Env) -> i128 {
+    pub fn get_aggregated_price(env: Env, asset_pair: Option<Symbol>) -> i128 {
+        let pair = asset_pair.unwrap_or_else(|| Symbol::new(&env, "XLM/USDC"));
         let sources: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::SourceOracleList)
             .unwrap_or(Vec::new(&env));
         if sources.is_empty() {
-            return internal_price(&env);
+            return internal_price(&env, &pair);
         }
 
         let mut prices: Vec<i128> = Vec::new(&env);
         for source in sources.iter() {
+            let mut args = Vec::new(&env);
+            args.push_back(pair.clone().into_val(&env));
             let result = env.try_invoke_contract::<i128, InvokeError>(
                 &source,
                 &symbol_short!("get_price"),
-                Vec::new(&env),
+                args,
             );
             if let Ok(Ok(price)) = result {
                 if price > 0 {
@@ -769,7 +820,7 @@ impl SimpleOracle {
         }
 
         if prices.is_empty() {
-            return internal_price(&env);
+            return internal_price(&env, &pair);
         }
 
         for i in 1..prices.len() {
@@ -1013,7 +1064,7 @@ mod tests {
         let source = register_price_source(&env, 17);
         client.add_source_oracle(&admin, &source);
 
-        assert_eq!(client.get_aggregated_price(), 17);
+        assert_eq!(client.get_aggregated_price(&None), 17);
     }
 
     #[test]
@@ -1028,7 +1079,7 @@ mod tests {
         client.add_source_oracle(&admin, &low);
         client.add_source_oracle(&admin, &middle);
 
-        assert_eq!(client.get_aggregated_price(), 20);
+        assert_eq!(client.get_aggregated_price(&None), 20);
     }
 
     #[test]
@@ -1040,7 +1091,7 @@ mod tests {
         client.add_source_oracle(&admin, &upper);
         client.add_source_oracle(&admin, &lower);
 
-        assert_eq!(client.get_aggregated_price(), i128::MAX - 1);
+        assert_eq!(client.get_aggregated_price(&None), i128::MAX - 1);
     }
 
     #[test]
@@ -1052,7 +1103,7 @@ mod tests {
             client.add_source_oracle(&admin, &source);
         }
 
-        assert_eq!(client.get_aggregated_price(), 9);
+        assert_eq!(client.get_aggregated_price(&None), 9);
     }
 
     #[test]
@@ -1068,16 +1119,16 @@ mod tests {
             client.add_source_oracle(&admin, &source);
         }
 
-        assert_eq!(client.get_aggregated_price(), 25);
+        assert_eq!(client.get_aggregated_price(&None), 25);
     }
 
     #[test]
     fn test_aggregate_fallback() {
         let (env, contract_id, admin, _) = setup();
         let client = SimpleOracleClient::new(&env, &contract_id);
-        client.set_fallback_price(&admin, &7);
+        client.set_fallback_price(&admin, &7, &None);
 
-        assert_eq!(client.get_aggregated_price(), 7);
+        assert_eq!(client.get_aggregated_price(&None), 7);
 
         let error_source = env.register(ErrorPriceSource, ());
         let incompatible_source = env.register(IncompatiblePriceSource, ());
@@ -1086,7 +1137,7 @@ mod tests {
         client.add_source_oracle(&admin, &incompatible_source);
         client.add_source_oracle(&admin, &missing_source);
 
-        assert_eq!(client.get_aggregated_price(), 7);
+        assert_eq!(client.get_aggregated_price(&None), 7);
     }
 
     #[test]
@@ -1097,15 +1148,15 @@ mod tests {
         client.add_source_oracle(&admin, &Address::generate(&env));
 
         env.ledger().set_sequence_number(100);
-        client.report_price(&reporter, &100_000_000);
+        client.report_price(&reporter, &100_000_000, &Symbol::new(&env, "XLM/USDC"));
         env.ledger().set_sequence_number(200);
-        client.report_price(&reporter, &200_000_000);
+        client.report_price(&reporter, &200_000_000, &Symbol::new(&env, "XLM/USDC"));
         env.ledger().set_sequence_number(300);
-        assert_eq!(client.get_aggregated_price(), 15);
+        assert_eq!(client.get_aggregated_price(&None), 15);
 
         client.set_twap_window(&admin, &1);
-        assert_eq!(client.get_aggregated_price(), 20);
-        assert_eq!(client.get_price(), 20);
+        assert_eq!(client.get_aggregated_price(&None), 20);
+        assert_eq!(client.get_price(&None), 20);
     }
 
     #[test]
@@ -1114,31 +1165,31 @@ mod tests {
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter);
         client.add_source_oracle(&admin, &Address::generate(&env));
-        client.set_fallback_price(&admin, &6);
+        client.set_fallback_price(&admin, &6, &None);
         client.set_staleness_threshold(&admin, &DEFAULT_TWAP_WINDOW);
 
         env.ledger().set_sequence_number(100);
-        client.report_price(&reporter, &80_000_000);
+        client.report_price(&reporter, &80_000_000, &Symbol::new(&env, "XLM/USDC"));
         env.ledger().set_sequence_number(110);
-        assert_eq!(client.get_aggregated_price(), 8);
+        assert_eq!(client.get_aggregated_price(&None), 8);
         env.ledger().set_sequence_number(111);
-        assert_eq!(client.get_aggregated_price(), 6);
-        assert_eq!(client.get_price(), 6);
+        assert_eq!(client.get_aggregated_price(&None), 6);
+        assert_eq!(client.get_price(&None), 6);
     }
 
     #[test]
     #[should_panic(expected = "Oracle has no observations and no fallback")]
     fn no_observations_without_fallback_panics() {
         let (env, contract_id, _, _) = setup();
-        SimpleOracleClient::new(&env, &contract_id).get_price();
+        SimpleOracleClient::new(&env, &contract_id).get_price(&None);
     }
 
     #[test]
     fn no_observations_uses_fallback() {
         let (env, contract_id, admin, _) = setup();
         let client = SimpleOracleClient::new(&env, &contract_id);
-        client.set_fallback_price(&admin, &8);
-        assert_eq!(client.get_price(), 8);
+        client.set_fallback_price(&admin, &8, &None);
+        assert_eq!(client.get_price(&None), 8);
     }
 
     #[test]
@@ -1269,14 +1320,14 @@ mod tests {
         add_reporter(&env, &contract_id, &admin, &reporter);
 
         env.ledger().set_sequence_number(100);
-        client.report_price(&reporter, &100_000_000);
+        client.report_price(&reporter, &100_000_000, &Symbol::new(&env, "XLM/USDC"));
         env.ledger().set_sequence_number(200);
-        client.report_price(&reporter, &200_000_000);
+        client.report_price(&reporter, &200_000_000, &Symbol::new(&env, "XLM/USDC"));
         env.ledger().set_sequence_number(300);
-        assert_eq!(client.get_price(), 15);
+        assert_eq!(client.get_price(&None), 15);
 
         client.set_twap_window(&admin, &1);
-        assert_eq!(client.get_price(), 20);
+        assert_eq!(client.get_price(&None), 20);
     }
 
     #[test]
@@ -1284,15 +1335,15 @@ mod tests {
         let (env, contract_id, admin, reporter) = setup();
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter);
-        client.set_fallback_price(&admin, &5);
+        client.set_fallback_price(&admin, &5, &None);
 
         env.ledger().set_sequence_number(100);
-        client.report_price(&reporter, &80_000_000);
+        client.report_price(&reporter, &80_000_000, &Symbol::new(&env, "XLM/USDC"));
         env.ledger().set_sequence_number(111);
-        assert_eq!(client.get_price(), 8);
+        assert_eq!(client.get_price(&None), 8);
 
         client.set_staleness_threshold(&admin, &DEFAULT_TWAP_WINDOW);
-        assert_eq!(client.get_price(), 5);
+        assert_eq!(client.get_price(&None), 5);
     }
 
     #[test]
@@ -1300,11 +1351,11 @@ mod tests {
         let (env, contract_id, admin, reporter) = setup();
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter);
-        client.set_fallback_price(&admin, &7);
+        client.set_fallback_price(&admin, &7, &None);
 
-        client.report_price(&reporter, &1_000_000_000);
+        client.report_price(&reporter, &1_000_000_000, &Symbol::new(&env, "XLM/USDC"));
         for _ in 0..DEFAULT_TWAP_WINDOW {
-            client.report_price(&reporter, &100_000_000);
+            client.report_price(&reporter, &100_000_000, &Symbol::new(&env, "XLM/USDC"));
         }
         env.as_contract(&contract_id, || {
             env.storage().instance().remove(&DataKey::TwapWindow);
@@ -1320,10 +1371,10 @@ mod tests {
         );
         env.ledger()
             .set_sequence_number(DEFAULT_STALENESS_THRESHOLD);
-        assert_eq!(client.get_price(), 10);
+        assert_eq!(client.get_price(&None), 10);
         env.ledger()
             .set_sequence_number(DEFAULT_STALENESS_THRESHOLD + 1);
-        assert_eq!(client.get_price(), 7);
+        assert_eq!(client.get_price(&None), 7);
     }
 
     #[test]
@@ -1343,8 +1394,8 @@ mod tests {
         let (env, contract_id, admin, reporter) = setup();
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter);
-        client.report_price(&reporter, &80_000_000);
-        assert_eq!(client.get_price(), 8);
+        client.report_price(&reporter, &80_000_000, &Symbol::new(&env, "XLM/USDC"));
+        assert_eq!(client.get_price(&None), 8);
     }
 
     #[test]
@@ -1353,9 +1404,9 @@ mod tests {
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter);
         for price in [60_000_000_i128, 90_000_000, 120_000_000] {
-            client.report_price(&reporter, &price);
+            client.report_price(&reporter, &price, &Symbol::new(&env, "XLM/USDC"));
         }
-        assert_eq!(client.get_price(), 9);
+        assert_eq!(client.get_price(&None), 9);
     }
 
     #[test]
@@ -1364,9 +1415,13 @@ mod tests {
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter);
         for price in 1_i128..=15 {
-            client.report_price(&reporter, &(price * PRICE_SCALE));
+            client.report_price(
+                &reporter,
+                &(price * PRICE_SCALE),
+                &Symbol::new(&env, "XLM/USDC"),
+            );
         }
-        assert_eq!(client.get_price(), 10);
+        assert_eq!(client.get_price(&None), 10);
     }
 
     #[test]
@@ -1376,16 +1431,20 @@ mod tests {
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter_one);
         add_reporter(&env, &contract_id, &admin, &reporter_two);
-        client.report_price(&reporter_one, &80_000_000);
-        client.report_price(&reporter_two, &120_000_000);
-        assert_eq!(client.get_price(), 10);
+        client.report_price(&reporter_one, &80_000_000, &Symbol::new(&env, "XLM/USDC"));
+        client.report_price(&reporter_two, &120_000_000, &Symbol::new(&env, "XLM/USDC"));
+        assert_eq!(client.get_price(&None), 10);
     }
 
     #[test]
     #[should_panic(expected = "Not an authorised reporter")]
     fn non_reporter_cannot_report() {
         let (env, contract_id, _, reporter) = setup();
-        SimpleOracleClient::new(&env, &contract_id).report_price(&reporter, &80_000_000);
+        SimpleOracleClient::new(&env, &contract_id).report_price(
+            &reporter,
+            &80_000_000,
+            &Symbol::new(&env, "XLM/USDC"),
+        );
     }
 
     #[test]
@@ -1395,7 +1454,7 @@ mod tests {
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter);
         client.remove_reporter(&admin, &reporter);
-        client.report_price(&reporter, &80_000_000);
+        client.report_price(&reporter, &80_000_000, &Symbol::new(&env, "XLM/USDC"));
     }
 
     #[test]
@@ -1420,7 +1479,11 @@ mod tests {
     fn zero_price_is_rejected() {
         let (env, contract_id, admin, reporter) = setup();
         add_reporter(&env, &contract_id, &admin, &reporter);
-        SimpleOracleClient::new(&env, &contract_id).report_price(&reporter, &0);
+        SimpleOracleClient::new(&env, &contract_id).report_price(
+            &reporter,
+            &0,
+            &Symbol::new(&env, "XLM/USDC"),
+        );
     }
 
     #[test]
@@ -1428,14 +1491,18 @@ mod tests {
     fn negative_price_is_rejected() {
         let (env, contract_id, admin, reporter) = setup();
         add_reporter(&env, &contract_id, &admin, &reporter);
-        SimpleOracleClient::new(&env, &contract_id).report_price(&reporter, &-1);
+        SimpleOracleClient::new(&env, &contract_id).report_price(
+            &reporter,
+            &-1,
+            &Symbol::new(&env, "XLM/USDC"),
+        );
     }
 
     #[test]
     #[should_panic(expected = "Fallback price must be positive")]
     fn zero_fallback_is_rejected() {
         let (env, contract_id, admin, _) = setup();
-        SimpleOracleClient::new(&env, &contract_id).set_fallback_price(&admin, &0);
+        SimpleOracleClient::new(&env, &contract_id).set_fallback_price(&admin, &0, &None);
     }
 
     #[test]
@@ -1444,10 +1511,10 @@ mod tests {
         env.ledger().set_sequence_number(100);
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter);
-        client.report_price(&reporter, &80_000_000);
+        client.report_price(&reporter, &80_000_000, &Symbol::new(&env, "XLM/USDC"));
         env.ledger()
             .set_sequence_number(100 + DEFAULT_STALENESS_THRESHOLD);
-        assert_eq!(client.get_price(), 8);
+        assert_eq!(client.get_price(&None), 8);
     }
 
     #[test]
@@ -1457,10 +1524,10 @@ mod tests {
         env.ledger().set_sequence_number(100);
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter);
-        client.report_price(&reporter, &80_000_000);
+        client.report_price(&reporter, &80_000_000, &Symbol::new(&env, "XLM/USDC"));
         env.ledger()
             .set_sequence_number(101 + DEFAULT_STALENESS_THRESHOLD);
-        client.get_price();
+        client.get_price(&None);
     }
 
     #[test]
@@ -1469,11 +1536,11 @@ mod tests {
         env.ledger().set_sequence_number(100);
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter);
-        client.set_fallback_price(&admin, &7);
-        client.report_price(&reporter, &80_000_000);
+        client.set_fallback_price(&admin, &7, &None);
+        client.report_price(&reporter, &80_000_000, &Symbol::new(&env, "XLM/USDC"));
         env.ledger()
             .set_sequence_number(101 + DEFAULT_STALENESS_THRESHOLD);
-        assert_eq!(client.get_price(), 7);
+        assert_eq!(client.get_price(&None), 7);
     }
 
     #[test]
@@ -1482,12 +1549,12 @@ mod tests {
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter);
         env.ledger().set_sequence_number(1);
-        client.report_price(&reporter, &20_000_000);
+        client.report_price(&reporter, &20_000_000, &Symbol::new(&env, "XLM/USDC"));
         env.ledger().set_sequence_number(1_000);
-        client.report_price(&reporter, &100_000_000);
+        client.report_price(&reporter, &100_000_000, &Symbol::new(&env, "XLM/USDC"));
         // TWAP: price 2 at ledger 1 (weight 999) + price 10 at ledger 1000
         // (weight 1). TWAP ≈ (2×999 + 10×1) / 1000 = 2008/1000 ≈ 2.
-        assert_eq!(client.get_price(), 2);
+        assert_eq!(client.get_price(&None), 2);
     }
 
     #[test]
@@ -1496,19 +1563,23 @@ mod tests {
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter);
         for price in 1_i128..=25 {
-            client.report_price(&reporter, &(price * PRICE_SCALE));
+            client.report_price(
+                &reporter,
+                &(price * PRICE_SCALE),
+                &Symbol::new(&env, "XLM/USDC"),
+            );
         }
-        assert_eq!(client.get_price(), 20);
+        assert_eq!(client.get_price(&None), 20);
         env.as_contract(&contract_id, || {
             let count: u32 = env
                 .storage()
                 .instance()
-                .get(&DataKey::ObservationCount)
+                .get(&DataKey::ObservationCount(Symbol::new(&env, "XLM/USDC")))
                 .unwrap();
             let next_index: u32 = env
                 .storage()
                 .instance()
-                .get(&DataKey::ObservationIndex)
+                .get(&DataKey::ObservationIndex(Symbol::new(&env, "XLM/USDC")))
                 .unwrap();
             assert_eq!(count, MAX_OBSERVATIONS);
             assert_eq!(next_index, 5);
@@ -1520,9 +1591,9 @@ mod tests {
         let (env, contract_id, admin, reporter) = setup();
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter);
-        client.report_price(&reporter, &i128::MAX);
-        client.report_price(&reporter, &i128::MAX);
-        assert!(client.try_get_price().is_err());
+        client.report_price(&reporter, &i128::MAX, &Symbol::new(&env, "XLM/USDC"));
+        client.report_price(&reporter, &i128::MAX, &Symbol::new(&env, "XLM/USDC"));
+        assert!(client.try_get_price(&None).is_err());
     }
 
     #[test]
@@ -1538,12 +1609,16 @@ mod tests {
                     .wrapping_mul(6_364_136_223_846_793_005)
                     .wrapping_add(1);
                 let price = i128::from((state % 1_000) + 1);
-                client.report_price(&reporter, &(price * PRICE_SCALE));
+                client.report_price(
+                    &reporter,
+                    &(price * PRICE_SCALE),
+                    &Symbol::new(&env, "XLM/USDC"),
+                );
                 if index >= 15 {
                     recent[index - 15] = price;
                 }
             }
-            let twap = client.get_price();
+            let twap = client.get_price(&None);
             let min = recent.iter().copied().min().unwrap();
             let max = recent.iter().copied().max().unwrap();
             assert!(twap >= min && twap <= max);
@@ -1560,11 +1635,11 @@ mod tests {
 
         // Report one observation at price 10 XLM/USDC.
         env.ledger().set_sequence_number(0);
-        client.report_price(&reporter, &100_000_000);
+        client.report_price(&reporter, &100_000_000, &Symbol::new(&env, "XLM/USDC"));
 
         // Advance 100 ledgers — weight = 100, TWAP = (10×100) / 100 = 10.
         env.ledger().set_sequence_number(100);
-        assert_eq!(client.get_price(), 10);
+        assert_eq!(client.get_price(&None), 10);
     }
 
     #[test]
@@ -1575,17 +1650,17 @@ mod tests {
 
         // Two observations spread across ledgers.
         env.ledger().set_sequence_number(100);
-        client.report_price(&reporter, &100_000_000); // price 10
+        client.report_price(&reporter, &100_000_000, &Symbol::new(&env, "XLM/USDC")); // price 10
 
         env.ledger().set_sequence_number(150);
-        client.report_price(&reporter, &200_000_000); // price 20
+        client.report_price(&reporter, &200_000_000, &Symbol::new(&env, "XLM/USDC")); // price 20
 
         // Current ledger 200.
         //  weight_100 = 150 - 100 = 50
         //  weight_150 = 200 - 150 = 50
         //  TWAP = (10×50 + 20×50) / 100 = 15
         env.ledger().set_sequence_number(200);
-        assert_eq!(client.get_price(), 15);
+        assert_eq!(client.get_price(&None), 15);
     }
 
     #[test]
@@ -1595,15 +1670,15 @@ mod tests {
         add_reporter(&env, &contract_id, &admin, &reporter);
 
         env.ledger().set_sequence_number(100);
-        client.report_price(&reporter, &80_000_000);
+        client.report_price(&reporter, &80_000_000, &Symbol::new(&env, "XLM/USDC"));
 
         // Set a fallback so stale observations don't panic.
-        client.set_fallback_price(&admin, &5);
+        client.set_fallback_price(&admin, &5, &None);
 
         // Advance past staleness threshold (720 ledgers).
         env.ledger()
             .set_sequence_number(100 + DEFAULT_STALENESS_THRESHOLD + 1);
-        assert_eq!(client.get_price(), 5);
+        assert_eq!(client.get_price(&None), 5);
     }
 
     #[test]
@@ -1614,18 +1689,18 @@ mod tests {
 
         // Normal price at ledger 100.
         env.ledger().set_sequence_number(100);
-        client.report_price(&reporter, &100_000_000); // price 10
+        client.report_price(&reporter, &100_000_000, &Symbol::new(&env, "XLM/USDC")); // price 10
 
         // Attacker submits extreme price at ledger 200.
         env.ledger().set_sequence_number(200);
-        client.report_price(&reporter, &10_000_000_000); // price 1000
+        client.report_price(&reporter, &10_000_000_000, &Symbol::new(&env, "XLM/USDC")); // price 1000
 
         // Advance 1 ledger — attacker's price has weight ≈ 1.
         //  weight_normal = 200 - 100 = 100
         //  weight_attack = 201 - 200 = 1
         //  TWAP ≈ (10×100 + 1000×1) / 101 = 2000/101 ≈ 19
         env.ledger().set_sequence_number(201);
-        let twap = client.get_price();
+        let twap = client.get_price(&None);
         // (10×100 + 1000×1) / 101 = 2000 / 101 = 19 — attack negligible.
         assert_eq!(twap, 19);
     }
@@ -1644,8 +1719,8 @@ mod tests {
     ) {
         let client = SimpleOracleClient::new(env, contract_id);
         add_reporter(env, contract_id, admin, reporter);
-        client.report_price(reporter, &base_price);
-        client.report_price(reporter, &base_price);
+        client.report_price(reporter, &base_price, &Symbol::new(&env, "XLM/USDC"));
+        client.report_price(reporter, &base_price, &Symbol::new(&env, "XLM/USDC"));
     }
 
     #[test]
@@ -1679,13 +1754,13 @@ mod tests {
         client.set_max_price_deviation(&admin, &500); // 5%
 
         // 82_000_000 vs baseline 80_000_000 → 2.5% deviation, within 5%.
-        client.report_price(&reporter, &82_000_000);
+        client.report_price(&reporter, &82_000_000, &Symbol::new(&env, "XLM/USDC"));
 
         env.as_contract(&contract_id, || {
             let count: u32 = env
                 .storage()
                 .instance()
-                .get(&DataKey::ObservationCount)
+                .get(&DataKey::ObservationCount(Symbol::new(&env, "XLM/USDC")))
                 .unwrap();
             assert_eq!(count, 3);
         });
@@ -1701,13 +1776,13 @@ mod tests {
         // 90_000_000 vs baseline 80_000_000 → 12.5% deviation, exceeds 5%.
         // Rejected observations are dropped, not panicked (see comment in
         // report_price: a panic would also erase the price_rejected event).
-        client.report_price(&reporter, &90_000_000);
+        client.report_price(&reporter, &90_000_000, &Symbol::new(&env, "XLM/USDC"));
 
         env.as_contract(&contract_id, || {
             let count: u32 = env
                 .storage()
                 .instance()
-                .get(&DataKey::ObservationCount)
+                .get(&DataKey::ObservationCount(Symbol::new(&env, "XLM/USDC")))
                 .unwrap();
             assert_eq!(count, 2, "rejected observation must not be stored");
         });
@@ -1723,7 +1798,7 @@ mod tests {
         client.set_max_price_deviation(&admin, &500);
 
         let events_before = env.events().all().events().len();
-        client.report_price(&reporter, &90_000_000);
+        client.report_price(&reporter, &90_000_000, &Symbol::new(&env, "XLM/USDC"));
 
         let events_after = env.events().all();
         assert_eq!(
@@ -1748,13 +1823,13 @@ mod tests {
         seed_baseline(&env, &contract_id, &admin, &reporter, 80_000_000);
         let client = SimpleOracleClient::new(&env, &contract_id);
 
-        client.report_price(&reporter, &800_000_000); // 10x the baseline
+        client.report_price(&reporter, &800_000_000, &Symbol::new(&env, "XLM/USDC")); // 10x the baseline
 
         env.as_contract(&contract_id, || {
             let count: u32 = env
                 .storage()
                 .instance()
-                .get(&DataKey::ObservationCount)
+                .get(&DataKey::ObservationCount(Symbol::new(&env, "XLM/USDC")))
                 .unwrap();
             assert_eq!(count, 3);
         });
@@ -1768,16 +1843,16 @@ mod tests {
         client.set_max_price_deviation(&admin, &500);
 
         // First observation: 0 prior observations — check must be skipped.
-        client.report_price(&reporter, &80_000_000);
+        client.report_price(&reporter, &80_000_000, &Symbol::new(&env, "XLM/USDC"));
         // Second observation: only 1 prior observation — check must still
         // be skipped, even though this "deviates" wildly from the first.
-        client.report_price(&reporter, &8_000_000_000);
+        client.report_price(&reporter, &8_000_000_000, &Symbol::new(&env, "XLM/USDC"));
 
         env.as_contract(&contract_id, || {
             let count: u32 = env
                 .storage()
                 .instance()
-                .get(&DataKey::ObservationCount)
+                .get(&DataKey::ObservationCount(Symbol::new(&env, "XLM/USDC")))
                 .unwrap();
             assert_eq!(count, 2);
         });
@@ -1789,11 +1864,11 @@ mod tests {
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter);
 
-        client.report_price(&reporter, &100);
-        client.report_price(&reporter, &200);
+        client.report_price(&reporter, &100, &Symbol::new(&env, "XLM/USDC"));
+        client.report_price(&reporter, &200, &Symbol::new(&env, "XLM/USDC"));
         client.set_twap_window(&admin, &1);
         client.set_max_price_deviation(&admin, &3_000);
-        client.report_price(&reporter, &260);
+        client.report_price(&reporter, &260, &Symbol::new(&env, "XLM/USDC"));
 
         assert_eq!(
             env.events().all().filter_by_contract(&contract_id),
@@ -1802,7 +1877,12 @@ mod tests {
                 (
                     contract_id.clone(),
                     (symbol_short!("price_upd"), reporter).into_val(&env),
-                    (260_i128, env.ledger().sequence()).into_val(&env),
+                    (
+                        260_i128,
+                        env.ledger().sequence(),
+                        Symbol::new(&env, "XLM/USDC")
+                    )
+                        .into_val(&env),
                 )
             ]
         );
@@ -1810,13 +1890,16 @@ mod tests {
             assert_eq!(
                 env.storage()
                     .instance()
-                    .get::<_, u32>(&DataKey::ObservationCount),
+                    .get::<_, u32>(&DataKey::ObservationCount(Symbol::new(&env, "XLM/USDC"))),
                 Some(3)
             );
             assert_eq!(
                 env.storage()
                     .instance()
-                    .get::<_, PriceObservation>(&DataKey::Observations(2))
+                    .get::<_, PriceObservation>(&DataKey::Observations(
+                        2,
+                        Symbol::new(&env, "XLM/USDC")
+                    ))
                     .unwrap()
                     .price,
                 260
@@ -1831,12 +1914,12 @@ mod tests {
         add_reporter(&env, &contract_id, &admin, &reporter);
 
         env.ledger().set_sequence_number(100);
-        client.report_price(&reporter, &100);
-        client.report_price(&reporter, &100);
+        client.report_price(&reporter, &100, &Symbol::new(&env, "XLM/USDC"));
+        client.report_price(&reporter, &100, &Symbol::new(&env, "XLM/USDC"));
         client.set_staleness_threshold(&admin, &10);
         client.set_max_price_deviation(&admin, &500);
         env.ledger().set_sequence_number(111);
-        client.report_price(&reporter, &1_000);
+        client.report_price(&reporter, &1_000, &Symbol::new(&env, "XLM/USDC"));
 
         assert_eq!(
             env.events().all().filter_by_contract(&contract_id),
@@ -1845,7 +1928,7 @@ mod tests {
                 (
                     contract_id.clone(),
                     (symbol_short!("price_upd"), reporter).into_val(&env),
-                    (1_000_i128, 111_u32).into_val(&env),
+                    (1_000_i128, 111_u32, Symbol::new(&env, "XLM/USDC")).into_val(&env),
                 )
             ]
         );
@@ -1853,13 +1936,16 @@ mod tests {
             assert_eq!(
                 env.storage()
                     .instance()
-                    .get::<_, u32>(&DataKey::ObservationCount),
+                    .get::<_, u32>(&DataKey::ObservationCount(Symbol::new(&env, "XLM/USDC"))),
                 Some(3)
             );
             assert_eq!(
                 env.storage()
                     .instance()
-                    .get::<_, PriceObservation>(&DataKey::Observations(2))
+                    .get::<_, PriceObservation>(&DataKey::Observations(
+                        2,
+                        Symbol::new(&env, "XLM/USDC")
+                    ))
                     .unwrap()
                     .price,
                 1_000
@@ -1879,7 +1965,7 @@ mod tests {
             token::Client::new(&env, &stake_token).balance(&contract_id),
             1_000
         );
-        client.report_price(&reporter, &100_000_000);
+        client.report_price(&reporter, &100_000_000, &Symbol::new(&env, "XLM/USDC"));
     }
 
     #[test]
@@ -1888,7 +1974,7 @@ mod tests {
         let (env, contract_id, admin, reporter) = setup();
         let client = SimpleOracleClient::new(&env, &contract_id);
         setup_staking(&env, &contract_id, &admin, &reporter, 1_000, 10);
-        client.report_price(&reporter, &100_000_000);
+        client.report_price(&reporter, &100_000_000, &Symbol::new(&env, "XLM/USDC"));
     }
 
     #[test]
@@ -1912,7 +1998,9 @@ mod tests {
             600
         );
         assert_eq!(client.get_slash_history(&reporter).len(), 1);
-        assert!(client.try_report_price(&reporter, &100_000_000).is_err());
+        assert!(client
+            .try_report_price(&reporter, &100_000_000, &Symbol::new(&env, "XLM/USDC"))
+            .is_err());
     }
 
     #[test]
@@ -1931,7 +2019,9 @@ mod tests {
             token::Client::new(&env, &stake_token).balance(&reporter),
             starting_balance
         );
-        assert!(client.try_report_price(&reporter, &100_000_000).is_err());
+        assert!(client
+            .try_report_price(&reporter, &100_000_000, &Symbol::new(&env, "XLM/USDC"))
+            .is_err());
     }
 
     #[test]
