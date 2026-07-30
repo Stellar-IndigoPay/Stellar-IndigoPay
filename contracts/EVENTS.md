@@ -592,7 +592,122 @@ call `cleanup_vesting_schedule` once the grace period has elapsed.
 
 ---
 
-## 43. `nft_meta` (Impact NFT Metadata Updated)
+# Campaign-to-Escrow Integration Events (#426)
+
+Gated behind the `escrow` Cargo feature (opt-in). Bridges the indigopay-contract
+campaign system with the escrow-contract to enable milestone-based fund release
+for climate projects.
+
+## 43. `esc_set` (Escrow Contract Address Set)
+
+**Description**: Emitted when M-of-N admins configure the escrow contract address
+for campaign escrow integration.
+
+| Event Name | Topics          | Data                   | When Emitted                                     |
+| ---------- | --------------- | ---------------------- | ------------------------------------------------ |
+| `esc_set`  | `["esc_set"]`   | `escrow_contract: Address` | When admins call `set_escrow_contract_address` |
+
+---
+
+## 44. `camp_es` (Campaign with Escrow Created)
+
+**Description**: Emitted when an admin creates a campaign with milestone-based
+escrow for a project. The escrow job is not created yet — it is funded later
+via `fund_campaign_escrow_job` once donations accumulate.
+
+| Event Name | Topics                                 | Data                          | When Emitted                               |
+| ---------- | -------------------------------------- | ----------------------------- | ------------------------------------------ |
+| `camp_es`  | `["camp_es", admin, project_id]`       | `(goal: i128, deadline_ledger: u32)` | When admin calls `create_campaign_with_escrow` |
+
+---
+
+## 45. `esc_fnd` (Campaign Escrow Job Funded)
+
+**Description**: Emitted when an admin funds the escrow job for a campaign.
+The accumulated contract-held donations are transferred to the escrow contract
+and the escrow job is created with the project wallet as the freelancer.
+
+| Event Name | Topics                              | Data                                        | When Emitted                            |
+| ---------- | ----------------------------------- | ------------------------------------------- | --------------------------------------- |
+| `esc_fnd`  | `["esc_fnd", admin, project_id]`    | `(job_id: String, total_raised: i128)`      | When admin calls `fund_campaign_escrow_job` |
+
+---
+
+## 46. `esc_rel` (Campaign Milestone Released)
+
+**Description**: Emitted when an admin releases a milestone for an escrow campaign.
+Proxies through to the escrow contract's `release_milestone`.
+
+| Event Name | Topics                               | Data                       | When Emitted                                |
+| ---------- | ------------------------------------ | -------------------------- | ------------------------------------------- |
+| `esc_rel`  | `["esc_rel", admin, project_id]`     | `milestone_index: u32`     | When admin calls `release_campaign_milestone` |
+
+---
+
+## 47. `esc_clm` (Campaign Milestone Claimed)
+
+**Description**: Emitted when a project wallet claims a released milestone for
+an escrow campaign. Proxies through to the escrow contract's `claim_milestone`.
+
+| Event Name | Topics                                | Data                       | When Emitted                               |
+| ---------- | ------------------------------------- | -------------------------- | ------------------------------------------ |
+| `esc_clm`  | `["esc_clm", project_wallet, project_id]` | `milestone_index: u32` | When project wallet calls `claim_campaign_milestone` |
+
+---
+
+## 48. `esc_dsp` (Campaign Milestone Disputed)
+
+**Description**: Emitted when M-of-N admins dispute a milestone on an escrow
+campaign. Proxies through to the escrow contract's `dispute_milestone`.
+
+| Event Name | Topics                         | Data                       | When Emitted                                |
+| ---------- | ------------------------------ | -------------------------- | ------------------------------------------- |
+| `esc_dsp`  | `["esc_dsp", project_id]`      | `milestone_index: u32`     | When admins call `dispute_campaign_milestone` |
+
+---
+
+## 49. `esc_rsv` (Campaign Milestone Dispute Resolved)
+
+**Description**: Emitted when M-of-N admins resolve a milestone dispute on an
+escrow campaign. Proxies through to the escrow contract's
+`resolve_milestone_dispute`.
+
+| Event Name | Topics                         | Data                                    | When Emitted                                          |
+| ---------- | ------------------------------ | --------------------------------------- | ----------------------------------------------------- |
+| `esc_rsv`  | `["esc_rsv", project_id]`      | `(milestone_index: u32, approve: bool)` | When admins call `resolve_campaign_ms_dispute` |
+
+---
+
+## 50. `att_settle` (Cross-Chain Attestation Settled)
+
+**Description**: Emitted when a verified cross-chain donation attestation is
+settled into the main contract's donation stats via `settle_attestation`. One
+event per attestation id — a second settlement of the same id panics with
+`"Attestation already settled"`, so this event never repeats.
+
+| Event Name   | Topics                                    | Data                                                                    | When Emitted                                     |
+| ------------ | ----------------------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------ |
+| `att_settle` | `["att_settle", donor, project_id]`       | `(attestation_id: u64, amount_xlm: i128, co2_grams: i128, donation_index: u32)` | When anyone calls `settle_attestation` on a `Verified` attestation |
+
+- `donor` and `project_id` come from the attestation record, not the caller —
+  `settle_attestation` is permissionless.
+- `amount_xlm` is the attested XLM value in stroops. It is credited to the
+  project's `total_raised`, the donor's `total_donated`, and
+  `GlobalTotalRaised`.
+- `co2_grams` is `amount_xlm / STROOP * project.co2_per_xlm`, the same formula
+  the native donation path uses.
+- `donation_index` is the index of the `DonationRecord` the settlement created.
+  That record carries the `XCHAIN` currency symbol, so indexers can separate
+  bridged donations from Stellar-native ones.
+
+A settlement also emits the events the shared donation path emits: `nft_mint`
+when the donor crosses into a new badge tier, and `camp_goal` when the
+credited amount takes a campaign over its goal. It emits **no** `donated`
+event — no tokens moved on Stellar.
+
+---
+
+## 51. `nft_meta` (Impact NFT Metadata Updated)
 
 **Description**: Emitted when an admin updates Impact NFT display metadata —
 either the contract-wide base URI or the metadata/token URI of a single badge
@@ -608,16 +723,19 @@ no tier topic.
 `uri` in the data is the tier's explicit token URI, which is empty when the
 tier resolves its URI from the base URI instead.
 
-Token URI resolution order, applied at read time by `get_nft_metadata` and
-`get_tier_metadata`:
+Token URI resolution order, applied at read time:
 
 1. The tier's explicit URI, set via `set_nft_metadata_uri`.
 2. `base_uri + tier_slug + ".json"` — slugs are `seedling`, `tree`, `forest`,
    `earth-guardian`.
 3. The URI stamped onto the NFT at mint time (`ImpactNFT.metadata_uri`).
+   `get_nft_metadata` only — `get_tier_metadata` takes no donor and has no
+   stored NFT to fall back to, so it goes straight from step 2 to step 4.
 4. The empty string, when no metadata has been configured.
 
 Project milestone NFTs resolve to `base_uri + "milestone/" + project_id + ".json"`.
+
+---
 
 ## Usage Notes
 

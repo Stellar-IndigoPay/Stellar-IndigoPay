@@ -179,6 +179,15 @@ pub struct ReceiptFields {
     pub currency: Symbol,
 }
 
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct VoteAllocation {
+    pub project_id: String,
+    pub votes_for: u32,
+    pub votes_against: u32,
+    pub credits_spent: u32,
+}
+
 /// A proof-verified donation with no donor identity in contract storage.
 #[cfg(feature = "zk")]
 #[contracttype]
@@ -247,6 +256,7 @@ pub struct ProjectMilestoneNFT {
 #[cfg(any(
     feature = "impact",
     feature = "donation",
+    feature = "recurring",
     feature = "usdc",
     feature = "zk",
     feature = "testutils"
@@ -265,6 +275,7 @@ pub struct Attribute {
 #[cfg(any(
     feature = "impact",
     feature = "donation",
+    feature = "recurring",
     feature = "usdc",
     feature = "zk",
     feature = "testutils"
@@ -560,6 +571,61 @@ pub trait EscrowInterface {
     );
 }
 
+// ─── Cross-chain attestation settlement (#439) ─────────────────────────────
+/// Lifecycle of a cross-chain donation attestation.
+///
+/// Layout MUST match the attestation-contract's `AttestationStatus` enum
+/// exactly — variant names are what the XDR encoding carries, so renaming or
+/// reordering here silently breaks the cross-contract read.
+#[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum AttestationStatus {
+    Pending,
+    Verified,
+    Revoked,
+}
+
+/// A cross-chain donation attestation as recorded by the attestation-contract.
+///
+/// Layout MUST match the attestation-contract's `Attestation` struct exactly
+/// (field names and order) for cross-contract XDR decoding compatibility.
+#[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Attestation {
+    pub id: u64,
+    pub source_chain: String,
+    pub source_tx_hash: String,
+    pub donor: Address,
+    pub project_id: String,
+    /// USD-equivalent value, 6 decimals (USDC convention).
+    pub amount_usd: i128,
+    /// XLM-equivalent at the time of recording, in stroops. This is the figure
+    /// settlement credits to project, donor, and global counters.
+    pub amount_xlm: i128,
+    pub message_hash: u32,
+    pub status: AttestationStatus,
+    pub created_at_ledger: u32,
+    pub verified_at_ledger: u32,
+    /// The relayer that recorded the attestation.
+    pub created_by: Address,
+}
+
+/// Cross-contract client for the attestation contract. Only the single read
+/// that settlement needs is declared — settlement never mutates the
+/// attestation contract's state.
+#[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+#[contractclient(name = "AttestationClient")]
+pub trait AttestationInterface {
+    fn get_attestation(env: Env, id: u64) -> Attestation;
+}
+
+/// Currency symbol stamped on the `DonationRecord` a settlement creates, so
+/// indexers can tell cross-chain donations apart from Stellar-native ones.
+#[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+const XCHAIN_CURRENCY: Symbol = symbol_short!("XCHAIN");
+
 #[contracttype]
 pub enum DataKey {
     // Multi-sig admin set: Vec<Address> of authorized admin addresses.
@@ -584,6 +650,8 @@ pub enum DataKey {
     // Governance
     Proposal(String),
     HasVoted(String, Address),
+    VoterCredits(Address),
+    VoterAllocation(String, Address),
     // Per-donor per-project cumulative donation total for milestone NFT gating
     DonorProjectTotal(String, Address),
     // Per-donor per-project per-token sliding-window donation rate limit.
@@ -694,12 +762,40 @@ pub enum DataKey {
     TokenRateLimitWindow(Address),
     /// Platform fee split recipients and their share basis points (#434).
     PlatformFeeRecipients,
+    // Campaign-to-Escrow Integration (#426)
+    /// Address of the deployed escrow contract (instance storage).
+    EscrowContractAddress,
+    /// Escrow milestones for a project's campaign: (project_id) -> Vec<EscrowMilestone>.
+    CampaignEscrowMilestones(String),
+    /// Escrow job ID for a project's campaign: (project_id) -> String.
+    CampaignEscrowJobId(String),
     /// Base URI used to construct token URIs when a tier has no explicit
     /// URI of its own — e.g. `ipfs://bafy…/`. Resolution appends the tier
     /// slug plus `.json` (#438).
     NFTMetadataBaseURI,
     /// Admin-configured display metadata for one badge tier (#438).
     NFTMetadata(BadgeTier),
+}
+
+/// Storage keys for cross-chain attestation settlement (#439).
+///
+/// Kept off `DataKey` so the whole enum can be feature-gated: a
+/// `#[contracttype]` enum expands before `#[cfg]` is applied to its variants,
+/// so a `DataKey::SettledAttestation` variant would be compiled into the slim
+/// `--no-default-features` build — 495 bytes against a 64 KB CI budget with
+/// ~400 to spare — even though `settle_attestation` itself is gated out of it.
+///
+/// The wire encoding is unaffected by which enum a variant lives on:
+/// `#[contracttype]` encodes an enum value as its variant *name* plus payload,
+/// so this key writes exactly the `SettledAttestation(u64)` the issue
+/// specifies.
+#[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+#[contracttype]
+pub enum SettlementKey {
+    /// Settlement marker for a cross-chain attestation id — present once
+    /// `settle_attestation` has credited that attestation to the main
+    /// contract's donation stats. Prevents double-settlement.
+    SettledAttestation(u64),
 }
 // ─── Constants ────────────────────────────────────────────────────────────────
 const STROOP: i128 = 10_000_000;
@@ -743,6 +839,7 @@ const EMERGENCY_WITHDRAWAL_TIMELOCK: u32 = 120_960;
 const REFUND_COOLDOWN_LEDGERS: u32 = 17_280;
 // 24 hours × 3600 s / 5 s per ledger = 17 280 ledgers. The challenge window
 // for high-value donations.
+#[allow(dead_code)]
 const CHALLENGE_WINDOW_LEDGERS: u32 = 17_280;
 
 // 72 hours × 3600 s / 5 s per ledger = 51 840 ledgers. The delay between
@@ -1779,6 +1876,7 @@ pub fn calculate_badge(total_stroops: i128) -> BadgeTier {
 #[cfg(any(
     feature = "impact",
     feature = "donation",
+    feature = "recurring",
     feature = "usdc",
     feature = "zk",
     feature = "testutils"
@@ -1794,6 +1892,7 @@ const MAX_NFT_ATTRIBUTES: u32 = 16;
 #[cfg(any(
     feature = "impact",
     feature = "donation",
+    feature = "recurring",
     feature = "usdc",
     feature = "zk",
     feature = "testutils"
@@ -1806,6 +1905,7 @@ struct UriBuf {
 #[cfg(any(
     feature = "impact",
     feature = "donation",
+    feature = "recurring",
     feature = "usdc",
     feature = "zk",
     feature = "testutils"
@@ -1845,6 +1945,7 @@ impl UriBuf {
 #[cfg(any(
     feature = "impact",
     feature = "donation",
+    feature = "recurring",
     feature = "usdc",
     feature = "zk",
     feature = "testutils"
@@ -1862,6 +1963,7 @@ fn tier_slug(tier: &BadgeTier) -> &'static [u8] {
 #[cfg(any(
     feature = "impact",
     feature = "donation",
+    feature = "recurring",
     feature = "usdc",
     feature = "zk",
     feature = "testutils"
@@ -1876,6 +1978,7 @@ fn read_nft_base_uri(env: &Env) -> Option<String> {
 #[cfg(any(
     feature = "impact",
     feature = "donation",
+    feature = "recurring",
     feature = "usdc",
     feature = "zk",
     feature = "testutils"
@@ -1895,6 +1998,7 @@ fn read_tier_metadata(env: &Env, tier: &BadgeTier) -> Option<NFTMetadata> {
 #[cfg(any(
     feature = "impact",
     feature = "donation",
+    feature = "recurring",
     feature = "usdc",
     feature = "zk",
     feature = "testutils"
@@ -1919,7 +2023,7 @@ fn resolve_tier_uri(env: &Env, tier: &BadgeTier) -> String {
 
 /// Resolve the token URI for a project milestone NFT: `base_uri +
 /// "milestone/" + project_id + ".json"`. Empty when no base URI is set.
-#[cfg(feature = "impact")]
+#[cfg(feature = "donation")]
 fn resolve_project_nft_uri(env: &Env, project_id: &String) -> String {
     match read_nft_base_uri(env) {
         Some(base) => {
@@ -2010,6 +2114,7 @@ fn get_token_config_for_donate_token(env: &Env, token: &Address) -> TokenConfig 
     panic!("Token not registered");
 }
 
+#[allow(dead_code)]
 #[inline(never)]
 fn anon_address(env: &Env) -> Address {
     Address::from_string(&String::from_str(
@@ -2038,15 +2143,25 @@ fn effective_token_rate_limit(env: &Env, token: &Address) -> (u32, u32) {
     (max, window)
 }
 
-/// Process a single donation's core logic: rate limiting, project validation,
-/// state updates (project, donor, NFT, globals), token transfers, and events.
-/// Does NOT handle auth, paused-check, or ensure_min_ttl — the caller is
-/// responsible for those.
+/// Apply every storage effect of a donation: project validation and totals,
+/// donor stats and badge, Impact NFT minting, the `DonationRecord`, and the
+/// global counters.
+///
+/// Shared by the native-token donation path (`process_donation_token`) and
+/// cross-chain attestation settlement (`settle_attestation`, #439) so both
+/// produce byte-identical on-chain state. Performs no auth, no paused check,
+/// no rate limiting, and no token transfer — callers own those.
+///
+/// `xlm_equivalent` drives every XLM-denominated counter and the CO₂
+/// calculation; `raw_amount` is what lands in the `DonationRecord` alongside
+/// `token_symbol`.
+///
+/// Returns the updated project, the CO₂ grams credited, and the index of the
+/// stored `DonationRecord`.
 #[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
 #[allow(clippy::too_many_arguments)]
-fn process_donation_token(
+fn apply_donation_effects(
     env: &Env,
-    token: &Address,
     token_symbol: &Symbol,
     donor: &Address,
     project_id: &String,
@@ -2054,50 +2169,7 @@ fn process_donation_token(
     xlm_equivalent: i128,
     msg_hash: u32,
     anonymous: bool,
-) {
-    let current_ledger = env.ledger().sequence();
-    let (max_donations, window_ledgers) = effective_token_rate_limit(env, token);
-
-    let rate_key = DataKey::DonorRateLimit(donor.clone(), project_id.clone(), token.clone());
-    let mut window: RateLimitWindow = match env.storage().instance().get(&rate_key) {
-        Some(window) => window,
-        None => {
-            let transitional_key =
-                DataKey::DonorRateLimitPerToken(donor.clone(), project_id.clone(), token.clone());
-            match env.storage().instance().get(&transitional_key) {
-                Some(window) => {
-                    env.storage().instance().remove(&transitional_key);
-                    window
-                }
-                None => {
-                    let legacy_key =
-                        LegacyDataKey::DonorRateLimit(donor.clone(), project_id.clone());
-                    match env.storage().instance().get(&legacy_key) {
-                        Some(window) => {
-                            // Move the old donor/project window only once so its
-                            // count cannot be copied into every token window.
-                            env.storage().instance().remove(&legacy_key);
-                            window
-                        }
-                        None => RateLimitWindow {
-                            window_start: current_ledger,
-                            count: 0,
-                        },
-                    }
-                }
-            }
-        }
-    };
-
-    if current_ledger - window.window_start >= window_ledgers {
-        window.window_start = current_ledger;
-        window.count = 0;
-    }
-    if window.count >= max_donations {
-        panic!("Donation rate limit exceeded");
-    }
-    window.count = window.count.checked_add(1).expect("overflow");
-    env.storage().instance().set(&rate_key, &window);
+) -> (Project, i128, u32) {
     let mut project: Project = env
         .storage()
         .instance()
@@ -2135,9 +2207,6 @@ fn process_donation_token(
             co2_offset_grams: 0,
         });
     let prev_badge = donor_stats.badge.clone();
-    // ── Effects: all state writes BEFORE the external token transfer
-    //    (Checks-Effects-Interactions to defend against reentrancy from a
-    //    malicious token contract passed via `token`).
 
     // ── Effects: state updates using XLM equivalent
     project.total_raised = project
@@ -2171,10 +2240,11 @@ fn process_donation_token(
     donor_stats.badge = calculate_badge(donor_stats.total_donated);
     #[cfg(feature = "delegation")]
     update_delegated_weight_if_needed(env, donor, &prev_badge, &donor_stats.badge);
+    #[cfg(feature = "governance")]
+    update_voter_credits_on_badge_change(env, donor, &prev_badge, &donor_stats.badge);
     env.storage()
         .instance()
         .set(&DataKey::DonorStats(stats_donor), &donor_stats);
-    // Track per-project cumulative donations for milestone NFT eligibility.
 
     // Track per-project cumulative donations for milestone NFT eligibility
     let proj_total_key = DataKey::DonorProjectTotal(project_id.clone(), donor.clone());
@@ -2185,7 +2255,6 @@ fn process_donation_token(
             .checked_add(xlm_equivalent)
             .expect("overflow"),
     );
-    // Auto-mint an Impact NFT when a donor reaches a new badge tier.
 
     // Auto-mint Impact NFT when donor reaches new badge tier
     if donor_stats.badge != BadgeTier::None && donor_stats.badge != prev_badge {
@@ -2263,6 +2332,84 @@ fn process_donation_token(
     env.storage()
         .instance()
         .set(&DataKey::GlobalCO2OffsetGrams, &new_gc);
+
+    (project, co2_increment, dc)
+}
+
+/// Process a single donation's core logic: rate limiting, project validation,
+/// state updates (project, donor, NFT, globals), token transfers, and events.
+/// Does NOT handle auth, paused-check, or ensure_min_ttl — the caller is
+/// responsible for those.
+#[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+#[allow(clippy::too_many_arguments)]
+fn process_donation_token(
+    env: &Env,
+    token: &Address,
+    token_symbol: &Symbol,
+    donor: &Address,
+    project_id: &String,
+    raw_amount: i128,
+    xlm_equivalent: i128,
+    msg_hash: u32,
+    anonymous: bool,
+) {
+    let current_ledger = env.ledger().sequence();
+    let (max_donations, window_ledgers) = effective_token_rate_limit(env, token);
+
+    let rate_key = DataKey::DonorRateLimit(donor.clone(), project_id.clone(), token.clone());
+    let mut window: RateLimitWindow = match env.storage().instance().get(&rate_key) {
+        Some(window) => window,
+        None => {
+            let transitional_key =
+                DataKey::DonorRateLimitPerToken(donor.clone(), project_id.clone(), token.clone());
+            match env.storage().instance().get(&transitional_key) {
+                Some(window) => {
+                    env.storage().instance().remove(&transitional_key);
+                    window
+                }
+                None => {
+                    let legacy_key =
+                        LegacyDataKey::DonorRateLimit(donor.clone(), project_id.clone());
+                    match env.storage().instance().get(&legacy_key) {
+                        Some(window) => {
+                            // Move the old donor/project window only once so its
+                            // count cannot be copied into every token window.
+                            env.storage().instance().remove(&legacy_key);
+                            window
+                        }
+                        None => RateLimitWindow {
+                            window_start: current_ledger,
+                            count: 0,
+                        },
+                    }
+                }
+            }
+        }
+    };
+
+    if current_ledger - window.window_start >= window_ledgers {
+        window.window_start = current_ledger;
+        window.count = 0;
+    }
+    if window.count >= max_donations {
+        panic!("Donation rate limit exceeded");
+    }
+    window.count = window.count.checked_add(1).expect("overflow");
+    env.storage().instance().set(&rate_key, &window);
+
+    // ── Effects: all state writes BEFORE the external token transfer
+    //    (Checks-Effects-Interactions to defend against reentrancy from a
+    //    malicious token contract passed via `token`).
+    let (project, _co2_increment, _donation_index) = apply_donation_effects(
+        env,
+        token_symbol,
+        donor,
+        project_id,
+        raw_amount,
+        xlm_equivalent,
+        msg_hash,
+        anonymous,
+    );
 
     #[cfg(feature = "fees")]
     let (project_amount, fee_amount) = split_fee(raw_amount, read_platform_fee_bps(env));
@@ -2432,6 +2579,29 @@ fn update_delegated_weight_if_needed(
                 env.storage().instance().set(&del_key, &del_weight);
             }
         }
+    }
+}
+#[cfg(feature = "governance")]
+fn update_voter_credits_on_badge_change(
+    env: &Env,
+    donor: &Address,
+    prev_badge: &BadgeTier,
+    new_badge: &BadgeTier,
+) {
+    if prev_badge != new_badge {
+        let new_weight = voting_weight_from_badge(new_badge);
+        #[cfg(feature = "delegation")]
+        let delegated_weight: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DelegatedWeight(donor.clone()))
+            .unwrap_or(0);
+        #[cfg(not(feature = "delegation"))]
+        let delegated_weight: u32 = 0;
+        let total_new_credits = new_weight.saturating_add(delegated_weight);
+        env.storage()
+            .instance()
+            .set(&DataKey::VoterCredits(donor.clone()), &total_new_credits);
     }
 }
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -3357,6 +3527,117 @@ impl IndigoPayContract {
             anonymous,
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    // ─── Cross-chain attestation settlement (#439) ────────────────────────────
+    /// Settle a verified cross-chain donation attestation into this contract's
+    /// donation stats.
+    ///
+    /// Cross-chain donations are recorded on the attestation-contract, which
+    /// knows nothing about projects, donor badges, or the global CO₂ counter.
+    /// This is the bridge: it reads attestation `attestation_id` from
+    /// `attestation_contract` and, if that attestation is `Verified`, credits
+    /// it exactly as if the donor had donated `amount_xlm` stroops natively —
+    /// project `total_raised` and `donor_count`, donor stats and badge tier
+    /// (minting an Impact NFT on a tier upgrade), a `DonationRecord` stamped
+    /// with the `XCHAIN` currency symbol, and the global raised/CO₂ totals.
+    ///
+    /// No tokens move: the donation already settled on the source chain. The
+    /// attestation contract's own state is never mutated — the cross-contract
+    /// call is a pure read.
+    ///
+    /// Permissionless by design. There is nothing to gate: the attestation
+    /// contract's relayer already authorised the underlying record, and this
+    /// function can only ever credit a `Verified` attestation once. Anyone may
+    /// pay the fee to push a settlement through.
+    ///
+    /// Panics when:
+    ///  - the contract is paused,
+    ///  - the attestation id is unknown to the attestation contract,
+    ///  - the attestation is `Pending` or `Revoked`,
+    ///  - the attestation was already settled,
+    ///  - `amount_xlm` is not positive,
+    ///  - `project_id` does not match a registered project, or that project is
+    ///    inactive, paused, or its campaign is closed.
+    #[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+    pub fn settle_attestation(env: Env, attestation_contract: Address, attestation_id: u64) {
+        require_not_paused(&env);
+
+        // ── Checks (pre-call): fail fast and cheap on an obvious replay.
+        let settled_key = SettlementKey::SettledAttestation(attestation_id);
+        if env.storage().instance().has(&settled_key) {
+            panic!("Attestation already settled");
+        }
+
+        // ── Interaction: read-only cross-contract call. It happens before any
+        //    state write, so a malicious `attestation_contract` that reenters
+        //    here finds storage untouched. The post-call re-check below closes
+        //    that window: the reentrant call sets the settled marker, and the
+        //    outer frame then panics, reverting the whole transaction.
+        let attestation =
+            AttestationClient::new(&env, &attestation_contract).get_attestation(&attestation_id);
+
+        // ── Checks (post-call): everything below reads only the returned value
+        //    and this contract's storage.
+        if attestation.id != attestation_id {
+            panic!("Attestation id mismatch");
+        }
+        match attestation.status {
+            AttestationStatus::Verified => {}
+            AttestationStatus::Pending => panic!("Attestation is not verified"),
+            AttestationStatus::Revoked => panic!("Attestation was revoked"),
+        }
+        if attestation.amount_xlm <= 0 {
+            panic!("Attestation amount must be positive");
+        }
+        if env.storage().instance().has(&settled_key) {
+            panic!("Attestation already settled");
+        }
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Project(attestation.project_id.clone()))
+        {
+            panic!("Attestation project is not registered");
+        }
+
+        // ── Effects: mark settled first so any nested frame sees the guard,
+        //    then apply the donation exactly as the native path would.
+        env.storage().instance().set(&settled_key, &true);
+        let (_project, co2_increment, donation_index) = apply_donation_effects(
+            &env,
+            &XCHAIN_CURRENCY,
+            &attestation.donor,
+            &attestation.project_id,
+            attestation.amount_xlm,
+            attestation.amount_xlm,
+            attestation.message_hash,
+            false,
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "att_settle"),
+                attestation.donor.clone(),
+                attestation.project_id.clone(),
+            ),
+            (
+                attestation_id,
+                attestation.amount_xlm,
+                co2_increment,
+                donation_index,
+            ),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// True once `attestation_id` has been settled into this contract's
+    /// donation stats. Lets a relayer skip attestations already bridged (#439).
+    #[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+    pub fn is_attestation_settled(env: Env, attestation_id: u64) -> bool {
+        env.storage()
+            .instance()
+            .has(&SettlementKey::SettledAttestation(attestation_id))
     }
 
     #[cfg(any(feature = "batch", feature = "donation", feature = "testutils"))]
@@ -5056,6 +5337,7 @@ impl IndigoPayContract {
     ///
     /// - If `donor` does not match the donation record's donor.
     /// - If the donation index does not exist.
+    #[cfg(feature = "donation")]
     pub fn generate_receipt(env: Env, donor: Address, donation_index: u32) -> DonationReceipt {
         donor.require_auth();
 
@@ -5133,6 +5415,7 @@ impl IndigoPayContract {
     ///   does not match the on-chain `DonationRecord`.
     /// - The `co2_offset` does not match the on-chain value.
     /// - The `contract_signature` has been tampered with.
+    #[cfg(feature = "donation")]
     pub fn verify_receipt(env: Env, receipt: DonationReceipt) -> bool {
         // Check the donation exists on-chain
         let record: DonationRecord = match env
@@ -5406,13 +5689,7 @@ impl IndigoPayContract {
     /// Mint a project milestone NFT when a donor's cumulative donation to a
     /// specific project exceeds 100 XLM. Minting is idempotent-blocked: a second
     /// call for the same (donor, project_id) pair panics.
-    ///
-    /// Gated on `impact` alongside `has_nft` / `get_nft` and the tier metadata
-    /// endpoints — these three were the only NFT entrypoints still ungated, so
-    /// the slim `--no-default-features` build was carrying the whole
-    /// `ProjectMilestoneNFT` surface against its 64 KB budget. `impact` is a
-    /// default feature, so every shipped build is unaffected.
-    #[cfg(feature = "impact")]
+    #[cfg(feature = "donation")]
     pub fn mint_project_nft(env: Env, donor: Address, project_id: String) {
         donor.require_auth();
         require_not_paused(&env);
@@ -5450,13 +5727,13 @@ impl IndigoPayContract {
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
-    #[cfg(feature = "impact")]
+    #[cfg(feature = "donation")]
     pub fn has_project_nft(env: Env, donor: Address, project_id: String) -> bool {
         env.storage()
             .instance()
             .has(&DataKey::ProjectMilestoneNFT(project_id, donor))
     }
-    #[cfg(feature = "impact")]
+    #[cfg(feature = "donation")]
     pub fn get_project_nft(env: Env, donor: Address, project_id: String) -> ProjectMilestoneNFT {
         env.storage()
             .instance()
@@ -5637,25 +5914,17 @@ impl IndigoPayContract {
             .get(&DataKey::DelegatedWeight(delegate))
             .unwrap_or(0)
     }
-    /// Badge holders (≥ Seedling) cast quadratic votes using credits.
-    /// Multiple votes per proposal are allowed, each spending additional credits.
     #[cfg(feature = "governance")]
-    pub fn vote_verify_project(
-        env: Env,
-        voter: Address,
-        project_id: String,
-        approve: bool,
-        credits: u32,
-    ) {
-        voter.require_auth();
-        require_not_paused(&env);
+    pub fn get_voter_initial_credits(env: Env, voter: Address) -> u32 {
+        #[cfg(feature = "delegation")]
         if env
             .storage()
             .instance()
             .has(&DataKey::VoteDelegation(voter.clone()))
         {
-            panic!("Must revoke delegation before voting directly");
+            return 0;
         }
+
         let stats: DonorStats = env
             .storage()
             .instance()
@@ -5666,46 +5935,128 @@ impl IndigoPayContract {
                 badge: BadgeTier::None,
                 co2_offset_grams: 0,
             });
-        let own_credits = voting_credits_from_badge(&stats.badge);
+        let own_credits = voting_weight_from_badge(&stats.badge);
+        #[cfg(feature = "delegation")]
         let delegated_credits: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::DelegatedWeight(voter.clone()))
+            .get(&DataKey::DelegatedWeight(voter))
             .unwrap_or(0);
-        let total_credits = own_credits
+        #[cfg(not(feature = "delegation"))]
+        let delegated_credits: u32 = 0;
+        own_credits
             .checked_add(delegated_credits)
-            .expect("overflow");
+            .expect("overflow")
+    }
 
-        if total_credits == 0 {
-            panic!("Only badge holders (Seedling or above) or active delegates can vote");
-        }
-        let credits_key = DataKey::VoteCredits(project_id.clone(), voter.clone());
-        let previously_spent: u32 = env.storage().instance().get(&credits_key).unwrap_or(0);
-        let new_total = previously_spent.checked_add(credits).expect("overflow");
-        if new_total > total_credits {
-            panic!("Insufficient voting credits");
-        }
-        let mut proposal: VoteProposal = env
+    /// Returns the remaining voting credits for a donor.
+    #[cfg(feature = "governance")]
+    pub fn get_voting_credits(env: Env, donor: Address) -> u32 {
+        if let Some(credits) = env
             .storage()
             .instance()
-            .get(&DataKey::Proposal(project_id.clone()))
-            .expect("Proposal not found");
-        if proposal.resolved {
-            panic!("Proposal already resolved");
+            .get(&DataKey::VoterCredits(donor.clone()))
+        {
+            credits
+        } else {
+            Self::get_voter_initial_credits(env, donor)
         }
-        if env.ledger().sequence() > proposal.deadline_ledger {
-            panic!("Voting window has closed");
-        }
-        let prev_effective = isqrt(previously_spent);
-        let new_effective = isqrt(new_total);
-        let weight_delta = new_effective
-            .checked_sub(prev_effective)
-            .expect("underflow");
+    }
 
-        // Effects: persist state before external effects.
+    /// Returns the current quadratic vote tally (for_votes, against_votes) for a proposal.
+    #[cfg(feature = "governance")]
+    pub fn get_proposal_tally(env: Env, project_id: String) -> (u32, u32) {
         let voter_list_key = DataKey::VoterList(project_id.clone());
-        let voted_key = DataKey::HasVoted(project_id.clone(), voter.clone());
-        if !env.storage().instance().has(&voted_key) {
+        if let Some(voters) = env
+            .storage()
+            .instance()
+            .get::<_, Vec<Address>>(&voter_list_key)
+        {
+            let mut for_votes: u32 = 0;
+            let mut against_votes: u32 = 0;
+            for voter in voters.iter() {
+                let alloc_key = DataKey::VoterAllocation(project_id.clone(), voter);
+                if let Some(alloc) = env
+                    .storage()
+                    .instance()
+                    .get::<_, VoteAllocation>(&alloc_key)
+                {
+                    for_votes = for_votes
+                        .checked_add(alloc.votes_for)
+                        .expect("for_votes overflow");
+                    against_votes = against_votes
+                        .checked_add(alloc.votes_against)
+                        .expect("against_votes overflow");
+                }
+            }
+            (for_votes, against_votes)
+        } else {
+            (0, 0)
+        }
+    }
+
+    /// Cast quadratic votes on one or more proposals in a single transaction.
+    #[cfg(feature = "governance")]
+    pub fn vote_on_proposals(env: Env, voter: Address, allocations: Vec<VoteAllocation>) {
+        voter.require_auth();
+        require_not_paused(&env);
+
+        #[cfg(feature = "delegation")]
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::VoteDelegation(voter.clone()))
+        {
+            panic!("Must revoke delegation before voting directly");
+        }
+
+        let mut total_credits_required: u32 = 0;
+        for alloc in allocations.iter() {
+            let voted_key = DataKey::HasVoted(alloc.project_id.clone(), voter.clone());
+            if env.storage().instance().has(&voted_key) {
+                panic!("Already voted on this proposal");
+            }
+            let cost_for = alloc
+                .votes_for
+                .checked_mul(alloc.votes_for)
+                .expect("votes_for overflow");
+            let cost_against = alloc
+                .votes_against
+                .checked_mul(alloc.votes_against)
+                .expect("votes_against overflow");
+            let cost = cost_for
+                .checked_add(cost_against)
+                .expect("credit cost overflow");
+            total_credits_required = total_credits_required
+                .checked_add(cost)
+                .expect("Total credits overflow");
+        }
+
+        let available_credits = Self::get_voting_credits(env.clone(), voter.clone());
+        if total_credits_required > available_credits {
+            panic!("Voting credits exhausted");
+        }
+
+        for alloc in allocations.iter() {
+            let cost_for = alloc.votes_for * alloc.votes_for;
+            let cost_against = alloc.votes_against * alloc.votes_against;
+            let cost = cost_for + cost_against;
+
+            let mut proposal: VoteProposal = env
+                .storage()
+                .instance()
+                .get(&DataKey::Proposal(alloc.project_id.clone()))
+                .expect("Proposal not found");
+            if proposal.resolved {
+                panic!("Proposal already resolved");
+            }
+            if env.ledger().sequence() > proposal.deadline_ledger {
+                panic!("Voting window has closed");
+            }
+
+            let voted_key = DataKey::HasVoted(alloc.project_id.clone(), voter.clone());
+
+            let voter_list_key = DataKey::VoterList(alloc.project_id.clone());
             let mut voter_list: Vec<Address> = env
                 .storage()
                 .instance()
@@ -5713,28 +6064,75 @@ impl IndigoPayContract {
                 .unwrap_or(Vec::new(&env));
             voter_list.push_back(voter.clone());
             env.storage().instance().set(&voter_list_key, &voter_list);
+
             env.storage().instance().set(&voted_key, &true);
-        }
-        env.storage().instance().set(&credits_key, &new_total);
-        if approve {
+
+            let alloc_key = DataKey::VoterAllocation(alloc.project_id.clone(), voter.clone());
+            let stored_alloc = VoteAllocation {
+                project_id: alloc.project_id.clone(),
+                votes_for: alloc.votes_for,
+                votes_against: alloc.votes_against,
+                credits_spent: cost,
+            };
+            env.storage().instance().set(&alloc_key, &stored_alloc);
+
             proposal.votes_for = proposal
                 .votes_for
-                .checked_add(weight_delta)
-                .expect("overflow");
-        } else {
+                .checked_add(alloc.votes_for)
+                .expect("votes_for overflow");
             proposal.votes_against = proposal
                 .votes_against
-                .checked_add(weight_delta)
-                .expect("overflow");
+                .checked_add(alloc.votes_against)
+                .expect("votes_against overflow");
+            env.storage()
+                .instance()
+                .set(&DataKey::Proposal(alloc.project_id.clone()), &proposal);
+
+            env.events().publish(
+                (
+                    symbol_short!("voted"),
+                    voter.clone(),
+                    alloc.project_id.clone(),
+                ),
+                alloc.votes_for > 0,
+            );
         }
+
+        let remaining = available_credits
+            .checked_sub(total_credits_required)
+            .expect("credits underflow");
         env.storage()
             .instance()
-            .set(&DataKey::Proposal(project_id.clone()), &proposal);
-        env.events().publish(
-            (symbol_short!("voted"), voter, project_id),
-            (approve, credits, weight_delta),
-        );
+            .set(&DataKey::VoterCredits(voter), &remaining);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Single proposal quadratic vote allocation helper.
+    #[cfg(feature = "governance")]
+    pub fn vote_verify_project(env: Env, voter: Address, project_id: String, approve: bool) {
+        let voted_key = DataKey::HasVoted(project_id.clone(), voter.clone());
+        if env.storage().instance().has(&voted_key) {
+            panic!("Already voted on this proposal");
+        }
+
+        let available_credits = Self::get_voting_credits(env.clone(), voter.clone());
+        if available_credits == 0 {
+            panic!("Only badge holders (Seedling or above) or active delegates can vote");
+        }
+        let votes = isqrt(available_credits);
+        if votes == 0 {
+            panic!("Only badge holders (Seedling or above) or active delegates can vote");
+        }
+        let (votes_for, votes_against) = if approve { (votes, 0) } else { (0, votes) };
+        let cost = votes * votes;
+        let mut allocations = Vec::new(&env);
+        allocations.push_back(VoteAllocation {
+            project_id,
+            votes_for,
+            votes_against,
+            credits_spent: cost,
+        });
+        Self::vote_on_proposals(env, voter, allocations);
     }
     /// Callable by anyone after the deadline. Resolves based on majority.
     /// Emits proj_ver on approval, prop_rej on rejection.
@@ -5843,10 +6241,15 @@ impl IndigoPayContract {
     /// Returns current vote counts and status for a proposal.
     #[cfg(feature = "governance")]
     pub fn get_proposal(env: Env, project_id: String) -> VoteProposal {
-        env.storage()
+        let mut proposal: VoteProposal = env
+            .storage()
             .instance()
-            .get(&DataKey::Proposal(project_id))
-            .expect("Proposal not found")
+            .get(&DataKey::Proposal(project_id.clone()))
+            .expect("Proposal not found");
+        let (for_votes, against_votes) = Self::get_proposal_tally(env, project_id);
+        proposal.votes_for = for_votes;
+        proposal.votes_against = against_votes;
+        proposal
     }
     /// Returns the list of voter addresses for a proposal.
     /// Can be used by governance UIs to display who voted and how.
@@ -7073,6 +7476,7 @@ impl IndigoPayContract {
 
     /// Admin-only (M-of-N): set the minimum donation threshold that triggers a challenge period.
     /// Setting threshold to 0 disables the challenge system (backward compatible).
+    #[cfg(feature = "donation")]
     pub fn set_challenge_threshold(env: Env, signers: Vec<Address>, threshold: i128) {
         require_admin_for_critical(&env, &signers);
         require_not_paused(&env);
@@ -7090,6 +7494,7 @@ impl IndigoPayContract {
     }
 
     /// Read-only: get the configured challenge threshold in stroops (0 if disabled).
+    #[cfg(feature = "donation")]
     pub fn get_challenge_threshold(env: Env) -> i128 {
         env.storage()
             .instance()
@@ -7098,6 +7503,7 @@ impl IndigoPayContract {
     }
 
     /// Badge holders (≥ Seedling) can challenge a donation exceeding the threshold within the 24h window.
+    #[cfg(feature = "donation")]
     pub fn challenge_donation(env: Env, challenger: Address, donation_index: u32, reason: String) {
         challenger.require_auth();
         require_not_paused(&env);
@@ -7159,6 +7565,7 @@ impl IndigoPayContract {
     }
 
     /// Admin-only: resolve a pending challenge by either approving or rejecting (refunding) the donation.
+    #[cfg(feature = "donation")]
     pub fn resolve_challenge(env: Env, admin: Address, donation_index: u32, approve: bool) {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
@@ -7277,6 +7684,7 @@ impl IndigoPayContract {
     }
 
     /// Read-only: get the challenge status for a donation index.
+    #[cfg(feature = "donation")]
     pub fn get_donation_challenge(env: Env, donation_index: u32) -> Option<DonationChallenge> {
         env.storage()
             .instance()
@@ -7284,6 +7692,7 @@ impl IndigoPayContract {
     }
 
     /// Read-only: check whether a donation is finalized.
+    #[cfg(feature = "donation")]
     pub fn is_donation_finalized(env: Env, donation_index: u32) -> bool {
         let record: DonationRecord = match env
             .storage()
@@ -7312,6 +7721,7 @@ impl IndigoPayContract {
     }
 
     /// Auto-finalize an unchallenged donation after the challenge window elapses.
+    #[cfg(feature = "donation")]
     pub fn auto_finalize(env: Env, donation_index: u32) -> bool {
         let finalized = Self::is_donation_finalized(env.clone(), donation_index);
         if finalized {
@@ -8910,7 +9320,7 @@ mod tests {
         client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
-        client.vote_verify_project(&voter, &pid, &true, &100);
+        client.vote_verify_project(&voter, &pid, &true);
         let p = client.get_proposal(&pid);
         assert_eq!(p.votes_for, 10);
         assert_eq!(p.votes_against, 0);
@@ -8923,29 +9333,27 @@ mod tests {
         let (env, _cid, client, admin, pid) = setup();
         client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let non_donor = Address::generate(&env);
-        client.vote_verify_project(&non_donor, &pid, &true, &100);
+        client.vote_verify_project(&non_donor, &pid, &true);
     }
     #[test]
-    #[should_panic(expected = "Insufficient voting credits")]
-    fn test_quadratic_voting_exhausts_credits() {
+    #[should_panic(expected = "Already voted on this proposal")]
+    fn test_double_vote_prevented() {
         let (env, cid, client, admin, pid) = setup();
         client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
-        // Seedling has 100 credits; spending all of them exhausts the budget.
-        client.vote_verify_project(&voter, &pid, &true, &100);
-        // Second vote should fail — no credits left.
-        client.vote_verify_project(&voter, &pid, &true, &1);
+        client.vote_verify_project(&voter, &pid, &true);
+        client.vote_verify_project(&voter, &pid, &true);
     }
     #[test]
     fn test_resolve_proposal_approved() {
         let (env, cid, client, admin, pid) = setup();
         client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
-        // 2 approve, 1 rejects — each Seedling spends all 100 credits
+        // 2 approve, 1 rejects
         for i in 0..3u32 {
             let voter = Address::generate(&env);
             grant_badge(&env, &cid, &voter);
-            client.vote_verify_project(&voter, &pid, &(i < 2), &100);
+            client.vote_verify_project(&voter, &pid, &(i < 2));
         }
         extend_ttl(&env, &cid);
         env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
@@ -8959,11 +9367,11 @@ mod tests {
     fn test_resolve_proposal_rejected() {
         let (env, cid, client, admin, pid) = setup();
         client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
-        // 1 approves, 2 reject — each Seedling spends all 100 credits
+        // 1 approves, 2 reject
         for i in 0..3u32 {
             let voter = Address::generate(&env);
             grant_badge(&env, &cid, &voter);
-            client.vote_verify_project(&voter, &pid, &(i == 0), &100);
+            client.vote_verify_project(&voter, &pid, &(i == 0));
         }
         extend_ttl(&env, &cid);
         env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
@@ -8980,7 +9388,7 @@ mod tests {
         for i in 0..2u32 {
             let voter = Address::generate(&env);
             grant_badge(&env, &cid, &voter);
-            client.vote_verify_project(&voter, &pid, &(i == 0), &100);
+            client.vote_verify_project(&voter, &pid, &(i == 0));
         }
         extend_ttl(&env, &cid);
         env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
@@ -9139,7 +9547,7 @@ mod tests {
         extend_ttl(&env, &cid);
         env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
         // Attempt to vote after deadline — should panic with "Voting window has closed"
-        client.vote_verify_project(&voter, &pid, &true, &100);
+        client.vote_verify_project(&voter, &pid, &true);
     }
     /// Test that voting is allowed before the deadline (issue #209).
     #[test]
@@ -9154,7 +9562,7 @@ mod tests {
         env.ledger()
             .set_sequence_number(start + VOTING_WINDOW_LEDGERS - 1);
         // Should succeed
-        client.vote_verify_project(&voter, &pid, &true, &100);
+        client.vote_verify_project(&voter, &pid, &true);
         let proposal = client.get_proposal(&pid);
         assert_eq!(proposal.votes_for, 10);
     }
@@ -9171,7 +9579,7 @@ mod tests {
         extend_ttl(&env, &cid);
         env.ledger()
             .set_sequence_number(start + custom_duration - 1);
-        client.vote_verify_project(&voter, &pid, &true, &100);
+        client.vote_verify_project(&voter, &pid, &true);
         let proposal = client.get_proposal(&pid);
         assert_eq!(proposal.votes_for, 10);
     }
@@ -9452,6 +9860,346 @@ mod tests {
         client.get_tier_metadata(&BadgeTier::Tree);
     }
 
+    // ─── Cross-chain attestation settlement (#439) ───────────────────────────
+    //
+    // These deploy the real attestation-contract next to this one rather than a
+    // mock, so `Attestation`'s mirrored layout is validated against the source
+    // of truth on every run — a renamed or reordered field breaks the decode
+    // here instead of on mainnet.
+    use attestation_contract::{AttestationContract, AttestationContractClient};
+
+    /// Both contracts wired up: an initialised IndigoPay contract with one
+    /// registered project, and an attestation contract with a relayer set.
+    #[allow(clippy::type_complexity)]
+    fn settlement_setup() -> (
+        Env,
+        IndigoPayContractClient<'static>,
+        AttestationContractClient<'static>,
+        Address, // attestation contract address
+        Address, // relayer
+        Address, // donor
+        String,  // project id
+    ) {
+        let (env, _cid, client, admin, pid) = setup();
+
+        let att_addr = env.register_contract(None, AttestationContract);
+        let att_client = AttestationContractClient::new(&env, &att_addr);
+        let att_admin = Address::generate(&env);
+        let relayer = Address::generate(&env);
+        att_client.initialize(&att_admin);
+        att_client.set_relayer(&att_admin, &relayer);
+
+        let donor = Address::generate(&env);
+        let _ = admin;
+        (env, client, att_client, att_addr, relayer, donor, pid)
+    }
+
+    /// Record a cross-chain attestation for `donor`/`project_id` worth
+    /// `amount_xlm` stroops and return its id. Still `Pending` on return.
+    fn record_attestation(
+        env: &Env,
+        att_client: &AttestationContractClient<'static>,
+        relayer: &Address,
+        donor: &Address,
+        project_id: &String,
+        tx_hash: &str,
+        amount_xlm: i128,
+    ) -> u64 {
+        att_client.record_attestation(
+            relayer,
+            &String::from_str(env, "ethereum"),
+            &String::from_str(env, tx_hash),
+            donor,
+            project_id,
+            &1_000_000i128,
+            &amount_xlm,
+            &7u32,
+        )
+    }
+
+    /// Full flow: record → verify → settle. Every donation counter the native
+    /// path maintains must move by exactly the attested XLM amount.
+    #[test]
+    fn test_settle_verified_attestation() {
+        let (env, client, att_client, att_addr, relayer, donor, pid) = settlement_setup();
+        let amount = 50 * STROOP;
+        let id = record_attestation(&env, &att_client, &relayer, &donor, &pid, "0xabc", amount);
+        att_client.verify_attestation(&id);
+
+        assert!(!client.is_attestation_settled(&id));
+        client.settle_attestation(&att_addr, &id);
+        assert!(client.is_attestation_settled(&id));
+
+        // Project totals.
+        let project = client.get_project(&pid);
+        assert_eq!(project.total_raised, amount);
+        assert_eq!(project.donor_count, 1);
+
+        // Donor stats — the test project offsets 100 g of CO₂ per XLM.
+        let stats = client.get_donor_stats(&donor);
+        assert_eq!(stats.total_donated, amount);
+        assert_eq!(stats.donation_count, 1);
+        assert_eq!(stats.co2_offset_grams, 50 * 100);
+        assert_eq!(stats.badge, BadgeTier::Seedling);
+
+        // Crossing into Seedling mints the tier's Impact NFT.
+        assert!(client.has_nft(&donor, &BadgeTier::Seedling));
+
+        // Global counters.
+        assert_eq!(client.get_global_total(), amount);
+        assert_eq!(client.get_global_co2(), 50 * 100);
+        assert_eq!(client.get_donation_count(), 1);
+
+        // Donation record, tagged so indexers can tell it apart from a
+        // Stellar-native donation.
+        let record = client.get_donation_record(&0u32);
+        assert_eq!(record.donor, donor);
+        assert_eq!(record.project, pid);
+        assert_eq!(record.amount, amount);
+        assert_eq!(record.currency, symbol_short!("XCHAIN"));
+        assert_eq!(record.message_hash, 7u32);
+        assert!(!record.anonymous);
+    }
+
+    /// A settled attestation must be indistinguishable from a native donation
+    /// of the same size, so the two paths can share leaderboards and totals.
+    #[test]
+    fn test_settle_matches_native_donation_stats() {
+        let (env, client, att_client, att_addr, relayer, donor, pid) = settlement_setup();
+        let amount = 120 * STROOP;
+
+        // Native donation from a different donor, for comparison.
+        let native_donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&native_donor, &amount);
+        client.donate(&token, &native_donor, &pid, &amount, &7u32);
+
+        let id = record_attestation(&env, &att_client, &relayer, &donor, &pid, "0xdef", amount);
+        att_client.verify_attestation(&id);
+        client.settle_attestation(&att_addr, &id);
+
+        let native = client.get_donor_stats(&native_donor);
+        let settled = client.get_donor_stats(&donor);
+        assert_eq!(settled.total_donated, native.total_donated);
+        assert_eq!(settled.donation_count, native.donation_count);
+        assert_eq!(settled.co2_offset_grams, native.co2_offset_grams);
+        assert_eq!(settled.badge, native.badge);
+        assert_eq!(settled.badge, BadgeTier::Tree);
+
+        // Both donations landed on the same project.
+        assert_eq!(client.get_project(&pid).total_raised, 2 * amount);
+        assert_eq!(client.get_project(&pid).donor_count, 2);
+        assert_eq!(client.get_global_total(), 2 * amount);
+    }
+
+    #[test]
+    #[should_panic(expected = "Attestation is not verified")]
+    fn test_settle_pending_attestation_panics() {
+        let (env, client, att_client, att_addr, relayer, donor, pid) = settlement_setup();
+        let id = record_attestation(
+            &env,
+            &att_client,
+            &relayer,
+            &donor,
+            &pid,
+            "0xpending",
+            10 * STROOP,
+        );
+        // Never verified.
+        client.settle_attestation(&att_addr, &id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Attestation was revoked")]
+    fn test_settle_revoked_attestation_panics() {
+        let (env, client, att_client, att_addr, relayer, donor, pid) = settlement_setup();
+        let id = record_attestation(
+            &env,
+            &att_client,
+            &relayer,
+            &donor,
+            &pid,
+            "0xrevoked",
+            10 * STROOP,
+        );
+        att_client.verify_attestation(&id);
+        // A deep reorg on the source chain orphaned the tx — the attestation
+        // contract's admin revokes it before anyone settles.
+        att_client.revoke_attestation(&att_client.get_admin(), &id);
+        client.settle_attestation(&att_addr, &id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Attestation already settled")]
+    fn test_settle_double_panics() {
+        let (env, client, att_client, att_addr, relayer, donor, pid) = settlement_setup();
+        let id = record_attestation(
+            &env,
+            &att_client,
+            &relayer,
+            &donor,
+            &pid,
+            "0xdouble",
+            25 * STROOP,
+        );
+        att_client.verify_attestation(&id);
+        client.settle_attestation(&att_addr, &id);
+        client.settle_attestation(&att_addr, &id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Attestation project is not registered")]
+    fn test_settle_unmatched_project_panics() {
+        let (env, client, att_client, att_addr, relayer, donor, _pid) = settlement_setup();
+        let unknown = String::from_str(&env, "proj-unknown");
+        let id = record_attestation(
+            &env,
+            &att_client,
+            &relayer,
+            &donor,
+            &unknown,
+            "0xnoproject",
+            25 * STROOP,
+        );
+        att_client.verify_attestation(&id);
+        client.settle_attestation(&att_addr, &id);
+    }
+
+    /// A failed settlement must leave no trace — in particular it must not
+    /// consume the attestation id, so the project can be registered and the
+    /// settlement retried.
+    #[test]
+    fn test_settle_retry_after_project_registered() {
+        let (env, _cid, client, admin, pid) = setup();
+        let att_addr = env.register_contract(None, AttestationContract);
+        let att_client = AttestationContractClient::new(&env, &att_addr);
+        let att_admin = Address::generate(&env);
+        let relayer = Address::generate(&env);
+        att_client.initialize(&att_admin);
+        att_client.set_relayer(&att_admin, &relayer);
+        let _ = pid;
+
+        let donor = Address::generate(&env);
+        let late = String::from_str(&env, "proj-late");
+        let id = record_attestation(&env, &att_client, &relayer, &donor, &late, "0xlate", STROOP);
+        att_client.verify_attestation(&id);
+
+        // First attempt fails because the project does not exist yet.
+        assert!(client.try_settle_attestation(&att_addr, &id).is_err());
+        assert!(!client.is_attestation_settled(&id));
+
+        client.register_project(
+            &admin,
+            &late,
+            &String::from_str(&env, "Late Project"),
+            &Address::generate(&env),
+            &100u32,
+        );
+        client.settle_attestation(&att_addr, &id);
+        assert!(client.is_attestation_settled(&id));
+        assert_eq!(client.get_project(&late).total_raised, STROOP);
+    }
+
+    /// Settlement is a donation-path write, so the global pause switch must
+    /// stop it like every other one.
+    #[test]
+    #[should_panic(expected = "Contract is paused")]
+    fn test_settle_while_paused_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        let att_addr = env.register_contract(None, AttestationContract);
+        let att_client = AttestationContractClient::new(&env, &att_addr);
+        let att_admin = Address::generate(&env);
+        let relayer = Address::generate(&env);
+        att_client.initialize(&att_admin);
+        att_client.set_relayer(&att_admin, &relayer);
+
+        let donor = Address::generate(&env);
+        let id = record_attestation(
+            &env,
+            &att_client,
+            &relayer,
+            &donor,
+            &pid,
+            "0xpaused",
+            10 * STROOP,
+        );
+        att_client.verify_attestation(&id);
+        client.pause_contract(&signers1(&env, &admin));
+        client.settle_attestation(&att_addr, &id);
+    }
+
+    /// Two attestations for the same donor and project both settle, and their
+    /// effects accumulate rather than overwrite.
+    #[test]
+    fn test_settle_multiple_attestations_accumulate() {
+        let (env, client, att_client, att_addr, relayer, donor, pid) = settlement_setup();
+        let first = record_attestation(
+            &env,
+            &att_client,
+            &relayer,
+            &donor,
+            &pid,
+            "0x1",
+            30 * STROOP,
+        );
+        let second = record_attestation(
+            &env,
+            &att_client,
+            &relayer,
+            &donor,
+            &pid,
+            "0x2",
+            80 * STROOP,
+        );
+        att_client.verify_attestation(&first);
+        att_client.verify_attestation(&second);
+
+        client.settle_attestation(&att_addr, &first);
+        client.settle_attestation(&att_addr, &second);
+
+        let stats = client.get_donor_stats(&donor);
+        assert_eq!(stats.total_donated, 110 * STROOP);
+        assert_eq!(stats.donation_count, 2);
+        assert_eq!(stats.badge, BadgeTier::Tree);
+        // donor_count counts unique donors, not donations.
+        assert_eq!(client.get_project(&pid).donor_count, 1);
+        assert_eq!(client.get_donation_count(), 2);
+    }
+
+    /// The settlement event carries the attestation id, the credited amount,
+    /// the CO₂ grams, and the donation index it produced.
+    #[test]
+    fn test_settle_emits_event() {
+        use soroban_sdk::testutils::Events as _;
+
+        let (env, cid, client, _admin, pid) = setup();
+        let att_addr = env.register_contract(None, AttestationContract);
+        let att_client = AttestationContractClient::new(&env, &att_addr);
+        let att_admin = Address::generate(&env);
+        let relayer = Address::generate(&env);
+        att_client.initialize(&att_admin);
+        att_client.set_relayer(&att_admin, &relayer);
+
+        let donor = Address::generate(&env);
+        let amount = 40 * STROOP;
+        let id = record_attestation(&env, &att_client, &relayer, &donor, &pid, "0xevent", amount);
+        att_client.verify_attestation(&id);
+        client.settle_attestation(&att_addr, &id);
+
+        // `settle_attestation` is the last top-level call, so `all()` still
+        // holds its events — see `assert_last_event_contains`.
+        let events = env.events().all().filter_by_contract(&cid);
+        let rendered = std::format!("{:?}", events.events().last().unwrap());
+        assert!(
+            rendered.contains("att_settle"),
+            "expected `att_settle` in event, got: {}",
+            rendered
+        );
+    }
+
     // ─── ProjectMilestoneNFT tests (#205) ────────────────────────────────────
     #[test]
     fn test_mint_project_nft_success() {
@@ -9724,7 +10472,7 @@ mod tests {
         for _ in 0..3 {
             let v = Address::generate(&env);
             grant_badge(&env, &cid, &v);
-            client.vote_verify_project(&v, &pid, &true, &100);
+            client.vote_verify_project(&v, &pid, &true);
             voters.push(v);
         }
         let list = client.get_voter_list(&pid);
@@ -9748,98 +10496,6 @@ mod tests {
         let pid = String::from_str(&env, "never-created");
         let list = client.get_voter_list(&pid);
         assert_eq!(list.len(), 0);
-    }
-    // ─── Quadratic voting tests ────────────────────────────────────────────────
-    #[test]
-    fn test_isqrt_values() {
-        assert_eq!(isqrt(0), 0);
-        assert_eq!(isqrt(1), 1);
-        assert_eq!(isqrt(2), 1);
-        assert_eq!(isqrt(3), 1);
-        assert_eq!(isqrt(4), 2);
-        assert_eq!(isqrt(99), 9);
-        assert_eq!(isqrt(100), 10);
-        assert_eq!(isqrt(101), 10);
-        assert_eq!(isqrt(400), 20);
-        assert_eq!(isqrt(800), 28);
-        assert_eq!(isqrt(u32::MAX), 65535);
-    }
-    #[test]
-    fn test_quadratic_voting_single_proposal() {
-        let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
-        let voter = Address::generate(&env);
-        grant_badge(&env, &cid, &voter);
-        // Seedling: 100 credits → isqrt(100) = 10 effective weight
-        client.vote_verify_project(&voter, &pid, &true, &100);
-        let p = client.get_proposal(&pid);
-        assert_eq!(p.votes_for, 10);
-        assert_eq!(p.votes_against, 0);
-        let weight = client.get_voter_weight(&voter);
-        assert_eq!(weight, 10);
-    }
-    #[test]
-    fn test_quadratic_voting_multi_proposal() {
-        let (env, cid, client, admin, pid1) = setup();
-        // Register a second project for multi-proposal voting
-        let pid2 = String::from_str(&env, "proj-002");
-        let wallet = Address::generate(&env);
-        client.register_project(
-            &admin,
-            &pid2,
-            &String::from_str(&env, "Second Project"),
-            &wallet,
-            &100u32,
-        );
-        client.create_proposal(&signers1(&env, &admin), &pid1, &0u32);
-        client.create_proposal(&signers1(&env, &admin), &pid2, &0u32);
-        let voter = Address::generate(&env);
-        grant_badge(&env, &cid, &voter);
-        // Credits are tracked per-proposal. pid1: spend 40 → weight = isqrt(40) = 6
-        // pid2: spend 60 → weight = isqrt(60) = 7 (60 not cumulative with pid1)
-        client.vote_verify_project(&voter, &pid1, &true, &40);
-        client.vote_verify_project(&voter, &pid2, &false, &60);
-        let p1 = client.get_proposal(&pid1);
-        assert_eq!(p1.votes_for, 6);
-        assert_eq!(p1.votes_against, 0);
-        let p2 = client.get_proposal(&pid2);
-        assert_eq!(p2.votes_for, 0);
-        assert_eq!(p2.votes_against, 7);
-        // Verify credits cannot exceed total allocation
-        client.vote_verify_project(&voter, &pid1, &true, &0);
-        // Attempting to overspend should fail
-    }
-    #[test]
-    #[should_panic(expected = "Insufficient voting credits")]
-    fn test_quadratic_voting_exceeds_credits() {
-        let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
-        let voter = Address::generate(&env);
-        grant_badge(&env, &cid, &voter);
-        // Seedling has 100 credits; trying to spend 101 should fail.
-        client.vote_verify_project(&voter, &pid, &true, &101);
-    }
-    #[test]
-    fn test_quadratic_voting_edge_cases() {
-        let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
-        let voter = Address::generate(&env);
-        grant_badge(&env, &cid, &voter);
-        // Spend 0 credits → effective weight delta = 0
-        client.vote_verify_project(&voter, &pid, &true, &0);
-        let p = client.get_proposal(&pid);
-        assert_eq!(p.votes_for, 0);
-        // Spend 1 credit → isqrt(1) = 1
-        client.vote_verify_project(&voter, &pid, &true, &1);
-        let p = client.get_proposal(&pid);
-        assert_eq!(p.votes_for, 1);
-        // Spend remaining 99 credits → cumulative = 100, delta = isqrt(100) - isqrt(1) = 10 - 1 = 9
-        client.vote_verify_project(&voter, &pid, &true, &99);
-        let p = client.get_proposal(&pid);
-        assert_eq!(p.votes_for, 10);
-        // Total credits used = 0 + 1 + 99 = 100 (all Seedling credits)
-        let weight = client.get_voter_weight(&voter);
-        assert_eq!(weight, 10);
     }
     // ─── Bulk admin tests ──────────────────────────────────────────────────────
     #[test]
@@ -15360,5 +16016,312 @@ mod tests {
                 totals,
             );
         });
+    }
+
+    // ─── Quadratic Voting tests (#424) ─────────────────────────────────────────
+
+    #[test]
+    fn test_zero_badge_no_credits() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let non_donor = Address::generate(&env);
+        assert_eq!(client.get_voting_credits(&non_donor), 0);
+    }
+
+    #[test]
+    fn test_credits_after_donation() {
+        let (env, cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&donor, &(10 * STROOP));
+        client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32);
+        // Donor gets Seedling badge (10 XLM) -> 100 voting credits
+        assert_eq!(client.get_voting_credits(&donor), 100);
+    }
+
+    #[test]
+    fn test_quadratic_voting_single_proposal() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        let voter = Address::generate(&env);
+        grant_badge(&env, &cid, &voter); // Seedling = 100 credits
+
+        // Voter allocates 3 votes_for (cost 3^2 = 9 credits)
+        let mut allocations = Vec::new(&env);
+        allocations.push_back(VoteAllocation {
+            project_id: pid.clone(),
+            votes_for: 3,
+            votes_against: 0,
+            credits_spent: 9,
+        });
+
+        client.vote_on_proposals(&voter, &allocations);
+
+        // Check remaining credits: 100 - 9 = 91
+        assert_eq!(client.get_voting_credits(&voter), 91);
+        let p = client.get_proposal(&pid);
+        assert_eq!(p.votes_for, 3);
+        assert_eq!(p.votes_against, 0);
+    }
+
+    #[test]
+    fn test_quadratic_voting_multiple_proposals() {
+        let (env, cid, client, admin) = setup_admin_only();
+        let pid1 = String::from_str(&env, "proj-1");
+        let pid2 = String::from_str(&env, "proj-2");
+        let wallet = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &pid1,
+            &String::from_str(&env, "P1"),
+            &wallet,
+            &100u32,
+        );
+        client.register_project(
+            &admin,
+            &pid2,
+            &String::from_str(&env, "P2"),
+            &wallet,
+            &100u32,
+        );
+
+        client.create_proposal(&signers1(&env, &admin), &pid1, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid2, &0u32);
+
+        let voter = Address::generate(&env);
+        grant_badge(&env, &cid, &voter); // 100 credits
+
+        // Cast 6 votes_for on P1 (36 credits) and 8 votes_against on P2 (64 credits)
+        // Total cost: 36 + 64 = 100 credits
+        let mut allocations = Vec::new(&env);
+        allocations.push_back(VoteAllocation {
+            project_id: pid1.clone(),
+            votes_for: 6,
+            votes_against: 0,
+            credits_spent: 36,
+        });
+        allocations.push_back(VoteAllocation {
+            project_id: pid2.clone(),
+            votes_for: 0,
+            votes_against: 8,
+            credits_spent: 64,
+        });
+
+        client.vote_on_proposals(&voter, &allocations);
+
+        assert_eq!(client.get_voting_credits(&voter), 0);
+        let p1 = client.get_proposal(&pid1);
+        assert_eq!(p1.votes_for, 6);
+        let p2 = client.get_proposal(&pid2);
+        assert_eq!(p2.votes_against, 8);
+    }
+
+    #[test]
+    #[should_panic(expected = "Voting credits exhausted")]
+    fn test_voting_credits_exhausted_panics() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        let voter = Address::generate(&env);
+        grant_badge(&env, &cid, &voter); // 100 credits
+
+        // Trying to cast 11 votes costs 11^2 = 121 credits > 100
+        let mut allocations = Vec::new(&env);
+        allocations.push_back(VoteAllocation {
+            project_id: pid,
+            votes_for: 11,
+            votes_against: 0,
+            credits_spent: 121,
+        });
+        client.vote_on_proposals(&voter, &allocations);
+    }
+
+    #[test]
+    fn test_voting_tally_computation() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        grant_badge(&env, &cid, &v1);
+        grant_badge(&env, &cid, &v2);
+
+        // v1 votes 5 for (cost 25)
+        let mut a1 = Vec::new(&env);
+        a1.push_back(VoteAllocation {
+            project_id: pid.clone(),
+            votes_for: 5,
+            votes_against: 0,
+            credits_spent: 25,
+        });
+        client.vote_on_proposals(&v1, &a1);
+
+        // v2 votes 3 against (cost 9)
+        let mut a2 = Vec::new(&env);
+        a2.push_back(VoteAllocation {
+            project_id: pid.clone(),
+            votes_for: 0,
+            votes_against: 3,
+            credits_spent: 9,
+        });
+        client.vote_on_proposals(&v2, &a2);
+
+        let (for_votes, against_votes) = client.get_proposal_tally(&pid);
+        assert_eq!(for_votes, 5);
+        assert_eq!(against_votes, 3);
+    }
+
+    #[test]
+    fn test_badge_upgrade_resets_credits() {
+        let (env, cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&donor, &(200 * STROOP));
+
+        // First donation: 10 XLM -> Seedling (100 credits)
+        client.donate(&token, &donor, &pid, &(10 * STROOP), &0u32);
+        assert_eq!(client.get_voting_credits(&donor), 100);
+
+        // Create proposal and spend 64 credits (8 votes)
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        let mut a = Vec::new(&env);
+        a.push_back(VoteAllocation {
+            project_id: pid.clone(),
+            votes_for: 8,
+            votes_against: 0,
+            credits_spent: 64,
+        });
+        client.vote_on_proposals(&donor, &a);
+        assert_eq!(client.get_voting_credits(&donor), 36);
+
+        // Second donation: 90 XLM -> Total 100 XLM -> Tree badge (141 credits)
+        client.donate(&token, &donor, &pid, &(90 * STROOP), &0u32);
+        assert_eq!(client.get_donor_stats(&donor).badge, BadgeTier::Tree);
+        // Badge upgrade resets credits to new tier weight (141)
+        assert_eq!(client.get_voting_credits(&donor), 141);
+    }
+
+    #[test]
+    #[cfg(feature = "delegation")]
+    fn test_delegated_credits_added() {
+        let (env, cid, client, _admin, _pid) = setup();
+        let donor = Address::generate(&env);
+        let delegate = Address::generate(&env);
+        grant_badge(&env, &cid, &donor); // 100 credits
+        grant_badge(&env, &cid, &delegate); // 100 credits
+
+        assert_eq!(client.get_voting_credits(&delegate), 100);
+        client.delegate_vote(&donor, &delegate);
+
+        // Delegate gets donor's 100 credits added -> 200 credits total
+        assert_eq!(client.get_voting_credits(&delegate), 200);
+        assert_eq!(client.get_voting_credits(&donor), 0);
+
+        // Revoke delegation
+        client.revoke_delegation(&donor);
+        assert_eq!(client.get_voting_credits(&delegate), 100);
+        assert_eq!(client.get_voting_credits(&donor), 100);
+    }
+
+    #[test]
+    fn test_integration_governance_full_flow() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+
+        let donor1 = Address::generate(&env);
+        let donor2 = Address::generate(&env);
+        grant_badge(&env, &cid, &donor1); // 100 credits
+        grant_badge(&env, &cid, &donor2); // 100 credits
+
+        // donor1 votes 7 for (49 credits)
+        let mut a1 = Vec::new(&env);
+        a1.push_back(VoteAllocation {
+            project_id: pid.clone(),
+            votes_for: 7,
+            votes_against: 0,
+            credits_spent: 49,
+        });
+        client.vote_on_proposals(&donor1, &a1);
+
+        // donor2 votes 5 against (25 credits)
+        let mut a2 = Vec::new(&env);
+        a2.push_back(VoteAllocation {
+            project_id: pid.clone(),
+            votes_for: 0,
+            votes_against: 5,
+            credits_spent: 25,
+        });
+        client.vote_on_proposals(&donor2, &a2);
+
+        // Verify tally: 7 for, 5 against
+        let (vf, va) = client.get_proposal_tally(&pid);
+        assert_eq!(vf, 7);
+        assert_eq!(va, 5);
+
+        // Resolve proposal after deadline
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
+        client.resolve_proposal(&pid);
+        let prop = client.get_proposal(&pid);
+        assert!(prop.resolved);
+        assert_eq!(prop.votes_for, 7);
+        assert_eq!(prop.votes_against, 5);
+    }
+
+    #[test]
+    fn prop_credits_never_negative() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        let voter = Address::generate(&env);
+        grant_badge(&env, &cid, &voter); // 100 credits
+
+        // Spend all 100 credits (10 votes)
+        let mut a = Vec::new(&env);
+        a.push_back(VoteAllocation {
+            project_id: pid.clone(),
+            votes_for: 10,
+            votes_against: 0,
+            credits_spent: 100,
+        });
+        client.vote_on_proposals(&voter, &a);
+
+        let rem = client.get_voting_credits(&voter);
+        assert_eq!(rem, 0);
+    }
+
+    #[test]
+    fn prop_tally_bounded_by_total_credits() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        grant_badge(&env, &cid, &v1);
+        grant_badge(&env, &cid, &v2);
+
+        let mut a1 = Vec::new(&env);
+        a1.push_back(VoteAllocation {
+            project_id: pid.clone(),
+            votes_for: 6,
+            votes_against: 0,
+            credits_spent: 36,
+        });
+        client.vote_on_proposals(&v1, &a1);
+
+        let mut a2 = Vec::new(&env);
+        a2.push_back(VoteAllocation {
+            project_id: pid.clone(),
+            votes_for: 8,
+            votes_against: 0,
+            credits_spent: 64,
+        });
+        client.vote_on_proposals(&v2, &a2);
+
+        let (for_votes, against_votes) = client.get_proposal_tally(&pid);
+        assert!(for_votes <= 6 + 8);
+        assert_eq!(against_votes, 0);
     }
 }
