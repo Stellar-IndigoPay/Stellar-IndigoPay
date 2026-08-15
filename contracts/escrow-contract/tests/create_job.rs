@@ -69,6 +69,7 @@ fn test_milestone_validation() {
         oracle: None,
         verified: false,
         proof_hash: None,
+            refunded: false,
     });
     milestones.push_back(Milestone {
         name: SorobanString::from_str(&env, "M2"),
@@ -78,6 +79,7 @@ fn test_milestone_validation() {
         oracle: None,
         verified: false,
         proof_hash: None,
+            refunded: false,
     });
 
     client.create_job(
@@ -201,6 +203,7 @@ fn test_zero_percentage_milestone() {
         oracle: None,
         verified: false,
         proof_hash: None,
+            refunded: false,
     });
     milestones.push_back(Milestone {
         name: SorobanString::from_str(&env, "Full"),
@@ -210,6 +213,7 @@ fn test_zero_percentage_milestone() {
         oracle: None,
         verified: false,
         proof_hash: None,
+            refunded: false,
     });
 
     client.create_job(

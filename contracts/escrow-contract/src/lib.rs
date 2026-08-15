@@ -28,6 +28,7 @@ pub struct Milestone {
     pub oracle: Option<Address>,
     pub verified: bool,
     pub proof_hash: Option<BytesN<32>>,
+    pub refunded: bool,
 }
 
 #[contracttype]
@@ -158,12 +159,13 @@ pub enum EscrowError {
     ThresholdExceedsAdminCount = 60,
     AdminTransferInProgress = 61,
     AdminSetUpdateFailed = 62,
+    JobAlreadyCompleted = 63,
 }
 
 fn compute_remaining_funds(job: &Job) -> i128 {
     let mut remaining_amount: i128 = 0;
     for milestone in job.milestones.iter() {
-        if !milestone.released {
+        if !milestone.released && !milestone.refunded {
             let proportion = milestone.percentage as i128;
             remaining_amount = remaining_amount
                 .checked_add((job.amount * proportion) / 100i128)
@@ -469,7 +471,7 @@ impl EscrowContract {
 
         let mut total_percentage: u32 = 0;
         for milestone in new_milestones.iter() {
-            if milestone.released || milestone.disputed {
+            if milestone.released || milestone.disputed || milestone.refunded {
                 panic_with_error!(&env, EscrowError::NewMilestonesMustNotBeReleasedOrDisputed);
             }
             total_percentage = total_percentage
@@ -557,22 +559,22 @@ impl EscrowContract {
         // ── Effects: rebuild the milestone vector, recompute status,
         //    and persist state BEFORE the external token movement (CEI ordering).
         let mut updated_milestones = job.milestones.clone();
-        let mut released_count = 0u32;
+        let mut settled_count = 0u32;
         for i in 0..updated_milestones.len() {
             let mut m = updated_milestones.get(i).unwrap().clone();
             if i == milestone_index {
                 m.released = true;
             }
-            if m.released {
-                released_count = released_count
+            if m.released || m.refunded {
+                settled_count = settled_count
                     .checked_add(1)
-                    .expect("released_count overflow");
+                    .expect("settled_count overflow");
             }
             updated_milestones.set(i, m);
         }
         job.milestones = updated_milestones;
         let any_disputed = job.milestones.iter().any(|m| m.disputed);
-        job.status = if released_count == job.milestones.len() {
+        job.status = if settled_count == job.milestones.len() {
             JobStatus::Completed
         } else if any_disputed {
             JobStatus::Disputed
@@ -697,6 +699,9 @@ impl EscrowContract {
             .instance()
             .get(&DataKey::Job(job_id.clone()))
             .expect("Job not found");
+        if job.status == JobStatus::Completed {
+            panic_with_error!(&env, EscrowError::JobAlreadyCompleted);
+        }
         job.disputed = true;
         job.status = JobStatus::Disputed;
         reputation_job_disputed(&env, &job);
@@ -732,7 +737,11 @@ impl EscrowContract {
         let mut updated_milestones = job.milestones.clone();
         for i in 0..updated_milestones.len() {
             let mut m = updated_milestones.get(i).unwrap().clone();
-            m.released = true;
+            if approve_remaining {
+                m.released = true;
+            } else {
+                m.refunded = true;
+            }
             m.disputed = false;
             updated_milestones.set(i, m);
         }
@@ -775,6 +784,10 @@ impl EscrowContract {
             .instance()
             .get(&DataKey::Job(job_id.clone()))
             .expect("Job not found");
+
+        if job.status == JobStatus::Completed {
+            panic_with_error!(&env, EscrowError::JobAlreadyCompleted);
+        }
 
         if milestone_index >= job.milestones.len() {
             panic_with_error!(&env, EscrowError::InvalidMilestoneIndex);
@@ -839,13 +852,17 @@ impl EscrowContract {
         let release_amount = (job.amount * proportion) / 100i128;
 
         milestone.disputed = false;
-        milestone.released = true;
+        if approve {
+            milestone.released = true;
+        } else {
+            milestone.refunded = true;
+        }
         milestones.set(milestone_index, milestone);
         job.milestones = milestones;
 
-        let all_released = job.milestones.iter().all(|m| m.released);
+        let all_settled = job.milestones.iter().all(|m| m.released || m.refunded);
         let any_disputed = job.milestones.iter().any(|m| m.disputed);
-        job.status = if all_released {
+        job.status = if all_settled {
             JobStatus::Completed
         } else if any_disputed {
             JobStatus::Disputed
@@ -955,9 +972,9 @@ impl EscrowContract {
         m.released = true;
         updated_milestones.set(milestone_index, m);
         job.milestones = updated_milestones;
-        let all_released = job.milestones.iter().all(|m| m.released);
+        let all_settled = job.milestones.iter().all(|m| m.released || m.refunded);
         let any_disputed = job.milestones.iter().any(|m| m.disputed);
-        job.status = if all_released {
+        job.status = if all_settled {
             JobStatus::Completed
         } else if any_disputed {
             JobStatus::Disputed
@@ -1150,6 +1167,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
         client.create_job(
             client_addr,
@@ -1186,6 +1204,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
         milestones.push_back(Milestone {
             name: String::from_str(&env, "Development"),
@@ -1195,6 +1214,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
         milestones.push_back(Milestone {
             name: String::from_str(&env, "Testing"),
@@ -1204,6 +1224,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -1249,6 +1270,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
         milestones.push_back(Milestone {
             name: String::from_str(&env, "M2"),
@@ -1258,6 +1280,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -1307,6 +1330,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -1343,6 +1367,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
         milestones.push_back(Milestone {
             name: String::from_str(&env, "M2"),
@@ -1352,6 +1377,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -1399,6 +1425,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -1442,6 +1469,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -1485,6 +1513,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
         milestones.push_back(Milestone {
             name: String::from_str(&env, "M2"),
@@ -1494,6 +1523,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -1551,6 +1581,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -1567,7 +1598,8 @@ mod tests {
 
         let job = client.get_job(&job_id).unwrap();
         assert_eq!(job.status, JobStatus::Completed);
-        assert!(job.milestones.get(0).unwrap().released);
+        assert!(!job.milestones.get(0).unwrap().released);
+        assert!(job.milestones.get(0).unwrap().refunded);
     }
 
     #[test]
@@ -1595,6 +1627,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -1635,6 +1668,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -1675,6 +1709,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -1713,6 +1748,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -1760,6 +1796,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -1800,6 +1837,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -1843,6 +1881,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -1890,6 +1929,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -1929,6 +1969,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -1972,6 +2013,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
         milestones.push_back(Milestone {
             name: String::from_str(&env, "M2"),
@@ -1981,6 +2023,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -2025,6 +2068,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         let job_1 = String::from_str(&env, "job-enum-1");
@@ -2081,6 +2125,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
         milestones.push_back(Milestone {
             name: String::from_str(&env, "M2-Implementation"),
@@ -2090,6 +2135,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
         milestones.push_back(Milestone {
             name: String::from_str(&env, "M3-Deployment"),
@@ -2099,6 +2145,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         client.create_job(
@@ -2145,6 +2192,7 @@ mod tests {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         }
     }
 
@@ -2965,6 +3013,7 @@ mod tests {
                 oracle: oracle.clone(),
                 verified: false,
                 proof_hash: None,
+            refunded: false,
             });
 
             client.create_job(

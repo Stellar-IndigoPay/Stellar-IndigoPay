@@ -106,6 +106,7 @@ mod fuzz {
     struct MilestoneModel {
         percentage: u32,
         released: bool,
+        refunded: bool,
     }
 
     impl EscrowModel {
@@ -124,6 +125,7 @@ mod fuzz {
                 .map(|&p| MilestoneModel {
                     percentage: p,
                     released: false,
+                    refunded: false,
                 })
                 .collect();
             let total_pct: u32 = model_milestones.iter().map(|m| m.percentage).sum();
@@ -160,8 +162,8 @@ mod fuzz {
                 .milestones
                 .get_mut(milestone_idx)
                 .ok_or("milestone not found")?;
-            if m.released {
-                return Err("milestone already released");
+            if m.released || m.refunded {
+                return Err("milestone already settled");
             }
             m.released = true;
             let proportion = m.percentage as i128;
@@ -190,8 +192,8 @@ mod fuzz {
                 .milestones
                 .get_mut(milestone_idx)
                 .ok_or("milestone not found")?;
-            if m.released {
-                return Err("milestone already released/claimed");
+            if m.released || m.refunded {
+                return Err("milestone already settled");
             }
             m.released = true;
             let proportion = m.percentage as i128;
@@ -229,16 +231,17 @@ mod fuzz {
             if job.resolved {
                 return Err("dispute already resolved");
             }
-            // If approving remaining, release all unreleased milestones
-            if approve_remaining {
-                for m in &mut job.milestones {
-                    if !m.released {
+            for m in &mut job.milestones {
+                if !m.released && !m.refunded {
+                    if approve_remaining {
                         m.released = true;
                         let proportion = m.percentage as i128;
                         job.total_released = job
                             .total_released
                             .checked_add((job.amount * proportion) / 100i128)
                             .expect("total_released overflow in model");
+                    } else {
+                        m.refunded = true;
                     }
                 }
             }
@@ -278,12 +281,12 @@ mod fuzz {
             if job.resolved {
                 return true; // contract status is Completed
             }
-            let released_count = job.milestones.iter().filter(|m| m.released).count();
+            let settled_count = job.milestones.iter().filter(|m| m.released || m.refunded).count();
             let total_count = job.milestones.len();
-            if released_count == 0 {
+            if settled_count == 0 {
                 return true; // Escrowed
             }
-            if released_count < total_count {
+            if settled_count < total_count {
                 return true; // PartiallyReleased
             }
             // All released
@@ -407,6 +410,7 @@ mod fuzz {
                 oracle: None,
                 verified: false,
                 proof_hash: None,
+            refunded: false,
             });
         }
         milestones
@@ -623,7 +627,10 @@ mod fuzz {
 
                     // ── Invariant 4: Refund ≤ remaining balance ──────────────
                     let all_unreleased_amount: i128 = (0..contract_job.milestones.len())
-                        .filter(|&i| !contract_job.milestones.get(i).unwrap().released)
+                        .filter(|&i| {
+                            let m = contract_job.milestones.get(i).unwrap();
+                            !m.released && !m.refunded
+                        })
                         .map(|i| {
                             let m = contract_job.milestones.get(i).unwrap();
                             (contract_job.amount * m.percentage as i128) / 100i128
@@ -663,12 +670,16 @@ mod fuzz {
                         let model_m = &job_model.milestones[mi];
                         let contract_m = contract_job.milestones.get(mi as u32).unwrap();
                         if model_m.released {
-                            // Model says released — contract should also be released
-                            // (unless the release failed silently, but we only
-                            // update the model on successful operations)
                             prop_assert!(
                                 contract_m.released,
                                 "INVARIANT (milestone): model says job {}/M{} released but contract not",
+                                job_model.id, mi
+                            );
+                        }
+                        if model_m.refunded {
+                            prop_assert!(
+                                contract_m.refunded,
+                                "INVARIANT (milestone): model says job {}/M{} refunded but contract not",
                                 job_model.id, mi
                             );
                         }
@@ -889,6 +900,7 @@ mod fuzz {
                     oracle: None,
                     verified: false,
                     proof_hash: None,
+            refunded: false,
                 });
             }
 
@@ -956,6 +968,7 @@ mod fuzz {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
         milestones_1.push_back(Milestone {
             name: SorobanString::from_str(&env, "M1"),
@@ -965,6 +978,7 @@ mod fuzz {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         let result_1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -994,6 +1008,7 @@ mod fuzz {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
         milestones_2.push_back(Milestone {
             name: SorobanString::from_str(&env, "M1"),
@@ -1003,6 +1018,7 @@ mod fuzz {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
         milestones_2.push_back(Milestone {
             name: SorobanString::from_str(&env, "M2"),
@@ -1012,6 +1028,7 @@ mod fuzz {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         let result_2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1041,6 +1058,7 @@ mod fuzz {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
         milestones_3.push_back(Milestone {
             name: SorobanString::from_str(&env, "M1"),
@@ -1050,6 +1068,7 @@ mod fuzz {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         let result_3 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1079,6 +1098,7 @@ mod fuzz {
             oracle: None,
             verified: false,
             proof_hash: None,
+            refunded: false,
         });
 
         let result_4 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
