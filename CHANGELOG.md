@@ -68,6 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+* **contracts:** eliminate milestone payout rounding-dust — `release_milestone`, `claim_milestone`, and `resolve_milestone_dispute` now absorb the integer-division remainder in the final milestone so `Σ released == job.amount` exactly; `compute_remaining_funds` and new `get_remaining_funds` helper use exact `amount − already_released` accounting instead of recomputing truncated proportions (closes rounding-dust issue)
 * **contracts:** skip missing persistent stealth donation entries during scans (closes #506)
 * **contracts:** deduplicate the escrow `Milestone` struct across feature configurations (closes #511)
 * **contracts:** add regression tests covering on-time vs late milestone completion reputation tracking

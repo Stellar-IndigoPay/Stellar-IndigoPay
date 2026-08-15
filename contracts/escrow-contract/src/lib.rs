@@ -160,17 +160,24 @@ pub enum EscrowError {
     AdminSetUpdateFailed = 62,
 }
 
+/// Returns the exact amount still held in escrow for `job`.
+///
+/// Computed as `job.amount – Σ released_amounts` using the same
+/// remainder-absorbing formula used by the release functions, so the
+/// result is always exact and never loses stroop dust to truncation.
 fn compute_remaining_funds(job: &Job) -> i128 {
-    let mut remaining_amount: i128 = 0;
+    let mut already_released: i128 = 0;
     for milestone in job.milestones.iter() {
-        if !milestone.released {
+        if milestone.released {
             let proportion = milestone.percentage as i128;
-            remaining_amount = remaining_amount
+            already_released = already_released
                 .checked_add((job.amount * proportion) / 100i128)
-                .expect("remaining_amount overflow");
+                .expect("already_released overflow");
         }
     }
-    remaining_amount
+    job.amount
+        .checked_sub(already_released)
+        .expect("remaining_funds underflow")
 }
 
 fn read_reputation(env: &Env, freelancer: &Address) -> FreelancerReputation {
@@ -552,7 +559,25 @@ impl EscrowContract {
         }
 
         let proportion = milestone.percentage as i128;
-        let release_amount = (job.amount * proportion) / 100i128;
+        // Compute how much has already been paid for previously-released milestones.
+        let already_released: i128 = job.milestones.iter().fold(0i128, |acc, m| {
+            if m.released {
+                acc.checked_add((job.amount * m.percentage as i128) / 100i128)
+                    .expect("already_released overflow")
+            } else {
+                acc
+            }
+        });
+        // Count unreleased milestones (including the current one being released).
+        let unreleased_count = job.milestones.iter().filter(|m| !m.released).count();
+        let release_amount = if unreleased_count == 1 {
+            // Last milestone: pay the exact remainder so sum == job.amount.
+            job.amount
+                .checked_sub(already_released)
+                .expect("release_amount underflow")
+        } else {
+            (job.amount * proportion) / 100i128
+        };
 
         // ── Effects: rebuild the milestone vector, recompute status,
         //    and persist state BEFORE the external token movement (CEI ordering).
@@ -836,7 +861,23 @@ impl EscrowContract {
         }
 
         let proportion = milestone.percentage as i128;
-        let release_amount = (job.amount * proportion) / 100i128;
+        // Exact remainder for the last unreleased milestone; truncated otherwise.
+        let already_released: i128 = job.milestones.iter().fold(0i128, |acc, m| {
+            if m.released {
+                acc.checked_add((job.amount * m.percentage as i128) / 100i128)
+                    .expect("already_released overflow")
+            } else {
+                acc
+            }
+        });
+        let unreleased_count = job.milestones.iter().filter(|m| !m.released).count();
+        let release_amount = if unreleased_count == 1 {
+            job.amount
+                .checked_sub(already_released)
+                .expect("release_amount underflow")
+        } else {
+            (job.amount * proportion) / 100i128
+        };
 
         milestone.disputed = false;
         milestone.released = true;
@@ -946,7 +987,23 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::MilestoneAlreadyReleased);
         }
         let proportion = milestone.percentage as i128;
-        let release_amount = (job.amount * proportion) / 100i128;
+        // Exact remainder for the last milestone; truncated proportion otherwise.
+        let already_released: i128 = job.milestones.iter().fold(0i128, |acc, m| {
+            if m.released {
+                acc.checked_add((job.amount * m.percentage as i128) / 100i128)
+                    .expect("already_released overflow")
+            } else {
+                acc
+            }
+        });
+        let unreleased_count = job.milestones.iter().filter(|m| !m.released).count();
+        let release_amount = if unreleased_count == 1 {
+            job.amount
+                .checked_sub(already_released)
+                .expect("release_amount underflow")
+        } else {
+            (job.amount * proportion) / 100i128
+        };
 
         // ── Effects: mark milestone released and update status BEFORE
         //    the external token transfer (CEI ordering).
@@ -1081,6 +1138,14 @@ impl EscrowContract {
 
     pub fn get_job(env: Env, job_id: String) -> Option<Job> {
         env.storage().instance().get(&DataKey::Job(job_id))
+    }
+
+    /// Read-only helper: returns `job.amount – Σ already_released`, i.e. the
+    /// exact number of stroops the contract still holds for this job.
+    /// Returns `None` if the job does not exist.
+    pub fn get_remaining_funds(env: Env, job_id: String) -> Option<i128> {
+        let job: Job = env.storage().instance().get(&DataKey::Job(job_id))?;
+        Some(compute_remaining_funds(&job))
     }
 
     pub fn get_job_count(env: Env) -> u32 {
