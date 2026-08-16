@@ -162,10 +162,17 @@ pub enum EscrowError {
 
 /// Returns the exact amount still held in escrow for `job`.
 ///
-/// Computed as `job.amount – Σ released_amounts` using the same
-/// remainder-absorbing formula used by the release functions, so the
-/// result is always exact and never loses stroop dust to truncation.
+/// When all milestones are released the contract holds nothing; return 0
+/// directly to avoid deriving a residual from truncated percentage sums.
+/// Otherwise compute `job.amount – Σ(truncated proportions of released
+/// milestones)`, which matches what callers like `refund_expired_job`
+/// expect when no milestone has been released yet.
 fn compute_remaining_funds(job: &Job) -> i128 {
+    // Fast path: every milestone has been paid out — nothing remains.
+    if job.milestones.iter().all(|m| m.released) {
+        return 0;
+    }
+
     let mut already_released: i128 = 0;
     for milestone in job.milestones.iter() {
         if milestone.released {
