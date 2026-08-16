@@ -18,7 +18,7 @@ export default function VerificationFilters({
   return (
     <div className="flex flex-wrap items-center gap-2">
       {STATUSES.map((status) => {
-        const isActive = value === status.key;
+        const isActive = value === status.key || (status.key === "all" && value === "");
         return (
           <button
             key={status.key}

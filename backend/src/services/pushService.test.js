@@ -229,6 +229,55 @@ describe("pushService", () => {
     });
   });
 
+  describe("notification routing payloads", () => {
+    test("includes app routes for donation receipts", async () => {
+      pool.query
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ token: "ExponentPushToken[abc]" }] })
+        .mockResolvedValueOnce({ rows: [] });
+      mockSendPushNotificationsAsync.mockResolvedValueOnce([{ status: "ok", id: "ticket-route" }]);
+
+      await pushService.sendDonationReceipt("GDONOR", {
+        id: "donation-1",
+        projectId: "project-1",
+        amount: 5,
+        currency: "XLM",
+        projectName: "Forest",
+      });
+
+      expect(mockSendPushNotificationsAsync.mock.calls[0][0][0].data).toEqual(
+        expect.objectContaining({
+          type: "donation_receipt",
+          donationId: "donation-1",
+          target: "/donations/donation-1",
+          route: "/donations/donation-1",
+        }),
+      );
+    });
+
+    test("includes project routes for project updates", async () => {
+      pool.query
+        .mockResolvedValueOnce({ rows: [{ token: "ExponentPushToken[abc]", wallet_address: null, platform: null }] })
+        .mockResolvedValueOnce({ rows: [] });
+      mockSendPushNotificationsAsync.mockResolvedValueOnce([{ status: "ok", id: "ticket-project" }]);
+
+      await pushService.sendProjectUpdateNotifications({
+        project: { id: "project-1", name: "Forest" },
+        update: { id: "update-1", title: "New trees" },
+      });
+
+      expect(mockSendPushNotificationsAsync.mock.calls[0][0][0].data).toEqual(
+        expect.objectContaining({
+          type: "project_update",
+          projectId: "project-1",
+          target: "/projects/project-1",
+          route: "/projects/project-1",
+        }),
+      );
+    });
+  });
+
   describe("sendMilestoneReachedNotifications", () => {
     test("notifies every wallet-linked follower and skips anonymous ones", async () => {
       pool.query
@@ -436,6 +485,8 @@ describe("pushService", () => {
         projectId: "proj-1",
         recurringId: "rec-99",
         nextPaymentDate: "2026-07-17T08:00:00.000Z",
+        target: "/projects/proj-1",
+        route: "/projects/proj-1",
         walletAddress: "GDONOR",
       });
     });

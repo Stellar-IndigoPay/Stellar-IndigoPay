@@ -1,6 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   navigateToNotification,
+  normalizeNotificationTarget,
   parseDeepLinkUrl,
   isNotificationHandled,
   getInboxNotifications,
@@ -30,6 +31,14 @@ describe("Notification Utilities", () => {
     AsyncStorage.clear();
   });
 
+  describe("normalizeNotificationTarget", () => {
+    it("accepts app-internal absolute routes only", () => {
+      expect(normalizeNotificationTarget("/projects/proj-1")).toBe("/projects/proj-1");
+      expect(normalizeNotificationTarget("//evil.test")).toBeNull();
+      expect(normalizeNotificationTarget("https://evil.test")).toBeNull();
+    });
+  });
+
   describe("parseDeepLinkUrl", () => {
     it("parses indigopay://project/123 -> /projects/123", () => {
       (Linking.parse as jest.Mock).mockReturnValueOnce({ path: "project/123" });
@@ -51,6 +60,14 @@ describe("Notification Utilities", () => {
   });
 
   describe("navigateToNotification", () => {
+    it("routes explicit target before type-specific fallback", () => {
+      navigateToNotification(
+        { type: "project_update", projectId: "proj-1", target: "/projects/target-proj" },
+        mockPush,
+      );
+      expect(mockPush).toHaveBeenCalledWith("/projects/target-proj");
+    });
+
     it("routes donation_receipt with donorAddress to profile", () => {
       navigateToNotification(
         { type: "donation_receipt", donorAddress: "0xABC", projectId: "proj-1" },
@@ -81,12 +98,26 @@ describe("Notification Utilities", () => {
       expect(mockPush).toHaveBeenCalledWith("/projects/proj-2");
     });
 
-    it("routes subscription_due to donate screen", () => {
+    it("routes governance proposal notifications to proposal screen", () => {
+      navigateToNotification(
+        { type: "governance_proposal", proposalId: "42" },
+        mockPush,
+      );
+      expect(mockPush).toHaveBeenCalledWith("/governance/42");
+    });
+
+    it("routes subscription_due and recurring_reminder to donate screen", () => {
       navigateToNotification(
         { type: "subscription_due", projectId: "proj-3" },
         mockPush,
       );
       expect(mockPush).toHaveBeenCalledWith("/donate/proj-3");
+
+      navigateToNotification(
+        { type: "recurring_reminder", projectId: "proj-4" },
+        mockPush,
+      );
+      expect(mockPush).toHaveBeenCalledWith("/donate/proj-4");
     });
 
     it("falls back to home '/' for unknown/missing payloads", () => {
