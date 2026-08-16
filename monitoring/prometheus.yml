@@ -60,6 +60,18 @@ scrape_configs:
           service: postgres-standby
           env: production
 
+  # ── Argo Rollouts controller ────────────────────────────────────────
+  # Exposes rollout_events_total{reason="RolloutAborted"}, used by the
+  # CanaryRolloutAborted alert in alert-rules.yml.
+  - job_name: argo-rollouts
+    metrics_path: /metrics
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["argo-rollouts-metrics.argo-rollouts.svc:8090"]
+        labels:
+          service: argo-rollouts-controller
+          env: production
+
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]

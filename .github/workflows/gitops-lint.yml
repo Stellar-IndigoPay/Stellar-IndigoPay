@@ -1,0 +1,53 @@
+# .github/workflows/gitops-lint.yml
+#
+# GrantFox OSS, area/ci: fails the build if the backend canary Rollout
+# regresses to a state where a failing canary is not auto-aborted, or
+# if the CanaryRolloutAborted alert is removed from alert-rules.yml.
+
+name: GitOps Lint
+
+on:
+  pull_request:
+    paths:
+      - "gitops/**"
+      - "monitoring/alert-rules.yml"
+      - "monitoring/tests/rollout-alerts-test.yml"
+      - "scripts/validate-gitops-rollout.js"
+      - ".github/workflows/gitops-lint.yml"
+  push:
+    branches: [main]
+    paths:
+      - "gitops/**"
+      - "monitoring/alert-rules.yml"
+      - "monitoring/tests/rollout-alerts-test.yml"
+      - "scripts/validate-gitops-rollout.js"
+      - ".github/workflows/gitops-lint.yml"
+
+jobs:
+  lint-gitops:
+    name: Validate canary auto-abort wiring
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Validate Rollout / AnalysisTemplate / abort alert wiring
+        run: node scripts/validate-gitops-rollout.js
+
+      - name: promtool check rules
+        run: |
+          docker run --rm -v "$PWD:/work" prom/prometheus:v2.53.0 \
+            promtool check rules /work/monitoring/alert-rules.yml
+
+      - name: promtool test rules (CanaryRolloutAborted)
+        run: |
+          docker run --rm -v "$PWD:/work" prom/prometheus:v2.53.0 \
+            promtool test rules /work/monitoring/tests/rollout-alerts-test.yml

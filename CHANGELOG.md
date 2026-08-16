@@ -55,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * **backend:** durable deduplication for Soroban event processing with atomic cursor commit to prevent double-application on restart (closes #679, GrantFox OSS)
 * **gitops:** Argo Rollouts canary strategy with Prometheus success-rate analysis
+* **gitops:** auto-abort/rollback a failing backend canary — background analysis now starts at step 0 (was step 1), explicit `abortScaleDownDelaySeconds`, `CanaryRolloutAborted` page alert, and a `gitops-lint` CI check (closes GrantFox OSS area/ci)
 * **k8s:** default-deny NetworkPolicy for the `indigopay` namespace with explicit allow rules
 * **k8s:** HPA (min 2, max 10) + PDB (`minAvailable: 1`) for backend and frontend
 * **k8s:** ExternalSecret + SecretStore templates for AWS Secrets Manager
