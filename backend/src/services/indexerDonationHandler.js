@@ -41,6 +41,23 @@ function setUsdcToXlmRate(rate) {
 }
 
 /**
+ * Return the stable Horizon identity for one operation.
+ *
+ * Horizon includes `id` on operation records. The paging token is a safe
+ * fallback for callers that provide a reduced operation shape, such as a
+ * backfill fixture or a DLQ payload.
+ *
+ * @param {object} op - Horizon operation object.
+ * @returns {string|null} Stable operation identity, when available.
+ */
+function getIndexerOperationId(op) {
+  const operationId = op.id ?? op.paging_token;
+  return operationId === undefined || operationId === null
+    ? null
+    : String(operationId);
+}
+
+/**
  * Handle a payment to a project — supports both native XLM and USDC.
  *
  * @param {string} projectId - Internal project UUID.
@@ -52,6 +69,7 @@ function setUsdcToXlmRate(rate) {
  */
 async function handleDonation(projectId, op, { isNative, isUSDC, isBackfill = false }, options = {}) {
   const txHash = op.transaction_hash;
+  const indexerOperationId = getIndexerOperationId(op);
   const donorAddress = op.from;
   const ledger = op.ledger_attr;
 
@@ -81,23 +99,41 @@ async function handleDonation(projectId, op, { isNative, isUSDC, isBackfill = fa
   let inTransaction = false;
 
   try {
-    const existingResult = await client.query(
-      "SELECT id FROM donations WHERE transaction_hash = $1",
-      [txHash],
-    );
-    if (existingResult.rows.length > 0) {
-      return;
-    }
-
     await client.query("BEGIN");
     inTransaction = true;
 
     const donationId = uuid();
-    await client.query(
-      `INSERT INTO donations (id, project_id, donor_address, amount_xlm, amount, currency, transaction_hash, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
-      [donationId, projectId, donorAddress, amountXlmForInsert, amount, currency, txHash],
+    const insertResult = await client.query(
+      `INSERT INTO donations (id, project_id, donor_address, amount_xlm, amount, currency, transaction_hash, indexer_operation_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+       ON CONFLICT DO NOTHING
+       RETURNING id`,
+      [
+        donationId,
+        projectId,
+        donorAddress,
+        amountXlmForInsert,
+        amount,
+        currency,
+        txHash,
+        indexerOperationId,
+      ],
     );
+
+    // A replayed operation is a successful no-op. It still advances the
+    // cursor in this transaction, so cursor rollback/redelivery cannot keep
+    // the same operation at the head of the stream forever.
+    if (insertResult.rows.length === 0) {
+      if (typeof options.onCursorUpdate === "function") {
+        await options.onCursorUpdate(client, ledger);
+      }
+
+      await client.query("COMMIT");
+      inTransaction = false;
+      return;
+    }
+
+    const recordedDonationId = insertResult.rows[0].id || donationId;
 
     await client.query(
       `UPDATE projects
@@ -164,7 +200,7 @@ async function handleDonation(projectId, op, { isNative, isUSDC, isBackfill = fa
 
     checkAndDeliverMilestones(projectId).catch(() => {});
 
-    return { donationId, amount, currency, source };
+    return { donationId: recordedDonationId, amount, currency, source };
   } catch (err) {
     if (inTransaction) await client.query("ROLLBACK");
     throw err;
@@ -175,5 +211,6 @@ async function handleDonation(projectId, op, { isNative, isUSDC, isBackfill = fa
 
 module.exports = {
   handleDonation,
+  getIndexerOperationId,
   setUsdcToXlmRate,
 };

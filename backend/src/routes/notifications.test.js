@@ -220,6 +220,96 @@ describe("PUT /api/notifications/preferences", () => {
   });
 });
 
+describe("POST /api/notifications/register", () => {
+  let app;
+
+  beforeEach(() => {
+    app = buildApp();
+    jest.clearAllMocks();
+  });
+
+  test("upserts a device token with a sliding expiry window", async () => {
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ id: "token-id-123" }] }) // upsert
+      .mockResolvedValueOnce({ rowCount: 0, rows: [] }); // expiry purge
+
+    const res = await request(app)
+      .post("/api/notifications/register")
+      .send({
+        token: "ExponentPushToken[abc]",
+        platform: "ios",
+        walletAddress: "GDONOR",
+      })
+      .expect(200);
+
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.tokenId).toBe("token-id-123");
+
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toEqual(expect.stringContaining("INSERT INTO device_tokens"));
+    expect(sql).toEqual(expect.stringContaining("ON CONFLICT (token) DO UPDATE"));
+    expect(sql).toEqual(expect.stringContaining("make_interval(days => $5)"));
+    expect(params).toEqual([
+      expect.any(String),
+      "ExponentPushToken[abc]",
+      "ios",
+      "GDONOR",
+      180,
+    ]);
+
+    // opportunistic expiry purge runs after the upsert
+    expect(pool.query.mock.calls[1][0]).toEqual(
+      expect.stringContaining("expires_at <= NOW()"),
+    );
+  });
+
+  test("re-registering the same token refreshes its expiry window", async () => {
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ id: "token-id-123" }] }) // upsert
+      .mockResolvedValueOnce({ rowCount: 0, rows: [] }); // expiry purge
+
+    await request(app)
+      .post("/api/notifications/register")
+      .send({ token: "ExponentPushToken[abc]", platform: "android" })
+      .expect(200);
+
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toEqual(expect.stringContaining("expires_at = NOW() + make_interval(days => $5)"));
+    expect(sql).toEqual(expect.stringContaining("is_active = true"));
+    expect(params[2]).toBe("android");
+    expect(params[3]).toBeNull();
+  });
+
+  test("rejects requests without a token", async () => {
+    const res = await request(app)
+      .post("/api/notifications/register")
+      .send({ platform: "ios" })
+      .expect(400);
+
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(res.body.error.field).toBe("token");
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  test("rejects missing or invalid platform", async () => {
+    const res = await request(app)
+      .post("/api/notifications/register")
+      .send({ token: "ExponentPushToken[abc]" })
+      .expect(400);
+
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(res.body.error.field).toBe("platform");
+
+    const res2 = await request(app)
+      .post("/api/notifications/register")
+      .send({ token: "ExponentPushToken[abc]", platform: "web" })
+      .expect(400);
+
+    expect(res2.body.error.code).toBe("VALIDATION_ERROR");
+    expect(res2.body.error.field).toBe("platform");
+  });
+});
+
 describe("POST /api/notifications/unregister", () => {
   let app;
 

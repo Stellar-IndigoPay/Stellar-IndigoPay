@@ -172,6 +172,31 @@ describe("pushService", () => {
       ]);
     });
 
+    test("only sends to tokens that have not expired", async () => {
+      pool.query
+        .mockResolvedValueOnce({ rows: [] }) // preference check
+        .mockResolvedValueOnce({ rows: [] }) // DND check
+        .mockResolvedValueOnce({ rows: [{ token: "ExponentPushToken[abc]" }] }) // device tokens
+        .mockResolvedValueOnce({ rows: [] }); // delivery insert
+
+      mockSendPushNotificationsAsync.mockResolvedValueOnce([
+        { status: "ok", id: "ticket-1" },
+      ]);
+
+      const tickets = await pushService.sendPushNotification({
+        walletAddress: "GDONOR",
+        title: "Hi",
+        body: "Body",
+        data: { type: "donation_receipt" },
+      });
+
+      expect(tickets).toHaveLength(1);
+      const tokenSql = pool.query.mock.calls[2][0];
+      expect(tokenSql).toEqual(
+        expect.stringContaining("expires_at IS NULL OR expires_at > NOW()"),
+      );
+    });
+
     test("records chunk-level send failures as failed deliveries instead of throwing", async () => {
       pool.query
         .mockResolvedValueOnce({ rows: [] }) // preference check
@@ -454,6 +479,36 @@ describe("pushService", () => {
 
       expect(result).toBeNull();
       expect(pool.query).toHaveBeenCalledTimes(1); // preference check only
+    });
+  });
+
+  describe("purgeExpiredTokens", () => {
+    test("soft-deactivates tokens past their expiry window", async () => {
+      pool.query.mockResolvedValueOnce({ rowCount: 3, rows: [] });
+
+      const count = await pushService.purgeExpiredTokens();
+
+      expect(count).toBe(3);
+      const [sql] = pool.query.mock.calls[0];
+      expect(sql).toEqual(expect.stringContaining("UPDATE device_tokens"));
+      expect(sql).toEqual(expect.stringContaining("is_active = false"));
+      expect(sql).toEqual(expect.stringContaining("expires_at <= NOW()"));
+    });
+
+    test("returns 0 and does not throw when the purge query fails", async () => {
+      pool.query.mockRejectedValueOnce(new Error("connection lost"));
+
+      const count = await pushService.purgeExpiredTokens();
+
+      expect(count).toBe(0);
+    });
+
+    test("returns 0 when there is nothing to purge", async () => {
+      pool.query.mockResolvedValueOnce({ rowCount: 0, rows: [] });
+
+      const count = await pushService.purgeExpiredTokens();
+
+      expect(count).toBe(0);
     });
   });
 });

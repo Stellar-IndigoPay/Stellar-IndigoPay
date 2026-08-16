@@ -1,5 +1,5 @@
 [coverage]
-exclude = ["src/fuzz_tests.rs"]
+exclude-files = ["**/fuzz_tests.rs"]
 fail-under = 70
 
 [html]

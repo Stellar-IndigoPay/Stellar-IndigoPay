@@ -18,6 +18,14 @@ const logger = require("../logger");
 const { sendViaProvider } = require("./pushProviders");
 
 /**
+ * Push-token lifecycle:
+ *  - PUSH_TOKEN_TTL_DAYS — sliding expiry window (in days) refreshed on every
+ *    register. Tokens not refreshed within the window are excluded from sends
+ *    and soft-deactivated by purgeExpiredTokens().
+ */
+const PUSH_TOKEN_TTL_DAYS = Number(process.env.PUSH_TOKEN_TTL_DAYS || 180);
+
+/**
  * Whether a wallet has opted in to push notifications of a given type.
  * No matching row means "opted in" (push defaults to on). A row with
  * type = NULL is a blanket preference for the whole channel; a row with
@@ -73,6 +81,37 @@ async function isInDndWindow(walletAddress) {
       "Failed to check DND window; defaulting to not suppressing",
     );
     return false;
+  }
+}
+
+/**
+ * Soft-deactivate device tokens whose sliding expiry window has passed so
+ * they are excluded from future sends. Hard deletion happens later via the
+ * device-tokens retention policy. Returns the number of tokens invalidated.
+ */
+async function purgeExpiredTokens() {
+  try {
+    const result = await pool.query(
+      `UPDATE device_tokens
+       SET is_active = false, updated_at = NOW()
+       WHERE is_active = true AND expires_at IS NOT NULL AND expires_at <= NOW()`,
+    );
+    if (result.rowCount > 0) {
+      logger.info(
+        { event: "push_expired_tokens_purged", count: result.rowCount },
+        "Deactivated expired device tokens",
+      );
+    }
+    return result.rowCount;
+  } catch (err) {
+    logger.error(
+      {
+        event: "push_expired_tokens_purge_failed",
+        err: err.message,
+      },
+      "Failed to purge expired device tokens",
+    );
+    return 0;
   }
 }
 
@@ -224,7 +263,9 @@ async function sendPushNotification({ walletAddress, title, body, data = {} }) {
   if (!(await shouldSendPush(walletAddress, data.type))) return null;
 
   const { rows: tokens } = await pool.query(
-    "SELECT token, platform FROM device_tokens WHERE wallet_address = $1 AND is_active = true",
+    `SELECT token, platform FROM device_tokens
+     WHERE wallet_address = $1 AND is_active = true
+       AND (expires_at IS NULL OR expires_at > NOW())`,
     [walletAddress],
   );
 
@@ -269,7 +310,8 @@ async function sendGovernanceProposalNotifications({
     `SELECT DISTINCT dt.token, dt.wallet_address, dt.platform
      FROM device_tokens dt
      WHERE dt.wallet_address IS NOT NULL
-       AND dt.is_active = true`,
+       AND dt.is_active = true
+       AND (dt.expires_at IS NULL OR dt.expires_at > NOW())`,
   );
 
   const shortBody =
@@ -388,7 +430,8 @@ async function sendProjectUpdateNotifications({ project, update }) {
     `SELECT dt.token, dt.wallet_address, dt.platform
      FROM project_follows pf
      JOIN device_tokens dt ON pf.device_token_id = dt.id
-     WHERE pf.project_id = $1 AND dt.is_active = true`,
+     WHERE pf.project_id = $1 AND dt.is_active = true
+       AND (dt.expires_at IS NULL OR dt.expires_at > NOW())`,
     [project.id],
   );
 
@@ -449,4 +492,6 @@ module.exports = {
   sendGovernanceProposalNotifications,
   sendRecurringReminder,
   shouldSendPush,
+  purgeExpiredTokens,
+  PUSH_TOKEN_TTL_DAYS,
 };

@@ -242,7 +242,8 @@ async function registerRetentionWorker(boss, opts = {}) {
   }
   const client = opts.pool || require("../db/pool");
 
-  await boss.work(RETENTION_JOB_NAME, async (job) => {
+  await boss.createQueue(RETENTION_JOB_NAME);
+  await boss.work(RETENTION_JOB_NAME, async ([job]) => {
     const { policy } = job.data || {};
     if (policy) {
       const found = byName(policy);
