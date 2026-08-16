@@ -19,6 +19,7 @@ import {
   subscribeBreakerEvents,
   type BreakerSnapshot,
 } from "./lib/apiClient";
+import { isTrustedSender } from "./sender-validation";
 
 // ── constants ────────────────────────────────────────────────────────
 
@@ -99,6 +100,14 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.runtime.onMessage.addListener(
   (message: any, sender: chrome.runtime.MessageSender, sendResponse: (response?: any) => void) => {
+    // Security: reject messages from unknown senders (web pages, other
+    // extensions) before any handler runs. Only the extension's own
+    // content script and pages may drive the background.
+    if (!isTrustedSender(sender)) {
+      console.warn("[IndigoPay] Ignoring message from untrusted sender:", sender);
+      return;
+    }
+
     // ── set project context (from content script) ────────────────
     if (message.action === "setProjectContext" && sender.tab?.id) {
       if (message.projectId) {

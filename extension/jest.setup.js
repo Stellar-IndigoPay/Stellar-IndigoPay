@@ -5,6 +5,7 @@
 
 var mockChrome = {
   runtime: {
+    id: "indigopay-test-extension-id",
     onMessage: {
       addListener: jest.fn(),
     },
