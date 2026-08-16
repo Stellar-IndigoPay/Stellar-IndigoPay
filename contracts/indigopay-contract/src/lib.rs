@@ -732,6 +732,25 @@ pub enum SettlementKey {
     /// contract's donation stats. Prevents double-settlement.
     SettledAttestation(u64),
 }
+
+/// Storage keys for DEX path-payment donation attestation (#712).
+///
+/// Kept off `DataKey` for the same reason as `SettlementKey` (#439): the
+/// shared enum compiles into the slim `--no-default-features` WASM, and this
+/// allow-list is only meaningful when the `donation` feature (which ships
+/// `donate_asset`) is enabled. The wire encoding is unaffected by which enum
+/// a variant lives on, so this key writes exactly the
+/// `PathPaymentAttester(Address)` entry the feature specifies.
+#[cfg(any(feature = "donation", feature = "testutils"))]
+#[contracttype]
+pub enum PathPaymentKey {
+    /// Allow-list of addresses authorised to attest that a DEX path-payment
+    /// donation actually delivered its claimed XLM amount. Admin-gated
+    /// attestation (#712): only admin-appointed attesters can record a
+    /// path-payment donation, binding the recorded amount to their
+    /// verification instead of the caller's word.
+    PathPaymentAttester(Address),
+}
 // ─── Constants ────────────────────────────────────────────────────────────────
 const STROOP: i128 = 10_000_000;
 #[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
@@ -3578,6 +3597,49 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
     // ─── DEX Path-Payment Donation (any Stellar asset → XLM) ──────────────────
+    /// Admin-only: authorise `attester` to attest that DEX path-payment
+    /// donations actually delivered their claimed XLM amount (#712).
+    ///
+    /// Path-payment donations are unverified by nature: the `PathPaymentStrictSend`
+    /// happens as a separate Stellar operation that the contract cannot observe,
+    /// so a caller could previously claim an arbitrary `xlm_amount` and inflate
+    /// `total_raised`, badges, and CO₂ attribution. This allow-list closes that
+    /// hole with admin-gated attestation — only admin-appointed attesters may
+    /// record a path-payment donation, binding the recorded amount to their
+    /// verification.
+    #[cfg(any(feature = "donation", feature = "testutils"))]
+    pub fn add_path_payment_attester(env: Env, admin: Address, attester: Address) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        env.storage().instance().set(
+            &PathPaymentKey::PathPaymentAttester(attester.clone()),
+            &true,
+        );
+        env.events()
+            .publish((symbol_short!("path_att"), admin), attester);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+    /// Admin-only: revoke an attester's authorisation. Donations it already
+    /// attested are left untouched — each attestation is a historical fact.
+    #[cfg(any(feature = "donation", feature = "testutils"))]
+    pub fn remove_path_payment_attester(env: Env, admin: Address, attester: Address) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        env.storage()
+            .instance()
+            .remove(&PathPaymentKey::PathPaymentAttester(attester.clone()));
+        env.events()
+            .publish((symbol_short!("path_rem"), admin), attester);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+    /// Returns true if `attester` is authorised to attest path-payment donations.
+    #[cfg(any(feature = "donation", feature = "testutils"))]
+    pub fn is_path_payment_attester(env: Env, attester: Address) -> bool {
+        env.storage()
+            .instance()
+            .get(&PathPaymentKey::PathPaymentAttester(attester))
+            .unwrap_or(false)
+    }
     /// Donate any Stellar asset via DEX path payment.
     ///
     /// The caller submits an atomic Stellar transaction that:
@@ -3590,6 +3652,14 @@ impl IndigoPayContract {
     /// a second token transfer. This keeps the contract simple while
     /// leveraging Stellar's native DEX for path payments.
     ///
+    /// **Attestation requirement (#712):** the contract cannot observe the
+    /// `PathPaymentStrictSend` operation, so a path-payment donation is only
+    /// recorded when `attester` — an address the admin has placed on the
+    /// `PathPaymentAttester` allow-list — co-signs the call, attesting that
+    /// `xlm_amount` was actually delivered to the project wallet. Without a
+    /// registered attester, `donate_asset` rejects the donation; a caller can
+    /// no longer claim an arbitrary amount.
+    ///
     /// `source_asset_code` is a short symbol identifying the source asset
     /// (e.g. "yXLM", "USDT", "BTC") for the on-chain donation record.
     /// Backward-compatible path-payment entrypoint.
@@ -3597,6 +3667,7 @@ impl IndigoPayContract {
     pub fn donate_asset(
         env: Env,
         donor: Address,
+        attester: Address,
         project_id: String,
         xlm_amount: i128,
         source_asset_code: Symbol,
@@ -3605,6 +3676,7 @@ impl IndigoPayContract {
         Self::donate_asset_with_privacy(
             env,
             donor,
+            attester,
             project_id,
             xlm_amount,
             source_asset_code,
@@ -3613,10 +3685,16 @@ impl IndigoPayContract {
         )
     }
     /// Record a path-payment donation with an attribution preference.
+    ///
+    /// Requires `donor` to authorise the donation and `attester` (an address on
+    /// the admin-gated `PathPaymentAttester` allow-list) to attest the delivered
+    /// XLM amount — see `donate_asset` (#712).
+    #[allow(clippy::too_many_arguments)]
     #[cfg(any(feature = "donation", feature = "testutils"))]
     pub fn donate_asset_with_privacy(
         env: Env,
         donor: Address,
+        attester: Address,
         project_id: String,
         xlm_amount: i128,
         source_asset_code: Symbol,
@@ -3624,7 +3702,16 @@ impl IndigoPayContract {
         anonymous: bool,
     ) {
         donor.require_auth();
+        attester.require_auth();
         require_not_paused(&env);
+        let is_attester: bool = env
+            .storage()
+            .instance()
+            .get(&PathPaymentKey::PathPaymentAttester(attester.clone()))
+            .unwrap_or(false);
+        if !is_attester {
+            panic!("Not an authorised path payment attester");
+        }
         if xlm_amount <= 0 {
             panic!("Donation amount must be positive");
         }
@@ -10231,11 +10318,117 @@ mod tests {
             &(env.ledger().sequence() + 1_000),
         );
         let donor = Address::generate(&env);
-        client.donate_asset(&donor, &pid, &(30 * STROOP), &symbol_short!("yXLM"), &0u32);
+        let attester = Address::generate(&env);
+        client.add_path_payment_attester(&admin, &attester);
+        client.donate_asset(
+            &donor,
+            &attester,
+            &pid,
+            &(30 * STROOP),
+            &symbol_short!("yXLM"),
+            &0u32,
+        );
         assert_eq!(
             client.get_project(&pid).campaign_status,
             CampaignStatus::GoalReached
         );
+    }
+    // ─── DEX path-payment attestation (#712) ─────────────────────────────────
+    /// Forgery regression (#712): a caller cannot record a path-payment
+    /// donation unless the co-signing `attester` is on the admin-gated
+    /// allow-list. Even with `mock_all_auths` (which satisfies every
+    /// `require_auth`), the allow-list check itself rejects the fabricated
+    /// amount — the recorded `xlm_amount` is bound to a trusted attestation.
+    #[test]
+    #[should_panic(expected = "Not an authorised path payment attester")]
+    fn test_donate_asset_rejects_unattested_amount() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let impersonated_attester = Address::generate(&env);
+        client.donate_asset(
+            &donor,
+            &impersonated_attester,
+            &pid,
+            &(100 * STROOP),
+            &symbol_short!("yXLM"),
+            &0u32,
+        );
+    }
+    /// A donor who is not themselves an attester cannot fabricate a larger
+    /// amount by passing their own address as the attester (#712). The host
+    /// rejects re-authorising the same address as both `donor` and `attester`,
+    /// so the call never reaches the effects — fabrication is blocked.
+    #[test]
+    #[should_panic]
+    fn test_donate_asset_rejects_self_attestation() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        client.donate_asset(
+            &donor,
+            &donor,
+            &pid,
+            &(100 * STROOP),
+            &symbol_short!("yXLM"),
+            &0u32,
+        );
+    }
+    /// Authorised attester: the recorded amount equals the attested amount —
+    /// the only amount the allow-listed attester vouched for (#712).
+    #[test]
+    fn test_donate_asset_records_only_attested_amount() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let attester = Address::generate(&env);
+        client.add_path_payment_attester(&admin, &attester);
+        assert!(client.is_path_payment_attester(&attester));
+        let amount = 7 * STROOP;
+        client.donate_asset(
+            &donor,
+            &attester,
+            &pid,
+            &amount,
+            &symbol_short!("yXLM"),
+            &0u32,
+        );
+        assert_eq!(client.get_project(&pid).total_raised, amount);
+        assert_eq!(client.get_donation_record(&0u32).amount, amount);
+        let global = client.get_global_stats();
+        assert_eq!(global.total_raised, amount);
+    }
+    /// Admin management of the attester allow-list, and removal revokes the
+    /// ability to attest (a removed attester's signature is rejected) (#712).
+    #[test]
+    fn test_path_payment_attester_lifecycle() {
+        let (env, _cid, client, admin, pid) = setup();
+        let attester = Address::generate(&env);
+        assert!(!client.is_path_payment_attester(&attester));
+        client.add_path_payment_attester(&admin, &attester);
+        assert!(client.is_path_payment_attester(&attester));
+        client.remove_path_payment_attester(&admin, &attester);
+        assert!(!client.is_path_payment_attester(&attester));
+        let donor = Address::generate(&env);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.donate_asset(
+                &donor,
+                &attester,
+                &pid,
+                &STROOP,
+                &symbol_short!("yXLM"),
+                &0u32,
+            );
+        }));
+        assert!(
+            result.is_err(),
+            "removed attester must not be able to attest"
+        );
+    }
+    #[test]
+    #[should_panic]
+    fn test_non_admin_cannot_add_path_payment_attester() {
+        let (env, _cid, client, _admin, _pid) = setup();
+        let not_admin = Address::generate(&env);
+        let attester = Address::generate(&env);
+        client.add_path_payment_attester(&not_admin, &attester);
     }
     #[test]
     fn test_donate_usdc_respects_campaign_deadline() {
@@ -14966,8 +15159,11 @@ mod tests {
         StellarAssetClient::new(&env, &token).mint(&donor, &amount);
 
         client.register_token(&admin, &token, &token, &symbol_short!("XTST"));
+        let attester = Address::generate(&env);
+        client.add_path_payment_attester(&admin, &attester);
         client.donate_asset_with_privacy(
             &donor,
+            &attester,
             &pid,
             &amount,
             &symbol_short!("XTST"),
@@ -14981,11 +15177,14 @@ mod tests {
     /// Covers donate_asset_with_privacy CO2 computation and storage saves.
     #[test]
     fn test_donate_asset_with_privacy_saves_global_stats() {
-        let (env, _cid, client, _admin, pid) = setup();
+        let (env, _cid, client, admin, pid) = setup();
         let donor = Address::generate(&env);
         let amount = 10 * STROOP;
+        let attester = Address::generate(&env);
+        client.add_path_payment_attester(&admin, &attester);
         client.donate_asset_with_privacy(
             &donor,
+            &attester,
             &pid,
             &amount,
             &symbol_short!("yXLM"),

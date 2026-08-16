@@ -112,9 +112,14 @@ async function runKeeperCycle() {
     return;
   }
 
-  // Process each schedule sequentially to prevent transaction sequence conflicts
+  // Process each schedule sequentially to prevent transaction sequence conflicts.
+  // The keeper account is re-fetched before every submission: a single loaded
+  // account can go stale if its sequence advances between submissions (e.g. an
+  // external transaction or a failed attempt), causing later submissions to fail
+  // with tx_bad_seq.
   for (const schedule of dueSchedules) {
     try {
+      account = await stellarServer.loadAccount(keeperPublicKey);
       await executeSchedule(schedule, account, keypair);
       if (metrics.recurringExecutionsTotal) {
         metrics.recurringExecutionsTotal.inc({ status: "success" });
@@ -183,8 +188,6 @@ async function executeSchedule(schedule, account, keypair) {
   const xdrString = preparedTx.toXDR();
   
   const submitResult = await submitTransaction(xdrString);
-  
-  account.incrementSequenceNumber();
 
   logger.info(
     {

@@ -108,6 +108,7 @@ async function start() {
     const cronSchedule = cronOverride || DEFAULT_CRONS[type];
     const queueName = getQueueName(type);
 
+    await boss.createQueue(queueName);
     await boss.schedule(queueName, cronSchedule, {}, { tz: "UTC" });
     await boss.work(
       queueName,

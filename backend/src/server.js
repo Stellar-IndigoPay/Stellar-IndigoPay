@@ -37,6 +37,7 @@ const helmet = require("helmet");
 const cookieParser = require("cookie-parser");
 const csurf = require("csurf");
 const { redisRateLimiter } = require("./middleware/rateLimiter");
+const { socketAuth } = require("./middleware/socketAuth");
 const http = require("http");
 const { Server } = require("socket.io");
 
@@ -445,6 +446,9 @@ const io = new Server(server, {
     credentials: false,
   },
 });
+// Realtime events carry donor-identifying data: refuse every connection that
+// cannot prove itself with the same access token the REST layer requires.
+io.use(socketAuth);
 app.set("io", io);
 
 // ── Background workers (registered with the lifecycle so they stop on shutdown)
