@@ -89,6 +89,10 @@ fn test_resolve_dispute_approve_remaining() {
         bal, 1000i128,
         "Freelancer should receive all funds on approve resolution"
     );
+
+    let rep = client.get_freelancer_reputation(&freelancer);
+    assert_eq!(rep.completed_jobs, 1);
+    assert_eq!(rep.total_value_completed, 1000i128);
 }
 
 #[test]
@@ -151,6 +155,10 @@ fn test_resolve_dispute_refund_client() {
     assert_eq!(common::token_balance(&env, &token, &freelancer), 500i128);
     // Client should have 500 refunded
     assert_eq!(common::token_balance(&env, &token, &client_addr), 500i128);
+
+    let rep = client.get_freelancer_reputation(&freelancer);
+    assert_eq!(rep.completed_jobs, 1);
+    assert_eq!(rep.total_value_completed, 500i128);
 }
 
 #[test]

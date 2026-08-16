@@ -52,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+* **contracts:** fix escrow freelancer reputation corruption on dispute resolution by making reputation crediting outcome-aware and crediting only funds received by freelancer
 * **backend:** durable deduplication for Soroban event processing with atomic cursor commit to prevent double-application on restart (closes #679, GrantFox OSS)
 * **gitops:** Argo Rollouts canary strategy with Prometheus success-rate analysis
 * **k8s:** default-deny NetworkPolicy for the `indigopay` namespace with explicit allow rules

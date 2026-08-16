@@ -72,6 +72,8 @@ pub enum DataKey {
     FreelancerReputation(Address),
     // Ensures multiple milestone disputes on one job count only once.
     ReputationDisputeCounted(String),
+    // Tracks cumulative funds released/paid to freelancer for a job.
+    JobEarnedAmount(String),
 }
 
 /// Minimum number of ledgers a job's release period may specify. Jobs
@@ -224,7 +226,25 @@ fn reputation_job_disputed(env: &Env, job: &Job) {
     env.storage().instance().set(&counted_key, &true);
 }
 
-fn reputation_job_completed(env: &Env, job: &Job) {
+fn add_job_earned_amount(env: &Env, job_id: &String, amount: i128) {
+    if amount <= 0 {
+        return;
+    }
+    let key = DataKey::JobEarnedAmount(job_id.clone());
+    let current: i128 = env.storage().instance().get(&key).unwrap_or(0i128);
+    let new_amount = current.checked_add(amount).expect("earned amount overflow");
+    env.storage().instance().set(&key, &new_amount);
+}
+
+fn get_job_earned_amount(env: &Env, job_id: &String) -> i128 {
+    let key = DataKey::JobEarnedAmount(job_id.clone());
+    env.storage().instance().get(&key).unwrap_or(0i128)
+}
+
+fn reputation_job_completed(env: &Env, job: &Job, earned_amount: i128) {
+    if earned_amount <= 0 {
+        return;
+    }
     let mut reputation = read_reputation(env, &job.freelancer);
     reputation.completed_jobs = reputation
         .completed_jobs
@@ -232,7 +252,7 @@ fn reputation_job_completed(env: &Env, job: &Job) {
         .expect("Freelancer completed_jobs overflow");
     reputation.total_value_completed = reputation
         .total_value_completed
-        .checked_add(job.amount)
+        .checked_add(earned_amount)
         .expect("Freelancer total_value_completed overflow");
     if env.ledger().sequence() <= job.deadline {
         reputation.on_time_completions = reputation
@@ -582,8 +602,12 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Job(job_id.clone()), &job);
+        if release_amount > 0 {
+            add_job_earned_amount(&env, &job_id, release_amount);
+        }
         if job.status == JobStatus::Completed {
-            reputation_job_completed(&env, &job);
+            let earned_amount = get_job_earned_amount(&env, &job_id);
+            reputation_job_completed(&env, &job, earned_amount);
         }
 
         // Event emission
@@ -742,7 +766,11 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Job(job_id.clone()), &job);
-        reputation_job_completed(&env, &job);
+        if approve_remaining && remaining_amount > 0 {
+            add_job_earned_amount(&env, &job_id, remaining_amount);
+        }
+        let earned_amount = get_job_earned_amount(&env, &job_id);
+        reputation_job_completed(&env, &job, earned_amount);
 
         env.events().publish(
             (symbol_short!("job_reslv"),),
@@ -856,8 +884,12 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Job(job_id.clone()), &job);
+        if approve && release_amount > 0 {
+            add_job_earned_amount(&env, &job_id, release_amount);
+        }
         if job.status == JobStatus::Completed {
-            reputation_job_completed(&env, &job);
+            let earned_amount = get_job_earned_amount(&env, &job_id);
+            reputation_job_completed(&env, &job, earned_amount);
         }
 
         env.events().publish(
@@ -967,8 +999,12 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Job(job_id.clone()), &job);
+        if release_amount > 0 {
+            add_job_earned_amount(&env, &job_id, release_amount);
+        }
         if job.status == JobStatus::Completed {
-            reputation_job_completed(&env, &job);
+            let earned_amount = get_job_earned_amount(&env, &job_id);
+            reputation_job_completed(&env, &job, earned_amount);
         }
 
         // Event emission
@@ -2897,6 +2933,90 @@ mod tests {
         let resolved = contract.get_freelancer_reputation(&freelancer);
         assert_eq!(resolved.disputed_jobs, 1);
         assert_eq!(resolved.completed_jobs, 1);
+        assert_eq!(resolved.total_value_completed, 500);
+    }
+
+    #[test]
+    fn test_reputation_on_dispute_reject() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, contract) = setup(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = String::from_str(&env, "rep-dispute-reject");
+        create_reputation_job(&env, &contract, &client, &freelancer, &job_id, 500);
+
+        contract.dispute_milestone(&signers1(&env, &admin), &job_id, &0);
+        let disputed = contract.get_freelancer_reputation(&freelancer);
+        assert_eq!(disputed.total_jobs, 1);
+        assert_eq!(disputed.disputed_jobs, 1);
+        assert_eq!(disputed.completed_jobs, 0);
+
+        // Resolve dispute with approve = false (refund to client)
+        contract.resolve_milestone_dispute(&signers1(&env, &admin), &job_id, &0, &false);
+        let resolved = contract.get_freelancer_reputation(&freelancer);
+        assert_eq!(resolved.disputed_jobs, 1);
+        // completed_jobs and total_value_completed must NOT be credited for refunded job
+        assert_eq!(resolved.completed_jobs, 0);
+        assert_eq!(resolved.total_value_completed, 0);
+    }
+
+    #[test]
+    fn test_reputation_on_dispute_partial_approve() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, contract) = setup(&env);
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "rep-partial");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M1"),
+            percentage: 50,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M2"),
+            percentage: 50,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+
+        contract.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+
+        // M1 released to freelancer (500)
+        contract.release_milestone(&client_addr, &job_id, &0);
+        // M2 disputed and refunded to client (500)
+        contract.dispute_milestone(&signers1(&env, &admin), &job_id, &1);
+        contract.resolve_milestone_dispute(&signers1(&env, &admin), &job_id, &1, &false);
+
+        let reputation = contract.get_freelancer_reputation(&freelancer);
+        assert_eq!(reputation.total_jobs, 1);
+        assert_eq!(reputation.disputed_jobs, 1);
+        assert_eq!(reputation.completed_jobs, 1);
+        // Only the approved M1 portion (500) should be credited, NOT full job amount (1000)
+        assert_eq!(reputation.total_value_completed, 500);
     }
 
     #[test]
