@@ -28,7 +28,6 @@ export function buildCsp(nonce: string, isWidget: boolean): string {
   const connectSrc = [
     "'self'",
     STELLAR_CONNECT,
-    "https://api.coingecko.com",
     ...(apiUrl ? [apiUrl] : []),
   ].join(" ");
 
