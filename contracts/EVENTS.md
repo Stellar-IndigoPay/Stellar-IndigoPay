@@ -592,7 +592,67 @@ call `cleanup_vesting_schedule` once the grace period has elapsed.
 
 ---
 
-# Campaign-to-Escrow Integration Events (#426)
+## 45. `fee_set` (Platform Fee Set)
+
+**Description**: Emitted when M-of-N admins set the platform fee basis points.
+
+| Event Name | Topics          | Data                | When Emitted                    |
+| ---------- | --------------- | -------------------- | -------------------------------- |
+| `fee_set`  | `["fee_set", admin]`   | `fee_bps: u32`  | When admins call `set_platform_fee` |
+
+---
+
+## 46. `treas_set` (Platform Treasury Set)
+
+**Description**: Emitted when M-of-N admins set the platform treasury address.
+
+| Event Name | Topics          | Data                | When Emitted                    |
+| ---------- | --------------- | -------------------- | -------------------------------- |
+| `treas_set`  | `["treas_set", admin]`   | `treasury_address: Address`  | When admins call `set_platform_treasury` |
+
+---
+
+## 47. `match_dep` (Matching Pool Deposit)
+
+**Description**: Emitted when an admin deposits funds into a matching pool.
+
+| Event Name | Topics                                | Data                                             | When Emitted                       |
+| ---------- | -------------------------------------- | -------------------------------------------------- | ------------------------------------ |
+| `match_dep` | `["match_dep", admin, project_id]`   | `(token: Address, amount: i128)` | When admin calls `deposit_into_matching_pool` |
+
+---
+
+## 48. `match_cfg` (Matching Round Configuration)
+
+**Description**: Emitted when an admin sets the configuration for a matching round.
+
+| Event Name | Topics                                | Data                                             | When Emitted                       |
+| ---------- | -------------------------------------- | -------------------------------------------------- | ------------------------------------ |
+| `match_cfg` | `["match_cfg", admin, project_id]`   | `(match_ratio_bps: u32, max_match_per_donation: i128, start_ledger: u32, end_ledger: u32, sponsor_wallet: Address)` | When admin calls `set_matching_round_config` |
+
+---
+
+## 49. `matched` (Donation Matched)
+
+**Description**: Emitted when a donation is matched from a matching pool.
+
+| Event Name | Topics                                | Data                                             | When Emitted                       |
+| ---------- | -------------------------------------- | -------------------------------------------------- | ------------------------------------ |
+| `matched` | `["matched", project_id]`   | `(donor: Address, donation_amount: i128, match_amount: i128)` | When a donation is matched |
+
+---
+
+## 50. `match_wdr` (Matching Pool Withdrawal)
+
+**Description**: Emitted when an admin withdraws unspent funds from a matching pool.
+
+| Event Name | Topics                                | Data                                             | When Emitted                       |
+| ---------- | -------------------------------------- | -------------------------------------------------- | ------------------------------------ |
+| `match_wdr` | `["match_wdr", admin, project_id]`   | `(token: Address, amount: i128, force: bool)` | When admin calls `withdraw_from_matching_pool` |
+
+---
+
+## Campaign-to-Escrow Integration Events (#426)
 
 Gated behind the `escrow` Cargo feature (opt-in). Bridges the indigopay-contract
 campaign system with the escrow-contract to enable milestone-based fund release

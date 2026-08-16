@@ -343,3 +343,16 @@ also mean the donation amount is recoverable from the public commitment.
 - **CEI & Transfer Ordering.** Per-recipient fee transfers execute within the Checks-Effects-Interactions pattern during donation processing before remaining funds are transferred to the project.
 - **Backward Compatibility.** Deployments with legacy single-treasury configuration (`DataKey::PlatformTreasury`) lazily fall back to a single 100% recipient share until `set_platform_fee_recipients` is invoked.
 
+## Donation Matching Pool
+
+### Trust Model & Security Guarantees
+
+- **Admin-gated configuration.** `set_matching_config`, `deposit_matching_funds`, and `withdraw_matching_funds` require M-of-N critical admin authorization (`require_admin_for_critical`) and are paused-gated by `require_not_paused`. Only authorized admins can configure matching rounds, deposit sponsor funds, or withdraw unspent funds.
+- **Canonical balance ledger.** Matching pool funds are tracked under `DataKey::ProjectContractBalance(project_id, token)`, the same ledger used for campaign escrow and emergency withdrawals. This ensures a single source of truth for contract-held funds per project and token, preventing balance inconsistencies.
+- **CEI ordering.** All matching pool operations follow Checks-Effects-Interactions: state updates (pool balance, config totals) occur before external token transfers. This defends against reentrancy attacks from malicious token contracts.
+- **Pool exhaustion protection.** The `compute_match_amount` helper caps the matched amount at the minimum of: (donation × ratio), `max_match_per_donation`, and the remaining pool balance. A donation can never drain more than the available pool balance.
+- **Time-bound matching windows.** Matching only applies when `current_ledger` is within `[start_ledger, end_ledger]`. Donations outside this window bypass matching logic entirely, ensuring predictable matching behavior.
+- **Force withdrawal safety.** `withdraw_matching_funds` panics during active rounds unless `force=true`. This prevents accidental sponsor withdrawals that could disrupt ongoing matching campaigns. The force flag enables emergency recovery if needed.
+- **Per-token isolation.** Matching pools are keyed by `(project_id, token_address)`. Separate pools for XLM, USDC, or custom tokens operate independently; a donation in one token cannot drain the pool of another.
+- **Overflow protection.** All arithmetic uses checked operations (`checked_add`, `checked_sub`, `checked_mul`). Pool balance updates, config totals, and match amount calculations panic on overflow/underflow rather than wrapping.
+- **Backward compatibility.** Existing donation entrypoints (`donate`, `donate_usdc`, `donate_with_privacy`) delegate to `process_donation_token`, which now includes matching logic. Donations without a configured matching round behave identically to pre-implementation behavior—no state mutation occurs for matching.

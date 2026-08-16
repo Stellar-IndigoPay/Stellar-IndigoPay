@@ -233,6 +233,25 @@ pub struct ProjectMilestoneNFT {
     pub co2_offset_grams: i128,
     pub minted_at_ledger: u32,
 }
+/// Per-project matching pool configuration for donation matching rounds.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MatchingConfig {
+    /// Match ratio in basis points (0–10000, where 10000 = 100% match)
+    pub match_ratio_bps: u32,
+    /// Maximum match amount per individual donation
+    pub max_match_per_donation: i128,
+    /// Ledger sequence when the matching round starts
+    pub start_ledger: u32,
+    /// Ledger sequence when the matching round ends
+    pub end_ledger: u32,
+    /// Total amount deposited into the matching pool
+    pub total_deposited: i128,
+    /// Total amount already matched to donations
+    pub total_matched: i128,
+    /// Sponsor wallet where withdrawn funds are returned
+    pub sponsor_wallet: Address,
+}
 /// A community voting proposal to verify a project.
 #[cfg(feature = "governance")]
 #[contracttype]
@@ -710,6 +729,10 @@ pub enum DataKey {
     CampaignEscrowMilestones(String),
     /// Escrow job ID for a project's campaign: (project_id) -> String.
     CampaignEscrowJobId(String),
+    /// Per-project matching pool configuration: (project_id) -> MatchingConfig.
+    MatchingConfig(String),
+    /// Global flag indicating whether any matching pool is currently active.
+    MatchingPoolActive,
 }
 
 /// Storage keys for cross-chain attestation settlement (#439).
@@ -2396,6 +2419,37 @@ fn process_donation_token(
         ),
         (raw_amount, token_symbol.clone(), msg_hash),
     );
+
+    // ─── Matching Pool Logic ─────────────────────────────────────────────────
+    // After the donation completes, check if a matching round is active and apply matching.
+    let config_key = DataKey::MatchingConfig(project_id.clone());
+    if let Some(mut config) = env.storage().instance().get::<_, MatchingConfig>(&config_key) {
+        let current_ledger = env.ledger().sequence();
+        if current_ledger >= config.start_ledger && current_ledger <= config.end_ledger {
+            let pool_key = DataKey::ProjectContractBalance(project_id.clone(), token.clone());
+            let pool_balance: i128 = env.storage().instance().get(&pool_key).unwrap_or(0);
+            if pool_balance > 0 {
+                let match_amount = compute_match_amount(raw_amount, &config, pool_balance);
+                if match_amount > 0 {
+                    // Effects: decrement pool balance and update config
+                    let new_pool_balance = pool_balance.checked_sub(match_amount).expect("underflow");
+                    env.storage().instance().set(&pool_key, &new_pool_balance);
+                    config.total_matched = config.total_matched.checked_add(match_amount).expect("overflow");
+                    env.storage().instance().set(&config_key, &config);
+
+                    // Interaction: transfer match from contract to project wallet
+                    let contract_addr = env.current_contract_address();
+                    token_client.transfer(&contract_addr, &project.wallet, &match_amount);
+
+                    // Emit matched event
+                    env.events().publish(
+                        (symbol_short!("matched"), project_id.clone()),
+                        (donor.clone(), raw_amount, match_amount),
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(any(feature = "donation", feature = "usdc", feature = "testutils"))]
@@ -2444,6 +2498,20 @@ fn apply_campaign_goal_progress(project: &mut Project) -> bool {
     } else {
         false
     }
+}
+
+/// Compute the match amount for a donation based on the matching config.
+/// Returns the minimum of: (donation * ratio), max_per_donation, and pool_balance.
+fn compute_match_amount(donation_amount: i128, config: &MatchingConfig, pool_balance: i128) -> i128 {
+    if config.match_ratio_bps == 0 {
+        return 0;
+    }
+    let ratio_match = donation_amount
+        .checked_mul(config.match_ratio_bps as i128)
+        .expect("overflow in ratio calculation")
+        / 10_000;
+    let capped = ratio_match.min(config.max_match_per_donation);
+    capped.min(pool_balance)
 }
 
 #[cfg(any(feature = "governance", feature = "delegation"))]
@@ -3412,6 +3480,189 @@ impl IndigoPayContract {
     pub fn get_platform_fee_recipients(env: Env) -> Vec<FeeRecipient> {
         read_platform_fee_recipients(&env)
     }
+    // ─── Matching Pool ─────────────────────────────────────────────────────────
+    /// M-of-N admin: deposit sponsor funds into a project's matching pool.
+    ///
+    /// Tokens are transferred from the admin to the contract and tracked under
+    /// `ProjectContractBalance(project_id, token)`. The matching config's
+    /// `total_deposited` is incremented.
+    ///
+    /// # Panics
+    /// - If amount <= 0
+    /// - If contract is paused
+    /// - If insufficient admin signatures
+    pub fn deposit_matching_funds(
+        env: Env,
+        signers: Vec<Address>,
+        project_id: String,
+        token: Address,
+        amount: i128,
+    ) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        if amount <= 0 {
+            panic!("Amount must be positive");
+        }
+
+        // Effects: update pool balance first (CEI)
+        let balance_key = DataKey::ProjectContractBalance(project_id.clone(), token.clone());
+        let current_balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
+        let new_balance = current_balance.checked_add(amount).expect("overflow");
+        env.storage().instance().set(&balance_key, &new_balance);
+
+        // Update MatchingConfig.total_deposited if config exists
+        let config_key = DataKey::MatchingConfig(project_id.clone());
+        if let Some(mut config) = env.storage().instance().get::<_, MatchingConfig>(&config_key) {
+            config.total_deposited = config.total_deposited.checked_add(amount).expect("overflow");
+            env.storage().instance().set(&config_key, &config);
+        }
+
+        // Emit event
+        env.events().publish(
+            (symbol_short!("match_dep"), signers.get(0).unwrap(), project_id.clone()),
+            (token.clone(), amount),
+        );
+
+        // Interaction: transfer tokens from admin to contract
+        let token_client = token::Client::new(&env, &token);
+        let contract_addr = env.current_contract_address();
+        token_client.transfer(&signers.get(0).unwrap(), &contract_addr, &amount);
+
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// M-of-N admin: configure a matching round for a project.
+    ///
+    /// Sets the match ratio, per-donation cap, time window, and sponsor wallet.
+    /// If a config already exists, it is overwritten.
+    ///
+    /// # Panics
+    /// - If match_ratio_bps > 10000
+    /// - If max_match_per_donation <= 0
+    /// - If start_ledger >= end_ledger
+    /// - If contract is paused
+    /// - If insufficient admin signatures
+    pub fn set_matching_config(
+        env: Env,
+        signers: Vec<Address>,
+        project_id: String,
+        match_ratio_bps: u32,
+        max_match_per_donation: i128,
+        start_ledger: u32,
+        end_ledger: u32,
+        sponsor_wallet: Address,
+    ) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        if match_ratio_bps > 10_000 {
+            panic!("Match ratio cannot exceed 10000 bps (100%)");
+        }
+        if max_match_per_donation <= 0 {
+            panic!("Max match per donation must be positive");
+        }
+        if start_ledger >= end_ledger {
+            panic!("Start ledger must be before end ledger");
+        }
+
+        let config = MatchingConfig {
+            match_ratio_bps,
+            max_match_per_donation,
+            start_ledger,
+            end_ledger,
+            total_deposited: 0,
+            total_matched: 0,
+            sponsor_wallet: sponsor_wallet.clone(),
+        };
+
+        let config_key = DataKey::MatchingConfig(project_id.clone());
+        env.storage().instance().set(&config_key, &config);
+
+        // Set global active flag
+        env.storage().instance().set(&DataKey::MatchingPoolActive, &true);
+
+        // Emit event
+        env.events().publish(
+            (symbol_short!("match_cfg"), signers.get(0).unwrap(), project_id),
+            (match_ratio_bps, max_match_per_donation, start_ledger, end_ledger, sponsor_wallet),
+        );
+
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// M-of-N admin: withdraw unspent matching funds back to the sponsor wallet.
+    ///
+    /// Panics if the matching round is still active unless `force=true`.
+    ///
+    /// # Panics
+    /// - If amount <= 0
+    /// - If amount > pool balance
+    /// - If matching round is active and force=false
+    /// - If contract is paused
+    /// - If insufficient admin signatures
+    pub fn withdraw_matching_funds(
+        env: Env,
+        signers: Vec<Address>,
+        project_id: String,
+        token: Address,
+        amount: i128,
+        force: bool,
+    ) {
+        require_admin_for_critical(&env, &signers);
+        require_not_paused(&env);
+        if amount <= 0 {
+            panic!("Amount must be positive");
+        }
+
+        // Check if round is active
+        let config_key = DataKey::MatchingConfig(project_id.clone());
+        let current_ledger = env.ledger().sequence();
+        if let Some(config) = env.storage().instance().get::<_, MatchingConfig>(&config_key) {
+            if !force && current_ledger >= config.start_ledger && current_ledger <= config.end_ledger {
+                panic!("Cannot withdraw during active matching round unless force=true");
+            }
+        }
+
+        // Effects: decrement pool balance first (CEI)
+        let balance_key = DataKey::ProjectContractBalance(project_id.clone(), token.clone());
+        let pool_balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
+        if amount > pool_balance {
+            panic!("Insufficient matching pool balance");
+        }
+        let new_balance = pool_balance.checked_sub(amount).expect("underflow");
+        env.storage().instance().set(&balance_key, &new_balance);
+
+        // Emit event
+        env.events().publish(
+            (symbol_short!("match_wdr"), signers.get(0).unwrap(), project_id.clone()),
+            (token.clone(), amount, force),
+        );
+
+        // Interaction: transfer tokens from contract to sponsor wallet
+        let token_client = token::Client::new(&env, &token);
+        let contract_addr = env.current_contract_address();
+        let sponsor_wallet = if let Some(config) = env.storage().instance().get::<_, MatchingConfig>(&config_key) {
+            config.sponsor_wallet
+        } else {
+            // Fallback to first signer if no config exists
+            signers.get(0).unwrap()
+        };
+        token_client.transfer(&contract_addr, &sponsor_wallet, &amount);
+
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Public read-only: get the matching pool balance for a project and token.
+    pub fn get_matching_pool_balance(env: Env, project_id: String, token: Address) -> i128 {
+        let balance_key = DataKey::ProjectContractBalance(project_id, token);
+        env.storage().instance().get(&balance_key).unwrap_or(0)
+    }
+
+    /// Public read-only: get the matching configuration for a project.
+    pub fn get_matching_config(env: Env, project_id: String) -> Option<MatchingConfig> {
+        let config_key = DataKey::MatchingConfig(project_id);
+        env.storage().instance().get(&config_key)
+    }
+
     // ─── Donations ────────────────────────────────────────────────────────────
     #[allow(clippy::too_many_arguments)]
     /// Backward-compatible public donation entrypoint.
@@ -15694,7 +15945,7 @@ mod tests {
 
     #[test]
     fn test_credits_after_donation() {
-        let (env, cid, client, _admin, pid) = setup();
+        let (env, _cid, client, _admin, pid) = setup();
         let donor = Address::generate(&env);
         let token_admin = Address::generate(&env);
         let token = env
@@ -15839,7 +16090,7 @@ mod tests {
 
     #[test]
     fn test_badge_upgrade_resets_credits() {
-        let (env, cid, client, admin, pid) = setup();
+        let (env, _cid, client, admin, pid) = setup();
         let donor = Address::generate(&env);
         let token_admin = Address::generate(&env);
         let token = env
@@ -15988,5 +16239,471 @@ mod tests {
         let (for_votes, against_votes) = client.get_proposal_tally(&pid);
         assert!(for_votes <= 6 + 8);
         assert_eq!(against_votes, 0);
+    }
+
+    // ─── Matching Pool Tests ─────────────────────────────────────────────────────
+    #[test]
+    fn test_deposit_matching_funds_success() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        StellarAssetClient::new(&env, &token).mint(&admin, &1_000_000_000);
+
+        // Deposit matching funds
+        client.deposit_matching_funds(&signers1(&env, &admin), &pid, &token, &100_000_000);
+
+        // Verify pool balance
+        let pool_balance = client.get_matching_pool_balance(&pid, &token);
+        assert_eq!(pool_balance, 100_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "Amount must be positive")]
+    fn test_deposit_matching_funds_zero_amount_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+
+        client.deposit_matching_funds(&signers1(&env, &admin), &pid, &token, &0);
+    }
+
+    #[test]
+    fn test_set_matching_config() {
+        let (env, _cid, client, admin, pid) = setup();
+        let sponsor_wallet = Address::generate(&env);
+
+        client.set_matching_config(
+            &signers1(&env, &admin),
+            &pid,
+            &5000u32, // 50% match
+            &1_000_000i128, // max 10 XLM per donation
+            &100u32, // start ledger
+            &200u32, // end ledger
+            &sponsor_wallet,
+        );
+
+        let config = client.get_matching_config(&pid).unwrap();
+        assert_eq!(config.match_ratio_bps, 5000);
+        assert_eq!(config.max_match_per_donation, 1_000_000);
+        assert_eq!(config.start_ledger, 100);
+        assert_eq!(config.end_ledger, 200);
+        assert_eq!(config.sponsor_wallet, sponsor_wallet);
+    }
+
+    #[test]
+    #[should_panic(expected = "Match ratio cannot exceed 10000 bps")]
+    fn test_set_matching_config_invalid_ratio_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        let sponsor_wallet = Address::generate(&env);
+
+        client.set_matching_config(
+            &signers1(&env, &admin),
+            &pid,
+            &10001u32, // invalid: > 10000
+            &1_000_000i128,
+            &100u32,
+            &200u32,
+            &sponsor_wallet,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Start ledger must be before end ledger")]
+    fn test_set_matching_config_invalid_window_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        let sponsor_wallet = Address::generate(&env);
+
+        client.set_matching_config(
+            &signers1(&env, &admin),
+            &pid,
+            &5000u32,
+            &1_000_000i128,
+            &200u32, // start after end
+            &100u32,
+            &sponsor_wallet,
+        );
+    }
+
+    #[test]
+    fn test_matching_during_round() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let donor = Address::generate(&env);
+        let sponsor_wallet = Address::generate(&env);
+
+        // Set up matching config for current ledger
+        env.ledger().set_sequence_number(150);
+        client.set_matching_config(
+            &signers1(&env, &admin),
+            &pid,
+            &10000u32, // 100% match
+            &1_000_000i128,
+            &100u32,
+            &200u32,
+            &sponsor_wallet,
+        );
+
+        // Deposit matching funds
+        StellarAssetClient::new(&env, &token).mint(&admin, &1_000_000_000);
+        client.deposit_matching_funds(&signers1(&env, &admin), &pid, &token, &500_000_000);
+
+        // Donate
+        StellarAssetClient::new(&env, &token).mint(&donor, &100_000_000);
+        client.donate(&token, &donor, &pid, &100_000_000, &0u32);
+
+        // Verify match occurred (pool decreased by 100_000_000)
+        let pool_balance = client.get_matching_pool_balance(&pid, &token);
+        assert_eq!(pool_balance, 400_000_000);
+
+        // Verify config updated
+        let config = client.get_matching_config(&pid).unwrap();
+        assert_eq!(config.total_matched, 100_000_000);
+    }
+
+    #[test]
+    fn test_matching_skipped_before_start() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let donor = Address::generate(&env);
+        let sponsor_wallet = Address::generate(&env);
+
+        // Set up matching config for future ledger
+        env.ledger().set_sequence_number(50);
+        client.set_matching_config(
+            &signers1(&env, &admin),
+            &pid,
+            &10000u32,
+            &1_000_000i128,
+            &100u32,
+            &200u32,
+            &sponsor_wallet,
+        );
+
+        // Deposit matching funds
+        StellarAssetClient::new(&env, &token).mint(&admin, &1_000_000_000);
+        client.deposit_matching_funds(&signers1(&env, &admin), &pid, &token, &500_000_000);
+
+        // Donate before round starts
+        StellarAssetClient::new(&env, &token).mint(&donor, &100_000_000);
+        client.donate(&token, &donor, &pid, &100_000_000, &0u32);
+
+        // Verify no match occurred
+        let pool_balance = client.get_matching_pool_balance(&pid, &token);
+        assert_eq!(pool_balance, 500_000_000);
+    }
+
+    #[test]
+    fn test_matching_skipped_after_end() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let donor = Address::generate(&env);
+        let sponsor_wallet = Address::generate(&env);
+
+        // Set up matching config for past ledger
+        env.ledger().set_sequence_number(250);
+        client.set_matching_config(
+            &signers1(&env, &admin),
+            &pid,
+            &10000u32,
+            &1_000_000i128,
+            &100u32,
+            &200u32,
+            &sponsor_wallet,
+        );
+
+        // Deposit matching funds
+        StellarAssetClient::new(&env, &token).mint(&admin, &1_000_000_000);
+        client.deposit_matching_funds(&signers1(&env, &admin), &pid, &token, &500_000_000);
+
+        // Donate after round ends
+        StellarAssetClient::new(&env, &token).mint(&donor, &100_000_000);
+        client.donate(&token, &donor, &pid, &100_000_000, &0u32);
+
+        // Verify no match occurred
+        let pool_balance = client.get_matching_pool_balance(&pid, &token);
+        assert_eq!(pool_balance, 500_000_000);
+    }
+
+    #[test]
+    fn test_matching_respects_max_per_donation() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let donor = Address::generate(&env);
+        let sponsor_wallet = Address::generate(&env);
+
+        // Set up matching config with low max per donation
+        env.ledger().set_sequence_number(150);
+        client.set_matching_config(
+            &signers1(&env, &admin),
+            &pid,
+            &10000u32, // 100% match
+            &50_000_000i128, // max 0.5 XLM per donation
+            &100u32,
+            &200u32,
+            &sponsor_wallet,
+        );
+
+        // Deposit matching funds
+        StellarAssetClient::new(&env, &token).mint(&admin, &1_000_000_000);
+        client.deposit_matching_funds(&signers1(&env, &admin), &pid, &token, &500_000_000);
+
+        // Donate large amount
+        StellarAssetClient::new(&env, &token).mint(&donor, &1_000_000_000);
+        client.donate(&token, &donor, &pid, &1_000_000_000, &0u32);
+
+        // Verify match capped at max_per_donation
+        let pool_balance = client.get_matching_pool_balance(&pid, &token);
+        assert_eq!(pool_balance, 450_000_000); // 500M - 50M
+    }
+
+    #[test]
+    fn test_matching_pool_exhaustion() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let donor = Address::generate(&env);
+        let sponsor_wallet = Address::generate(&env);
+
+        // Set up matching config
+        env.ledger().set_sequence_number(150);
+        client.set_matching_config(
+            &signers1(&env, &admin),
+            &pid,
+            &10000u32,
+            &1_000_000i128,
+            &100u32,
+            &200u32,
+            &sponsor_wallet,
+        );
+
+        // Deposit small matching pool
+        StellarAssetClient::new(&env, &token).mint(&admin, &1_000_000_000);
+        client.deposit_matching_funds(&signers1(&env, &admin), &pid, &token, &100_000_000);
+
+        // Donate more than pool
+        StellarAssetClient::new(&env, &token).mint(&donor, &1_000_000_000);
+        client.donate(&token, &donor, &pid, &1_000_000_000, &0u32);
+
+        // Verify pool exhausted (balance = 0)
+        let pool_balance = client.get_matching_pool_balance(&pid, &token);
+        assert_eq!(pool_balance, 0);
+    }
+
+    #[test]
+    fn test_withdraw_matching_funds() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let sponsor_wallet = Address::generate(&env);
+
+        // Deposit matching funds
+        StellarAssetClient::new(&env, &token).mint(&admin, &1_000_000_000);
+        client.deposit_matching_funds(&signers1(&env, &admin), &pid, &token, &500_000_000);
+
+        // Set up matching config that has ended
+        env.ledger().set_sequence_number(250);
+        client.set_matching_config(
+            &signers1(&env, &admin),
+            &pid,
+            &10000u32,
+            &1_000_000i128,
+            &100u32,
+            &200u32,
+            &sponsor_wallet,
+        );
+
+        // Withdraw
+        client.withdraw_matching_funds(&signers1(&env, &admin), &pid, &token, &200_000_000, &false);
+
+        // Verify pool decreased
+        let pool_balance = client.get_matching_pool_balance(&pid, &token);
+        assert_eq!(pool_balance, 300_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot withdraw during active matching round")]
+    fn test_withdraw_during_active_round_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let sponsor_wallet = Address::generate(&env);
+
+        // Set up active matching config
+        env.ledger().set_sequence_number(150);
+        client.set_matching_config(
+            &signers1(&env, &admin),
+            &pid,
+            &10000u32,
+            &1_000_000i128,
+            &100u32,
+            &200u32,
+            &sponsor_wallet,
+        );
+
+        // Deposit matching funds
+        StellarAssetClient::new(&env, &token).mint(&admin, &1_000_000_000);
+        client.deposit_matching_funds(&signers1(&env, &admin), &pid, &token, &500_000_000);
+
+        // Try to withdraw during active round
+        client.withdraw_matching_funds(&signers1(&env, &admin), &pid, &token, &200_000_000, &false);
+    }
+
+    #[test]
+    fn test_force_withdraw_during_active_round() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let sponsor_wallet = Address::generate(&env);
+
+        // Set up active matching config
+        env.ledger().set_sequence_number(150);
+        client.set_matching_config(
+            &signers1(&env, &admin),
+            &pid,
+            &10000u32,
+            &1_000_000i128,
+            &100u32,
+            &200u32,
+            &sponsor_wallet,
+        );
+
+        // Deposit matching funds
+        StellarAssetClient::new(&env, &token).mint(&admin, &1_000_000_000);
+        client.deposit_matching_funds(&signers1(&env, &admin), &pid, &token, &500_000_000);
+
+        // Force withdraw during active round
+        client.withdraw_matching_funds(&signers1(&env, &admin), &pid, &token, &200_000_000, &true);
+
+        // Verify pool decreased
+        let pool_balance = client.get_matching_pool_balance(&pid, &token);
+        assert_eq!(pool_balance, 300_000_000);
+    }
+
+    #[test]
+    fn test_donation_without_config_no_matching() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let donor = Address::generate(&env);
+
+        // Deposit matching funds without config
+        StellarAssetClient::new(&env, &token).mint(&admin, &1_000_000_000);
+        client.deposit_matching_funds(&signers1(&env, &admin), &pid, &token, &500_000_000);
+
+        // Donate
+        StellarAssetClient::new(&env, &token).mint(&donor, &100_000_000);
+        client.donate(&token, &donor, &pid, &100_000_000, &0u32);
+
+        // Verify no match occurred (pool unchanged)
+        let pool_balance = client.get_matching_pool_balance(&pid, &token);
+        assert_eq!(pool_balance, 500_000_000);
+    }
+
+    #[test]
+    fn test_zero_match_ratio() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let donor = Address::generate(&env);
+        let sponsor_wallet = Address::generate(&env);
+
+        // Set up matching config with zero ratio
+        env.ledger().set_sequence_number(150);
+        client.set_matching_config(
+            &signers1(&env, &admin),
+            &pid,
+            &0u32, // 0% match
+            &1_000_000i128,
+            &100u32,
+            &200u32,
+            &sponsor_wallet,
+        );
+
+        // Deposit matching funds
+        StellarAssetClient::new(&env, &token).mint(&admin, &1_000_000_000);
+        client.deposit_matching_funds(&signers1(&env, &admin), &pid, &token, &500_000_000);
+
+        // Donate
+        StellarAssetClient::new(&env, &token).mint(&donor, &100_000_000);
+        client.donate(&token, &donor, &pid, &100_000_000, &0u32);
+
+        // Verify no match occurred
+        let pool_balance = client.get_matching_pool_balance(&pid, &token);
+        assert_eq!(pool_balance, 500_000_000);
+    }
+
+    #[test]
+    fn test_matching_with_privacy() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let donor = Address::generate(&env);
+        let sponsor_wallet = Address::generate(&env);
+
+        // Set up matching config
+        env.ledger().set_sequence_number(150);
+        client.set_matching_config(
+            &signers1(&env, &admin),
+            &pid,
+            &10000u32,
+            &1_000_000i128,
+            &100u32,
+            &200u32,
+            &sponsor_wallet,
+        );
+
+        // Deposit matching funds
+        StellarAssetClient::new(&env, &token).mint(&admin, &1_000_000_000);
+        client.deposit_matching_funds(&signers1(&env, &admin), &pid, &token, &500_000_000);
+
+        // Donate with privacy
+        StellarAssetClient::new(&env, &token).mint(&donor, &100_000_000);
+        client.donate_with_privacy(&token, &donor, &pid, &100_000_000, &0u32, &true);
+
+        // Verify match occurred
+        let pool_balance = client.get_matching_pool_balance(&pid, &token);
+        assert_eq!(pool_balance, 400_000_000);
+    }
+
+    #[test]
+    fn test_matching_multi_token() {
+        let (env, _cid, client, admin, pid) = setup();
+        let token_admin = Address::generate(&env);
+        let token1 = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+        let token2 = env.register_stellar_asset_contract_v2(token_admin).address();
+        let donor = Address::generate(&env);
+        let sponsor_wallet = Address::generate(&env);
+
+        // Set up matching config
+        env.ledger().set_sequence_number(150);
+        client.set_matching_config(
+            &signers1(&env, &admin),
+            &pid,
+            &10000u32,
+            &1_000_000i128,
+            &100u32,
+            &200u32,
+            &sponsor_wallet,
+        );
+
+        // Deposit matching funds for both tokens
+        StellarAssetClient::new(&env, &token1).mint(&admin, &1_000_000_000);
+        StellarAssetClient::new(&env, &token2).mint(&admin, &1_000_000_000);
+        client.deposit_matching_funds(&signers1(&env, &admin), &pid, &token1, &500_000_000);
+        client.deposit_matching_funds(&signers1(&env, &admin), &pid, &token2, &300_000_000);
+
+        // Donate with token1
+        StellarAssetClient::new(&env, &token1).mint(&donor, &100_000_000);
+        client.donate(&token1, &donor, &pid, &100_000_000, &0u32);
+
+        // Verify token1 pool decreased, token2 pool unchanged
+        let pool1_balance = client.get_matching_pool_balance(&pid, &token1);
+        let pool2_balance = client.get_matching_pool_balance(&pid, &token2);
+        assert_eq!(pool1_balance, 400_000_000);
+        assert_eq!(pool2_balance, 300_000_000);
     }
 }
