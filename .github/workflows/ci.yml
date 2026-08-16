@@ -72,6 +72,8 @@ jobs:
           sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
       - name: Secret scanning
         run: gitleaks detect --config .gitleaks.toml --source . --no-git --exit-code 1
+      - name: Staleness Check
+        run: node scripts/check-stale-gitleaks.js
 
   openapi-lint:
     name: OpenAPI Spec Validation (Spectral)
