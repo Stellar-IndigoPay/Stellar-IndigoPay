@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Admin audit-log CSV export now streams results in fixed-size batches via keyset
+  pagination instead of materializing the full filtered result set (and full CSV
+  string) in memory, removing an OOM/UI-blocking risk on large exports.
+  (`backend/src/routes/admin/audit-export.js`)
+
 ### Added
 
 * **frontend:** announce `DonateForm` validation errors to screen readers via `aria-live="assertive"` region (GrantFox GF-a11y-donate-form)
