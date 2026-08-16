@@ -313,15 +313,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **contracts:** fix escrow freelancer reputation corruption on dispute resolution by making reputation crediting outcome-aware and crediting only funds received by freelancer
 - **ci,extension:** stop tracking the generated `greenpay-extension.zip` in git, generate it from source in CI, and verify the packaged artifact is reproducible across two builds (closes #696)
 - **contracts:** prevent challenge and refund flows from reversing the same donation twice; invalid finalization attempts now return structured errors instead of underflowing accounting.
 - **frontend:** pin locale (`en-US`) and timezone (`UTC`) for date/number formatting helpers (`formatDate`, `formatDateTime`, `formatTime`, `formatMonthYear`, `formatNumber`) and replace raw `Intl.*`/`toLocaleString` calls in SSR-rendered components, making server/client output deterministic and eliminating hydration mismatches (closes #652)
 - **contracts/oracle:** align TWAP observation window with staleness threshold invariant — reduce `DEFAULT_STALENESS_THRESHOLD` from 720 to 120 ledger sequences to match `MAX_OBSERVATIONS` capacity; enforce constraint that staleness threshold ≥ MAX_OBSERVATIONS at config time to prevent misconfiguration where operators believe oracle has long-window averaging when actual TWAP coverage is limited to ~20 observations (~100 seconds) (GrantFox GF-oracle-twap-alignment)
 - **contracts:** allow `mint_impact_nft` to mint any previously-earned badge tier at or below the donor's current badge (rank-order comparison), so a donor who progressed to a higher tier can still mint lower-tier Impact NFTs once each (closes #674)
 - **gitops:** ArgoCD Application manifest for chart-driven reconciliation
-
-### Fixed
-
 - **backend:** fix `auditChain.js` canonicalization to be injective and prevent hash collisions from pipe characters
 - **backend:** durable deduplication for Soroban event processing with atomic cursor commit to prevent double-application on restart (closes #679, GrantFox OSS)
 - **backend:** compute donation/CO₂ projection arithmetic in BigInt (and keep stroop amounts as exact decimal strings) so i128 donations beyond 2^53 stay integer-exact in the leaderboard/impact/CO₂ projections instead of being rounded by JS `Number` (closes #681)
