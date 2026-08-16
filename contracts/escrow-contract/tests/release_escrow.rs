@@ -324,7 +324,10 @@ fn test_no_dust_two_milestones_50_50_odd_amount() {
 
     // Contract must hold zero balance for this token
     let contract_bal = common::token_balance(&env, &token, &client.address);
-    assert_eq!(contract_bal, 0i128, "Contract must hold zero after full release");
+    assert_eq!(
+        contract_bal, 0i128,
+        "Contract must hold zero after full release"
+    );
 }
 
 /// amount=101, milestones [33,33,34].
@@ -444,7 +447,8 @@ fn test_no_dust_claim_50_50_odd_amount() {
     );
 
     // Jump past release period
-    env.ledger().set_sequence_number(env.ledger().sequence() + 12);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 12);
 
     client.claim_milestone(&freelancer, &job_id, &0u32);
     assert_eq!(common::token_balance(&env, &token, &freelancer), 50i128);
