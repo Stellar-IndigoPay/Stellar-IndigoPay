@@ -1,0 +1,55 @@
+# .github/workflows/helm-k8s-drift.yml
+#
+# Renders the Helm chart (with the four "parity" values flags enabled --
+# postgres.standby, postgres.failover, postgres.replication, and
+# backend.serviceMonitor, plus postgres.replication.walArchive -- so the
+# comparison is apples-to-apples with what k8s/kustomization.yaml deploys
+# unconditionally) and diffs it against the raw k8s/ manifests.
+#
+# Resources that only exist on the k8s/ side by design (NetworkPolicy x10,
+# postgres-exporter x4) are allowlisted in scripts/detect-helm-k8s-drift.js.
+# Any other only-in-k8s or only-in-Helm resource, or drift in a curated set
+# of fields (replicas, image, ports, resources, envFrom, config keys,
+# ingress rules, HPA/PDB thresholds) on a resource present in both, fails
+# the build. metadata.labels is intentionally excluded from the diff --
+# see the comment in detect-helm-k8s-drift.js for why.
+
+name: Helm/K8s Drift Detection
+
+on:
+  pull_request:
+    paths:
+      - "helm/**"
+      - "k8s/**"
+      - "scripts/detect-helm-k8s-drift.js"
+      - ".github/workflows/helm-k8s-drift.yml"
+  push:
+    branches: [main]
+    paths:
+      - "helm/**"
+      - "k8s/**"
+      - "scripts/detect-helm-k8s-drift.js"
+      - ".github/workflows/helm-k8s-drift.yml"
+
+jobs:
+  detect-drift:
+    name: Detect Helm/K8s Drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: "v4.2.4"
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Detect Helm/K8s drift
+        run: node scripts/detect-helm-k8s-drift.js

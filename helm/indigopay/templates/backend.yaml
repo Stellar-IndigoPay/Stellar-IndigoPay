@@ -25,7 +25,7 @@ spec:
     spec:
       # Allow the in-process drain to complete before SIGKILL. Must be
       # greater than the value of backend.shutdownTimeoutMs.
-      terminationGracePeriodSeconds: {{ add .Values.backend.shutdownTimeoutMs 5000 | div 1000 | int64 }}
+      terminationGracePeriodSeconds: {{ div (add .Values.backend.shutdownTimeoutMs 5000) 1000 | int64 }}
       containers:
         - name: backend
           image: {{ .Values.backend.image }}

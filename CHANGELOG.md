@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+* **ci:** add Helm/k8s drift detection — renders the Helm chart and diffs it against raw `k8s/` manifests (replicas, image, ports, resources, envFrom, config keys, ingress rules, HPA/PDB thresholds), failing CI on undocumented drift; allowlists the documented NetworkPolicy and postgres-exporter gaps (closes #708)
 * **backend:** deduplicate push device tokens per user+device with a sliding expiry window (default 180 days) refreshed on register, soft-invalidate on unregister/expiry, and purge expired tokens from push sends (closes #717)
 * **frontend:** announce `DonateForm` validation errors to screen readers via `aria-live="assertive"` region (GrantFox GF-a11y-donate-form)
 * **frontend:** add keyboard accessibility for Leaflet map markers on `ProjectMap` — focusable buttons with Enter/Space to open popups (closes #533, grantfox GF-031)
