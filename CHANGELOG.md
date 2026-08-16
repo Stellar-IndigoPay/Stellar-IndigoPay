@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **frontend:** add keyboard accessibility for Leaflet map markers on `ProjectMap` — focusable buttons with Enter/Space to open popups (closes #533, grantfox GF-031)
 * **frontend:** complete 100% i18n coverage across all locale dictionaries with pluralization and locale-aware formatting (closes #264, #262)
 * **frontend:** refactor admin verification queue table with `@tanstack/react-table`, sortable columns, status filter pills, responsive mobile expansion, and server-driven pagination
+* **frontend:** add Playwright coverage for admin verification queue sorting, filtering, pagination, and CSV export
+* **backend,mobile:** add notification target routes to push payloads and route tapped mobile notifications to project, donation, governance, or donation screens
 * **frontend:** implement advanced keyboard navigation, global keyboard shortcuts (`Cmd+K`/`Ctrl+K`), route focus management, and skip links
 * **frontend:** implement Playwright end-to-end test suite covering donation, dashboard, and admin analytics journeys (GF-052, closes #110)
 * **frontend:** build admin audit log viewer with filtering, pagination, and CSV export (GF-028, closes #83)

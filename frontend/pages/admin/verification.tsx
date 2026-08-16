@@ -174,9 +174,44 @@ export default function AdminVerificationPage() {
 
   const metrics = computeMetrics(allRequests);
 
+  const handleExportCsv = () => {
+    const headers = [
+      "Organization",
+      "Project",
+      "Category",
+      "Status",
+      "CO2 per XLM",
+      "Submitted At",
+    ];
+    const escapeCsv = (value: unknown) => {
+      const raw = String(value ?? "");
+      return /[",\n]/.test(raw) ? `"${raw.replace(/"/g, '""')}"` : raw;
+    };
+    const rows = requests.map((request) => [
+      request.organizationName,
+      request.projectName,
+      request.projectCategory,
+      request.status,
+      request.co2PerXLM,
+      request.submittedAt,
+    ]);
+    const csv = [headers, ...rows]
+      .map((row) => row.map(escapeCsv).join(","))
+      .join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `verification-queue-${statusFilter || "all"}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
   // Filter tab handler
   const handleStatusFilter = (key: string) => {
-    setStatusFilter(key);
+    setStatusFilter(key === "all" ? "" : key);
     setPage(1);
   };
 
@@ -279,6 +314,17 @@ export default function AdminVerificationPage() {
             </button>
           </div>
         )}
+
+        <div className="mb-6 flex justify-end">
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            disabled={loading || requests.length === 0}
+            className="px-4 py-2 rounded-lg text-sm font-semibold bg-[var(--primary)] text-white disabled:opacity-50"
+          >
+            Export CSV
+          </button>
+        </div>
 
         {/* Status filter pills */}
         <div className="mb-6">

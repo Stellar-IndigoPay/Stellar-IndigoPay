@@ -17,6 +17,17 @@ const pool = require("../db/pool");
 const logger = require("../logger");
 const { sendViaProvider } = require("./pushProviders");
 
+function projectTarget(projectId) {
+  return projectId ? { target: `/projects/${projectId}`, route: `/projects/${projectId}` } : {};
+}
+
+function donationTarget(donation) {
+  if (donation?.id) {
+    return { target: `/donations/${donation.id}`, route: `/donations/${donation.id}` };
+  }
+  return projectTarget(donation?.projectId);
+}
+
 /**
  * Whether a wallet has opted in to push notifications of a given type.
  * No matching row means "opted in" (push defaults to on). A row with
@@ -247,6 +258,7 @@ async function sendDonationReceipt(donorAddress, donation) {
       type: "donation_receipt",
       projectId: donation.projectId,
       donationId: donation.id,
+      ...donationTarget(donation),
     },
   });
 }
@@ -280,6 +292,8 @@ async function sendGovernanceProposalNotifications({
   const data = {
     type: "governance_proposal",
     proposalId,
+    target: `/governance/${proposalId}`,
+    route: `/governance/${proposalId}`,
     ...(endsAt ? { endsAt: new Date(endsAt).toISOString() } : {}),
   };
 
@@ -331,6 +345,7 @@ async function sendRecurringReminder({
     type: "recurring_reminder",
     projectId,
     recurringId,
+    ...projectTarget(projectId),
     ...(nextPaymentDate
       ? { nextPaymentDate: new Date(nextPaymentDate).toISOString() }
       : {}),
@@ -370,7 +385,7 @@ async function sendMilestoneReachedNotifications({
         walletAddress: follower.wallet_address,
         title: "Milestone Reached! \u{1F389}",
         body: `${projectName} has reached its ${percentage}% funding milestone!`,
-        data: { type: "milestone_reached", projectId },
+        data: { type: "milestone_reached", projectId, ...projectTarget(projectId) },
       }),
     );
   }
@@ -398,6 +413,7 @@ async function sendProjectUpdateNotifications({ project, update }) {
     type: "project_update",
     projectId: project.id,
     updateId: update.id,
+    ...projectTarget(project.id),
   };
 
   const messages = [];

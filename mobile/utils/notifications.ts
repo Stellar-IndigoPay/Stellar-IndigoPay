@@ -286,6 +286,13 @@ export function isNotificationHandled(id: string): boolean {
 /**
  * Parses deep links like indigopay://project/123 -> /projects/123
  */
+export function normalizeNotificationTarget(target: unknown): string | null {
+  if (typeof target !== "string" || !target.trim()) return null;
+  const trimmed = target.trim();
+  if (!trimmed.startsWith("/") || trimmed.startsWith("//")) return null;
+  return trimmed;
+}
+
 export function parseDeepLinkUrl(url: string): string | null {
   try {
     const parsed = Linking.parse(url);
@@ -316,7 +323,13 @@ export function navigateToNotification(
     return;
   }
 
-  const { type, projectId, donorAddress, url } = data;
+  const { type, projectId, donorAddress, url, target, route, donationId } = data;
+
+  const normalizedTarget = normalizeNotificationTarget(target ?? route);
+  if (normalizedTarget) {
+    push(normalizedTarget);
+    return;
+  }
 
   if (url && typeof url === "string") {
     if (url.startsWith("indigopay://")) {
@@ -351,6 +364,7 @@ export function navigateToNotification(
         push("/");
       }
       break;
+    case "recurring_reminder":
     case "subscription_due":
       if (projectId) {
         push(`/donate/${projectId}`);
@@ -358,8 +372,15 @@ export function navigateToNotification(
         push("/");
       }
       break;
+    case "governance_proposal":
+      push(data.proposalId ? `/governance/${data.proposalId}` : "/");
+      break;
     default:
-      push("/");
+      if (donationId) {
+        push(`/donations/${donationId}`);
+      } else {
+        push("/");
+      }
   }
 }
 
@@ -381,22 +402,7 @@ export function setupNotificationResponseListener(
         string,
         unknown
       >;
-      const type = data?.type as string | undefined;
-      const projectId = data?.projectId as string | undefined;
-      const proposalId = data?.proposalId as string | undefined;
-
-      if (type === "governance_proposal" && proposalId) {
-        // TODO: Replace with dedicated governance voting screen when available.
-        // For now, navigate to the project detail if a projectId is also present.
-        if (projectId) {
-          push(`/projects/${projectId}`);
-        }
-        return;
-      }
-
-      if (projectId) {
-        push(`/projects/${projectId}`);
-      }
+      navigateToNotification(data, push);
     },
   );
 
