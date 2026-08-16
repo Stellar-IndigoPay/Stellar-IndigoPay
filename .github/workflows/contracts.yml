@@ -32,7 +32,13 @@ jobs:
           workspaces: contracts
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: |
+          cargo fmt --all -- --check || (
+            echo "Formatting differences detected. Showing diff for debug:";
+            cargo fmt --all;
+            git --no-pager diff -- . || true;
+            exit 1
+          )
 
       - name: Run Clippy
         run: cargo clippy --workspace -- -D warnings
@@ -48,12 +54,26 @@ jobs:
 
       - name: Check WASM size
         run: |
-          wasm-opt -Oz target/wasm32v1-none/release/indigopay_contract.wasm \
-            -o target/wasm32v1-none/release/indigopay_contract.opt.wasm
-          size=$(stat -c%s target/wasm32v1-none/release/indigopay_contract.opt.wasm)
+          set -euo pipefail
+          outdir=target/wasm32v1-none/release
+          wasm_file="$outdir/indigopay_contract.wasm"
+          opt_file="$outdir/indigopay_contract.opt.wasm"
+
+          echo "--- release dir listing ---"
+          ls -la "$outdir" || true
+
+          if [ ! -f "$wasm_file" ]; then
+            echo "Error: expected artifact not found: $wasm_file"
+            exit 1
+          fi
+
+          echo "Optimizing $wasm_file -> $opt_file"
+          wasm-opt -Oz "$wasm_file" -o "$opt_file"
+
+          size=$(stat -c%s "$opt_file")
           echo "WASM size (slim + wasm-opt): $size bytes"
-          if [ $size -gt 65536 ]; then
-            echo "Error: WASM binary exceeds 64KB limit"
+          if [ "$size" -gt 65536 ]; then
+            echo "Error: WASM binary exceeds 64 KB limit ($size bytes > 65536)"
             exit 1
           fi
 

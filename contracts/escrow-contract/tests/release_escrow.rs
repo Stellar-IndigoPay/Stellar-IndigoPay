@@ -1,3 +1,4 @@
+use escrow_contract::JobStatus;
 /// Integration tests: release_escrow
 ///
 /// Coverage:
@@ -10,7 +11,6 @@
 ///   - Releasing on a disputed job panics (new)
 use soroban_sdk::testutils::{Address as _, Ledger};
 use soroban_sdk::{Address, Env, String as SorobanString};
-use escrow_contract::JobStatus;
 
 mod common;
 
