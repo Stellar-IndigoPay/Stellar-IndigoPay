@@ -81,6 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+* **extension:** validate the sender of every content-script ↔ background `chrome.runtime` message against an allow-list (extension id + extension origin) and reject unknown senders before any handler runs (closes #697)
 * **frontend:** harden the production CSP — drop `'unsafe-inline'` from `script-src` (rely on nonce + `strict-dynamic`) and report violations via `report-to` alongside the deprecated `report-uri` (closes #688)
 * **backend:** reload the keeper account before each recurring submission so transaction sequence numbers are never stale — prevents `tx_bad_seq` when the account sequence advances externally or after a failed submission (closes #705)
 * **backend:** make Horizon donation indexing idempotent by operation ID, advance the cursor on replay, and allow multiple payment operations per transaction (closes #635)
