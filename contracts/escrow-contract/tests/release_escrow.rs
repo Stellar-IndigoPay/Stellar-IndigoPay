@@ -8,9 +8,8 @@
 ///   - Only the client can release (new)
 ///   - Releasing an already-released milestone panics (new)
 ///   - Releasing on a disputed job panics (new)
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, Ledger};
 use soroban_sdk::{Address, Env, String as SorobanString};
-
 use escrow_contract::JobStatus;
 
 mod common;
