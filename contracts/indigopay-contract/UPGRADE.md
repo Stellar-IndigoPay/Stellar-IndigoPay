@@ -122,6 +122,8 @@ The current persisted keys are:
     installments are released) set this field. Active schedules with `completed_at == 0`
     are not eligible for cleanup.
 - `DataKey::DonorVestingCount(Address)` _(#386 per-donor vesting count)_
+- `DataKey::MatchingConfig(String)` _Donation matching pool configuration per project_
+- `DataKey::MatchingPoolActive` _Global flag indicating whether any matching pool is currently active_
 - **Storage version tracking** _(#379 — Symbol-keyed, not a DataKey variant)_
 
 Do not rename or remove these variants, change their argument order, or reorder/remove fields from stored structs such as `Project`, `DonorStats`, `ImpactNFT`, `ProjectMilestoneNFT`, `VoteProposal`, or `GlobalStats` without adding an explicit migration path. New fields should be handled through a new storage version or a new key namespace so existing v1 values remain decodable.

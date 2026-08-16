@@ -17,7 +17,8 @@ mod fuzz {
     use proptest::prelude::*;
     use soroban_sdk::BytesN;
     use soroban_sdk::{
-        testutils::Address as _, token::StellarAssetClient, Address, Env, String as SorobanString,
+        testutils::{Address as _, Ledger},
+        token::StellarAssetClient, Address, Env, String as SorobanString,
     };
 
     /// Upper bound for a single donation: 1 billion XLM in stroops (10^16).
@@ -584,6 +585,165 @@ mod fuzz {
                 sum += amount;
             }
             prop_assert_eq!(sum, fee_amount, "Sum of recipient fee shares must equal total fee amount");
+        }
+
+        // ─── Matching Pool Fuzz Tests ───────────────────────────────────────────
+
+        /// Property: Matching never exceeds the pool balance.
+        /// For any donation amount and pool balance, the matched amount must be
+        /// less than or equal to the pool balance before the donation.
+        #[test]
+        fn prop_matching_never_exceeds_pool(
+            donation_amount in 1i128..=1_000_000_000i128,
+            pool_balance in 1i128..=10_000_000_000i128,
+            match_ratio_bps in 0u32..=10_000u32,
+            max_match in 1i128..=1_000_000_000i128,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let cid = env.register_contract(None, IndigoPayContract);
+            let client = IndigoPayContractClient::new(&env, &cid);
+            let admin = Address::generate(&env);
+            let sponsor_wallet = Address::generate(&env);
+            client.initialize(&soroban_sdk::vec![&env, admin.clone()], &1u32);
+
+            let project_id = SorobanString::from_str(&env, "fuzz-match");
+            let wallet = Address::generate(&env);
+            client.register_project(
+                &admin,
+                &project_id,
+                &SorobanString::from_str(&env, "Fuzz Match"),
+                &wallet,
+                &100u32,
+            );
+
+            let token_admin = Address::generate(&env);
+            let token = env.register_stellar_asset_contract_v2(token_admin).address();
+
+            // Set up matching config
+            env.ledger().set_sequence_number(150);
+            client.set_matching_config(
+                &soroban_sdk::vec![&env, admin.clone()],
+                &project_id,
+                &match_ratio_bps,
+                &max_match,
+                &100u32,
+                &200u32,
+                &sponsor_wallet,
+            );
+
+            // Deposit pool balance
+            StellarAssetClient::new(&env, &token).mint(&admin, &pool_balance);
+            client.deposit_matching_funds(&soroban_sdk::vec![&env, admin.clone()], &project_id, &token, &pool_balance);
+
+            let pool_before = client.get_matching_pool_balance(&project_id, &token);
+
+            // Donate
+            let donor = Address::generate(&env);
+            StellarAssetClient::new(&env, &token).mint(&donor, &donation_amount);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.donate(&token, &donor, &project_id, &donation_amount, &MSG_HASH);
+            }));
+
+            let pool_after = client.get_matching_pool_balance(&project_id, &token);
+
+            // Pool balance must not increase (matching only decreases it)
+            prop_assert!(
+                pool_after <= pool_before,
+                "Pool balance increased: {} -> {}",
+                pool_before,
+                pool_after
+            );
+
+            // Pool balance must not go negative
+            prop_assert!(pool_after >= 0, "Pool balance went negative: {}", pool_after);
+        }
+
+        /// Property: Matching respects configuration constraints.
+        /// The matched amount must never exceed:
+        /// 1. The pool balance
+        /// 2. max_match_per_donation
+        /// 3. donation_amount * match_ratio_bps / 10000
+        #[test]
+        fn prop_matching_respects_config(
+            donation_amount in 1i128..=1_000_000_000i128,
+            pool_balance in 1i128..=10_000_000_000i128,
+            match_ratio_bps in 1u32..=10_000u32,
+            max_match in 1i128..=1_000_000_000i128,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let cid = env.register_contract(None, IndigoPayContract);
+            let client = IndigoPayContractClient::new(&env, &cid);
+            let admin = Address::generate(&env);
+            let sponsor_wallet = Address::generate(&env);
+            client.initialize(&soroban_sdk::vec![&env, admin.clone()], &1u32);
+
+            let project_id = SorobanString::from_str(&env, "fuzz-match-config");
+            let wallet = Address::generate(&env);
+            client.register_project(
+                &admin,
+                &project_id,
+                &SorobanString::from_str(&env, "Fuzz Match Config"),
+                &wallet,
+                &100u32,
+            );
+
+            let token_admin = Address::generate(&env);
+            let token = env.register_stellar_asset_contract_v2(token_admin).address();
+
+            // Set up matching config
+            env.ledger().set_sequence_number(150);
+            client.set_matching_config(
+                &soroban_sdk::vec![&env, admin.clone()],
+                &project_id,
+                &match_ratio_bps,
+                &max_match,
+                &100u32,
+                &200u32,
+                &sponsor_wallet,
+            );
+
+            // Deposit pool balance
+            StellarAssetClient::new(&env, &token).mint(&admin, &pool_balance);
+            client.deposit_matching_funds(&soroban_sdk::vec![&env, admin.clone()], &project_id, &token, &pool_balance);
+
+            let pool_before = client.get_matching_pool_balance(&project_id, &token);
+
+            // Donate
+            let donor = Address::generate(&env);
+            StellarAssetClient::new(&env, &token).mint(&donor, &donation_amount);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.donate(&token, &donor, &project_id, &donation_amount, &MSG_HASH);
+            }));
+
+            let pool_after = client.get_matching_pool_balance(&project_id, &token);
+            let matched = pool_before - pool_after;
+
+            // Matched amount must not exceed max_match_per_donation
+            prop_assert!(
+                matched <= max_match,
+                "Matched amount {} exceeds max_match_per_donation {}",
+                matched,
+                max_match
+            );
+
+            // Matched amount must not exceed pool balance
+            prop_assert!(
+                matched <= pool_before,
+                "Matched amount {} exceeds pool balance {}",
+                matched,
+                pool_before
+            );
+
+            // Matched amount must not exceed ratio-based calculation
+            let ratio_match = donation_amount * match_ratio_bps as i128 / 10_000;
+            prop_assert!(
+                matched <= ratio_match,
+                "Matched amount {} exceeds ratio-based calculation {}",
+                matched,
+                ratio_match
+            );
         }
     }
 }
