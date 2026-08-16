@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+* **escrow:** `create_job` now enforces all five previously-dead validation error codes: `MilestoneVectorEmpty` (14), `MilestonePercentageZero` (11), `MilestoneNameTooLong` (12), `DuplicateMilestoneName` (15), and `JobIdTooLong` (13); added `MAX_MILESTONE_NAME_LEN` and `MAX_JOB_ID_LEN` constants (both 64 bytes) to bound instance-storage key/entry size; O(n²) duplicate-name scan noted inline (closes #612)
+* **escrow:** added `#[should_panic]` integration tests for all five new rejection paths plus a boundary-value success test (`test_create_job_at_length_boundaries_succeeds`) in `tests/create_job.rs`
+
+### Added
+
 * **frontend:** announce `DonateForm` validation errors to screen readers via `aria-live="assertive"` region (GrantFox GF-a11y-donate-form)
 * **frontend:** add keyboard accessibility for Leaflet map markers on `ProjectMap` — focusable buttons with Enter/Space to open popups (closes #533, grantfox GF-031)
 * **frontend:** complete 100% i18n coverage across all locale dictionaries with pluralization and locale-aware formatting (closes #264, #262)

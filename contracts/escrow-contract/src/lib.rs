@@ -81,6 +81,16 @@ pub enum DataKey {
 pub const RELEASE_AFTER_LEDGERS: u32 = 10;
 pub const DEFAULT_DEADLINE_LEDGERS: u32 = 1_555_200; // 90 days @ 5s/ledger
 
+/// Maximum byte length of a `job_id` string. Bounds instance-storage key
+/// size; Soroban ledger entries have a hard size limit and unbounded keys
+/// can push a contract toward it.
+pub const MAX_JOB_ID_LEN: u32 = 64;
+
+/// Maximum byte length of a milestone `name` string. Each name is stored
+/// inline in the `Job` ledger entry; an unbounded name inflates the entry
+/// size proportionally to the number of milestones.
+pub const MAX_MILESTONE_NAME_LEN: u32 = 64;
+
 // ─── Contract error codes ───────────────────────────────────────────────────
 //
 // Every error returned by the escrow contract carries a unique numeric code.
@@ -365,9 +375,47 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::JobAlreadyExists);
         }
 
-        // Validate milestones sum to 100%
+        // ── job_id length bound ──────────────────────────────────────────
+        // Unbounded job_id strings inflate instance-storage keys and can
+        // push the ledger entry toward Soroban's per-entry size limit.
+        if job_id.len() > MAX_JOB_ID_LEN {
+            panic_with_error!(&env, EscrowError::JobIdTooLong);
+        }
+
+        // ── Milestone vector must not be empty ───────────────────────────
+        if milestones.is_empty() {
+            panic_with_error!(&env, EscrowError::MilestoneVectorEmpty);
+        }
+
+        // ── Per-milestone validation + sum check ─────────────────────────
+        // O(n²) duplicate-name scan: milestone vectors are expected to be
+        // small (single digits), so the quadratic cost is negligible.
         let mut total_percentage: u32 = 0;
-        for milestone in milestones.iter() {
+        let n = milestones.len();
+        for i in 0..n {
+            let milestone = milestones.get(i).unwrap();
+
+            // Each milestone must contribute a non-zero percentage so it
+            // cannot be released for 0 funds while still counting toward
+            // job completion.
+            if milestone.percentage == 0 {
+                panic_with_error!(&env, EscrowError::MilestonePercentageZero);
+            }
+
+            // Milestone names are stored inline in the Job entry; an
+            // unbounded name inflates storage proportional to milestone count.
+            if milestone.name.len() > MAX_MILESTONE_NAME_LEN {
+                panic_with_error!(&env, EscrowError::MilestoneNameTooLong);
+            }
+
+            // Check for duplicate names among all later milestones.
+            for j in (i + 1)..n {
+                let other = milestones.get(j).unwrap();
+                if milestone.name == other.name {
+                    panic_with_error!(&env, EscrowError::DuplicateMilestoneName);
+                }
+            }
+
             total_percentage = total_percentage
                 .checked_add(milestone.percentage)
                 .expect("Milestone percentage overflow");
