@@ -978,9 +978,12 @@ mod fuzz {
                 &RELEASE_AFTER,
             );
         }));
+        // Zero-percentage milestones are now rejected (MilestonePercentageZero = 11).
+        // Even though [0, 100] sums to 100, a zero-percentage milestone is meaningless:
+        // releasing it transfers 0 tokens while still counting toward job completion.
         assert!(
-            result_1.is_ok(),
-            "Job with valid sum [0, 100] should succeed"
+            result_1.is_err(),
+            "Job with [0, 100] should be rejected (MilestonePercentageZero)"
         );
 
         // Test case 2: Valid sum with multiple zeros (e.g., [0, 0, 100])
@@ -1025,9 +1028,10 @@ mod fuzz {
                 &RELEASE_AFTER,
             );
         }));
+        // Zero-percentage milestones are now rejected (MilestonePercentageZero = 11).
         assert!(
-            result_2.is_ok(),
-            "Job with valid sum [0, 0, 100] should succeed"
+            result_2.is_err(),
+            "Job with [0, 0, 100] should be rejected (MilestonePercentageZero)"
         );
 
         // Test case 3: Invalid sum with overflow (percentages > 100 each)
