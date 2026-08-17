@@ -1186,13 +1186,14 @@ fn verify_merkle_proof(
     let mut hash: BytesN<32> = leaf.clone();
     let mut idx = index;
     for sibling in proof.iter() {
-        let mut combined = [0u8; 64];
+        let mut combined = [0u8; 65];
+        combined[0] = 0x01;
         if idx.is_multiple_of(2) {
-            combined[..32].copy_from_slice(&hash.to_array());
-            combined[32..].copy_from_slice(&sibling.to_array());
+            combined[1..33].copy_from_slice(&hash.to_array());
+            combined[33..65].copy_from_slice(&sibling.to_array());
         } else {
-            combined[..32].copy_from_slice(&sibling.to_array());
-            combined[32..].copy_from_slice(&hash.to_array());
+            combined[1..33].copy_from_slice(&sibling.to_array());
+            combined[33..65].copy_from_slice(&hash.to_array());
         }
         hash = env
             .crypto()
@@ -1209,7 +1210,10 @@ fn verify_merkle_proof(
 fn compute_impact_leaf_hash(env: &Env, leaf: &ImpactLeaf) -> BytesN<32> {
     use soroban_sdk::xdr::ToXdr;
     let xdr_bytes = leaf.to_xdr(env);
-    env.crypto().sha256(&xdr_bytes).into()
+    let mut combined = soroban_sdk::Bytes::new(env);
+    combined.push_back(0x00);
+    combined.append(&xdr_bytes);
+    env.crypto().sha256(&combined).into()
 }
 #[cfg(feature = "impact")]
 /// Compute a deterministic 32-byte storage key from (project_id, report_id).
@@ -1236,9 +1240,10 @@ fn mmr_append_peaks(env: &Env, peaks: &mut Vec<BytesN<32>>, leaf_count: u32, new
     let merges = leaf_count.trailing_ones();
     for _ in 0..merges {
         if let Some(prev_peak) = peaks.pop_back() {
-            let mut combined = [0u8; 64];
-            combined[..32].copy_from_slice(&prev_peak.to_array());
-            combined[32..].copy_from_slice(&current_hash.to_array());
+            let mut combined = [0u8; 65];
+            combined[0] = 0x01;
+            combined[1..33].copy_from_slice(&prev_peak.to_array());
+            combined[33..65].copy_from_slice(&current_hash.to_array());
             current_hash = env
                 .crypto()
                 .sha256(&Bytes::from_slice(env, &combined))
