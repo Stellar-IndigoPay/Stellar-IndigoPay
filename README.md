@@ -44,7 +44,7 @@ The same platform ships as:
 | 🌐 **Web app**           | Donor dashboard, project browse, leaderboard, AI impact summaries, multi-wallet | Next.js 14 · React · TypeScript · Tailwind |
 | 📱 **Mobile app**        | QR-scan-to-give, biometric auth, secure wallet storage, push receipts           | React Native · Expo · expo-router          |
 | 🧩 **Browser extension** | Detect Stellar addresses on any page, donate in one click                       | Manifest V3 · Webpack (Chrome + Firefox)   |
-| ⛓️ **4 Soroban contracts** | Donation ledger (136 codes), escrow (62), attestation (60), oracle (50) — **308 structured error codes** | Rust · WASM `wasm32v1-none`                |
+| ⛓️ **4 Soroban contracts** | Donation ledger (136 codes), escrow (63), attestation (60), oracle (50) — **309 structured error codes** | Rust · WASM `wasm32v1-none`                |
 | 🛠 **Backend API**        | Metadata, leaderboard, webhooks, AI summaries, admin, event streaming           | Node.js 22 · Express · Postgres · pg-boss  |
 
 ---

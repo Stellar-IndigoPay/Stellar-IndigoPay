@@ -52,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **contracts/escrow:** block `refund_expired_job` while any milestone is disputed — a disputed milestone is unreleased, so without this guard the client could claw back the disputed milestone's funds past the deadline, bypassing dispute resolution; adds structured `CannotRefundWhileMilestoneDisputed` error (closes #614, GrantFox OSS)
 - **contracts/oracle:** align TWAP observation window with staleness threshold invariant — reduce `DEFAULT_STALENESS_THRESHOLD` from 720 to 120 ledger sequences to match `MAX_OBSERVATIONS` capacity; enforce constraint that staleness threshold ≥ MAX_OBSERVATIONS at config time to prevent misconfiguration where operators believe oracle has long-window averaging when actual TWAP coverage is limited to ~20 observations (~100 seconds) (GrantFox GF-oracle-twap-alignment)
 - **gitops:** ArgoCD Application manifest for chart-driven reconciliation
 

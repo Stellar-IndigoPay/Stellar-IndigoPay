@@ -158,6 +158,9 @@ pub enum EscrowError {
     ThresholdExceedsAdminCount = 60,
     AdminTransferInProgress = 61,
     AdminSetUpdateFailed = 62,
+    // Refund guard appended after admin section to preserve existing codes:
+    // a disputed milestone must be resolved before the client can refund.
+    CannotRefundWhileMilestoneDisputed = 63,
 }
 
 fn compute_remaining_funds(job: &Job) -> i128 {
@@ -896,6 +899,14 @@ impl EscrowContract {
         let any_claimed = job.milestones.iter().any(|m| m.released);
         if any_claimed {
             panic_with_error!(&env, EscrowError::CannotRefundMilestonesClaimed);
+        }
+
+        // A disputed milestone is not released, so without this guard the
+        // client could claw back the disputed milestone's funds past the
+        // deadline, bypassing ongoing dispute resolution.
+        let any_disputed = job.milestones.iter().any(|m| m.disputed);
+        if any_disputed {
+            panic_with_error!(&env, EscrowError::CannotRefundWhileMilestoneDisputed);
         }
 
         let remaining = compute_remaining_funds(&job);
@@ -1996,6 +2007,63 @@ mod tests {
 
         env.ledger()
             .set_sequence_number(DEFAULT_DEADLINE_LEDGERS + 10);
+        client.refund_expired_job(&client_addr, &job_id);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_refund_expired_job_disputed_milestone_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-disputed-expired");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M1"),
+            percentage: 50,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M2"),
+            percentage: 50,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+
+        // Dispute a milestone without releasing any funds.
+        client.dispute_milestone(&signers1(&env, &admin), &job_id, &0u32);
+
+        // Fast forward ledger sequence past deadline.
+        env.ledger()
+            .set_sequence_number(DEFAULT_DEADLINE_LEDGERS + 10);
+
+        // Refund must be blocked while a milestone is still disputed.
         client.refund_expired_job(&client_addr, &job_id);
     }
 
