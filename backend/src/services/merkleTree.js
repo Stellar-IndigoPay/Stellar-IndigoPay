@@ -8,7 +8,10 @@ function buildMerkleTree(entries) {
   // entries: [{ id, prevHash, action, actor, resource, timestamp }]
   const leaves = entries.map(entry =>
     sha256(
-      `${entry.id}${entry.prevHash}${entry.action}${entry.actor}${entry.resource}${entry.timestamp}`
+      Buffer.concat([
+        Buffer.from([0x00]),
+        Buffer.from(`${entry.id}${entry.prevHash}${entry.action}${entry.actor}${entry.resource}${entry.timestamp}`)
+      ])
     )
   );
   let level = leaves;
@@ -17,8 +20,8 @@ function buildMerkleTree(entries) {
     const nextLevel = [];
     for (let i = 0; i < level.length; i += 2) {
       if (i + 1 < level.length) {
-        const pair = [level[i], level[i + 1]].sort(Buffer.compare);
-        nextLevel.push(sha256(Buffer.concat(pair)));
+        const pair = [level[i], level[i + 1]];
+        nextLevel.push(sha256(Buffer.concat([Buffer.from([0x01]), ...pair])));
       } else {
         nextLevel.push(level[i]);
       }
@@ -53,7 +56,7 @@ function verifyMerkleProof(leaf, proof, root) {
   let hash = leaf;
   for (const step of proof) {
     const pair = step.position === 'right' ? [hash, step.hash] : [step.hash, hash];
-    hash = sha256(Buffer.concat(pair.sort(Buffer.compare)));
+    hash = sha256(Buffer.concat([Buffer.from([0x01]), ...pair]));
   }
   return hash.equals(root);
 }
