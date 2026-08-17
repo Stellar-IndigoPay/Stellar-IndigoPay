@@ -75,8 +75,10 @@ an even number, the result is the overflow-safe arithmetic mean of the two middl
 values.
 
 Every source must return the same scaled-down XLM-stroops-per-USDC-stroop value
-documented above. The external interface exposes no timestamp or freshness
-metadata, so each source is responsible for enforcing its own staleness policy.
+documented above. `get_aggregated_price()` validates per-source freshness against
+the contract's configured `staleness_threshold` by querying `last_updated_ledger` /
+`get_last_updated_ledger` from the source contract, or checking stored source ledger records.
+Stale sources exceeding the staleness threshold are excluded prior to median computation.
 The source count is bounded, but the execution cost of an individual source is
 not. Admins must also avoid cycles between aggregator contracts because only
 direct self-registration can be rejected locally.
