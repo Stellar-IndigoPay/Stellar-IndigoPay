@@ -33,7 +33,7 @@ import {
 } from "react-native";
 import { useRouter } from "expo-router";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import axios from "axios";
+import { apiClient } from "../lib/apiClient";
 import { parseQRData, ParsedQR } from "../utils/qrParser";
 import {
   addToHistory,
@@ -63,7 +63,7 @@ async function lookupAddress(
   address: string,
 ): Promise<{ found: boolean; project?: RegistryProject }> {
   try {
-    const res = await axios.get(
+    const res = await apiClient.get(
       `${API_URL}/api/projects?wallet=${encodeURIComponent(address)}`,
     );
     const list: RegistryProject[] = Array.isArray(res.data?.data)

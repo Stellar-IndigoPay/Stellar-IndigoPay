@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 * **extension:** audit `chrome.storage` usage, confirm no plaintext wallet secrets are persisted (signing is delegated entirely to Freighter), and add CI secret-scan to enforce this going forward (closes #656)
+- **mobile:** add TLS certificate/public-key pinning for backend API calls — centralized pinned `apiClient`/`pinnedFetch` in `lib/apiClient.ts`, a dependency-free pinning policy + validation module (`lib/pinning.ts`) with a dev-build allowlist, additive-first (grace-pin) rotation, HMAC-SHA256-authenticated remote pin updates, and unit tests for pin validation / mismatch rejection (closes #694)
 
 - **backend:** deduplicate push device tokens per user+device with a sliding expiry window (default 180 days) refreshed on register, soft-invalidate on unregister/expiry, and purge expired tokens from push sends (closes #717)
 - **frontend:** announce `DonateForm` validation errors to screen readers via `aria-live="assertive"` region (GrantFox GF-a11y-donate-form)

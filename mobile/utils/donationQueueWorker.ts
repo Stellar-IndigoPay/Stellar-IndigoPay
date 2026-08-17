@@ -11,7 +11,7 @@
  *   - Stops polling when app goes to background, resumes on foreground
  */
 import { AppState, AppStateStatus } from "react-native";
-import axios from "axios";
+import { apiClient } from "../lib/apiClient";
 import {
   getRetryEligibleDonations,
   markRetrying,
@@ -58,7 +58,7 @@ async function submitDonation(
   if (donation.message) payload.message = donation.message;
   if (donation.transactionHash) payload.transactionHash = donation.transactionHash;
 
-  const res = await axios.post(`${API_URL}/api/donations`, payload, {
+  const res = await apiClient.post(`${API_URL}/api/donations`, payload, {
     timeout: 15_000,
   });
   const txHash =
