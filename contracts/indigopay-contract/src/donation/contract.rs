@@ -1,4 +1,4 @@
-use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, Vec};
+use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, Bytes, BytesN, Env, Vec};
 
 use crate::donation::{
     events::{emit_stealth_donation, emit_stealth_scan},
@@ -42,6 +42,31 @@ impl DonationContract {
         msg_hash: BytesN<32>,
     ) -> u64 {
         sender.require_auth();
+
+        let mut is_allowed = false;
+        let config_key = crate::DataKey::TokenConfig(token.clone());
+        if let Some(config) = env.storage().instance().get::<_, crate::TokenConfig>(&config_key) {
+            if config.active {
+                is_allowed = true;
+            }
+        }
+        if !is_allowed {
+            if let Some(native_token) = env.storage().instance().get::<_, Address>(&crate::DataKey::NativeTokenAddress) {
+                if native_token == token {
+                    is_allowed = true;
+                }
+            }
+        }
+        if !is_allowed {
+            if let Some(usdc_token) = env.storage().instance().get::<_, Address>(&crate::DataKey::USDCTokenAddress) {
+                if usdc_token == token {
+                    is_allowed = true;
+                }
+            }
+        }
+        if !is_allowed {
+            panic_with_error!(&env, crate::donation::types::DonationError::DisallowedToken);
+        }
 
         let stealth_addr = Self::generate_stealth_address(
             env.clone(),
@@ -165,6 +190,14 @@ mod tests {
         token
     }
 
+    fn allow_token(env: &Env, contract_id: &Address, token: &Address) {
+        env.as_contract(contract_id, || {
+            env.storage()
+                .instance()
+                .set(&crate::DataKey::NativeTokenAddress, token);
+        });
+    }
+
     #[test]
     fn test_generate_stealth_address_deterministic() {
         let env = Env::default();
@@ -212,6 +245,8 @@ mod tests {
         let msg_hash = BytesN::from_array(&env, &[0u8; 32]);
         let amount: i128 = 5_000_000;
 
+        allow_token(&env, &contract_id, &token);
+
         let donation_id =
             client.donate_stealth(&donor, &token, &ephem, &project, &amount, &msg_hash);
 
@@ -222,6 +257,24 @@ mod tests {
         assert_eq!(stored.project_wallet, project);
         assert_eq!(stored.ephemeral_pubkey, ephem);
         assert_eq!(stored.msg_hash, msg_hash);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError: Error(Contract, #1)")]
+    fn test_donate_stealth_disallowed_token() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, TestHarness);
+        let client = TestHarnessClient::new(&env, &contract_id);
+
+        let donor = Address::generate(&env);
+        let project = Address::generate(&env);
+        let token = create_token(&env, &donor, 10_000_000);
+        let ephem = BytesN::from_array(&env, &[42u8; 33]);
+        let msg_hash = BytesN::from_array(&env, &[0u8; 32]);
+        let amount: i128 = 5_000_000;
+
+        client.donate_stealth(&donor, &token, &ephem, &project, &amount, &msg_hash);
     }
 
     fn seed_donations(env: &Env, contract_id: &Address) -> (Address, BytesN<32>) {
@@ -236,6 +289,8 @@ mod tests {
         let ephem1 = BytesN::from_array(env, &[10u8; 33]);
         let ephem2 = BytesN::from_array(env, &[20u8; 33]);
         let msg_hash = BytesN::from_array(env, &[0u8; 32]);
+
+        allow_token(env, contract_id, &token);
 
         client.donate_stealth(&donor1, &token, &ephem1, &project, &3_000_000, &msg_hash);
         client.donate_stealth(&donor2, &token, &ephem2, &project, &7_000_000, &msg_hash);
@@ -321,6 +376,8 @@ mod tests {
         let ephem1 = BytesN::from_array(&env, &[10u8; 33]);
         let ephem2 = BytesN::from_array(&env, &[20u8; 33]);
         let msg_hash = BytesN::from_array(&env, &[0u8; 32]);
+
+        allow_token(&env, &contract_id, &token);
 
         client.donate_stealth(&donor1, &token, &ephem1, &project, &3_000_000, &msg_hash);
         env.as_contract(&contract_id, || {

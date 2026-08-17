@@ -119,4 +119,12 @@ function getRateLimitConfig(method, path) {
   return RATE_LIMIT_TIERS.default;
 }
 
-module.exports = { RATE_LIMIT_TIERS, getRateLimitConfig };
+const FALLBACK_POLICY = process.env.RATE_LIMIT_FALLBACK_POLICY || "conservative";
+const FALLBACK_REPLICAS = parseInt(process.env.RATE_LIMIT_REPLICAS, 10) || 2;
+
+module.exports = { 
+  RATE_LIMIT_TIERS, 
+  getRateLimitConfig,
+  FALLBACK_POLICY,
+  FALLBACK_REPLICAS
+};
