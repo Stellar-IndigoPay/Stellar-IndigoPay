@@ -1199,6 +1199,57 @@ mod tests {
     }
 
     #[test]
+    fn test_one_source_unresponsive_is_skipped() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        let valid1 = register_price_source(&env, 25);
+        let valid2 = register_price_source(&env, 25);
+        let panicking = env.register(PanickingPriceSource, ());
+
+        client.add_source_oracle(&admin, &valid1);
+        client.add_source_oracle(&admin, &panicking);
+        client.add_source_oracle(&admin, &valid2);
+
+        assert_eq!(client.get_aggregated_price(), 25);
+    }
+
+    #[test]
+    fn test_unexpected_response_type_is_skipped() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        let low = register_price_source(&env, 10);
+        let high = register_price_source(&env, 30);
+        let incompatible = env.register(IncompatiblePriceSource, ());
+
+        client.add_source_oracle(&admin, &low);
+        client.add_source_oracle(&admin, &incompatible);
+        client.add_source_oracle(&admin, &high);
+
+        // median of [10,30] -> 20
+        assert_eq!(client.get_aggregated_price(), 20);
+    }
+
+    #[test]
+    fn test_majority_failure_succeeds_with_quorum() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        // 7 sources, 5 healthy (value 42), 2 panicking
+        let mut sources = Vec::new(&env);
+        for _ in 0..5 {
+            let s = register_price_source(&env, 42);
+            client.add_source_oracle(&admin, &s);
+            sources.push_back(s);
+        }
+        for _ in 0..2 {
+            let p = env.register(PanickingPriceSource, ());
+            client.add_source_oracle(&admin, &p);
+        }
+
+        assert_eq!(client.get_aggregated_price(), 42);
+    }
+
+    #[test]
     fn aggregation_fallback_preserves_configured_twap_window() {
         let (env, contract_id, admin, reporter) = setup();
         let client = SimpleOracleClient::new(&env, &contract_id);
