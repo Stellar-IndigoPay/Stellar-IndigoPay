@@ -47,6 +47,7 @@ const MAX_SOURCE_CHAIN_LEN: u32 = 32;
 const MAX_TX_HASH_LEN: u32 = 128;
 const MAX_PROJECT_ID_LEN: u32 = 64;
 pub const MAX_BATCH_SIZE: u32 = 50;
+pub const MAX_XLM_PER_USD: i128 = 10_000;
 
 // ─── Status enum ────────────────────────────────────────────────────────────
 //
@@ -248,6 +249,7 @@ pub enum AttestationError {
     AggregationUpdateFailed = 58,
     DonorAggregateNotFound = 59,
     ChainAggregateNotFound = 60,
+    InconsistentAmountRatio = 61,
 }
 
 fn read_admin(env: &Env) -> Address {
@@ -285,31 +287,27 @@ fn require_not_paused(env: &Env) {
     }
 }
 
-fn require_positive(amount: i128, _label: &str) {
-    if amount <= 0 {
-        // Cannot call panic_with_error! without env, so callers are
-        // responsible for emitting structured errors. This function is
-        // only called from validate_attestation_input which has env access;
-        // the check is duplicated there for structured error reporting.
-        panic!("Amount must be positive");
-    }
-}
-
-fn validate_source_chain(source_chain: &String) {
+fn validate_source_chain(env: &Env, source_chain: &String) {
     if source_chain.is_empty() || source_chain.len() > MAX_SOURCE_CHAIN_LEN {
-        panic!("Invalid source_chain length");
+        panic_with_error!(env, AttestationError::InvalidSourceChainLength);
     }
 }
 
-fn validate_attestation_input(input: &BatchAttestationInput) {
+fn validate_attestation_input(env: &Env, input: &BatchAttestationInput) {
     if input.source_tx_hash.is_empty() || input.source_tx_hash.len() > MAX_TX_HASH_LEN {
-        panic!("Invalid source_tx_hash length");
+        panic_with_error!(env, AttestationError::InvalidSourceTxHashLength);
     }
     if input.project_id.is_empty() || input.project_id.len() > MAX_PROJECT_ID_LEN {
-        panic!("Invalid project_id length");
+        panic_with_error!(env, AttestationError::InvalidProjectIdLength);
     }
-    require_positive(input.amount_usd, "amount_usd");
-    require_positive(input.amount_xlm, "amount_xlm");
+    if input.amount_usd <= 0 || input.amount_xlm <= 0 {
+        panic_with_error!(env, AttestationError::AmountMustBePositive);
+    }
+
+    let max_xlm = input.amount_usd.checked_mul(MAX_XLM_PER_USD).unwrap_or(i128::MAX);
+    if input.amount_xlm > max_xlm {
+        panic_with_error!(env, AttestationError::InconsistentAmountRatio);
+    }
 }
 
 fn require_source_chain_allowed(env: &Env, source_chain: &String) {
@@ -357,12 +355,12 @@ fn record_attestations_internal(
     let first_input = attestations.get(0).expect("Batch must not be empty");
     let source_chain = first_input.source_chain.clone();
 
-    validate_source_chain(&source_chain);
+    validate_source_chain(env, &source_chain);
     for input in attestations.iter() {
         if input.source_chain != source_chain {
             panic_with_error!(env, AttestationError::BatchSourceChainsMustMatch);
         }
-        validate_attestation_input(&input);
+        validate_attestation_input(env, &input);
     }
     require_source_chain_allowed(env, &source_chain);
 
@@ -1409,6 +1407,26 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "HostError: Error(Contract, #61)")]
+    fn test_max_ratio_panics() {
+        let (env, id, _admin, _relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        
+        let amount_usd = 1_000_000;
+        let amount_xlm = 1_000_000 * super::MAX_XLM_PER_USD + 1;
+
+        client.record_attestation(
+            &client.get_relayer().unwrap(),
+            &String::from_str(&env, "ethereum"),
+            &String::from_str(&env, "0xf6_ratio"),
+            &donor,
+            &String::from_str(&env, "proj"),
+            &amount_usd,
+            &amount_xlm,
+            &0u32,
+        );
+    }
+    #[test]
     fn test_get_attestation_by_source_resolves_to_correct_id() {
         let (env, id, _admin, _relayer, donor) = init_and_relayer();
         let client = AttestationContractClient::new(&env, &id);
@@ -1511,6 +1529,21 @@ mod tests {
         inputs.push_back(batch_input(&env, &donor, "ethereum", "0xvalid"));
         let mut invalid = batch_input(&env, &donor, "ethereum", "0xinvalid");
         invalid.amount_xlm = 0;
+        inputs.push_back(invalid);
+
+        client.record_attestation_batch(&relayer, &inputs);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError: Error(Contract, #61)")]
+    fn test_batch_max_ratio_panics() {
+        let (env, id, _admin, relayer, donor) = init_and_relayer();
+        let client = AttestationContractClient::new(&env, &id);
+        let mut inputs = Vec::new(&env);
+        inputs.push_back(batch_input(&env, &donor, "ethereum", "0xvalid"));
+        let mut invalid = batch_input(&env, &donor, "ethereum", "0xinvalid");
+        invalid.amount_usd = 1_000_000;
+        invalid.amount_xlm = 1_000_000 * super::MAX_XLM_PER_USD + 1;
         inputs.push_back(invalid);
 
         client.record_attestation_batch(&relayer, &inputs);
