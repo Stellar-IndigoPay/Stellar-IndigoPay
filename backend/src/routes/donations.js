@@ -558,6 +558,9 @@ router.get("/:id", async (req, res, next) => {
       throw new AppError("VALIDATION_ERROR", { field: "id", message: "Invalid donation ID" });
     }
 
+    // Prefer the per-donation snapshot (set at ingestion) so historical CO₂
+    // attribution is immutable under later USDC→XLM rate changes. Fall back
+    // to the current env rate only for pre-snapshot rows.
     const USDC_TO_XLM_RATE = parseFloat(process.env.USDC_TO_XLM_RATE || "8.0");
     const query = `
       SELECT 
@@ -566,7 +569,7 @@ router.get("/:id", async (req, res, next) => {
         pr.display_name AS donor_display_name,
         CASE
           WHEN d.currency = 'USDC' AND p.raised_xlm > 0
-            THEN (d.amount * ${USDC_TO_XLM_RATE} * (p.co2_offset_kg::numeric / p.raised_xlm))
+            THEN (d.amount * COALESCE(d.usdc_rate_at_donation, $2::numeric) * (p.co2_offset_kg::numeric / p.raised_xlm))
           WHEN d.currency = 'XLM' AND p.raised_xlm > 0
             THEN (d.amount_xlm * (p.co2_offset_kg::numeric / p.raised_xlm))
           ELSE 0
@@ -576,7 +579,7 @@ router.get("/:id", async (req, res, next) => {
       LEFT JOIN profiles pr ON d.donor_address = pr.public_key
       WHERE d.id = $1
     `;
-    const result = await pool.query(query, [id]);
+    const result = await pool.query(query, [id, USDC_TO_XLM_RATE]);
 
     if (!result.rows[0]) {
       throw new AppError("DONATION_NOT_FOUND");

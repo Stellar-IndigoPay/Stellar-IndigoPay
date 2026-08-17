@@ -157,7 +157,7 @@ async function updateProjectWallets() {
     const rateFromEnv = process.env.USDC_TO_XLM_RATE;
     if (rateFromEnv && !isNaN(parseFloat(rateFromEnv))) {
       usdcToXlmRate = parseFloat(rateFromEnv);
-      setUsdcToXlmRate(usdcToXlmRate);
+      setUsdcToXlmRate(usdcToXlmRate, "env");
     }
   } catch (err) {
     logger.error({ event: "indexer_wallets_refresh_error", err }, err.message);

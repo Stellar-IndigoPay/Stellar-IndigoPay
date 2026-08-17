@@ -53,6 +53,12 @@ ALTER TABLE donations ADD COLUMN IF NOT EXISTS conversion_path     JSONB;
 ALTER TABLE donations ADD COLUMN IF NOT EXISTS converted_amount_xlm NUMERIC(20, 7);
 CREATE INDEX IF NOT EXISTS idx_donations_source_asset ON donations (source_asset) WHERE source_asset IS NOT NULL;
 
+-- USDC→XLM rate snapshot (migration 030): the rate (and its source) actually
+-- applied when a USDC donation was recorded, so historical values are
+-- immutable under later rate changes. NULL for native XLM donations.
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS usdc_rate_at_donation NUMERIC(20, 7);
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS usdc_rate_source       TEXT;
+
 -- Automated CO₂ offset-rate verification (see migration 018 and
 -- services/co2Verifier.js). Self-reported co2_per_xlm rates are compared
 -- against per-category industry benchmarks when a verification request is

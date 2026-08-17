@@ -217,6 +217,23 @@ describe("handleDonation with USDC", () => {
     expect(insertCall[1][5]).toBe("USDC"); // currency
   });
 
+  test("snapshots the USDC→XLM rate and source on the donation row", async () => {
+    const client = makeMockClient();
+    pool.connect.mockResolvedValue(client);
+
+    await handleDonation(projectId, op, { isNative: false, isUSDC: true });
+
+    const insertCall = client.query.mock.calls.find(
+      ([sql]) => sql.startsWith("INSERT INTO donations"),
+    );
+    expect(insertCall).toBeDefined();
+    expect(insertCall[0]).toContain("usdc_rate_at_donation");
+    expect(insertCall[0]).toContain("usdc_rate_source");
+    // Default module-level rate is 8.0, source "default".
+    expect(insertCall[1][8]).toBe(8.0);
+    expect(insertCall[1][9]).toBe("default");
+  });
+
   test("updates project raised_xlm by XLM-equivalent", async () => {
     const client = makeMockClient();
     pool.connect.mockResolvedValue(client);
@@ -291,6 +308,13 @@ describe("handleDonation with USDC", () => {
     );
     // 50 USDC * 12.5 = 625 XLM-equivalent
     expect(updateCall[1][0]).toBe(625);
+
+    const insertCall = client.query.mock.calls.find(
+      ([sql]) => sql.startsWith("INSERT INTO donations"),
+    );
+    // Rate and source are snapshotted from the env-configured value.
+    expect(insertCall[1][8]).toBe(12.5);
+    expect(insertCall[1][9]).toBe("env");
 
     delete process.env.USDC_TO_XLM_RATE;
   });

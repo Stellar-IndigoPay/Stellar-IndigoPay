@@ -34,6 +34,7 @@ let container;
 let testPool;
 let appPool;
 let handleDonation;
+let setUsdcToXlmRate;
 let ready = false;
 let previousDatabaseUrl;
 
@@ -121,9 +122,11 @@ describe("indexer donation idempotency integration", () => {
       `);
 
       const migration = require("../db/migrations/028_indexer_donation_idempotency");
+      const rateMigration = require("../db/migrations/030_usdc_rate_snapshot");
       const migrationClient = await testPool.connect();
       try {
         await migration.up(migrationClient);
+        await rateMigration.up(migrationClient);
       } finally {
         migrationClient.release();
       }
@@ -132,7 +135,7 @@ describe("indexer donation idempotency integration", () => {
       delete require.cache[require.resolve("../db/pool")];
       delete require.cache[require.resolve("./indexerDonationHandler")];
       appPool = require("../db/pool");
-      ({ handleDonation } = require("./indexerDonationHandler"));
+      ({ handleDonation, setUsdcToXlmRate } = require("./indexerDonationHandler"));
       await appPool.query("SELECT 1");
 
       ready = true;
@@ -297,5 +300,70 @@ describe("indexer donation idempotency integration", () => {
       [projectId],
     );
     expect(Number(project.rows[0].raised_xlm)).toBe(15);
+  });
+
+  test("a later USDC→XLM rate change does not alter a stored donation", async () => {
+    if (!ready) {
+      console.warn("Skipping, testcontainer not available");
+      return expect(true).toBe(true);
+    }
+
+    await cleanDatabase();
+    const projectId = await seedProject();
+
+    // Snapshots the rate at ingestion time.
+    setUsdcToXlmRate(8.0, "env");
+    const operation = makeOperation({
+      id: "7001",
+      amount: 50,
+      ledger: 60,
+      transactionHash: "c".repeat(64),
+    });
+
+    await handleDonation(projectId, operation, { isNative: false, isUSDC: true }, {
+      onCursorUpdate: advanceCursor,
+    });
+
+    // 50 USDC × 8.0 = 400 XLM-equivalent recorded at ingestion.
+    const firstDonation = await testPool.query(
+      `SELECT usdc_rate_at_donation, usdc_rate_source, amount
+       FROM donations WHERE project_id = $1`,
+      [projectId],
+    );
+    expect(firstDonation.rows).toHaveLength(1);
+    expect(Number(firstDonation.rows[0].usdc_rate_at_donation)).toBe(8.0);
+    expect(firstDonation.rows[0].usdc_rate_source).toBe("env");
+
+    const firstProject = await testPool.query(
+      "SELECT raised_xlm FROM projects WHERE id = $1",
+      [projectId],
+    );
+    expect(Number(firstProject.rows[0].raised_xlm)).toBe(400);
+
+    // Correct the rate and replay the same operation (as a backfill/replay
+    // would). The existing donation is a no-op, so its snapshot and the
+    // project's raised_xlm must remain unchanged.
+    setUsdcToXlmRate(12.5, "env");
+    await handleDonation(projectId, operation, { isNative: false, isUSDC: true }, {
+      onCursorUpdate: advanceCursor,
+    });
+
+    const secondDonation = await testPool.query(
+      `SELECT usdc_rate_at_donation, usdc_rate_source, amount
+       FROM donations WHERE project_id = $1`,
+      [projectId],
+    );
+    expect(secondDonation.rows).toHaveLength(1);
+    expect(Number(secondDonation.rows[0].usdc_rate_at_donation)).toBe(8.0);
+    expect(secondDonation.rows[0].usdc_rate_source).toBe("env");
+
+    const secondProject = await testPool.query(
+      "SELECT raised_xlm FROM projects WHERE id = $1",
+      [projectId],
+    );
+    expect(Number(secondProject.rows[0].raised_xlm)).toBe(400);
+
+    // Reset for any subsequent tests in this file.
+    setUsdcToXlmRate(8.0, "default");
   });
 });

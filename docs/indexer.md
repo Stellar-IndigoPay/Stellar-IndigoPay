@@ -163,9 +163,9 @@ The indexer uses **custom exponential backoff** for SSE reconnection, independen
 When a matching payment arrives:
 
 1. **Currency detection** — Determines if the payment is XLM or USDC based on `asset_type` and `asset_issuer`.
-2. **Amount normalization** — For USDC, the raw amount is stored in the `amount` column; `amount_xlm` is left `null`. The XLM-equivalent is computed using `USDC_TO_XLM_RATE` for `raised_xlm` increment and donor profile updates.
+2. **Amount normalization** — For USDC, the raw amount is stored in the `amount` column; `amount_xlm` is left `null`. The XLM-equivalent is computed using `USDC_TO_XLM_RATE` for `raised_xlm` increment and donor profile updates. The applied rate and its source are snapshotted on the row (`usdc_rate_at_donation`, `usdc_rate_source`) so historical values are immutable under later rate changes.
 3. **Deduplication** — Checks if the `transaction_hash` already exists in the `donations` table.
-4. **Insert donation** — Writes a new row with `project_id`, `donor_address`, `amount_xlm` (null for USDC), `amount`, `currency`, `transaction_hash`.
+4. **Insert donation** — Writes a new row with `project_id`, `donor_address`, `amount_xlm` (null for USDC), `amount`, `currency`, `transaction_hash`, plus the USDC rate snapshot when applicable.
 5. **Update project** — Increments `raised_xlm` by the XLM-equivalent amount and recalculates `donor_count`.
 6. **Upsert donor profile** — Computes new `total_donated_xlm`, `projects_supported`, and badge tiers.
 7. **Persist cursor** — Updates `indexer_state.last_processed_ledger` in the same transaction.

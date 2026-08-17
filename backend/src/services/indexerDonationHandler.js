@@ -31,13 +31,18 @@ const indexerDonationsProcessed = new Counter({
 
 // Global reference to the USDC→XLM rate — set by indexerService on startup
 let usdcToXlmRate = 8.0;
+// Where the current rate came from ("env", "default", …). Snapshot alongside
+// the rate so historical donations stay auditable and reproducible.
+let usdcRateSource = "default";
 
 /**
  * Set the USDC→XLM conversion rate. Called by indexerService during startup.
  * @param {number} rate
+ * @param {string} [source] - Where the rate came from ("env", "default").
  */
-function setUsdcToXlmRate(rate) {
+function setUsdcToXlmRate(rate, source = "default") {
   usdcToXlmRate = rate;
+  usdcRateSource = source;
 }
 
 /**
@@ -77,6 +82,8 @@ async function handleDonation(projectId, op, { isNative, isUSDC, isBackfill = fa
   let amount;
   let amountXlmForRaised;
   let amountXlmForInsert;
+  let usdcRateAtDonation = null;
+  let usdcRateSourceAtDonation = null;
 
   if (isNative) {
     currency = "XLM";
@@ -89,6 +96,8 @@ async function handleDonation(projectId, op, { isNative, isUSDC, isBackfill = fa
     const xlmEquiv = amount * usdcToXlmRate;
     amountXlmForRaised = xlmEquiv;
     amountXlmForInsert = null;
+    usdcRateAtDonation = usdcToXlmRate;
+    usdcRateSourceAtDonation = usdcRateSource;
   } else {
     return;
   }
@@ -104,8 +113,8 @@ async function handleDonation(projectId, op, { isNative, isUSDC, isBackfill = fa
 
     const donationId = uuid();
     const insertResult = await client.query(
-      `INSERT INTO donations (id, project_id, donor_address, amount_xlm, amount, currency, transaction_hash, indexer_operation_id, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+      `INSERT INTO donations (id, project_id, donor_address, amount_xlm, amount, currency, transaction_hash, indexer_operation_id, usdc_rate_at_donation, usdc_rate_source, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
        ON CONFLICT DO NOTHING
        RETURNING id`,
       [
@@ -117,6 +126,8 @@ async function handleDonation(projectId, op, { isNative, isUSDC, isBackfill = fa
         currency,
         txHash,
         indexerOperationId,
+        usdcRateAtDonation,
+        usdcRateSourceAtDonation,
       ],
     );
 
