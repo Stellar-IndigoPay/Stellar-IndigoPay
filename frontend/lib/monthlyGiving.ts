@@ -22,6 +22,7 @@ import {
   submitSorobanTransaction,
 } from "@/lib/stellar";
 import { signTransactionWithWallet } from "@/lib/wallet";
+import { xlmToStroops } from "@/lib/xlm";
 
 /** ~1 day at 5s/ledger — the contract's minimum allowed subscription interval. */
 export const MIN_SUBSCRIPTION_INTERVAL_LEDGERS = 17280;
@@ -195,9 +196,7 @@ export async function createMonthlySubscription({
 }: CreateMonthlySubscriptionParams): Promise<CreateMonthlySubscriptionResult> {
   try {
     const account = await server.loadAccount(donor);
-    const amountStroops = BigInt(
-      Math.round(Number.parseFloat(amountXLM) * 10_000_000),
-    );
+    const amountStroops = xlmToStroops(amountXLM);
 
     const contract = new Contract(CONTRACT_ID);
     const op = contract.call(

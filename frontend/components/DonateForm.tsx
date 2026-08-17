@@ -153,9 +153,10 @@ export default function DonateForm({
     setValidationAnnouncement(errorValues.length > 0 ? errorValues[0] : "");
   }, [errors]);
 
-  const amountNum = parseFloat(amount);
+  const normalizedAmount = amount.trim();
+  const amountNum = normalizedAmount ? Number.parseFloat(normalizedAmount) : 0;
   const isValid = donationSchema.safeParse({
-    amount,
+    amount: normalizedAmount,
     message: message || undefined,
     projectId: project.id,
   }).success;
@@ -210,7 +211,7 @@ export default function DonateForm({
       await queueDonation({
         projectId: project.id,
         donorAddress: publicKey,
-        amount: amountNum.toString(),
+        amount: normalizedAmount,
         currency,
         message: message.trim() || undefined,
         idempotencyKey,
@@ -284,7 +285,7 @@ export default function DonateForm({
           contractId: CONTRACT_ID,
           donor: publicKey,
           projectId: project.id,
-          amount: amountNum.toFixed(7),
+          amount: normalizedAmount,
           currency,
           intervalLedgers,
           keeperIncentive: "0.5000000",
@@ -323,7 +324,7 @@ export default function DonateForm({
           tokenAddress: nativeTokenAddress,
           donor: publicKey,
           projectId: project.id,
-          amount: amountNum.toFixed(7),
+          amount: normalizedAmount,
           msgHash,
         });
 
@@ -359,7 +360,7 @@ export default function DonateForm({
         await recordDonationMutation.mutateAsync({
           projectId: project.id,
           donorAddress: publicKey,
-          amount: amountNum.toString(),
+          amount: normalizedAmount,
           currency: currency,
           message: message.trim() || undefined,
           transactionHash: result.hash,
@@ -399,7 +400,7 @@ export default function DonateForm({
         fromPublicKey: publicKey,
         toPublicKey: project.walletAddress,
         amount:
-          currency === "XLM" ? amountNum.toFixed(7) : amountNum.toFixed(2),
+          currency === "XLM" ? normalizedAmount : amountNum.toFixed(2),
         memo: `IndigoPay:${project.id.slice(0, 16)}`,
         asset,
       });
@@ -435,7 +436,7 @@ export default function DonateForm({
         recordDonation({
           projectId: project.id,
           donorAddress: publicKey,
-          amount: amountNum.toString(),
+          amount: normalizedAmount,
           currency: currency,
           message: message.trim() || undefined,
           transactionHash: result.hash,
@@ -458,7 +459,7 @@ export default function DonateForm({
         await queueDonation({
           projectId: project.id,
           donorAddress: publicKey,
-          amount: amountNum.toString(),
+          amount: normalizedAmount,
           currency,
           message: message.trim() || undefined,
           idempotencyKey,

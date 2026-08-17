@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { xlmToStroops, STROOPS_PER_XLM } from "@/lib/xlm";
 import { PROJECT_CATEGORIES } from "@/utils/format";
 
 // ── Shared enums ─────────────────────────────────────────────────────────────
@@ -17,8 +18,11 @@ export const stellarTxHashSchema = z
 export const positiveNumberString = z.string().refine(
   (val) => {
     if (val === "" || val == null) return false;
-    const n = Number.parseFloat(val);
-    return Number.isFinite(n) && n > 0;
+    try {
+      return xlmToStroops(val) > BigInt(0);
+    } catch {
+      return false;
+    }
   },
   { message: "Must be a positive number" },
 );
@@ -59,8 +63,11 @@ export const donationSchema = z.object({
     .regex(/^\d+(\.\d{1,7})?$/)
     .refine(
       (val) => {
-        const n = Number.parseFloat(val);
-        return Number.isFinite(n) && n >= 1;
+        try {
+          return xlmToStroops(val) >= STROOPS_PER_XLM;
+        } catch {
+          return false;
+        }
       },
       { message: "Minimum donation is 1" },
     ),
