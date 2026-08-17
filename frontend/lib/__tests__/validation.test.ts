@@ -13,6 +13,7 @@ import {
   submitProjectSchema,
   verificationRequestSchema,
 } from "@/lib/validation";
+import { xlmToStroops } from "@/lib/xlm";
 
 // ── Stellar Address ───────────────────────────────────────────────────────────
 
@@ -109,6 +110,37 @@ describe("xlmAmount", () => {
 });
 
 // ── submitProjectSchema ───────────────────────────────────────────────────────
+
+describe("xlmToStroops", () => {
+  test.each([
+    ["0.1", BigInt(100000)],
+    ["1", BigInt(1000000)],
+    ["1.5", BigInt(1500000)],
+    ["0.000001", BigInt(1)],
+    ["1.234567", BigInt(1234567)],
+  ])("converts %s to %s exactly", (input, expected) => {
+    expect(xlmToStroops(input)).toBe(expected);
+  });
+
+  test("rejects sub-stroop precision", () => {
+    expect(() => xlmToStroops("0.0000001")).toThrow();
+    expect(() => xlmToStroops("1.2345678")).toThrow();
+  });
+
+  test("accepts trailing-zero values at the stroop boundary", () => {
+    expect(xlmToStroops("0.0000010")).toBe(BigInt(1));
+    expect(xlmToStroops("1.0000000")).toBe(BigInt(1000000));
+  });
+
+  test("avoids floating-point rounding regressions for 0.1", () => {
+    expect(xlmToStroops("0.1")).toBe(BigInt(100000));
+    expect(xlmToStroops("0.1") === BigInt(100000)).toBe(true);
+  });
+
+  test("handles the maximum donation amount without losing precision", () => {
+    expect(xlmToStroops("9999999.999999")).toBe(BigInt(9999999999999));
+  });
+});
 
 describe("submitProjectSchema", () => {
   const validPayload = {

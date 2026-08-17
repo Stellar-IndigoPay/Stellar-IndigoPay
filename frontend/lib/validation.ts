@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { StrKey } from "@stellar/stellar-sdk";
+import { xlmToStroops } from "@/lib/xlm";
 import { PROJECT_CATEGORIES } from "@/utils/format";
 
 // ── Reusable field-level validators ────────────────────────────────────────────
@@ -25,9 +26,18 @@ export const xlmAmount = z
   .regex(/^\d+(\.\d{1,7})?$/, {
     message: "Must be a valid XLM amount (up to 7 decimal places)",
   })
-  .refine((val) => parseFloat(val) > 0, {
-    message: "Amount must be greater than 0",
-  });
+  .refine(
+    (val) => {
+      try {
+        return xlmToStroops(val) > BigInt(0);
+      } catch {
+        return false;
+      }
+    },
+    {
+      message: "Amount must be greater than 0",
+    },
+  );
 
 /**
  * Positive whole number string validator (for annual tonnes CO2).
