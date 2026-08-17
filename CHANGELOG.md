@@ -57,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **backend:** fix `auditChain.js` canonicalization to be injective and prevent hash collisions from pipe characters
 - **backend:** durable deduplication for Soroban event processing with atomic cursor commit to prevent double-application on restart (closes #679, GrantFox OSS)
 - **gitops:** Argo Rollouts canary strategy with Prometheus success-rate analysis
 - **k8s:** default-deny NetworkPolicy for the `indigopay` namespace with explicit allow rules
