@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **contracts:** enforce token allow-list on `donate_stealth` to prevent spoofed donations with arbitrary tokens
 - **backend:** apply conservative cap in-memory fallback during Redis outages to prevent rate limits from multiplying across horizontally-scaled replicas
 
 ### Added

@@ -1,4 +1,10 @@
-use soroban_sdk::{contracttype, Address, BytesN};
+use soroban_sdk::{contracterror, contracttype, Address, BytesN};
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub enum DonationError {
+    DisallowedToken = 1,
+}
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
