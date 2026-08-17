@@ -1,0 +1,72 @@
+# .github/workflows/contracts-fuzz.yml
+#
+# Scheduled fuzz harness run for the Soroban contracts.
+#
+# The regular Contracts CI (`contracts.yml`) runs `cargo test` with
+# `--skip fuzz` to keep PR feedback fast, which means the stateful escrow
+# fuzz target and the proptest suite only ever execute when someone
+# remembers to run them locally. This workflow makes the highest-value
+# security test surface run automatically:
+#
+#   - `cargo test --features testutils --workspace -- --nocapture fuzz`
+#   - proptest replays the committed failure seeds in
+#     `contracts/*/proptest-regressions/` before generating new cases, so a
+#     known regression fails loudly instead of accumulating silently
+#   - a post-run `git status` check fails the job on seed-corpus drift
+#     (a regression file that changed during the run means a property
+#     produced a brand-new failing case)
+#
+# Schedule: every Monday at 05:00 UTC.
+# Manual dispatch: `workflow_dispatch`, runnable on any branch.
+
+name: Contracts Fuzz (Scheduled)
+
+on:
+  schedule:
+    # Weekly — Mondays 05:00 UTC.
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz harness (proptest + seed-drift check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+          targets: wasm32v1-none
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+
+      - name: Run fuzz harness
+        run: cargo test --features testutils --workspace -- --nocapture fuzz
+
+      - name: Fail on seed-corpus drift
+        if: always()
+        run: |
+          CHANGED=$(git status --porcelain)
+          if [ -n "$CHANGED" ]; then
+            echo "::error::Fuzz run modified tracked files — seed-corpus drift detected."
+            echo "$CHANGED"
+            echo ""
+            echo "A changing regression file in contracts/*/proptest-regressions/ means"
+            echo "a property produced a new failing case during this run. If the finding"
+            echo "is now fixed, commit the seed; otherwise this is a live regression."
+            exit 1
+          fi
+          echo "Seed corpus unchanged — no regression seeds were rewritten."

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **ci:** scheduled weekly contracts fuzz run (`contracts-fuzz.yml`) — executes the full proptest suite plus the stateful escrow fuzz target via `cargo test --features testutils -- --nocapture fuzz` every Monday 05:00 UTC with `workflow_dispatch` for on-demand runs, failing on any regression or seed-corpus drift (closes #728)
 * **extension:** audit `chrome.storage` usage, confirm no plaintext wallet secrets are persisted (signing is delegated entirely to Freighter), and add CI secret-scan to enforce this going forward (closes #656)
 
 - **backend:** deduplicate push device tokens per user+device with a sliding expiry window (default 180 days) refreshed on register, soft-invalidate on unregister/expiry, and purge expired tokens from push sends (closes #717)
@@ -53,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **contracts/oracle:** align TWAP observation window with staleness threshold invariant — reduce `DEFAULT_STALENESS_THRESHOLD` from 720 to 120 ledger sequences to match `MAX_OBSERVATIONS` capacity; enforce constraint that staleness threshold ≥ MAX_OBSERVATIONS at config time to prevent misconfiguration where operators believe oracle has long-window averaging when actual TWAP coverage is limited to ~20 observations (~100 seconds) (GrantFox GF-oracle-twap-alignment)
+- **contracts/escrow:** guard `dispute_job` against re-disputing a `Completed` job — reject with `EscrowError::JobAlreadyCompleted` instead of silently overwriting milestone disbursement state (caught by the stateful escrow fuzz target)
 - **gitops:** ArgoCD Application manifest for chart-driven reconciliation
 
 ### Fixed

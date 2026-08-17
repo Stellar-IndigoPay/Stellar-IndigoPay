@@ -158,6 +158,8 @@ pub enum EscrowError {
     ThresholdExceedsAdminCount = 60,
     AdminTransferInProgress = 61,
     AdminSetUpdateFailed = 62,
+    // Disputing an already-finalized (Completed) job is not allowed.
+    JobAlreadyCompleted = 63,
 }
 
 fn compute_remaining_funds(job: &Job) -> i128 {
@@ -697,6 +699,16 @@ impl EscrowContract {
             .instance()
             .get(&DataKey::Job(job_id.clone()))
             .expect("Job not found");
+
+        // A finalized job (all milestones released / dispute resolved) is
+        // terminal — re-disputing it would flip a Completed job back to
+        // Disputed and allow a second resolve to run on settled funds.
+        if job.status == JobStatus::Completed {
+            panic_with_error!(&env, EscrowError::JobAlreadyCompleted);
+        }
+        if job.disputed {
+            panic_with_error!(&env, EscrowError::DisputeJobAlreadyDisputed);
+        }
         job.disputed = true;
         job.status = JobStatus::Disputed;
         reputation_job_disputed(&env, &job);
