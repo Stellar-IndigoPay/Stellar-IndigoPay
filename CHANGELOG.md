@@ -54,7 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **frontend:** pin locale (`en-US`) and timezone (`UTC`) for date/number formatting helpers (`formatDate`, `formatDateTime`, `formatTime`, `formatMonthYear`, `formatNumber`) and replace raw `Intl.*`/`toLocaleString` calls in SSR-rendered components, making server/client output deterministic and eliminating hydration mismatches (closes #652)
+- **contracts/oracle:** preserve a reporter's existing unstake cooldown when they top up an active stake, so previously unlocked stake is not re-locked
+
 - **contracts/oracle:** align TWAP observation window with staleness threshold invariant — reduce `DEFAULT_STALENESS_THRESHOLD` from 720 to 120 ledger sequences to match `MAX_OBSERVATIONS` capacity; enforce constraint that staleness threshold ≥ MAX_OBSERVATIONS at config time to prevent misconfiguration where operators believe oracle has long-window averaging when actual TWAP coverage is limited to ~20 observations (~100 seconds) (GrantFox GF-oracle-twap-alignment)
 - **gitops:** ArgoCD Application manifest for chart-driven reconciliation
 

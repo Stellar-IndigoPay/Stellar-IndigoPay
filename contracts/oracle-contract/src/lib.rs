@@ -449,16 +449,24 @@ impl SimpleOracle {
         let updated = current
             .checked_add(amount)
             .expect("Reporter stake overflow");
-        let cooldown: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::UnstakeCooldown)
-            .unwrap_or(DEFAULT_UNSTAKE_COOLDOWN);
-        let available_at = env
-            .ledger()
-            .sequence()
-            .checked_add(cooldown)
-            .expect("Stake cooldown overflow");
+        // One availability timestamp governs the reporter's aggregate stake.
+        // Preserve it for top-ups so already-unlocked stake is not re-locked.
+        let available_at = if current == 0 {
+            let cooldown: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::UnstakeCooldown)
+                .unwrap_or(DEFAULT_UNSTAKE_COOLDOWN);
+            env.ledger()
+                .sequence()
+                .checked_add(cooldown)
+                .expect("Stake cooldown overflow")
+        } else {
+            env.storage()
+                .instance()
+                .get(&DataKey::StakeAvailableAt(reporter.clone()))
+                .expect("Stake cooldown not set")
+        };
 
         env.storage()
             .instance()
@@ -2045,6 +2053,30 @@ mod tests {
         setup_staking(&env, &contract_id, &admin, &reporter, 1_000, 10);
         client.stake(&reporter, &1_000);
         client.unstake(&reporter);
+    }
+
+    #[test]
+    fn test_stake_top_up_preserves_existing_cooldown() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        let (stake_token, _) = setup_staking(&env, &contract_id, &admin, &reporter, 1_000, 10);
+        let starting_balance = token::Client::new(&env, &stake_token).balance(&reporter);
+
+        client.stake(&reporter, &1_000);
+        env.ledger().set_sequence_number(5);
+        client.stake(&reporter, &500);
+
+        env.ledger().set_sequence_number(9);
+        assert!(client.try_unstake(&reporter).is_err());
+
+        env.ledger().set_sequence_number(10);
+        client.unstake(&reporter);
+
+        assert_eq!(client.get_reporter_stake(&reporter), 0);
+        assert_eq!(
+            token::Client::new(&env, &stake_token).balance(&reporter),
+            starting_balance
+        );
     }
 
     #[test]
