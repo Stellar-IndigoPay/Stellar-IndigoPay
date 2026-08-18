@@ -4,6 +4,12 @@ const logger = require("../logger");
 const { Gauge, Counter } = require("prom-client");
 const { registry } = require("./metrics");
 
+const guardianLastSuccessTimestamp = new Gauge({
+  name: "guardian_last_success_timestamp",
+  help: "Unix timestamp of the most recent successful TTL extension.",
+  registers: [registry],
+});
+
 // 12-hour cadence
 const GUARDIAN_INTERVAL_MS = 12 * 60 * 60 * 1000;
 // threshold_ledgers = 120,960 * 4 (matching the contract's internal constant)
@@ -56,6 +62,7 @@ async function runGuardian() {
     const txXdr = await buildExtendAllTtlTransaction();
     await submitTransaction(txXdr);
     guardianUpdateCounter.inc();
+    guardianLastSuccessTimestamp.set(Math.round(Date.now() / 1000));
     logger.info({ event: "guardian_ttl_extended" }, "Guardian successfully extended all TTLs");
   } catch (err) {
     logger.error({ event: "guardian_ttl_extend_failed", err: err.message }, "Guardian failed to extend TTL");
@@ -96,4 +103,5 @@ module.exports = {
   runGuardian,
   start,
   stop,
+  guardianLastSuccessTimestamp,
 };

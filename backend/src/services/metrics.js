@@ -554,6 +554,7 @@ const metrics = {
   projectionRebuildDurationSeconds,
   projectionRebuildLastEvents,
   projectionRebuildInProgress,
+  guardianLastSuccessTimestamp,
 };
 
 module.exports = {
@@ -566,4 +567,5 @@ module.exports = {
   refreshDbPoolMetrics,
   refreshQueueMetrics,
   updateSecretRotationMetrics,
+  guardianLastSuccessTimestamp,
 };

@@ -224,6 +224,18 @@ groups:
         annotations:
           summary: "Oracle price is stale (>15 min since last update)"
 
+      - alert: GuardianTtlExtensionStale
+        expr: time() - guardian_last_success_timestamp > 86400
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Guardian TTL extension is stale (>24h since last successful extension)"
+          description: |
+            The guardian's successful TTL extension on contract storage has not occurred for more than 24 hours.
+            The guardian runs every 12 hours and should extend contract storage TTLs regularly to prevent storage entries from expiring and being irrecoverably deleted.
+            If this alert persists, contract storage may become stale and require manual intervention to recover expired entries.
+
   - name: stellar-indigopay-secret-rotation
     interval: 30s
     rules:
