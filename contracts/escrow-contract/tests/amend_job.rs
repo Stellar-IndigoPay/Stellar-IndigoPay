@@ -44,7 +44,7 @@ fn test_create_amend_then_release_new_milestones() {
         oracle: None,
         verified: false,
         proof_hash: None,
-            refunded: false,
+        refunded: false,
     });
     new_milestones.push_back(Milestone {
         name: SorobanString::from_str(&env, "Design-Visuals"),
@@ -54,7 +54,7 @@ fn test_create_amend_then_release_new_milestones() {
         oracle: None,
         verified: false,
         proof_hash: None,
-            refunded: false,
+        refunded: false,
     });
     new_milestones.push_back(Milestone {
         name: SorobanString::from_str(&env, "Development"),
@@ -64,7 +64,7 @@ fn test_create_amend_then_release_new_milestones() {
         oracle: None,
         verified: false,
         proof_hash: None,
-            refunded: false,
+        refunded: false,
     });
     new_milestones.push_back(Milestone {
         name: SorobanString::from_str(&env, "Testing"),
@@ -74,7 +74,7 @@ fn test_create_amend_then_release_new_milestones() {
         oracle: None,
         verified: false,
         proof_hash: None,
-            refunded: false,
+        refunded: false,
     });
 
     client.amend_job_milestones(&client_addr, &freelancer, &job_id, &new_milestones);
@@ -138,7 +138,7 @@ fn test_amend_after_release_panics_integration() {
         oracle: None,
         verified: false,
         proof_hash: None,
-            refunded: false,
+        refunded: false,
     });
     client.amend_job_milestones(&client_addr, &freelancer, &job_id, &new_milestones);
 }

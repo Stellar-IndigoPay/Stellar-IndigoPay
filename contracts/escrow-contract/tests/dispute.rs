@@ -113,7 +113,7 @@ fn test_resolve_dispute_refund_client() {
         oracle: None,
         verified: false,
         proof_hash: None,
-            refunded: false,
+        refunded: false,
     });
     milestones.push_back(escrow_contract::Milestone {
         name: SorobanString::from_str(&env, "M2"),
@@ -123,7 +123,7 @@ fn test_resolve_dispute_refund_client() {
         oracle: None,
         verified: false,
         proof_hash: None,
-            refunded: false,
+        refunded: false,
     });
 
     client.create_job(

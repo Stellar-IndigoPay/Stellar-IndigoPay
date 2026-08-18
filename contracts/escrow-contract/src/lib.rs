@@ -3013,7 +3013,7 @@ mod tests {
                 oracle: oracle.clone(),
                 verified: false,
                 proof_hash: None,
-            refunded: false,
+                refunded: false,
             });
 
             client.create_job(

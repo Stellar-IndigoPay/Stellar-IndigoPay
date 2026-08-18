@@ -63,7 +63,7 @@ pub fn create_simple_job(
         oracle: None,
         verified: false,
         proof_hash: None,
-            refunded: false,
+        refunded: false,
     });
     client.create_job(
         client_addr,
@@ -94,7 +94,7 @@ pub fn three_milestones(env: &Env) -> Vec<Milestone> {
         oracle: None,
         verified: false,
         proof_hash: None,
-            refunded: false,
+        refunded: false,
     });
     milestones.push_back(Milestone {
         name: SorobanString::from_str(env, "Development"),
@@ -104,7 +104,7 @@ pub fn three_milestones(env: &Env) -> Vec<Milestone> {
         oracle: None,
         verified: false,
         proof_hash: None,
-            refunded: false,
+        refunded: false,
     });
     milestones.push_back(Milestone {
         name: SorobanString::from_str(env, "Testing"),
@@ -114,7 +114,7 @@ pub fn three_milestones(env: &Env) -> Vec<Milestone> {
         oracle: None,
         verified: false,
         proof_hash: None,
-            refunded: false,
+        refunded: false,
     });
     milestones
 }

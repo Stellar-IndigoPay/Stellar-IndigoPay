@@ -281,7 +281,11 @@ mod fuzz {
             if job.resolved {
                 return true; // contract status is Completed
             }
-            let settled_count = job.milestones.iter().filter(|m| m.released || m.refunded).count();
+            let settled_count = job
+                .milestones
+                .iter()
+                .filter(|m| m.released || m.refunded)
+                .count();
             let total_count = job.milestones.len();
             if settled_count == 0 {
                 return true; // Escrowed
@@ -410,7 +414,7 @@ mod fuzz {
                 oracle: None,
                 verified: false,
                 proof_hash: None,
-            refunded: false,
+                refunded: false,
             });
         }
         milestones

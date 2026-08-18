@@ -1,0 +1,437 @@
+[2m2026-08-18T00:16:28.800164Z[0m [32m INFO[0m [2mcargo_tarpaulin::config[0m[2m:[0m Creating config
+[2m2026-08-18T00:16:29.912124Z[0m [32m INFO[0m [2mcargo_tarpaulin[0m[2m:[0m Running config coverage
+[2m2026-08-18T00:16:29.912165Z[0m [32m INFO[0m [2mcargo_tarpaulin[0m[2m:[0m Running Tarpaulin
+[2m2026-08-18T00:16:29.912172Z[0m [32m INFO[0m [2mcargo_tarpaulin[0m[2m:[0m Building project
+[2m2026-08-18T00:16:29.912181Z[0m [32m INFO[0m [2mcargo_tarpaulin::cargo[0m[2m:[0m Cleaning project
+error: --exclude can only be used together with --workspace
+[2m2026-08-18T00:16:31.708324Z[0m [31mERROR[0m [2mcargo_tarpaulin[0m[2m:[0m Cargo failed to run! Error: cargo run failed
+[2m2026-08-18T00:16:32.064020Z[0m [32m INFO[0m [2mcargo_tarpaulin[0m[2m:[0m Running config html
+[2m2026-08-18T00:16:32.064071Z[0m [32m INFO[0m [2mcargo_tarpaulin[0m[2m:[0m Running Tarpaulin
+[2m2026-08-18T00:16:32.064079Z[0m [32m INFO[0m [2mcargo_tarpaulin[0m[2m:[0m Building project
+[2m2026-08-18T00:16:32.064088Z[0m [32m INFO[0m [2mcargo_tarpaulin::cargo[0m[2m:[0m Cleaning project
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.46
+   Compiling version_check v0.9.5
+   Compiling cfg-if v1.0.4
+   Compiling typenum v1.20.1
+   Compiling serde_core v1.0.228
+   Compiling libc v0.2.186
+   Compiling serde v1.0.228
+   Compiling zmij v1.0.21
+   Compiling serde_json v1.0.150
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling generic-array v0.14.9
+   Compiling subtle v2.6.1
+   Compiling autocfg v1.5.1
+   Compiling const-oid v0.9.6
+   Compiling strsim v0.11.1
+   Compiling ident_case v1.0.1
+   Compiling zerocopy v0.8.54
+   Compiling syn v2.0.118
+   Compiling cpufeatures v0.2.17
+   Compiling num-traits v0.2.19
+   Compiling semver v1.0.28
+   Compiling schemars v0.8.22
+   Compiling getrandom v0.2.17
+   Compiling rand_core v0.6.4
+   Compiling dyn-clone v1.0.20
+   Compiling data-encoding v2.11.0
+   Compiling paste v1.0.15
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.6
+   Compiling digest v0.10.7
+   Compiling num-integer v0.1.46
+   Compiling ethnum v1.5.3
+   Compiling once_cell v1.21.4
+   Compiling escape-bytes v0.1.1
+   Compiling num-bigint v0.4.8
+   Compiling sha2 v0.10.9
+   Compiling ff v0.13.1
+   Compiling rustc_version v0.4.1
+   Compiling ahash v0.8.12
+   Compiling base16ct v0.2.0
+   Compiling arrayvec v0.7.8
+   Compiling equivalent v1.0.2
+   Compiling either v1.16.0
+   Compiling hashbrown v0.17.1
+   Compiling itertools v0.13.0
+   Compiling darling_core v0.23.0
+   Compiling indexmap v2.14.0
+   Compiling group v0.13.0
+   Compiling libm v0.2.16
+   Compiling base64 v0.22.1
+   Compiling allocator-api2 v0.2.21
+   Compiling wasmparser v0.116.1
+   Compiling fnv v1.0.7
+   Compiling thiserror v1.0.69
+   Compiling hashbrown v0.15.5
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.3.1
+   Compiling curve25519-dalek v4.1.3
+   Compiling rand v0.8.7
+   Compiling static_assertions v1.1.0
+   Compiling downcast-rs v1.2.1
+   Compiling indexmap-nostd v0.4.0
+   Compiling wasmparser-nostd v0.100.2
+   Compiling wasmi_core v0.13.0
+   Compiling ark-std v0.5.0
+   Compiling prettyplease v0.2.37
+   Compiling getrandom v0.3.4
+   Compiling wasmi_arena v0.4.1
+   Compiling spin v0.9.8
+   Compiling smallvec v1.15.2
+   Compiling darling_core v0.20.11
+   Compiling byteorder v1.5.0
+   Compiling heapless v0.8.0
+   Compiling serde_derive v1.0.228
+   Compiling zeroize_derive v1.5.0
+   Compiling cfg_eval v0.1.2
+   Compiling enum-ordinalize-derive v4.4.1
+   Compiling zeroize v1.9.0
+   Compiling darling_macro v0.23.0
+   Compiling enum-ordinalize v4.4.1
+   Compiling der v0.7.10
+   Compiling darling v0.23.0
+   Compiling serde_with_macros v3.21.0
+   Compiling ark-serialize-derive v0.5.0
+   Compiling ark-serialize v0.5.0
+   Compiling signature v2.2.0
+   Compiling sec1 v0.7.3
+   Compiling crypto-bigint v0.5.5
+   Compiling educe v0.6.0
+   Compiling ark-ff-asm v0.5.0
+   Compiling ark-ff-macros v0.5.0
+   Compiling hmac v0.12.1
+   Compiling elliptic-curve v0.13.8
+   Compiling rfc6979 v0.4.0
+   Compiling derive_arbitrary v1.3.2
+   Compiling crate-git-revision v0.0.6
+   Compiling hex v0.4.3
+   Compiling num-derive v0.4.2
+   Compiling stellar-strkey v0.0.13
+   Compiling stellar-xdr v27.0.0
+   Compiling thiserror-impl v1.0.69
+   Compiling soroban-env-common v27.0.0
+   Compiling ecdsa v0.16.9
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling arbitrary v1.3.2
+   Compiling primeorder v0.13.6
+   Compiling ed25519 v2.2.3
+   Compiling serde_with v3.21.0
+   Compiling soroban-wasmi v0.31.1-soroban.20.0.1
+   Compiling ark-ff v0.5.0
+   Compiling soroban-env-host v27.0.0
+   Compiling keccak v0.1.6
+   Compiling sha3 v0.10.9
+   Compiling p256 v0.13.2
+   Compiling ed25519-dalek v2.2.0
+   Compiling k256 v0.13.4
+   Compiling stellar-strkey v0.0.16
+   Compiling crate-git-revision v0.0.9
+   Compiling darling_macro v0.20.11
+   Compiling hash32 v0.3.1
+   Compiling soroban-builtin-sdk-macros v27.0.0
+   Compiling dtor-proc-macro v0.0.6
+   Compiling stable_deref_trait v1.2.1
+   Compiling getrandom v0.4.3
+   Compiling hex-literal v0.4.1
+   Compiling rustix v1.1.4
+   Compiling dtor v0.1.1
+   Compiling rand_core v0.9.5
+   Compiling darling v0.20.11
+   Compiling soroban-sdk v27.0.0
+   Compiling macro-string v0.1.4
+   Compiling linux-raw-sys v0.12.1
+   Compiling heck v0.5.0
+   Compiling ctor-proc-macro v0.0.6
+   Compiling bitflags v2.13.0
+   Compiling ctor v0.5.0
+   Compiling bytes-lit v0.0.6
+   Compiling visibility v0.1.1
+   Compiling fastrand v2.4.1
+   Compiling wait-timeout v0.2.1
+   Compiling bit-vec v0.8.0
+   Compiling quick-error v1.2.3
+   Compiling bit-set v0.8.0
+   Compiling rand_xorshift v0.4.0
+   Compiling rand v0.9.5
+   Compiling rand_chacha v0.9.0
+   Compiling regex-syntax v0.8.11
+   Compiling unarray v0.1.4
+   Compiling ark-poly v0.5.0
+   Compiling tempfile v3.27.0
+   Compiling rusty-fork v0.3.1
+   Compiling ark-ec v0.5.0
+   Compiling proptest v1.11.0
+   Compiling ark-bls12-381 v0.5.0
+   Compiling ark-bn254 v0.5.0
+   Compiling soroban-spec v27.0.0
+   Compiling soroban-spec-rust v27.0.0
+   Compiling soroban-env-macros v27.0.0
+   Compiling soroban-sdk-macros v27.0.0
+   Compiling soroban-ledger-snapshot v27.0.0
+   Compiling escrow-contract v0.1.0 (/home/gift/Stellar-IndigoPay/contracts/escrow-contract)
+   Compiling attestation-contract v0.1.0 (/home/gift/Stellar-IndigoPay/contracts/attestation-contract)
+   Compiling oracle-contract v0.1.0 (/home/gift/Stellar-IndigoPay/contracts/oracle-contract)
+   Compiling indigopay-contract v0.1.0 (/home/gift/Stellar-IndigoPay/contracts/indigopay-contract)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 37s
+[2m2026-08-18T00:19:11.368856Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling::linux[0m[2m:[0m Launching test
+[2m2026-08-18T00:19:11.369014Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling[0m[2m:[0m running /home/gift/cargo-build/debug/deps/amend_job-399c8df7dd3177c3
+
+running 2 tests
+test test_amend_after_release_panics_integration - should panic ... ok
+test test_create_amend_then_release_new_milestones ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+[2m2026-08-18T00:19:26.506448Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling::linux[0m[2m:[0m Launching test
+[2m2026-08-18T00:19:26.506489Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling[0m[2m:[0m running /home/gift/cargo-build/debug/deps/attestation_contract-c07e1c77fcc080f4
+
+running 39 tests
+test tests::test_aggregate_empty_chain_returns_zeros ... ok
+test tests::test_aggregate_empty_donor_returns_zeros ... ok
+test tests::test_batch_duplicate_hash_panics - should panic ... ok
+test tests::test_allow_list_rejects_unlisted_chain - should panic ... ok
+test tests::test_batch_empty_panics - should panic ... ok
+test tests::test_batch_invalid_amount_panics - should panic ... ok
+test tests::test_batch_mixed_source_chains_panics - should panic ... ok
+test tests::test_batch_paused_panics - should panic ... ok
+test tests::test_batch_events ... ok
+test tests::test_batch_allowlisted_source_chain ... ok
+test tests::test_aggregate_with_revoked ... ok
+test tests::test_batch_replay_panics - should panic ... ok
+test tests::test_batch_unauthorized_relayer_panics - should panic ... ok
+test tests::test_batch_unlisted_source_chain_panics - should panic ... ok
+test tests::test_batch_atomicity ... ok
+test tests::test_batch_size_limit - should panic ... ok
+test tests::test_batch_recording_success ... ok
+test tests::test_chain_aggregate ... ok
+test tests::test_aggregate_consistency_after_repeated_operations ... ok
+test tests::test_chain_aggregate_after_verify_and_revoke ... ok
+test tests::test_double_init_fails - should panic ... ok
+test tests::test_donor_aggregate_on_record ... ok
+test tests::test_donor_aggregate_on_verify ... ok
+test tests::test_initialize_stores_admin ... ok
+test tests::test_non_relayer_cannot_record - should panic ... ok
+test tests::test_double_verify_panics - should panic ... ok
+test tests::test_get_attestation_by_source_resolves_to_correct_id ... ok
+test tests::test_different_donors_aggregate_independently ... ok
+test tests::test_pause_blocks_record_attestation ... ok
+test tests::test_pause_blocks_record_via_event - should panic ... ok
+test tests::test_get_by_donor_returns_all_attestations_for_that_donor ... ok
+test tests::test_replay_attempt_panics - should panic ... ok
+test tests::test_record_attestation_returns_id_and_increments_counts ... ok
+test tests::test_zero_amount_panics - should panic ... ok
+test tests::test_revoke_attestation_keeps_record_but_status_is_revoked ... ok
+test tests::test_revoke_verified_attestation_updates_aggregate_correctly ... ok
+test tests::test_verify_attestation_moves_to_verified ... ok
+test tests::test_multiple_attestations_across_multiple_chains ... ok
+test tests::test_batch_of_50_all_records_queryable ... ok
+
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.71s
+
+[2m2026-08-18T00:19:45.421799Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling::linux[0m[2m:[0m Launching test
+[2m2026-08-18T00:19:45.421843Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling[0m[2m:[0m running /home/gift/cargo-build/debug/deps/release_escrow-b41967fa50fd91c9
+
+running 8 tests
+test release_missing_job_panics - should panic ... ok
+test test_only_client_can_release - should panic ... ok
+test test_invalid_milestone_index_panics - should panic ... ok
+test test_release_already_released_milestone_panics - should panic ... ok
+test test_partial_release_updates_status ... ok
+test test_release_disputed_job_panics - should panic ... ok
+test test_full_release_completes_job ... ok
+test test_milestone_release_pays_proportional_amount ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+
+[2m2026-08-18T00:19:59.865129Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling::linux[0m[2m:[0m Launching test
+[2m2026-08-18T00:19:59.865174Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling[0m[2m:[0m running /home/gift/cargo-build/debug/deps/claim-654593cfa14442a6
+
+running 7 tests
+test test_claim_non_existent_job_panics - should panic ... ok
+test test_claim_before_release_period_panics - should panic ... ok
+test test_claim_invalid_milestone_index_panics - should panic ... ok
+test test_freelancer_can_claim_after_release_period ... ok
+test test_claim_already_released_milestone_panics - should panic ... ok
+test test_claim_disputed_job_panics - should panic ... ok
+test test_claim_all_milestones_completes_job ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+
+[2m2026-08-18T00:20:14.235517Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling::linux[0m[2m:[0m Launching test
+[2m2026-08-18T00:20:14.235606Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling[0m[2m:[0m running /home/gift/cargo-build/debug/deps/multisig-9384fffc068d6b55
+
+running 1 test
+test test_3_of_5_dispute_and_release_with_per_job_period ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+[2m2026-08-18T00:20:29.157694Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling::linux[0m[2m:[0m Launching test
+[2m2026-08-18T00:20:29.159353Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling[0m[2m:[0m running /home/gift/cargo-build/debug/deps/oracle_contract-bb4bfd27f43f92b0
+
+running 62 tests
+test tests::admin_can_set_configuration ... ok
+test tests::averages_fewer_than_ten_observations ... ok
+test tests::changing_twap_window_applies_to_existing_observations ... ok
+test tests::configuration_defaults_are_stored_and_returned ... ok
+test tests::aggregation_fallback_preserves_configured_twap_window ... ok
+test tests::configuration_setters_emit_events ... ok
+test tests::changing_staleness_threshold_applies_immediately ... ok
+test tests::aggregation_fallback_preserves_staleness_and_fallback_price ... ok
+test tests::direct_self_registration_is_rejected ... ok
+test tests::initialize_only_once - should panic ... ok
+test tests::duplicate_values_are_retained_in_median ... ok
+test tests::configured_staleness_affects_deviation_baseline_availability ... ok
+test tests::even_source_median_is_overflow_safe ... ok
+test tests::averages_only_latest_ten_observations ... ok
+test tests::invalid_prices_and_failed_sources_are_skipped ... ok
+test tests::negative_price_is_rejected - should panic ... ok
+test tests::newest_observation_controls_freshness ... ok
+test tests::multiple_reporters_contribute_to_twap ... ok
+test tests::configured_twap_window_affects_deviation_baseline ... ok
+test tests::non_reporter_cannot_report - should panic ... ok
+test tests::no_observations_uses_fallback ... ok
+test tests::one_observation_is_returned ... ok
+test tests::observation_at_staleness_threshold_is_fresh ... ok
+test tests::no_observations_without_fallback_panics - should panic ... ok
+test tests::non_admin_cannot_set_configuration ... ok
+test tests::only_admin_can_set_deviation_threshold - should panic ... ok
+test tests::only_admin_can_add_reporter - should panic ... ok
+test tests::missing_configuration_keys_use_legacy_defaults ... ok
+test tests::only_admin_can_remove_reporter - should panic ... ok
+test tests::staleness_threshold_bounds_are_enforced ... ok
+test tests::stale_observation_uses_fallback ... ok
+test tests::circular_buffer_overwrites_after_twenty_entries ... ok
+test tests::stale_observation_without_fallback_panics - should panic ... ok
+test tests::removed_reporter_cannot_report - should panic ... ok
+test tests::test_aggregate_single_source ... ok
+test tests::test_aggregate_fallback ... ok
+test tests::test_add_remove_source ... ok
+test tests::test_aggregate_multiple_sources_median ... ok
+test tests::test_deviation_disabled_zero ... ok
+test tests::test_deviation_accept_within_bounds ... ok
+test tests::test_deviation_reject ... ok
+test tests::test_deviation_reject_emits_price_rejected_event ... ok
+test tests::test_set_deviation_threshold ... ok
+test tests::test_deviation_skip_few_observations ... ok
+test tests::test_twap_flash_loan_resistance ... ok
+test tests::test_report_without_stake_panics - should panic ... ok
+test tests::test_twap_freshness_expiry ... ok
+test tests::test_source_limit_enforced ... ok
+test tests::test_twap_multiple_observations ... ok
+test tests::test_twap_single_observation ... ok
+test tests::test_stake ... ok
+test tests::twap_addition_overflow_panics ... ok
+test tests::twap_window_bounds_are_enforced ... ok
+test tests::test_slash_event ... ok
+test tests::twap_window_cannot_exceed_staleness_threshold ... ok
+test tests::test_unstake_before_cooldown_panics - should panic ... ok
+test tests::zero_fallback_is_rejected - should panic ... ok
+test tests::test_slash_reduces_stake ... ok
+test tests::unauthorized_source_management_does_not_mutate_state ... ok
+test tests::test_unstake_after_cooldown ... ok
+test tests::zero_price_is_rejected - should panic ... ok
+test tests::random_sequences_stay_within_recent_min_and_max ... ok
+
+test result: ok. 62 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 10.05s
+
+[2m2026-08-18T00:20:54.373530Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling::linux[0m[2m:[0m Launching test
+[2m2026-08-18T00:20:54.373587Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling[0m[2m:[0m running /home/gift/cargo-build/debug/deps/create_job-fb41d87d69f88752
+
+running 8 tests
+test test_milestone_validation - should panic ... ok
+test test_zero_amount_panics - should panic ... ok
+test test_negative_amount_panics - should panic ... ok
+test test_release_after_below_minimum_panics - should panic ... ok
+test test_duplicate_job_id_panics - should panic ... ok
+test test_zero_percentage_milestone ... ok
+test test_create_job_with_custom_release_after ... ok
+test test_milestone_based_release ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+[2m2026-08-18T00:21:07.609597Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling::linux[0m[2m:[0m Launching test
+[2m2026-08-18T00:21:07.609639Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling[0m[2m:[0m running /home/gift/cargo-build/debug/deps/multi_token-bfa28a04aa9ca179
+
+running 7 tests
+test test_create_job_with_usdc ... ok
+test test_refund_usdc_job ... ok
+test test_claim_milestone_usdc ... ok
+test test_dispute_resolution_usdc ... ok
+test test_usdc_full_lifecycle_integration ... ok
+test test_release_milestone_usdc ... ok
+test test_two_jobs_different_tokens_isolated ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+[2m2026-08-18T00:21:21.300687Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling::linux[0m[2m:[0m Launching test
+[2m2026-08-18T00:21:21.300732Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling[0m[2m:[0m running /home/gift/cargo-build/debug/deps/dispute-ad70c8c80ace5d8c
+
+running 7 tests
+test test_dispute_non_existent_job_panics - should panic ... ok
+test test_resolve_non_disputed_job_panics - should panic ... ok
+test test_non_admin_cannot_dispute - should panic ... ok
+test test_non_admin_cannot_resolve - should panic ... ok
+test test_dispute_freezes_release ... ok
+test test_resolve_dispute_approve_remaining ... ok
+test test_resolve_dispute_refund_client ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+[2m2026-08-18T00:21:35.843521Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling::linux[0m[2m:[0m Launching test
+[2m2026-08-18T00:21:35.843566Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling[0m[2m:[0m running /home/gift/cargo-build/debug/deps/escrow_contract-0e8f16356423b50e
+
+running 45 tests
+test tests::release_missing_job_panics - should panic ... ok
+test tests::test_admin_management ... ok
+test tests::test_amend_only_freelancer_panics - should panic ... ok
+test tests::test_amend_only_client_panics - should panic ... ok
+test tests::test_amend_wrong_sum_panics - should panic ... ok
+test tests::test_claim_milestone_after_release_period ... ok
+test tests::test_amend_count_increments ... ok
+test tests::test_amend_released_job_panics - should panic ... ok
+test tests::test_amend_unreleased_job ... ok
+test tests::test_claim_milestone_before_release_period_panics - should panic ... ok
+test tests::test_claim_milestone_wrong_freelancer_panics - should panic ... ok
+test tests::test_dispute_freezes_release ... ok
+test tests::test_milestone_validation - should panic ... ok
+test tests::test_multi_sig_admin_initialize ... ok
+test tests::test_dispute_milestone_already_disputed_panics - should panic ... ok
+test tests::test_dispute_released_milestone_panics - should panic ... ok
+test tests::test_insufficient_signatures_panics - should panic ... ok
+test tests::test_enumeration_get_job_count_and_ids ... ok
+test tests::test_milestone_based_release ... ok
+test tests::test_multi_sig_dispute ... ok
+test tests::test_per_job_release_after_longer_than_minimum_still_enforced - should panic ... ok
+test tests::test_per_job_release_after ... ok
+test tests::test_release_after_below_minimum_panics - should panic ... ok
+test tests::test_per_milestone_dispute_resolution_reject ... ok
+test tests::test_lifecycle_integration ... ok
+test tests::test_refund_expired_job_before_deadline_panics - should panic ... ok
+test tests::test_per_milestone_dispute_and_resolution_approve ... ok
+test tests::test_refund_expired_job_not_client_panics - should panic ... ok
+test tests::test_release_after_exceeds_deadline_panics - should panic ... ok
+test tests::test_remove_last_admin_panics - should panic ... ok
+test tests::test_refund_expired_job_milestones_claimed_panics - should panic ... ok
+test tests::test_refund_expired_job_success ... ok
+test tests::test_release_already_released_panics - should panic ... ok
+test tests::test_reputation_query ... ok
+test tests::test_release_milestone_success ... ok
+test tests::test_reputation_late_completion ... ok
+test tests::test_reputation_on_refund ... ok
+test tests::test_reputation_on_time_completion ... ok
+test tests::test_reputation_on_completion ... ok
+test tests::test_reputation_on_dispute ... ok
+test tests::test_resolve_not_disputed_milestone_panics - should panic ... ok
+test tests::test_single_admin_threshold_panics - should panic ... ok
+test tests::test_update_release_after ... ok
+test tests::test_resolve_dispute_deprecated ... ok
+test tests::test_update_release_after_cannot_shorten_panics - should panic ... ok
+
+test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 2.70s
+
+[2m2026-08-18T00:21:54.071607Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling::linux[0m[2m:[0m Launching test
+[2m2026-08-18T00:21:54.071652Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling[0m[2m:[0m running /home/gift/cargo-build/debug/deps/indigopay_contract-394182ba4f2f9e6a
