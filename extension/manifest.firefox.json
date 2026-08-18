@@ -7,15 +7,26 @@
     "default_popup": "popup.html",
     "default_title": "IndigoPay Companion"
   },
-  "permissions": ["storage", "contextMenus"],
+  "permissions": [
+    "storage",
+    "contextMenus"
+  ],
   "background": {
-    "scripts": ["dist-firefox/background.js"]
+    "scripts": [
+      "dist-firefox/background.js"
+    ]
   },
-  "host_permissions": ["https://api.stellar-indigopay.app/*"],
+  "host_permissions": [
+    "https://api.stellar-indigopay.app/*"
+  ],
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["dist-firefox/content-script.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "dist-firefox/content-script.js"
+      ],
       "run_at": "document_end"
     }
   ],
@@ -25,5 +36,8 @@
       "id": "indigopay@stellar-indigopay.com",
       "strict_min_version": "120.0"
     }
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none';"
   }
 }

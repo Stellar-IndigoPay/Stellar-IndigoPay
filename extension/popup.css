@@ -615,3 +615,11 @@ input[type="number"]:focus {
   font-size: 0.78rem;
   white-space: nowrap;
 }
+
+.settings-title {
+  margin-top: 8px;
+}
+
+.settings-amount-wrapper {
+  position: relative;
+}
