@@ -147,7 +147,12 @@ const CSV_COLUMNS = [
  
 function csvEscape(v) {
   if (v === null || v === undefined) return "";
-  const s = typeof v === "object" ? JSON.stringify(v) : String(v);
+  const s =
+    v instanceof Date
+      ? v.toISOString()
+      : typeof v === "object"
+        ? JSON.stringify(v)
+        : String(v);
   return `"${s.replace(/"/g, "\"\"")}"`;
 }
  
