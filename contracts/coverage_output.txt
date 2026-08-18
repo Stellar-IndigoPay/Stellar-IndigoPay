@@ -435,3 +435,361 @@ test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; fin
 
 [2m2026-08-18T00:21:54.071607Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling::linux[0m[2m:[0m Launching test
 [2m2026-08-18T00:21:54.071652Z[0m [32m INFO[0m [2mcargo_tarpaulin::process_handling[0m[2m:[0m running /home/gift/cargo-build/debug/deps/indigopay_contract-394182ba4f2f9e6a
+
+running 352 tests
+test donation::contract::tests::test_generate_stealth_address_different_keys ... ok
+test donation::contract::tests::test_generate_stealth_address_deterministic ... ok
+test donation::contract::tests::test_stealth_address_unlinkability ... ok
+test donation::contract::tests::test_scan_stealth_donations_empty ... ok
+test donation::contract::tests::test_donate_stealth ... ok
+test tests::project_verification_tests::test_attest_by_non_verifier_panics - should panic ... ok
+test tests::project_verification_tests::test_add_duplicate_verifier_panics - should panic ... ok
+test donation::contract::tests::test_scan_stealth_donations ... ok
+test tests::project_verification_tests::test_attest_unknown_project_panics - should panic ... ok
+test donation::contract::tests::test_scan_with_missing_donation_is_graceful ... ok
+test tests::project_verification_tests::test_duplicate_attestation_panics - should panic ... ok
+test tests::project_verification_tests::test_attest_project ... ok
+test tests::project_verification_tests::test_events_have_expected_payloads ... ok
+test tests::project_verification_tests::test_donate_to_unverified_project_panics - should panic ... ok
+test tests::project_verification_tests::test_real_auth_enforcement_without_mocks ... ok
+test tests::project_verification_tests::test_remove_unknown_verifier_panics - should panic ... ok
+test tests::project_verification_tests::test_reach_threshold_auto_verify ... ok
+test tests::project_verification_tests::test_removed_verifier_attestation_is_not_retroactively_undone ... ok
+test tests::project_verification_tests::test_verifier_management ... ok
+test tests::project_verification_tests::test_donate_to_unverified_project_allowed_in_legacy_mode ... ok
+test tests::project_verification_tests::test_revoke_verification ... ok
+test tests::project_verification_tests::test_lowering_threshold_unsticks_pending_project_on_next_touch ... ok
+test tests::project_verification_tests::test_donate_to_verified_project_succeeds ... ok
+test tests::project_verification_tests::test_integration_three_verifiers_threshold_two_then_donate ... ok
+test tests::test_add_admin_duplicate_panics - should panic ... ok
+test tests::test_add_project_donation_storage_write ... ok
+test tests::test_add_verifier_persists ... ok
+test tests::test_anon_address_is_callable ... ok
+test tests::test_accept_admin_old_admin_removed_panics - should panic ... ok
+test tests::prop_challenge_only_badge_holders ... ok
+test tests::prop_credits_never_negative ... ok
+test tests::test_admin_can_lower_threshold_for_faster_adjustment ... ok
+test tests::prop_tally_bounded_by_total_credits ... ok
+test tests::test_admin_can_clear_impact_flag ... ok
+test tests::test_approve_refund_non_admin_panics - should panic ... ok
+test tests::test_approve_refund_not_pending_panics - should panic ... ok
+test tests::test_approve_refund_badge_preserved ... ok
+test tests::test_approve_refund_counters_decremented ... ok
+test tests::test_approve_refund_token_transferred ... ok
+test tests::test_aggregated_impact ... ok
+test tests::test_auto_adjustment_triggers_at_default_threshold ... ok
+test tests::test_auto_adjustment_stays_current_on_resubmission ... ok
+test tests::test_backward_compat_donate_with_privacy ... ok
+test tests::test_auto_finalize ... ok
+test tests::test_batch_donate_knows ... ok
+test tests::test_batch_donate_basic_flow ... ok
+test tests::test_badge_upgrade_resets_credits ... ok
+test tests::test_batch_donate_multiple_donors ... ok
+test tests::test_batch_donate_multiple_entries ... ok
+test tests::test_batch_donate_nft_minting_on_badge_upgrade ... ok
+test tests::test_batch_donate_zero_amount_fails ... ok
+test tests::test_batch_donate_respects_unique_donor_count ... ok
+test tests::test_calculate_badge_thresholds ... ok
+test tests::test_batch_register_projects_duplicate_fails - should panic ... ok
+test tests::test_backward_compat_donate_usdc ... ok
+test tests::test_batch_register_projects ... ok
+test tests::test_batch_donate_updates_global_stats ... ok
+test tests::test_cancel_recurring_not_found - should panic ... ok
+test tests::test_cancel_upgrade_without_pending_fails - should panic ... ok
+test tests::test_cancel_recurring_not_active - should panic ... ok
+test tests::test_cancel_recurring_success ... ok
+test tests::test_cancel_upgrade_clears_pending ... ok
+test tests::test_challenge_below_threshold_not_triggered - should panic ... ok
+test tests::test_cast_vote ... ok
+test tests::test_challenge_donation ... ok
+test tests::test_challenge_non_badge_holder_panics - should panic ... ok
+test tests::test_cancel_force_refund ... ok
+test tests::test_cleanup_before_grace_period_panics - should panic ... ok
+test tests::test_cleanup_unresolved_panics - should panic ... ok
+test tests::test_cleanup_resolved_proposal ... ok
+test tests::test_cleanup_proposal_idempotent - should panic ... ok
+test tests::test_cancel_force_refund_after_execution_panics - should panic ... ok
+test tests::test_clear_impact_flag_happy ... ok
+test tests::test_challenge_integration ... ok
+test tests::test_cleanup_vesting_active_panics - should panic ... ok
+test tests::test_close_campaign_after_deadline_sets_expired ... ok
+test tests::test_cleanup_vesting_before_grace_period_panics - should panic ... ok
+test tests::test_cleanup_vesting_cancelled ... ok
+test tests::test_close_campaign_none_status_panics - should panic ... ok
+test tests::test_close_campaign_early_sets_closed ... ok
+test tests::test_cleanup_vesting_completed ... ok
+test tests::test_close_campaign_after_goal_reached_sets_closed ... ok
+test tests::test_contract_pause_unpause_roundtrip ... ok
+test tests::test_create_campaign_past_deadline_fails - should panic ... ok
+test tests::test_create_campaign_non_admin_fails - should panic ... ok
+test tests::test_create_campaign_sets_active_goal_and_deadline ... ok
+test tests::test_create_campaign_while_active_fails - should panic ... ok
+test tests::test_create_campaign_inactive_project_panics - should panic ... ok
+test tests::test_create_campaign_goal_not_exceeding_raised_panics - should panic ... ok
+test tests::test_create_proposal ... ok
+test tests::test_create_campaign_zero_goal_fails - should panic ... ok
+test tests::test_create_duplicate_proposal_fails - should panic ... ok
+test tests::test_create_proposal_custom_duration ... ok
+test tests::test_create_proposal_rejects_too_long_duration - should panic ... ok
+test tests::test_create_proposal_rejects_too_short_duration - should panic ... ok
+test tests::test_create_proposal_zero_duration_uses_default ... ok
+test tests::test_create_recurring_invalid_amount - should panic ... ok
+test tests::test_create_recurring_invalid_interval - should panic ... ok
+test tests::test_create_recurring_project_not_found - should panic ... ok
+test tests::test_create_recurring_invalid_keeper_incentive - should panic ... ok
+test tests::test_create_recurring_success ... ok
+test tests::test_create_sub_project ... ok
+test tests::test_deactivate_all_projects_non_admin_fails - should panic ... ok
+test tests::test_deactivate_project_saves_state ... ok
+test tests::test_credits_after_donation ... ok
+test tests::test_archive_rotation_enforces_max ... ok
+test tests::test_deactivate_project_cascades_to_sub_projects ... ok
+test tests::test_deactivate_all_projects ... ok
+test tests::test_donate_after_campaign_closed_panics - should panic ... ok
+test tests::test_donate_after_close_fails - should panic ... ok
+test tests::test_donate_after_deadline_fails - should panic ... ok
+test tests::test_delegated_credits_added ... ok
+test tests::test_donate_after_goal_reached_fails - should panic ... ok
+test tests::test_donate_anonymous_increments_anon_count ... ok
+test tests::test_donate_after_resume_succeeds ... ok
+test tests::test_donate_basic_flow_after_cei_reorder ... ok
+test tests::test_donate_non_anonymous_stats_updated ... ok
+test tests::test_donate_asset_with_privacy_saves_global_stats ... ok
+test tests::test_donate_asset_respects_campaign_goal ... ok
+test tests::test_donate_asset_with_privacy_registered_token ... ok
+test tests::test_donate_reaching_goal_sets_goal_reached ... ok
+test tests::test_donate_distinct_donors_increment_count ... ok
+test tests::test_donate_to_paused_project_fails - should panic ... ok
+test tests::test_donate_to_inactive_project_panics - should panic ... ok
+test tests::test_donate_to_paused_project_panics - should panic ... ok
+test tests::test_donate_token_unregistered_panics - should panic ... ok
+test tests::test_donate_token_custom ... ok
+test tests::test_donate_token_inactive_panics - should panic ... ok
+test tests::test_donate_token_xlm ... ok
+test tests::test_donate_token_usdc ... ok
+test tests::test_donate_under_goal_keeps_campaign_active ... ok
+test tests::test_donate_token_with_privacy_native_token ... ok
+test tests::test_donate_usdc_respects_campaign_deadline ... ok
+test tests::test_donate_unique_donor_count_not_inflated ... ok
+test tests::test_donate_without_campaign_unchanged ... ok
+test tests::test_donate_with_privacy_registered_token_symbol ... ok
+test tests::test_donor_badge_none_below_threshold ... ok
+test tests::test_donation_rate_limit_first_donation_succeeds ... ok
+test tests::test_double_init_fails - should panic ... ok
+test tests::test_donation_rate_limit_allows_up_to_max_within_window ... ok
+test tests::test_donation_rate_limit_blocks_max_plus_one - should panic ... ok
+test tests::test_double_resolve_fails - should panic ... ok
+test tests::test_donation_rate_limit_independent_per_donor ... ok
+test tests::test_donation_rate_limit_independent_per_project ... ok
+test tests::test_donation_rate_limit_resets_after_window_elapses ... ok
+test tests::test_donation_rate_limit_off_by_one_window_boundary ... ok
+test tests::test_double_vote_prevented - should panic ... ok
+test tests::test_duplicate_report_updates_in_place ... ok
+test tests::test_execute_recurring_pre_maturity_panics - should panic ... ok
+test tests::test_execute_recurring_cancelled_panics - should panic ... ok
+test tests::test_execute_recurring_contract_paused_panics - should panic ... ok
+test tests::test_execute_upgrade_after_timelock_succeeds ... ok
+test tests::test_execute_upgrade_before_timelock_fails - should panic ... ok
+test tests::test_execute_upgrade_without_pending_fails - should panic ... ok
+test tests::test_execute_recurring_project_paused_panics - should panic ... ok
+test tests::test_extend_all_ttl ... ok
+test tests::test_execute_force_refund_before_timelock_panics - should panic ... ok
+test tests::test_execute_force_refund_after_timelock ... ok
+test tests::test_extend_campaign_new_deadline_not_after_current_panics - should panic ... ok
+test tests::test_extend_campaign_deadline_passed_panics ... ok
+test tests::test_extend_campaign_non_admin_fails - should panic ... ok
+test tests::test_extend_campaign_not_active_panics - should panic ... ok
+test tests::test_extend_campaign_updates_deadline ... ok
+test tests::test_get_donation_rate_limit_defaults ... ok
+test tests::test_execute_recurring_success_xlm ... ok
+test tests::test_execute_recurring_success_usdc ... ok
+test tests::test_force_approve_single_admin_panics - should panic ... ok
+test tests::test_force_approve_refund_m_of_n ... ok
+test tests::test_generate_receipt ... ok
+test tests::test_get_global_stats_initial_zeros ... ok
+test tests::test_get_donation_record ... ok
+test tests::test_get_refund_request_not_found_panics - should panic ... ok
+test tests::test_execute_recurring_badge_progression ... ok
+test tests::test_impact_deviates_50_percent_boundaries ... ok
+test tests::test_impact_deviates_50_percent_claimed_greater_than_verified ... ok
+test tests::test_get_donor_recurrings ... ok
+test tests::test_impact_deviates_50_percent_claimed_zero ... ok
+test tests::test_get_voter_list_non_existent_proposal ... ok
+test tests::test_force_refund_integration_reverses_balances_and_stats ... ok
+test tests::test_get_impact_periods_listing ... ok
+test tests::test_initialize_empty_admins_panics - should panic ... ok
+test tests::test_initialize_global_and_version_stored ... ok
+test tests::test_initialize_threshold_exceeds_admins_panics - should panic ... ok
+test tests::test_initialize_zero_threshold_panics - should panic ... ok
+test tests::test_initialize ... ok
+test tests::test_get_global_stats_matches_individual_getters ... ok
+test tests::test_median_odd_length ... ok
+test tests::test_get_sub_projects ... ok
+test tests::test_median_single_element ... ok
+test tests::test_median_even_length ... ok
+test tests::test_impact_verifier_lifecycle ... ok
+test tests::test_get_voter_list ... ok
+test tests::test_integration_governance_full_flow ... ok
+test tests::test_merkle_proof_wrong_root ... ok
+test tests::test_migration_idempotent ... ok
+test tests::test_merkle_proof_wrong_leaf_index ... ok
+test tests::test_merkle_proof_verification_invalid ... ok
+test tests::test_merkle_proof_mismatched_root ... ok
+test tests::test_merkle_proof_verification_valid ... ok
+test tests::test_mmr_append_single ... ok
+test tests::test_migration_runs_on_upgrade ... ok
+test tests::test_mmr_append_multiple ... ok
+test tests::test_mmr_peak_calculation ... ok
+test tests::test_minimum_voting_duration_enforced ... ok
+test tests::test_mint_project_nft_below_threshold - should panic ... ok
+test tests::test_mmr_proof_verification ... ok
+test tests::test_mmr_proof_invalid ... ok
+test tests::test_mmr_does_not_break_single_root_verification ... ok
+test tests::test_mmr_three_leaves_two_peaks ... ok
+test tests::test_mint_project_nft_success ... ok
+test tests::test_integration_multi_token_donations ... ok
+test tests::test_mint_project_nft_duplicate_prevented - should panic ... ok
+test tests::test_mmr_proof_verification_multi_leaf ... ok
+test tests::test_non_admin_cannot_add_verifier - should panic ... ok
+test tests::test_non_verifier_cannot_submit_report - should panic ... ok
+test tests::test_pause_already_paused_project_fails - should panic ... ok
+test tests::test_non_badge_holder_cannot_vote - should panic ... ok
+test tests::test_pause_contract_non_admin_fails - should panic ... ok
+test tests::test_pause_deactivated_project_fails - should panic ... ok
+test tests::test_pause_project_already_paused_panics - should panic ... ok
+test tests::test_pause_project_non_admin_fails - should panic ... ok
+test tests::test_pause_project_deactivated_panics - should panic ... ok
+test tests::test_pause_blocks_donate ... ok
+test tests::test_non_donor_generate_panics - should panic ... ok
+test tests::test_parent_deactivation_cascades ... ok
+test tests::test_mmr_large_tree ... ok
+test tests::test_pause_project_sets_paused_flag ... ok
+test tests::test_pause_resume_project_full_flow ... ok
+test tests::test_project_flagged_at_exact_50_percent_boundary ... ok
+test tests::test_project_flagged_on_large_deviation ... ok
+test tests::test_per_token_rate_limit_fallback ... ok
+test tests::test_pause_then_unpause_allows_donate ... ok
+test tests::test_project_not_flagged_under_50_percent ... ok
+test tests::test_propose_upgrade_double_propose_rejected - should panic ... ok
+test tests::test_propose_upgrade_non_admin_fails - should panic ... ok
+test tests::test_per_token_rate_limit ... ok
+test tests::test_propose_upgrade_stores_pending ... ok
+test tests::test_publish_impact_root_stores_current ... ok
+test tests::test_project_nft_cumulative_across_donations ... ok
+test tests::test_publish_root_archives_previous ... ok
+test tests::test_publish_root_invalid_period_range_panics - should panic ... ok
+test tests::test_publish_root_zero_root_panics - should panic ... ok
+test tests::test_publish_root_non_admin_panics - should panic ... ok
+test tests::test_project_nft_independent_per_project ... ok
+test tests::test_register_project_duplicate_panics - should panic ... ok
+test tests::test_per_token_rate_limit_isolation ... ok
+test tests::test_register_duplicate_token_panics - should panic ... ok
+test tests::test_quadratic_voting_single_proposal ... ok
+test tests::test_register_project_rejects_excessive_co2_per_xlm - should panic ... ok
+test tests::test_quadratic_voting_multiple_proposals ... ok
+test tests::test_register_sub_project_co2_exceeds_max - should panic ... ok
+test tests::test_receipt_deterministic ... ok
+test tests::test_rate_limit_key_migration ... ok
+test tests::test_register_sub_project_duplicate_panics - should panic ... ok
+test tests::test_remove_admin_last_admin_panics - should panic ... ok
+test tests::test_remove_admin_not_admin_panics - should panic ... ok
+test tests::test_register_token ... ok
+test tests::test_remove_admin_threshold_exceeds_set_panics - should panic ... ok
+test tests::test_remove_unregistered_token_panics - should panic ... ok
+test tests::test_remove_token ... ok
+test tests::test_remove_verifier_persists ... ok
+test tests::test_reject_refund_non_admin_panics - should panic ... ok
+test tests::test_remove_token_already_inactive_panics - should panic ... ok
+test tests::test_removed_verifier_cannot_submit ... ok
+test tests::test_reject_refund_not_pending_panics - should panic ... ok
+test tests::test_reject_refund_success ... ok
+test tests::test_request_refund_nonexistent_donation_panics - should panic ... ok
+test tests::test_resolve_before_deadline_fails - should panic ... ok
+test tests::test_request_refund_after_cooldown_panics - should panic ... ok
+test tests::test_request_refund_double_request_panics - should panic ... ok
+test tests::test_request_refund_success ... ok
+test tests::test_request_refund_wrong_donor_panics - should panic ... ok
+test tests::test_resume_deactivated_project_fails - should panic ... ok
+test tests::test_resume_project_non_admin_fails - should panic ... ok
+test tests::test_resume_project_clears_paused_flag ... ok
+test tests::test_resolve_challenge_approve ... ok
+test tests::test_resolve_challenge_reject ... ok
+test tests::test_resolve_proposal_tie_rejected_with_rejection_event ... ok
+test tests::test_resolve_proposal_approved ... ok
+test tests::test_resolve_proposal_rejected ... ok
+test tests::test_resume_unpaused_project_fails - should panic ... ok
+test tests::test_resume_project_not_paused_panics - should panic ... ok
+test tests::test_set_donation_rate_limit_non_admin_fails - should panic ... ok
+test tests::test_revoke_verification_unknown_project_panics - should panic ... ok
+test tests::test_set_and_verify_impact_root ... ok
+test tests::test_set_donation_rate_limit_zero_max_panics - should panic ... ok
+test tests::test_set_donation_rate_limit_zero_window_panics - should panic ... ok
+test tests::test_set_impact_report_threshold_happy ... ok
+test tests::test_set_get_native_token ... ok
+test tests::test_set_oracle_persists ... ok
+test tests::test_set_token_rate_limit_non_admin_fails - should panic ... ok
+test tests::test_set_token_rate_limit ... ok
+test tests::test_set_usdc_token_persists ... ok
+test tests::test_set_verification_threshold_happy ... ok
+test tests::test_set_donation_rate_limit_takes_effect_immediately ... ok
+test tests::test_settle_pending_attestation_panics - should panic ... ok
+test tests::test_settle_unmatched_project_panics - should panic ... ok
+test tests::test_settle_emits_event ... ok
+test tests::test_settle_double_panics - should panic ... ok
+test tests::test_settle_retry_after_project_registered ... ok
+test tests::test_settle_revoked_attestation_panics - should panic ... ok
+test tests::test_stealth_counter_storage_write ... ok
+test tests::test_settle_multiple_attestations_accumulate ... ok
+test tests::test_settle_while_paused_panics - should panic ... ok
+test tests::test_settle_matches_native_donation_stats ... ok
+test tests::test_storage_version_initialized ... ok
+test tests::test_settle_verified_attestation ... ok
+test tests::test_submit_impact_report_rejects_excessive_rate - should panic ... ok
+test tests::test_submit_impact_report_unknown_project_panics - should panic ... ok
+test tests::test_submit_impact_report_rejects_zero_rate - should panic ... ok
+test tests::test_transfer_admin_new_admin_already_in_set_panics - should panic ... ok
+test tests::test_transfer_admin_old_admin_not_in_set_panics - should panic ... ok
+test tests::test_stealth_integrated_donate_flow ... ok
+test tests::test_stealth_integrated_stats ... ok
+test tests::test_two_step_admin_transfer_accept_without_proposal_fails - should panic ... ok
+test tests::test_stealth_integrated_donor_stats_not_updated ... ok
+test tests::test_stealth_integrated_end_to_end ... ok
+test tests::test_two_step_admin_transfer_non_admin_cant_initiate - should panic ... ok
+test tests::test_two_step_admin_transfer_cancel_without_pending_fails - should panic ... ok
+test tests::test_threshold_zero_disables ... ok
+test tests::test_stealth_integrated_project_total ... ok
+test tests::test_two_step_admin_transfer_double_propose_fails - should panic ... ok
+test tests::test_two_step_admin_transfer_cancel_clears_pending ... ok
+test tests::test_unauthorized_sub_project_registration - should panic ... ok
+test tests::test_update_threshold_zero_panics - should panic ... ok
+test tests::test_update_threshold_happy ... ok
+test tests::test_upgrade_double_propose_rejected - should panic ... ok
+test tests::test_update_project_co2_rate_zero_panics - should panic ... ok
+test tests::test_update_project_co2_rate_exceeds_max_panics - should panic ... ok
+test tests::test_two_step_admin_transfer_success ... ok
+test tests::test_upgrade_full_flow ... ok
+test tests::test_update_project_co2_rate_happy ... ok
+test tests::test_verify_impact_inclusion_returns_false_for_unknown_period ... ok
+test tests::test_verifier_can_submit_report ... ok
+test tests::test_vesting_cancel_by_non_donor_fails - should panic ... ok
+test tests::test_vesting_claim_before_interval_fails - should panic ... ok
+test tests::test_upgrade_preserves_donation_state_and_storage_keys ... ok
+test tests::test_verify_tampered_receipt ... ok
+test tests::test_veto_proposal_missing_fails - should panic ... ok
+test tests::test_vesting_create_and_first_claim ... ok
+test tests::test_vesting_cancel_returns_unvested ... ok
+test tests::test_verify_valid_receipt ... ok
+test tests::test_veto_proposal_non_admin_fails - should panic ... ok
+test tests::test_veto_proposal ... ok
+test tests::test_veto_proposal_double_veto_fails - should panic ... ok
+test tests::test_voting_weight_all_tiers ... ok
+test tests::test_vesting_multiple_claims ... ok
+test tests::test_vote_rejected_after_deadline - should panic ... ok
+test tests::test_zero_badge_no_credits ... ok
+test tests::test_vote_allowed_before_deadline ... ok
+test tests::test_voting_credits_exhausted_panics - should panic ... ok
+test tests::test_voting_tally_computation ... ok
+
+test result: ok. 352 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 16.44s
+
+Error: "Cargo failed to run! Error: cargo run failed"
