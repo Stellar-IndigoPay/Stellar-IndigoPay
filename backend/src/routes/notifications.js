@@ -104,31 +104,34 @@ router.post("/register", async (req, res, next) => {
 
     const normalizedPlatform = platform.toLowerCase();
 
-    // Check if token exists
-    const existingResult = await pool.query(
-      "SELECT * FROM device_tokens WHERE token = $1",
-      [token],
+    // Atomic upsert: re-registrations refresh the platform, wallet binding,
+    // active flag, and sliding expiry window in a single statement. The token
+    // column is globally UNIQUE, so a device can never be double-registered.
+    const id = uuidv4();
+    const ttlDays = Number(process.env.PUSH_TOKEN_TTL_DAYS || 180);
+    const result = await pool.query(
+      `INSERT INTO device_tokens (id, token, platform, wallet_address, expires_at)
+       VALUES ($1, $2, $3, $4, NOW() + make_interval(days => $5))
+       ON CONFLICT (token) DO UPDATE SET
+         platform = EXCLUDED.platform,
+         wallet_address = EXCLUDED.wallet_address,
+         is_active = true,
+         expires_at = NOW() + make_interval(days => $5),
+         updated_at = NOW()
+       RETURNING id`,
+      [id, token, normalizedPlatform, walletAddress || null, ttlDays],
     );
 
-    if (existingResult.rows[0]) {
-      // Update existing token — re-activate and refresh address
-      await pool.query(
-        `UPDATE device_tokens 
-         SET platform = $1, wallet_address = $2, is_active = true, updated_at = NOW()
-         WHERE token = $3`,
-        [normalizedPlatform, walletAddress || null, token],
-      );
-      res.json({ success: true, data: { tokenId: existingResult.rows[0].id } });
-    } else {
-      // Insert new token
-      const id = uuidv4();
-      await pool.query(
-        `INSERT INTO device_tokens (id, token, platform, wallet_address)
-         VALUES ($1, $2, $3, $4)`,
-        [id, token, normalizedPlatform, walletAddress || null],
-      );
-      res.json({ success: true, data: { tokenId: id } });
+    // Opportunistically soft-deactivate expired tokens (self-healing on
+    // re-registration). Cleanup must never fail the register request.
+    try {
+      const { purgeExpiredTokens } = require("../services/pushService");
+      await purgeExpiredTokens();
+    } catch (e) {
+      // ignore — expiry cleanup is best-effort
     }
+
+    res.json({ success: true, data: { tokenId: result.rows[0].id } });
   } catch (e) {
     next(e);
   }
@@ -395,7 +398,9 @@ router.post("/unregister", async (req, res, next) => {
     }
 
     const result = await pool.query(
-      "UPDATE device_tokens SET is_active = false, updated_at = NOW() WHERE token = $1 RETURNING id",
+      `UPDATE device_tokens
+       SET is_active = false, expires_at = NOW(), updated_at = NOW()
+       WHERE token = $1 RETURNING id`,
       [token],
     );
 
@@ -608,7 +613,9 @@ router.post("/delivery-callback", async (req, res, next) => {
     // Deactivate the device token when the provider confirms it is stale.
     if (status === "unregistered" && deviceToken) {
       await pool.query(
-        "UPDATE device_tokens SET is_active = false, updated_at = NOW() WHERE token = $1",
+        `UPDATE device_tokens
+         SET is_active = false, expires_at = NOW(), updated_at = NOW()
+         WHERE token = $1`,
         [deviceToken],
       );
     }

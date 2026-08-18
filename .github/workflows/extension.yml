@@ -54,6 +54,15 @@ jobs:
 
       - run: npm ci
 
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Scan for plaintext secrets in storage (#656)
+        run: node scripts/scan-storage-secrets.js
+
       - run: npm run build
 
       - name: Verify build output

@@ -6,7 +6,8 @@
  * Coverage:
  *   - handleDonation with native XLM payments (unchanged behaviour)
  *   - handleDonation with USDC payments (currency, null amount_xlm, XLM-equivalent)
- *   - handleDonation deduplication by transaction hash
+ *   - handleDonation idempotency by Horizon operation identity
+ *   - handleDonation cursor advancement for replayed operations
  *   - Unknown/non-matching asset types silently skipped
  *   - USDC CO₂ offset calculation
  */
@@ -50,6 +51,8 @@ function mockXlmOp(overrides = {}) {
     to: "GPROJECTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
     amount: "100.0000000",
     transaction_hash: "abc123".repeat(8).slice(0, 64),
+    id: "123456789",
+    paging_token: "123456789-1",
     ledger_attr: 12345678,
     ...overrides,
   };
@@ -65,6 +68,8 @@ function mockUsdcOp(overrides = {}) {
     to: "GPROJECT2XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
     amount: "50.0000000",
     transaction_hash: "def456".repeat(8).slice(0, 64),
+    id: "223456789",
+    paging_token: "223456789-1",
     ledger_attr: 12345679,
     ...overrides,
   };
@@ -72,10 +77,10 @@ function mockUsdcOp(overrides = {}) {
 
 /**
  * Create a mock database client.
- * Default: no existing donation (dedup returns empty), all queries succeed.
+ * Default: donation insert succeeds, all queries succeed.
  * Tests can override specific queries via `client.query.mockResolvedValueOnce(...)`.
  */
-function makeMockClient() {
+function makeMockClient({ donationInsertRows = [{ id: "donation-1" }] } = {}) {
   const mockQuery = jest.fn();
   let inTx = false;
 
@@ -96,6 +101,9 @@ function makeMockClient() {
     }
     if (sql.includes("INSERT INTO profiles")) {
       return { rows: [] };
+    }
+    if (sql.startsWith("INSERT INTO donations")) {
+      return { rows: donationInsertRows };
     }
     // Default: empty rows
     return { rows: [] };
@@ -135,18 +143,36 @@ describe("handleDonation with native XLM", () => {
     expect(insertCall[1][5]).toBe("XLM"); // currency
   });
 
-  test("deduplicates by transaction hash", async () => {
+  test("uses the Horizon operation identity in the idempotent insert", async () => {
     const client = makeMockClient();
-    // First query (dedup check) returns existing donation
-    client.query.mockResolvedValueOnce({ rows: [{ id: "existing" }] });
     pool.connect.mockResolvedValue(client);
 
     await handleDonation(projectId, op, { isNative: true, isUSDC: false });
 
-    const insertCalls = client.query.mock.calls.filter(
+    const insertCall = client.query.mock.calls.find(
       ([sql]) => sql.startsWith("INSERT INTO donations"),
     );
-    expect(insertCalls).toHaveLength(0);
+    expect(insertCall).toBeDefined();
+    expect(insertCall[0]).toContain("ON CONFLICT DO NOTHING");
+    expect(insertCall[1][6]).toBe(op.transaction_hash);
+    expect(insertCall[1][7]).toBe(op.id);
+  });
+
+  test("advances the cursor when a replayed operation is a no-op", async () => {
+    const client = makeMockClient({ donationInsertRows: [] });
+    const onCursorUpdate = jest.fn().mockResolvedValue(undefined);
+    pool.connect.mockResolvedValue(client);
+
+    await handleDonation(
+      projectId,
+      op,
+      { isNative: true, isUSDC: false },
+      { onCursorUpdate },
+    );
+
+    expect(onCursorUpdate).toHaveBeenCalledWith(client, op.ledger_attr);
+    expect(client.query).toHaveBeenCalledWith("COMMIT");
+    expect(client.query).not.toHaveBeenCalledWith("ROLLBACK");
   });
 
   test("updates project raised_xlm by the XLM amount", async () => {
@@ -219,17 +245,16 @@ describe("handleDonation with USDC", () => {
     expect(profileCall[1][1]).toBe("400.0000000");
   });
 
-  test("deduplicates USDC donations by transaction hash", async () => {
+  test("uses the Horizon operation identity for USDC idempotency", async () => {
     const client = makeMockClient();
-    client.query.mockResolvedValueOnce({ rows: [{ id: "existing-usdc" }] });
     pool.connect.mockResolvedValue(client);
 
     await handleDonation(projectId, op, { isNative: false, isUSDC: true });
 
-    const insertCalls = client.query.mock.calls.filter(
+    const insertCall = client.query.mock.calls.find(
       ([sql]) => sql.startsWith("INSERT INTO donations"),
     );
-    expect(insertCalls).toHaveLength(0);
+    expect(insertCall[1][7]).toBe(op.id);
   });
 
   test("uses custom USDC_TO_XLM_RATE via updateProjectWallets", async () => {

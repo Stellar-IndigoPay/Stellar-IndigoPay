@@ -91,8 +91,9 @@ CREATE TRIGGER project_search_update
   FOR EACH ROW EXECUTE FUNCTION update_project_search_vector();
 
 -- donations: immutable donation ledger. Each row is a single
--- contribution from donor_address to a project. transaction_hash must be
--- unique (one Stellar payment → one donation). No updated_at column —
+-- contribution from donor_address to a project. Horizon-indexed rows use
+-- transaction_hash plus indexer_operation_id for idempotency, while direct
+-- donation rows remain unique by transaction_hash. No updated_at column —
 -- records are never mutated after insert.
 CREATE TABLE IF NOT EXISTS donations (
   id UUID PRIMARY KEY,
@@ -102,9 +103,18 @@ CREATE TABLE IF NOT EXISTS donations (
   amount NUMERIC(20, 7) NOT NULL,
   currency TEXT NOT NULL DEFAULT 'XLM',
   message TEXT,
-  transaction_hash TEXT NOT NULL UNIQUE,
+  transaction_hash TEXT NOT NULL,
+  indexer_operation_id TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_donations_tx_operation_id
+  ON donations (transaction_hash, indexer_operation_id)
+  WHERE indexer_operation_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_donations_tx_without_operation_id
+  ON donations (transaction_hash)
+  WHERE indexer_operation_id IS NULL;
 
 -- profiles: aggregated donor stats and public profile for a Stellar wallet.
 -- total_donated_xlm and projects_supported are computed counters kept in

@@ -58,6 +58,7 @@ async function start() {
     ),
   );
   await boss.start();
+  await boss.createQueue(QUEUE);
 
   await boss.work(
     QUEUE,
@@ -66,7 +67,7 @@ async function start() {
       teamConcurrency: 1,
       retryLimit: RETRY_DELAYS_SECONDS.length,
     },
-    async (job) => {
+    async ([job]) => {
       const { deliveryId } = job.data || {};
       if (!deliveryId) {
         // Defensive: malformed job. Don't retry.
