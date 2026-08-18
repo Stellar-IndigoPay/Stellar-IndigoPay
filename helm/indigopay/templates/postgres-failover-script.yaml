@@ -1,0 +1,118 @@
+{{- if .Values.postgres.failover.enabled }}
+# helm/indigopay/templates/postgres-failover-script.yaml
+# ConfigMap with the canonical failover shell script.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-failover-script
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: postgres-failover
+    component: database-failover
+data:
+  failover.sh: |
+    #!/bin/sh
+    set -e
+
+    NAMESPACE="${NAMESPACE:-{{ .Values.namespace }}}"
+    STANDBY_POD="${STANDBY_POD:-postgres-standby-0}"
+    BACKEND_METRICS_URL="${BACKEND_METRICS_URL:-}"
+    FAILOVER_TOKEN="${FAILOVER_TOKEN:-}"
+    SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}"
+
+    log_info()  { echo "[failover] $(date -Iseconds) ℹ️  $1"; }
+    log_ok()    { echo "[failover] $(date -Iseconds) ✅ $1"; }
+    log_err()   { echo "[failover] $(date -Iseconds) ❌ $1" >&2; }
+
+    push_metric() {
+      local outcome="$1"
+      if [ -z "$BACKEND_METRICS_URL" ]; then
+        log_info "BACKEND_METRICS_URL not set — skipping metric push (outcome=$outcome)"
+        return 0
+      fi
+      log_info "Pushing failover metric: outcome=$outcome"
+      curl -sS -X POST "$BACKEND_METRICS_URL" \
+        -H "Authorization: Bearer ${FAILOVER_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "{\"outcome\":\"${outcome}\"}" 2>&1 || log_info "Metric push failed (non-fatal)"
+    }
+
+    log_info "=== Postgres automated failover started ==="
+    push_metric "initiated"
+
+    log_info "Step 1/7: Verifying standby pod is reachable..."
+    if ! kubectl get pod -n "$NAMESPACE" "$STANDBY_POD" -o jsonpath='{.status.phase}' 2>/dev/null | grep -q Running; then
+      log_err "Standby pod $STANDBY_POD is not Running. Failover aborted."
+      push_metric "failed"
+      exit 1
+    fi
+    STANDBY_IN_RECOVERY=$(kubectl exec -n "$NAMESPACE" "$STANDBY_POD" -- \
+      psql -U postgres -tAc "SELECT pg_is_in_recovery();" 2>/dev/null || echo "")
+    if [ "$STANDBY_IN_RECOVERY" != "t" ]; then
+      log_info "Standby is NOT in recovery mode. It may already be promoted."
+    fi
+    log_ok "Standby is reachable."
+
+    log_info "Step 2/7: Promoting standby to primary..."
+    kubectl exec -n "$NAMESPACE" "$STANDBY_POD" -- \
+      pg_ctl promote -D /var/lib/postgresql/data 2>&1 || {
+      STILL_RECOVERING=$(kubectl exec -n "$NAMESPACE" "$STANDBY_POD" -- \
+        psql -U postgres -tAc "SELECT pg_is_in_recovery();" 2>/dev/null || echo "")
+      if [ "$STILL_RECOVERING" = "t" ]; then
+        log_err "Promotion failed — standby still in recovery."
+        push_metric "failed"
+        exit 1
+      fi
+    }
+    log_ok "Standby promoted to primary."
+
+    log_info "Step 3/7: Patching postgres-svc Service selector → standby..."
+    kubectl patch svc postgres-svc -n "$NAMESPACE" \
+      --type=json \
+      -p='[{"op":"replace","path":"/spec/selector/role","value":"standby"}]' 2>&1
+    log_ok "postgres-svc patched."
+
+    log_info "Step 4/7: Patching postgres-primary-svc Service selector → standby..."
+    kubectl patch svc postgres-primary-svc -n "$NAMESPACE" \
+      --type=json \
+      -p='[{"op":"replace","path":"/spec/selector/role","value":"standby"}]' 2>&1
+    log_ok "postgres-primary-svc patched."
+
+    log_info "Step 5/7: Updating ConfigMap with new primary host..."
+    kubectl patch configmap stellar-indigopay-config -n "$NAMESPACE" \
+      --type=merge \
+      -p "{\"data\":{\"POSTGRES_PRIMARY_HOST\":\"postgres-standby-svc.$NAMESPACE.svc.cluster.local\",\"POSTGRES_FAILOVER_AT\":\"$(date -Iseconds)\"}}" 2>&1 || \
+      log_info "ConfigMap patch skipped."
+    log_ok "ConfigMap updated."
+
+    log_info "Step 6/7: Rolling restart of backend deployment..."
+    kubectl rollout restart deployment/backend -n "$NAMESPACE" 2>&1 || {
+      log_err "Backend restart command failed."
+      push_metric "failed"
+      exit 1
+    }
+    log_info "Waiting for backend pods to become ready..."
+    kubectl wait --for=condition=ready pod \
+      -l app=backend \
+      -n "$NAMESPACE" \
+      --timeout=120s 2>&1 || {
+      log_err "Backend pods did not become ready within 120s."
+      push_metric "failed"
+      exit 1
+    }
+    log_ok "Backend restarted and ready."
+
+    log_info "Step 7/7: Sending notification..."
+    if [ -n "$SLACK_WEBHOOK_URL" ]; then
+      curl -sS -X POST "$SLACK_WEBHOOK_URL" \
+        -H "Content-Type: application/json" \
+        -d "{\"text\":\"🔄 *Postgres failover executed.* Standby promoted to primary at $(date -Iseconds). Backend restarted.\"}" 2>&1 || true
+      log_ok "Slack notification sent."
+    else
+      log_info "SLACK_WEBHOOK_URL not set — skipping notification."
+    fi
+
+    push_metric "succeeded"
+    log_ok "=== Postgres automated failover completed successfully ==="
+{{- end }}

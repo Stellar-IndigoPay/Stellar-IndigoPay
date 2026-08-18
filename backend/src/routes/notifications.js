@@ -12,6 +12,10 @@ const router = express.Router();
 const { v4: uuidv4 } = require("uuid");
 const pool = require("../db/pool");
 const { AppError } = require("../errors");
+const { verifyUnsubscribeToken } = require("../services/digestBuilder");
+const {
+  metrics: { pushSentTotal },
+} = require("../services/metrics");
 
 function parseLastSeen(value) {
   if (!value || typeof value !== "string") return null;
@@ -100,31 +104,34 @@ router.post("/register", async (req, res, next) => {
 
     const normalizedPlatform = platform.toLowerCase();
 
-    // Check if token exists
-    const existingResult = await pool.query(
-      "SELECT * FROM device_tokens WHERE token = $1",
-      [token],
+    // Atomic upsert: re-registrations refresh the platform, wallet binding,
+    // active flag, and sliding expiry window in a single statement. The token
+    // column is globally UNIQUE, so a device can never be double-registered.
+    const id = uuidv4();
+    const ttlDays = Number(process.env.PUSH_TOKEN_TTL_DAYS || 180);
+    const result = await pool.query(
+      `INSERT INTO device_tokens (id, token, platform, wallet_address, expires_at)
+       VALUES ($1, $2, $3, $4, NOW() + make_interval(days => $5))
+       ON CONFLICT (token) DO UPDATE SET
+         platform = EXCLUDED.platform,
+         wallet_address = EXCLUDED.wallet_address,
+         is_active = true,
+         expires_at = NOW() + make_interval(days => $5),
+         updated_at = NOW()
+       RETURNING id`,
+      [id, token, normalizedPlatform, walletAddress || null, ttlDays],
     );
 
-    if (existingResult.rows[0]) {
-      // Update existing token — re-activate and refresh address
-      await pool.query(
-        `UPDATE device_tokens 
-         SET platform = $1, wallet_address = $2, is_active = true, updated_at = NOW()
-         WHERE token = $3`,
-        [normalizedPlatform, walletAddress || null, token],
-      );
-      res.json({ success: true, data: { tokenId: existingResult.rows[0].id } });
-    } else {
-      // Insert new token
-      const id = uuidv4();
-      await pool.query(
-        `INSERT INTO device_tokens (id, token, platform, wallet_address)
-         VALUES ($1, $2, $3, $4)`,
-        [id, token, normalizedPlatform, walletAddress || null],
-      );
-      res.json({ success: true, data: { tokenId: id } });
+    // Opportunistically soft-deactivate expired tokens (self-healing on
+    // re-registration). Cleanup must never fail the register request.
+    try {
+      const { purgeExpiredTokens } = require("../services/pushService");
+      await purgeExpiredTokens();
+    } catch (e) {
+      // ignore — expiry cleanup is best-effort
     }
+
+    res.json({ success: true, data: { tokenId: result.rows[0].id } });
   } catch (e) {
     next(e);
   }
@@ -391,7 +398,9 @@ router.post("/unregister", async (req, res, next) => {
     }
 
     const result = await pool.query(
-      "UPDATE device_tokens SET is_active = false, updated_at = NOW() WHERE token = $1 RETURNING id",
+      `UPDATE device_tokens
+       SET is_active = false, expires_at = NOW(), updated_at = NOW()
+       WHERE token = $1 RETURNING id`,
       [token],
     );
 
@@ -400,6 +409,221 @@ router.post("/unregister", async (req, res, next) => {
     }
 
     res.json({ success: true, data: { tokenId: result.rows[0].id, active: false } });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// GET /api/notifications/unsubscribe
+// Disable email digest delivery for the wallet address encoded in the token.
+router.get("/unsubscribe", async (req, res, next) => {
+  try {
+    const { token } = req.query || {};
+
+    if (!token || typeof token !== "string") {
+      throw new AppError("VALIDATION_ERROR", { field: "token" });
+    }
+
+    let payload;
+    try {
+      payload = verifyUnsubscribeToken(token);
+    } catch (err) {
+      throw new AppError("VALIDATION_ERROR", {
+        field: "token",
+        detail: err.message,
+      });
+    }
+
+    await pool.query(
+      `INSERT INTO notification_preferences (id, wallet_address, channel, type, enabled)
+       VALUES ($1, $2, 'email', 'digest', false)
+       ON CONFLICT (wallet_address, channel, type)
+       DO UPDATE SET enabled = false, updated_at = NOW()`,
+      [uuidv4(), payload.walletAddress],
+    );
+
+    res.json({ success: true, message: "Digest emails unsubscribed successfully" });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// PATCH /api/notifications/preferences
+// Update a single project-level notification preference.
+// Body: { walletAddress, projectId, channel, enabled }
+router.patch("/preferences", async (req, res, next) => {
+  try {
+    const { walletAddress, projectId, channel, enabled } = req.body || {};
+
+    if (!walletAddress || typeof walletAddress !== "string") {
+      return res.status(400).json({ error: "walletAddress is required" });
+    }
+    if (!projectId || typeof projectId !== "string") {
+      return res.status(400).json({ error: "projectId is required" });
+    }
+    if (!channel || typeof channel !== "string") {
+      return res.status(400).json({ error: "channel is required" });
+    }
+    if (typeof enabled !== "boolean") {
+      return res.status(400).json({ error: "enabled must be a boolean" });
+    }
+
+    await pool.query(
+      `INSERT INTO notification_preferences (id, wallet_address, project_id, channel, enabled)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (wallet_address, project_id, channel)
+       WHERE project_id IS NOT NULL
+       DO UPDATE SET enabled = $5, updated_at = NOW()`,
+      [uuidv4(), walletAddress, projectId, channel, enabled],
+    );
+
+    res.json({ success: true, data: { walletAddress, projectId, channel, enabled } });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// GET /api/notifications/inbox
+// List in-app notifications for a wallet, newest first.
+router.get("/inbox", async (req, res, next) => {
+  try {
+    const { walletAddress } = req.query;
+    const limit = Math.min(parseInt(req.query.limit || "50", 10), 100);
+    const offset = parseInt(req.query.offset || "0", 10);
+
+    if (!walletAddress || typeof walletAddress !== "string") {
+      return res.status(400).json({ error: "walletAddress query parameter is required" });
+    }
+
+    const { rows } = await pool.query(
+      `SELECT id, title, body, data, read, created_at
+       FROM in_app_notifications
+       WHERE wallet_address = $1
+       ORDER BY created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [walletAddress, limit, offset],
+    );
+
+    const countResult = await pool.query(
+      "SELECT COUNT(*) AS total FROM in_app_notifications WHERE wallet_address = $1",
+      [walletAddress],
+    );
+
+    const unreadResult = await pool.query(
+      "SELECT COUNT(*) AS unread FROM in_app_notifications WHERE wallet_address = $1 AND read = FALSE",
+      [walletAddress],
+    );
+
+    res.json({
+      success: true,
+      data: {
+        notifications: rows,
+        total: parseInt(countResult.rows[0].total, 10),
+        unread: parseInt(unreadResult.rows[0].unread, 10),
+        limit,
+        offset,
+      },
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// POST /api/notifications/inbox/:id/read
+// Mark a single in-app notification as read.
+router.post("/inbox/:id/read", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { walletAddress } = req.body || {};
+
+    if (!walletAddress || typeof walletAddress !== "string") {
+      return res.status(400).json({ error: "walletAddress is required in body" });
+    }
+
+    const result = await pool.query(
+      `UPDATE in_app_notifications SET read = TRUE
+       WHERE id = $1 AND wallet_address = $2
+       RETURNING id, read`,
+      [id, walletAddress],
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Notification not found" });
+    }
+
+    res.json({ success: true, data: { id, read: true } });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// POST /api/notifications/delivery-callback
+// Receives confirmed delivery status from APNs / FCM webhooks.
+//
+// Authentication: Bearer token checked against DELIVERY_CALLBACK_SECRET env var.
+// This endpoint is called by APNs/FCM delivery receipt pipelines, not by
+// end-user clients. APNs Unregistered (410) responses are handled
+// synchronously in ApnsProvider.send(); this endpoint handles asynchronous
+// FCM downstream message receipts and any future webhook-based confirmations.
+router.post("/delivery-callback", async (req, res, next) => {
+  try {
+    const secret = process.env.DELIVERY_CALLBACK_SECRET;
+    if (secret) {
+      const auth = req.headers.authorization || "";
+      const provided = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+      if (provided !== secret) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+    }
+
+    const { provider, deviceToken, status, providerMessageId } = req.body;
+
+    const validProviders = ["apns", "fcm", "expo"];
+    const validStatuses = ["delivered", "unregistered", "failed"];
+
+    if (!provider || !validProviders.includes(provider)) {
+      throw new AppError("VALIDATION_ERROR", {
+        field: "provider",
+        detail: `provider must be one of: ${validProviders.join(", ")}`,
+      });
+    }
+    if (!status || !validStatuses.includes(status)) {
+      throw new AppError("VALIDATION_ERROR", {
+        field: "status",
+        detail: `status must be one of: ${validStatuses.join(", ")}`,
+      });
+    }
+    if (!deviceToken && !providerMessageId) {
+      throw new AppError("VALIDATION_ERROR", {
+        field: "deviceToken",
+        detail: "deviceToken or providerMessageId is required",
+      });
+    }
+
+    // Update the push_notifications row if we have a provider message ID.
+    if (providerMessageId) {
+      await pool.query(
+        `UPDATE push_notifications
+           SET status = $1, updated_at = NOW()
+         WHERE ticket_id = $2`,
+        [status === "delivered" ? "delivered" : "failed", providerMessageId],
+      );
+    }
+
+    // Deactivate the device token when the provider confirms it is stale.
+    if (status === "unregistered" && deviceToken) {
+      await pool.query(
+        `UPDATE device_tokens
+         SET is_active = false, expires_at = NOW(), updated_at = NOW()
+         WHERE token = $1`,
+        [deviceToken],
+      );
+    }
+
+    // Increment the Prometheus counter for confirmed delivery outcome.
+    pushSentTotal.inc({ provider, outcome: status });
+
+    res.json({ success: true });
   } catch (e) {
     next(e);
   }

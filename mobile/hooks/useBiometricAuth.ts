@@ -61,7 +61,7 @@ export function useBiometricAuth() {
         fallbackLabel: 'Use device passcode',
         cancelLabel: 'Cancel donation',
       });
-      return { success: result.success, error: result.error || undefined };
+      return { success: result.success, error: (result as any).error || undefined };
     } catch (err) {
       return { success: false, error: 'Biometric authentication failed' };
     } finally {
@@ -97,4 +97,20 @@ export function useBiometricAuth() {
     setBiometricThreshold,
     setIsEnabled: updateIsEnabled,
   };
+}
+
+/**
+ * Standalone authenticate helper exported for non-hook consumers
+ * (e.g. secureStore.ts) that can't call the React hook directly.
+ */
+export async function authenticate(reason: string): Promise<boolean> {
+  try {
+    const result = await LocalAuthentication.authenticateAsync({
+      promptMessage: reason,
+      fallbackLabel: 'Use device passcode',
+    });
+    return result.success;
+  } catch {
+    return false;
+  }
 }

@@ -8,12 +8,17 @@
  * the wizard stores their `url` returned by POST /api/uploads and sends
  * them in `supportingDocuments[]` on the final POST.
  *
+ * Uses react-hook-form for performant form state and zod for type-safe
+ * schema validation, replacing the previous manual useState per field.
+ *
  * The POST hits /api/verification-requests which the backend persists
  * to the verification_requests table and uses to email admins via
  * Resend. Backend behaviour lives in backend/src/routes/verification.js.
  */
 import { useRef, useState } from "react";
 import { useRouter } from "next/router";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
 import { useI18n } from "@/lib/i18n";
 import { PROJECT_CATEGORIES } from "@/utils/format";
 import {
@@ -21,23 +26,15 @@ import {
   uploadSupportingDocument,
   type VerificationDocument,
 } from "@/lib/api";
+import FormField from "@/components/FormField";
+import { useFormValidation } from "@/hooks/useFormValidation";
+import {
+  verificationRequestSchema,
+  type VerificationRequestFormData,
+} from "@/lib/validation/schemas";
+import { z } from "zod";
 
 type Step = "org" | "project" | "impact" | "documents" | "review" | "done";
-
-interface FormData {
-  organizationName: string;
-  organizationWebsite: string;
-  organizationCountry: string;
-  contactEmail: string;
-  walletAddress: string;
-  projectName: string;
-  projectCategory: string;
-  projectLocation: string;
-  projectDescription: string;
-  co2PerXLM: string;
-  expectedAnnualTonnesCO2: string;
-  notes: string;
-}
 
 const STEPS: Step[] = [
   "org",
@@ -56,40 +53,8 @@ const STEP_LABELS: Record<Step, string> = {
   done: "Done",
 };
 
-const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ACCEPTED_DOC_TYPES =
   ".pdf,.png,.jpg,.jpeg,.webp,.gif,.doc,.docx,.xls,.xlsx,.txt,.csv,.zip";
-
-function Field({
-  label,
-  error,
-  helper,
-  children,
-}: {
-  label: string;
-  error?: string;
-  helper?: string;
-  children: React.ReactNode;
-}) {
-  // The <label> wraps *only* the input so the accessible name is just the
-  // field label text. Putting helper/error messages inside the <label>
-  // would cause screen readers + RTL's getByLabelText to include them in
-  // the label's accessible text (e.g. "apply.walletAddress *apply.walletHelper"),
-  // which would break both a11y and test label matching.
-  return (
-    <div className="flex flex-col gap-1">
-      <label className="flex flex-col gap-1 cursor-pointer">
-        <span className="label">{label}</span>
-        {children}
-      </label>
-      {helper && !error && (
-        <p className="text-xs text-[#8aaa8a] font-body">{helper}</p>
-      )}
-      {error && <p className="text-xs text-red-500 font-body">{error}</p>}
-    </div>
-  );
-}
 
 export default function ApplyPage() {
   const router = useRouter();
@@ -100,27 +65,92 @@ export default function ApplyPage() {
   const [submitting, setSubmitting] = useState(false);
   const [serverError, setServerError] = useState("");
   const [reviewTimeline, setReviewTimeline] = useState("5–10 business days");
-  const [fieldErrors, setFieldErrors] = useState<
-    Partial<Record<keyof FormData, string>>
-  >({});
+  const orgStepSchema = z.object({
+    organizationName: z.string().min(1, "required"),
+    organizationWebsite: z
+      .string()
+      .url("invalidUrl")
+      .optional()
+      .or(z.literal("")),
+    organizationCountry: z.string().optional(),
+    contactEmail: z.string().email("invalidEmail"),
+    walletAddress: z.string().regex(/^G[A-Z2-7]{55}$/, "invalidWallet"),
+  });
+
+  const projectStepSchema = z.object({
+    projectName: z.string().min(1, "required"),
+    projectCategory: z.enum(PROJECT_CATEGORIES as [string, ...string[]], {
+      message: "invalidCategory",
+    }),
+    projectLocation: z.string().min(1, "required"),
+    projectDescription: z.string().optional(),
+  });
+
+  const impactStepSchema = z.object({
+    co2PerXLM: z.string().refine(
+      (val) => {
+        const n = Number(val);
+        return val !== "" && Number.isFinite(n) && n >= 0;
+      },
+      { message: "invalidCO2" },
+    ),
+    expectedAnnualTonnesCO2: z
+      .string()
+      .refine(
+        (val) => {
+          if (val === "") return true;
+          const n = Number(val);
+          return Number.isFinite(n) && n >= 0;
+        },
+        { message: "invalidCO2" },
+      )
+      .optional(),
+    notes: z.string().optional(),
+  });
+
+  const orgValidation = useFormValidation(orgStepSchema);
+  const projectValidation = useFormValidation(projectStepSchema);
+  const impactValidation = useFormValidation(impactStepSchema);
+
+  const currentValidation =
+    step === "org"
+      ? orgValidation
+      : step === "project"
+        ? projectValidation
+        : step === "impact"
+          ? impactValidation
+          : null;
+
+  const fieldErrors = (
+    currentValidation ? currentValidation.errors : {}
+  ) as Record<string, string | undefined>;
+
   const [documents, setDocuments] = useState<VerificationDocument[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const [form, setForm] = useState<FormData>({
-    organizationName: "",
+  type FormData = any;
+  const [form, setForm] = useState<any>({
+    projectCategory: PROJECT_CATEGORIES[0],
     organizationWebsite: "",
     organizationCountry: "",
-    contactEmail: "",
-    walletAddress: "",
-    projectName: "",
-    projectCategory: PROJECT_CATEGORIES[0],
-    projectLocation: "",
     projectDescription: "",
-    co2PerXLM: "",
     expectedAnnualTonnesCO2: "",
     notes: "",
+  });
+
+  const { register } = useForm<VerificationRequestFormData>({
+    resolver: zodResolver(verificationRequestSchema) as any,
+    defaultValues: {
+      projectCategory: PROJECT_CATEGORIES[0],
+      organizationWebsite: "",
+      organizationCountry: "",
+      projectDescription: "",
+      expectedAnnualTonnesCO2: "",
+      notes: "",
+    },
+    mode: "onTouched",
   });
 
   const set =
@@ -130,52 +160,45 @@ export default function ApplyPage() {
         HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
       >,
     ) => {
-      setForm((prev) => ({ ...prev, [field]: e.target.value }));
-      setFieldErrors((prev) => ({ ...prev, [field]: undefined }));
+      setForm((prev: any) => ({ ...prev, [field]: e.target.value }));
+      orgValidation.clearField(field as any);
+      projectValidation.clearField(field as any);
+      impactValidation.clearField(field as any);
     };
 
   function validateStep(): boolean {
-    const errs: Partial<Record<keyof FormData, string>> = {};
-
     if (step === "org") {
-      if (!form.organizationName.trim()) errs.organizationName = T("required");
-      if (!form.contactEmail.trim()) errs.contactEmail = T("required");
-      else if (!EMAIL_RE.test(form.contactEmail))
-        errs.contactEmail = T("invalidEmail");
-      if (!STELLAR_ADDRESS_RE.test(form.walletAddress.trim())) {
-        errs.walletAddress = T("invalidWallet");
-      }
+      return orgValidation.validate({
+        organizationName: form.organizationName,
+        organizationWebsite: form.organizationWebsite,
+        organizationCountry: form.organizationCountry,
+        contactEmail: form.contactEmail,
+        walletAddress: form.walletAddress,
+      });
     }
-
     if (step === "project") {
-      if (!form.projectName.trim()) errs.projectName = T("required");
-      if (!form.projectCategory) errs.projectCategory = T("invalidCategory");
-      if (!form.projectLocation.trim()) errs.projectLocation = T("required");
+      return projectValidation.validate({
+        projectName: form.projectName,
+        projectCategory: form.projectCategory,
+        projectLocation: form.projectLocation,
+        projectDescription: form.projectDescription,
+      });
     }
-
     if (step === "impact") {
-      const co2 = Number(form.co2PerXLM);
-      if (!form.co2PerXLM || !Number.isFinite(co2) || co2 < 0)
-        errs.co2PerXLM = T("invalidCO2");
-      const annual = form.expectedAnnualTonnesCO2
-        ? Number(form.expectedAnnualTonnesCO2)
-        : 0;
-      if (
-        form.expectedAnnualTonnesCO2 &&
-        (!Number.isFinite(annual) || annual < 0)
-      ) {
-        errs.expectedAnnualTonnesCO2 = T("invalidCO2");
-      }
+      return impactValidation.validate({
+        co2PerXLM: form.co2PerXLM,
+        expectedAnnualTonnesCO2: form.expectedAnnualTonnesCO2,
+        notes: form.notes,
+      });
     }
-
-    setFieldErrors(errs);
-    return Object.keys(errs).length === 0;
+    return true;
   }
 
-  function nextStep() {
-    if (!validateStep()) return;
-    const idx = STEPS.indexOf(step);
-    if (idx < STEPS.length - 2) setStep(STEPS[idx + 1]);
+  function validateAndNext() {
+    if (validateStep()) {
+      const idx = STEPS.indexOf(step);
+      if (idx < STEPS.length - 2) setStep(STEPS[idx + 1]);
+    }
   }
 
   function prevStep() {
@@ -217,29 +240,39 @@ export default function ApplyPage() {
     setDocuments((prev) => prev.filter((_, i) => i !== index));
   }
 
-  async function handleSubmit() {
-    if (!validateStep()) return;
+  async function handleFinalSubmit(e: React.FormEvent) {
+    e.preventDefault();
     setSubmitting(true);
     setServerError("");
+
+    const payload = {
+      organizationName: (form.organizationName || "").trim(),
+      organizationWebsite: (form.organizationWebsite || "").trim() || undefined,
+      organizationCountry: (form.organizationCountry || "").trim() || undefined,
+      contactEmail: (form.contactEmail || "").trim(),
+      walletAddress: (form.walletAddress || "").trim(),
+      projectName: (form.projectName || "").trim(),
+      projectCategory: form.projectCategory || PROJECT_CATEGORIES[0],
+      projectLocation: (form.projectLocation || "").trim(),
+      projectDescription: (form.projectDescription || "").trim() || undefined,
+      co2PerXLM: (form.co2PerXLM || "").trim(),
+      expectedAnnualTonnesCO2:
+        (form.expectedAnnualTonnesCO2 || "").trim() || undefined,
+      supportingDocuments: documents,
+      notes: (form.notes || "").trim() || undefined,
+    };
+
+    // Validate against the full schema before submitting
+    const validation = verificationRequestSchema.safeParse(payload);
+    if (!validation.success) {
+      setServerError("Please check your entries and try again.");
+      setSubmitting(false);
+      return;
+    }
+
     try {
-      const payload = {
-        organizationName: form.organizationName.trim(),
-        organizationWebsite: form.organizationWebsite.trim() || undefined,
-        organizationCountry: form.organizationCountry.trim() || undefined,
-        contactEmail: form.contactEmail.trim(),
-        walletAddress: form.walletAddress.trim(),
-        projectName: form.projectName.trim(),
-        projectCategory: form.projectCategory,
-        projectLocation: form.projectLocation.trim(),
-        projectDescription: form.projectDescription.trim() || undefined,
-        co2PerXLM: form.co2PerXLM.trim(),
-        expectedAnnualTonnesCO2:
-          form.expectedAnnualTonnesCO2.trim() || undefined,
-        supportingDocuments: documents,
-        notes: form.notes.trim() || undefined,
-      };
-      const data = await submitVerificationRequest(payload);
-      setReviewTimeline(data?.reviewTimeline ?? "5–10 business days");
+      const result = await submitVerificationRequest(payload);
+      setReviewTimeline(result?.reviewTimeline ?? "5–10 business days");
       setStep("done");
     } catch (err: any) {
       const msg =
@@ -247,8 +280,6 @@ export default function ApplyPage() {
         err?.response?.data?.message ??
         "Submission failed. Please try again.";
       setServerError(msg);
-      // Don't move back to "review" if the API still wants the form filled —
-      // surface the message so the submitter can correct and retry.
     } finally {
       setSubmitting(false);
     }
@@ -267,7 +298,7 @@ export default function ApplyPage() {
         <p className="text-[#5a7a5a] font-body mb-8">
           {T("subCopy")
             .replace("{timeline}", reviewTimeline)
-            .replace("{email}", form.contactEmail)}
+            .replace("{email}", form.contactEmail ?? "")}
         </p>
         <button className="btn-primary" onClick={() => router.push("/")}>
           {T("backToHome")}
@@ -319,65 +350,104 @@ export default function ApplyPage() {
           </div>
         ))}
       </div>
-      <div className="card p-6 space-y-5">
+      <form
+        onSubmit={handleFinalSubmit}
+        className="card p-6 space-y-5"
+      >
         {/* Step: org */}
         {step === "org" && (
           <>
             <h2 className="font-display text-xl font-bold text-[#0F172A] dark:text-[#E2E8F0]">
               {T("stepOrg")}
             </h2>
-            <Field
+            <FormField
+              name="organizationName"
               label={`${T("orgName")} *`}
-              error={fieldErrors.organizationName}
+              error={
+                fieldErrors.organizationName
+                  ? T(fieldErrors.organizationName)
+                  : undefined
+              }
             >
               <input
                 className="input-field"
+                {...register("organizationName")}
                 value={form.organizationName}
                 onChange={set("organizationName")}
                 placeholder="Acme Climate Foundation"
               />
-            </Field>
-            <Field label={T("orgWebsite")}>
+            </FormField>
+            <FormField
+              name="organizationWebsite"
+              label={T("orgWebsite")}
+              error={
+                fieldErrors.organizationWebsite
+                  ? T(fieldErrors.organizationWebsite)
+                  : undefined
+              }
+            >
               <input
                 className="input-field"
+                {...register("organizationWebsite")}
                 value={form.organizationWebsite}
                 onChange={set("organizationWebsite")}
                 placeholder="https://acme.org"
               />
-            </Field>
-            <Field label={T("orgCountry")}>
+            </FormField>
+            <FormField
+              name="organizationCountry"
+              label={T("orgCountry")}
+              error={
+                fieldErrors.organizationCountry
+                  ? T(fieldErrors.organizationCountry)
+                  : undefined
+              }
+            >
               <input
                 className="input-field"
+                {...register("organizationCountry")}
                 value={form.organizationCountry}
                 onChange={set("organizationCountry")}
                 placeholder="Kenya"
               />
-            </Field>
-            <Field
+            </FormField>
+            <FormField
+              name="contactEmail"
               label={`${T("contactEmail")} *`}
-              error={fieldErrors.contactEmail}
+              error={
+                fieldErrors.contactEmail
+                  ? T(fieldErrors.contactEmail)
+                  : undefined
+              }
             >
               <input
                 className="input-field"
                 type="email"
+                placeholder="hello@acme.org"
+                {...register("contactEmail")}
                 value={form.contactEmail}
                 onChange={set("contactEmail")}
-                placeholder="hello@acme.org"
               />
-            </Field>
-            <Field
+            </FormField>
+            <FormField
+              name="walletAddress"
               label={`${T("walletAddress")} *`}
               helper={T("walletHelper")}
-              error={fieldErrors.walletAddress}
+              error={
+                fieldErrors.walletAddress
+                  ? T(fieldErrors.walletAddress)
+                  : undefined
+              }
             >
               <input
                 className="input-field font-mono text-sm"
                 spellCheck={false}
+                {...register("walletAddress")}
                 value={form.walletAddress}
                 onChange={set("walletAddress")}
                 placeholder="GABC…"
               />
-            </Field>
+            </FormField>
           </>
         )}
 
@@ -387,23 +457,33 @@ export default function ApplyPage() {
             <h2 className="font-display text-xl font-bold text-[#0F172A] dark:text-[#E2E8F0]">
               {T("stepProject")}
             </h2>
-            <Field
+            <FormField
+              name="projectName"
               label={`${T("projectName")} *`}
-              error={fieldErrors.projectName}
+              error={
+                fieldErrors.projectName ? T(fieldErrors.projectName) : undefined
+              }
             >
               <input
                 className="input-field"
+                {...register("projectName")}
                 value={form.projectName}
                 onChange={set("projectName")}
                 placeholder="Acme Solar Farm Phase 1"
               />
-            </Field>
-            <Field
+            </FormField>
+            <FormField
+              name="projectCategory"
               label={`${T("projectCategory")} *`}
-              error={fieldErrors.projectCategory}
+              error={
+                fieldErrors.projectCategory
+                  ? T(fieldErrors.projectCategory)
+                  : undefined
+              }
             >
               <select
                 className="input-field"
+                {...register("projectCategory")}
                 value={form.projectCategory}
                 onChange={set("projectCategory")}
               >
@@ -413,26 +493,41 @@ export default function ApplyPage() {
                   </option>
                 ))}
               </select>
-            </Field>
-            <Field
+            </FormField>
+            <FormField
+              name="projectLocation"
               label={`${T("projectLocation")} *`}
-              error={fieldErrors.projectLocation}
+              error={
+                fieldErrors.projectLocation
+                  ? T(fieldErrors.projectLocation)
+                  : undefined
+              }
             >
               <input
                 className="input-field"
+                {...register("projectLocation")}
                 value={form.projectLocation}
                 onChange={set("projectLocation")}
                 placeholder="Nairobi, Kenya"
               />
-            </Field>
-            <Field label={T("projectDescription")}>
+            </FormField>
+            <FormField
+              name="projectDescription"
+              label={T("projectDescription")}
+              error={
+                fieldErrors.projectDescription
+                  ? T(fieldErrors.projectDescription)
+                  : undefined
+              }
+            >
               <textarea
                 className="input-field min-h-[100px] resize-y"
+                {...register("projectDescription")}
                 value={form.projectDescription}
                 onChange={set("projectDescription")}
                 placeholder="Tell us about the project in a few sentences."
               />
-            </Field>
+            </FormField>
           </>
         )}
 
@@ -445,9 +540,12 @@ export default function ApplyPage() {
             <p className="text-[#475569] dark:text-[#94A3B8] text-sm font-body">
               We use these numbers to communicate impact to donors and on-chain.
             </p>
-            <Field
+            <FormField
+              name="co2PerXLM"
               label={`${T("co2PerXLM")} *`}
-              error={fieldErrors.co2PerXLM}
+              error={
+                fieldErrors.co2PerXLM ? T(fieldErrors.co2PerXLM) : undefined
+              }
               helper="e.g. 0.05 kg CO₂ per XLM."
             >
               <input
@@ -456,14 +554,20 @@ export default function ApplyPage() {
                 inputMode="decimal"
                 min="0"
                 step="any"
+                placeholder="0.05"
+                {...register("co2PerXLM")}
                 value={form.co2PerXLM}
                 onChange={set("co2PerXLM")}
-                placeholder="0.05"
               />
-            </Field>
-            <Field
+            </FormField>
+            <FormField
+              name="expectedAnnualTonnesCO2"
               label={T("annualTonnes")}
-              error={fieldErrors.expectedAnnualTonnesCO2}
+              error={
+                fieldErrors.expectedAnnualTonnesCO2
+                  ? T(fieldErrors.expectedAnnualTonnesCO2)
+                  : undefined
+              }
             >
               <input
                 className="input-field"
@@ -471,19 +575,25 @@ export default function ApplyPage() {
                 inputMode="decimal"
                 min="0"
                 step="any"
+                placeholder="1200"
+                {...register("expectedAnnualTonnesCO2")}
                 value={form.expectedAnnualTonnesCO2}
                 onChange={set("expectedAnnualTonnesCO2")}
-                placeholder="1200"
               />
-            </Field>
-            <Field label={T("notes")}>
+            </FormField>
+            <FormField
+              name="notes"
+              label={T("notes")}
+              error={fieldErrors.notes ? T(fieldErrors.notes) : undefined}
+            >
               <textarea
                 className="input-field min-h-[80px] resize-y"
+                {...register("notes")}
                 value={form.notes}
                 onChange={set("notes")}
                 placeholder="Methodology, prior funding rounds, anything else the reviewer should see."
               />
-            </Field>
+            </FormField>
           </>
         )}
 
@@ -562,97 +672,103 @@ export default function ApplyPage() {
         )}
 
         {/* Step: review */}
-        {step === "review" && (
-          <>
-            <h2 className="font-display text-xl font-bold text-[#0F172A] dark:text-[#E2E8F0]">
-              {T("stepReview")}
-            </h2>
-            <p className="text-sm text-[#475569] dark:text-[#94A3B8] font-body">
-              Quick scan before submission:
-            </p>
-            <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm font-body">
-              <div>
-                <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
-                  {T("orgName")}
-                </dt>
-                <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
-                  {form.organizationName || "—"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
-                  {T("contactEmail")}
-                </dt>
-                <dd className="text-forest-900 break-all">
-                  {form.contactEmail || "—"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
-                  {T("walletAddress")}
-                </dt>
-                <dd className="font-mono text-xs text-[#0F172A] dark:text-[#E2E8F0] break-all">
-                  {form.walletAddress || "—"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
-                  {T("projectName")}
-                </dt>
-                <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
-                  {form.projectName || "—"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
-                  {T("projectCategory")}
-                </dt>
-                <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
-                  {form.projectCategory || "—"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
-                  {T("projectLocation")}
-                </dt>
-                <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
-                  {form.projectLocation || "—"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
-                  {T("co2PerXLM")}
-                </dt>
-                <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
-                  {form.co2PerXLM || "—"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
-                  {T("annualTonnes")}
-                </dt>
-                <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
-                  {form.expectedAnnualTonnesCO2 || "—"}
-                </dd>
-              </div>
-              <div className="sm:col-span-2">
-                <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
-                  {T("documentsTitle")}
-                </dt>
-                <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
-                  {documents.length
-                    ? documents.map((d) => d.name).join(", ")
-                    : T("noDocuments")}
-                </dd>
-              </div>
-            </dl>
+        {step === "review" &&
+          (() => {
+            const reviewData = form;
+            return (
+              <>
+                <h2 className="font-display text-xl font-bold text-[#0F172A] dark:text-[#E2E8F0]">
+                  {T("stepReview")}
+                </h2>
+                <p className="text-sm text-[#475569] dark:text-[#94A3B8] font-body">
+                  Quick scan before submission:
+                </p>
+                <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm font-body">
+                  <div>
+                    <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
+                      {T("orgName")}
+                    </dt>
+                    <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
+                      {reviewData.organizationName || "—"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
+                      {T("contactEmail")}
+                    </dt>
+                    <dd className="text-forest-900 break-all">
+                      {reviewData.contactEmail || "—"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
+                      {T("walletAddress")}
+                    </dt>
+                    <dd className="font-mono text-xs text-[#0F172A] dark:text-[#E2E8F0] break-all">
+                      {reviewData.walletAddress || "—"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
+                      {T("projectName")}
+                    </dt>
+                    <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
+                      {reviewData.projectName || "—"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
+                      {T("projectCategory")}
+                    </dt>
+                    <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
+                      {reviewData.projectCategory || "—"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
+                      {T("projectLocation")}
+                    </dt>
+                    <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
+                      {reviewData.projectLocation || "—"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
+                      {T("co2PerXLM")}
+                    </dt>
+                    <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
+                      {reviewData.co2PerXLM || "—"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
+                      {T("annualTonnes")}
+                    </dt>
+                    <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
+                      {reviewData.expectedAnnualTonnesCO2 || "—"}
+                    </dd>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <dt className="text-xs text-[#64748B] dark:text-[#94A3B8] uppercase tracking-wider">
+                      {T("documentsTitle")}
+                    </dt>
+                    <dd className="text-[#0F172A] dark:text-[#E2E8F0]">
+                      {documents.length
+                        ? documents.map((d) => d.name).join(", ")
+                        : T("noDocuments")}
+                    </dd>
+                  </div>
+                </dl>
 
-            {serverError && (
-              <p className="text-sm text-red-500 font-body">{serverError}</p>
-            )}
-          </>
-        )}
-      </div>
+                {serverError && (
+                  <p className="text-sm text-red-500 font-body">
+                    {serverError}
+                  </p>
+                )}
+              </>
+            );
+          })()}
+      </form>
       {/* Navigation */}
       <div className="flex justify-between mt-6">
         <button
@@ -665,20 +781,28 @@ export default function ApplyPage() {
         </button>
 
         {step === "documents" ? (
-          <button type="button" onClick={nextStep} className="btn-primary">
+          <button
+            type="button"
+            onClick={validateAndNext}
+            className="btn-primary"
+          >
             {T("common.next") || "Next"}
           </button>
         ) : step === "review" ? (
           <button
             type="button"
-            onClick={handleSubmit}
+            onClick={handleFinalSubmit}
             disabled={submitting}
             className="btn-primary disabled:opacity-60 disabled:cursor-not-allowed"
           >
             {submitting ? T("submitting") : T("submit")}
           </button>
         ) : (
-          <button type="button" onClick={nextStep} className="btn-primary">
+          <button
+            type="button"
+            onClick={validateAndNext}
+            className="btn-primary"
+          >
             {T("common.next") || "Next"}
           </button>
         )}

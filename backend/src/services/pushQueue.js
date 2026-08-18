@@ -93,8 +93,9 @@ async function start() {
     logger.error({ event: "push_queue_error", err: err.message }, "pg-boss error"),
   );
   await boss.start();
+  await boss.createQueue(QUEUE);
 
-  await boss.work(QUEUE, { teamSize: 2, teamConcurrency: 1 }, async (job) => {
+  await boss.work(QUEUE, { teamSize: 2, teamConcurrency: 1 }, async ([job]) => {
     const { type, payload } = job.data || {};
     const handler = HANDLERS[type];
     if (!handler) {
@@ -106,11 +107,6 @@ async function start() {
     }
     await handler(payload || {});
   });
-
-  logger.info(
-    { event: "push_queue_started", queue: QUEUE },
-    "push queue worker registered",
-  );
 }
 
 /**
@@ -129,14 +125,8 @@ async function enqueuePushNotification({ type, payload }) {
 
 async function stop() {
   if (!boss) return;
-  try {
-    await boss.stop({ graceful: true, timeout: 15_000 });
-  } catch (err) {
-    logger.warn(
-      { event: "push_queue_stop_error", err: err.message },
-      "graceful stop failed",
-    );
-  }
+  await boss.stop({ graceful: true, timeout: 15_000 });
+  boss = null;
 }
 
 module.exports = { QUEUE, start, stop, enqueuePushNotification };

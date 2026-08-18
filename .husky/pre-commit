@@ -1,4 +1,9 @@
 #!/usr/bin/env sh
 . "$(dirname -- "$0")/_/husky.sh"
 
+# Run the Rust formatting validation gating script on staged files
+.husky/check-rust-fmt.sh || exit $?
+
+# Run lint-staged to validate other staged codebase assets
 npx lint-staged
+

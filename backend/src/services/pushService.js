@@ -3,23 +3,27 @@
 /**
  * src/services/pushService.js
  *
- * Push notification sending, on top of the Expo Push API. `pushQueue.js`
- * is the pg-boss worker that calls into this module for reliability
- * (retries on transient failures); this module owns the actual send,
- * per-donor preference checks, and delivery tracking in
- * `push_notifications`.
+ * Push notification dispatch with multi-provider routing (APNs / FCM / Expo).
+ * `pushQueue.js` is the pg-boss worker that calls into this module; this
+ * module owns preference checks, provider selection, and delivery tracking.
+ *
+ * Provider routing is delegated to `pushProviders.js`. The public API of
+ * this module is unchanged so callers (pushQueue, routes) need no updates.
  */
 
 const { Expo } = require("expo-server-sdk");
 const { v4: uuid } = require("uuid");
 const pool = require("../db/pool");
 const logger = require("../logger");
+const { sendViaProvider } = require("./pushProviders");
 
-const expo = new Expo(
-  process.env.EXPO_ACCESS_TOKEN
-    ? { accessToken: process.env.EXPO_ACCESS_TOKEN }
-    : undefined,
-);
+/**
+ * Push-token lifecycle:
+ *  - PUSH_TOKEN_TTL_DAYS — sliding expiry window (in days) refreshed on every
+ *    register. Tokens not refreshed within the window are excluded from sends
+ *    and soft-deactivated by purgeExpiredTokens().
+ */
+const PUSH_TOKEN_TTL_DAYS = Number(process.env.PUSH_TOKEN_TTL_DAYS || 180);
 
 /**
  * Whether a wallet has opted in to push notifications of a given type.
@@ -80,6 +84,37 @@ async function isInDndWindow(walletAddress) {
   }
 }
 
+/**
+ * Soft-deactivate device tokens whose sliding expiry window has passed so
+ * they are excluded from future sends. Hard deletion happens later via the
+ * device-tokens retention policy. Returns the number of tokens invalidated.
+ */
+async function purgeExpiredTokens() {
+  try {
+    const result = await pool.query(
+      `UPDATE device_tokens
+       SET is_active = false, updated_at = NOW()
+       WHERE is_active = true AND expires_at IS NOT NULL AND expires_at <= NOW()`,
+    );
+    if (result.rowCount > 0) {
+      logger.info(
+        { event: "push_expired_tokens_purged", count: result.rowCount },
+        "Deactivated expired device tokens",
+      );
+    }
+    return result.rowCount;
+  } catch (err) {
+    logger.error(
+      {
+        event: "push_expired_tokens_purge_failed",
+        err: err.message,
+      },
+      "Failed to purge expired device tokens",
+    );
+    return 0;
+  }
+}
+
 async function shouldSendPush(walletAddress, type) {
   if (!walletAddress) return false;
 
@@ -117,12 +152,14 @@ async function recordDelivery({
   status,
   ticketId,
   errorMessage,
+  platform = null,
+  provider = null,
 }) {
   try {
     await pool.query(
       `INSERT INTO push_notifications
-         (id, wallet_address, device_token, title, body, data, status, ticket_id, error_message)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)`,
+         (id, wallet_address, device_token, title, body, data, status, ticket_id, error_message, platform, provider)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11)`,
       [
         uuid(),
         walletAddress || null,
@@ -133,6 +170,8 @@ async function recordDelivery({
         status,
         ticketId || null,
         errorMessage || null,
+        platform || null,
+        provider || null,
       ],
     );
   } catch (err) {
@@ -149,106 +188,71 @@ async function recordDelivery({
 }
 
 /**
- * Send a batch of already-built Expo messages and record the outcome of
- * every ticket (or the chunk-level failure) in `push_notifications`.
- * `walletAddresses[i]` corresponds to `messages[i]` — it may be null for
- * anonymous device follows that have no wallet to check preferences for.
+ * Dispatch a list of device descriptors (each with a token, platform, walletAddress)
+ * via the appropriate provider, recording outcomes in push_notifications.
+ *
+ * Replaces the old Expo-only dispatch().
+ *
+ * @param {{ token: string, platform: string|null, walletAddress: string|null }[]} devices
+ * @param {{ title: string, body: string, data?: object }} payload
  */
-async function dispatch(messages, walletAddresses) {
-  if (messages.length === 0) return [];
+async function dispatchToDevices(devices, payload) {
+  const results = [];
 
-  const chunks = expo.chunkPushNotifications(messages);
-  const tickets = [];
-  let cursor = 0;
+  for (const device of devices) {
+    const result = await sendViaProvider(
+      device.token,
+      device.platform,
+      "auto",
+      payload,
+    );
 
-  for (const chunk of chunks) {
-    let ticketChunk;
-    try {
-      ticketChunk = await expo.sendPushNotificationsAsync(chunk);
-    } catch (err) {
-      logger.error(
-        { event: "push_send_chunk_failed", err: err.message },
-        "Failed to send push notification chunk",
-      );
-      for (let i = 0; i < chunk.length; i++) {
-        await recordDelivery({
-          walletAddress: walletAddresses[cursor + i],
-          message: chunk[i],
-          status: "failed",
-          errorMessage: err.message,
-        });
-      }
-      cursor += chunk.length;
-      continue;
-    }
+    // Map provider outcome to push_notifications.status
+    const status =
+      result.success || result.outcome === "fallback" ? "sent" : "failed";
 
-    for (let i = 0; i < ticketChunk.length; i++) {
-      const ticket = ticketChunk[i];
-      const message = chunk[i];
-      const walletAddress = walletAddresses[cursor + i];
+    await recordDelivery({
+      walletAddress: device.walletAddress,
+      message: { to: device.token, ...payload },
+      status,
+      ticketId: result.providerMessageId || null,
+      errorMessage: result.error || null,
+      platform: device.platform,
+      provider: result.provider,
+    });
 
-      if (ticket.status === "ok") {
-        await recordDelivery({
-          walletAddress,
-          message,
-          status: "sent",
-          ticketId: ticket.id,
-        });
-      } else {
-        logger.warn(
-          {
-            event: "push_ticket_error",
-            walletAddress,
-            deviceToken: message.to,
-            error: ticket.details && ticket.details.error,
-            message: ticket.message,
-          },
-          "Expo push ticket reported an error",
+    // Deactivate stale tokens regardless of provider.
+    if (result.unregistered) {
+      try {
+        await pool.query(
+          "UPDATE device_tokens SET is_active = false, updated_at = NOW() WHERE token = $1",
+          [device.token],
         );
-        await recordDelivery({
-          walletAddress,
-          message,
-          status: "failed",
-          errorMessage: ticket.message,
-        });
-
-        // Auto-mark the token inactive when Expo reports it's no longer
-        // registered (e.g., user uninstalled the app).
-        if (
-          ticket.details &&
-          ticket.details.error === "DeviceNotRegistered"
-        ) {
-          try {
-            await pool.query(
-              "UPDATE device_tokens SET is_active = false, updated_at = NOW() WHERE token = $1",
-              [message.to],
-            );
-            logger.info(
-              {
-                event: "push_stale_token_marked_inactive",
-                deviceToken: message.to,
-                walletAddress,
-              },
-              "Auto-marked stale device token as inactive",
-            );
-          } catch (err) {
-            logger.error(
-              {
-                event: "push_stale_token_mark_failed",
-                deviceToken: message.to,
-                err: err.message,
-              },
-              "Failed to mark stale token inactive",
-            );
-          }
-        }
+        logger.info(
+          {
+            event: "push_stale_token_marked_inactive",
+            provider: result.provider,
+            deviceToken: device.token,
+            walletAddress: device.walletAddress,
+          },
+          "Auto-marked stale device token as inactive",
+        );
+      } catch (err) {
+        logger.error(
+          {
+            event: "push_stale_token_mark_failed",
+            deviceToken: device.token,
+            err: err.message,
+          },
+          "Failed to mark stale token inactive",
+        );
       }
-      tickets.push(ticket);
     }
-    cursor += chunk.length;
+
+    results.push(result);
   }
 
-  return tickets;
+  return results;
 }
 
 /**
@@ -259,31 +263,20 @@ async function sendPushNotification({ walletAddress, title, body, data = {} }) {
   if (!(await shouldSendPush(walletAddress, data.type))) return null;
 
   const { rows: tokens } = await pool.query(
-    "SELECT token FROM device_tokens WHERE wallet_address = $1 AND is_active = true",
+    `SELECT token, platform FROM device_tokens
+     WHERE wallet_address = $1 AND is_active = true
+       AND (expires_at IS NULL OR expires_at > NOW())`,
     [walletAddress],
   );
 
-  const messages = [];
-  const walletAddresses = [];
-  for (const row of tokens) {
-    if (!Expo.isExpoPushToken(row.token)) {
-      logger.warn(
-        { event: "push_invalid_token", walletAddress, token: row.token },
-        "Skipping invalid Expo push token",
-      );
-      continue;
-    }
-    messages.push({
-      to: row.token,
-      sound: "default",
-      title,
-      body,
-      data: { ...data, walletAddress },
-    });
-    walletAddresses.push(walletAddress);
-  }
+  const devices = tokens.map((row) => ({
+    token: row.token,
+    platform: row.platform || null,
+    walletAddress,
+  }));
 
-  return dispatch(messages, walletAddresses);
+  const payload = { title, body, data: { ...data, walletAddress } };
+  return dispatchToDevices(devices, payload);
 }
 
 async function sendDonationReceipt(donorAddress, donation) {
@@ -314,10 +307,11 @@ async function sendGovernanceProposalNotifications({
   endsAt,
 }) {
   const { rows: followers } = await pool.query(
-    `SELECT DISTINCT dt.token, dt.wallet_address
+    `SELECT DISTINCT dt.token, dt.wallet_address, dt.platform
      FROM device_tokens dt
      WHERE dt.wallet_address IS NOT NULL
-       AND dt.is_active = true`,
+       AND dt.is_active = true
+       AND (dt.expires_at IS NULL OR dt.expires_at > NOW())`,
   );
 
   const shortBody =
@@ -332,9 +326,7 @@ async function sendGovernanceProposalNotifications({
   };
 
   const messages = [];
-  const walletAddresses = [];
   for (const row of followers) {
-    if (!Expo.isExpoPushToken(row.token)) continue;
     if (
       row.wallet_address &&
       !(await shouldSendPush(row.wallet_address, data.type))
@@ -342,18 +334,25 @@ async function sendGovernanceProposalNotifications({
       continue;
     }
     messages.push({
-      to: row.token,
-      sound: "default",
-      title: `Governance: ${title}`,
-      body: shortBody,
-      data: row.wallet_address
-        ? { ...data, walletAddress: row.wallet_address }
-        : data,
+      token: row.token,
+      platform: row.platform || null,
+      walletAddress: row.wallet_address || null,
     });
-    walletAddresses.push(row.wallet_address || null);
   }
 
-  return dispatch(messages, walletAddresses);
+  const sendPayload = {
+    title: `Governance: ${title}`,
+    body: shortBody,
+    data,
+  };
+
+  const devices = messages.map((m) => ({
+    token: m.token,
+    platform: m.platform,
+    walletAddress: m.walletAddress,
+  }));
+
+  return dispatchToDevices(devices, sendPayload);
 }
 
 /**
@@ -428,10 +427,11 @@ async function sendMilestoneReachedNotifications({
  */
 async function sendProjectUpdateNotifications({ project, update }) {
   const { rows: followers } = await pool.query(
-    `SELECT dt.token, dt.wallet_address
+    `SELECT dt.token, dt.wallet_address, dt.platform
      FROM project_follows pf
      JOIN device_tokens dt ON pf.device_token_id = dt.id
-     WHERE pf.project_id = $1 AND dt.is_active = true`,
+     WHERE pf.project_id = $1 AND dt.is_active = true
+       AND (dt.expires_at IS NULL OR dt.expires_at > NOW())`,
     [project.id],
   );
 
@@ -453,9 +453,8 @@ async function sendProjectUpdateNotifications({ project, update }) {
           projectId: project.id,
           token: row.token,
         },
-        "Skipping invalid Expo push token",
+        "Skipping token not usable as Expo push token (native tokens handled by platform providers)",
       );
-      continue;
     }
     if (
       row.wallet_address &&
@@ -464,18 +463,25 @@ async function sendProjectUpdateNotifications({ project, update }) {
       continue;
     }
     messages.push({
-      to: row.token,
-      sound: "default",
-      title,
-      body,
-      data: row.wallet_address
-        ? { ...data, walletAddress: row.wallet_address }
-        : data,
+      token: row.token,
+      platform: row.platform || null,
+      walletAddress: row.wallet_address || null,
     });
     walletAddresses.push(row.wallet_address || null);
   }
 
-  return dispatch(messages, walletAddresses);
+  const sendPayload = {
+    title,
+    body,
+    data,
+  };
+  // Build device list for multi-provider dispatch
+  const devices = messages.map((m) => ({
+    token: m.token,
+    platform: m.platform,
+    walletAddress: m.walletAddress,
+  }));
+  return dispatchToDevices(devices, sendPayload);
 }
 
 module.exports = {
@@ -486,4 +492,6 @@ module.exports = {
   sendGovernanceProposalNotifications,
   sendRecurringReminder,
   shouldSendPush,
+  purgeExpiredTokens,
+  PUSH_TOKEN_TTL_DAYS,
 };

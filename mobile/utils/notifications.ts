@@ -4,7 +4,8 @@
  */
 import * as Notifications from "expo-notifications";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Platform } from "react-native";
+import { Platform, Linking as RNLinking } from "react-native";
+import * as Linking from "expo-linking";
 
 // Configure notification behavior
 Notifications.setNotificationHandler({
@@ -250,6 +251,7 @@ export function setupNotificationListener(
   const subscription = Notifications.addNotificationReceivedListener(
     async (notification) => {
       console.log("Notification received:", notification);
+      await saveNotificationFromExpo(notification);
       const currentBadge = await Notifications.getBadgeCountAsync().catch(
         () => 0,
       );
@@ -260,6 +262,105 @@ export function setupNotificationListener(
   );
 
   return subscription;
+}
+
+const handledNotificationIds = new Set<string>();
+
+/**
+ * Check if a notification has already been handled to prevent duplicates
+ */
+export function isNotificationHandled(id: string): boolean {
+  if (handledNotificationIds.has(id)) {
+    return true;
+  }
+  handledNotificationIds.add(id);
+  if (handledNotificationIds.size > 100) {
+    const firstElement = handledNotificationIds.values().next().value;
+    if (firstElement !== undefined) {
+      handledNotificationIds.delete(firstElement);
+    }
+  }
+  return false;
+}
+
+/**
+ * Parses deep links like indigopay://project/123 -> /projects/123
+ */
+export function parseDeepLinkUrl(url: string): string | null {
+  try {
+    const parsed = Linking.parse(url);
+    const path = parsed.path;
+    if (!path) return null;
+    const [segment, param] = path.replace(/^\//, "").split("/");
+    if (!param) return null;
+    if (segment === "project") {
+      return `/projects/${param}`;
+    } else if (segment === "donate") {
+      return `/donate/${param}`;
+    }
+  } catch (e) {
+    console.error("Failed to parse deep link url:", e);
+  }
+  return null;
+}
+
+/**
+ * Navigate according to notification payload structure
+ */
+export function navigateToNotification(
+  data: Record<string, any> | undefined,
+  push: (path: string) => void,
+) {
+  if (!data) {
+    push("/");
+    return;
+  }
+
+  const { type, projectId, donorAddress, url } = data;
+
+  if (url && typeof url === "string") {
+    if (url.startsWith("indigopay://")) {
+      const parsed = parseDeepLinkUrl(url);
+      if (parsed) {
+        push(parsed);
+        return;
+      }
+    } else if (url.startsWith("http://") || url.startsWith("https://")) {
+      RNLinking.openURL(url).catch((err) =>
+        console.error("Error opening URL:", err),
+      );
+      return;
+    }
+  }
+
+  switch (type) {
+    case "donation_receipt":
+      if (donorAddress) {
+        push(`/profile/${donorAddress}`);
+      } else if (projectId) {
+        push(`/projects/${projectId}`);
+      } else {
+        push("/");
+      }
+      break;
+    case "project_update":
+    case "milestone_reached":
+      if (projectId) {
+        push(`/projects/${projectId}`);
+      } else {
+        push("/");
+      }
+      break;
+    case "subscription_due":
+      if (projectId) {
+        push(`/donate/${projectId}`);
+      } else {
+        push("/");
+      }
+      break;
+    default:
+      push("/");
+  }
 }
 
 /**
@@ -300,4 +401,114 @@ export function setupNotificationResponseListener(
   );
 
   return subscription;
+}
+
+const INBOX_KEY = "indigopay:notifications:inbox";
+
+export interface InboxNotification {
+  id: string;
+  type: string;
+  title?: string;
+  body?: string;
+  timestamp: number;
+  read: boolean;
+  projectId?: string;
+  donationId?: string;
+  donorAddress?: string;
+  url?: string;
+}
+
+export async function getInboxNotifications(): Promise<InboxNotification[]> {
+  try {
+    const raw = await AsyncStorage.getItem(INBOX_KEY);
+    if (!raw) return [];
+    const list = JSON.parse(raw);
+    if (Array.isArray(list)) {
+      return list.sort((a, b) => b.timestamp - a.timestamp);
+    }
+    return [];
+  } catch (error) {
+    console.error("Error loading inbox notifications:", error);
+    return [];
+  }
+}
+
+export async function saveInboxNotifications(
+  notifications: InboxNotification[],
+): Promise<void> {
+  try {
+    await AsyncStorage.setItem(INBOX_KEY, JSON.stringify(notifications));
+  } catch (error) {
+    console.error("Error saving inbox notifications:", error);
+  }
+}
+
+export async function addInboxNotification(
+  notification: InboxNotification,
+): Promise<void> {
+  try {
+    const current = await getInboxNotifications();
+    if (current.some((n) => n.id === notification.id)) {
+      return;
+    }
+    const updated = [notification, ...current];
+    await saveInboxNotifications(updated.slice(0, 50));
+  } catch (error) {
+    console.error("Error adding inbox notification:", error);
+  }
+}
+
+export async function saveNotificationFromExpo(
+  notification: Notifications.Notification,
+): Promise<void> {
+  const id = notification.request.identifier;
+  const { title, body, data } = notification.request.content;
+  const type = (data?.type as string) || "unknown";
+  const projectId = data?.projectId as string | undefined;
+  const donationId = data?.donationId as string | undefined;
+  const donorAddress = data?.donorAddress as string | undefined;
+  const url = data?.url as string | undefined;
+
+  await addInboxNotification({
+    id,
+    type,
+    title: title || undefined,
+    body: body || undefined,
+    timestamp: Date.now(),
+    read: false,
+    projectId,
+    donationId,
+    donorAddress,
+    url,
+  });
+}
+
+export async function markInboxNotificationRead(id: string): Promise<void> {
+  try {
+    const current = await getInboxNotifications();
+    const updated = current.map((n) =>
+      n.id === id ? { ...n, read: true } : n,
+    );
+    await saveInboxNotifications(updated);
+  } catch (error) {
+    console.error("Error marking inbox notification as read:", error);
+  }
+}
+
+export async function markAllInboxNotificationsRead(): Promise<void> {
+  try {
+    const current = await getInboxNotifications();
+    const updated = current.map((n) => ({ ...n, read: true }));
+    await saveInboxNotifications(updated);
+  } catch (error) {
+    console.error("Error marking all inbox notifications as read:", error);
+  }
+}
+
+export async function clearInboxNotifications(): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(INBOX_KEY);
+  } catch (error) {
+    console.error("Error clearing inbox notifications:", error);
+  }
 }

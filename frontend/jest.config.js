@@ -9,12 +9,24 @@ const createJestConfig = nextJest({
 const customJestConfig = {
   testEnvironment: "jest-environment-jsdom",
   setupFilesAfterEnv: ["<rootDir>/jest.setup.ts"],
-  // Mirror the "@/*" path alias from tsconfig.json
   moduleNameMapper: {
     "^@/(.*)$": "<rootDir>/$1",
+    "^zod$": "<rootDir>/node_modules/zod",
   },
   // Only run unit/snapshot tests here; Playwright e2e lives in /e2e
   testMatch: ["<rootDir>/**/__tests__/**/*.test.{ts,tsx}"],
+  collectCoverageFrom: [
+    "components/EmptyState.tsx",
+    "components/DonorProfileSkeleton.tsx",
+  ],
+  coverageThreshold: {
+    global: {
+      statements: 99.5,
+      branches: 99.5,
+      functions: 99.5,
+      lines: 99.5,
+    },
+  },
 };
 
 module.exports = createJestConfig(customJestConfig);

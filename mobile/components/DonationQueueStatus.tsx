@@ -27,7 +27,7 @@ import {
   QueuedDonation,
   DonationStatus,
 } from "../utils/donationQueue";
-import { retryAllNow, processQueue } from "../utils/donationQueueWorker";
+import { retryAllNow, retryDonationNow, isSyncing } from "../utils/donationQueueWorker";
 
 // Polling interval for refreshing queue state.
 const POLL_INTERVAL_MS = 5_000;
@@ -62,27 +62,36 @@ function statusColor(status: DonationStatus): string {
 
 interface FloatingBadgeProps {
   count: number;
+  syncing?: boolean;
   onPress: () => void;
 }
 
-function FloatingBadge({ count, onPress }: FloatingBadgeProps) {
+function FloatingBadge({ count, syncing, onPress }: FloatingBadgeProps) {
   const { colors } = useTheme();
 
-  if (count === 0) return null;
+  if (count === 0 && !syncing) return null;
 
   return (
     <TouchableOpacity
       style={[styles.floatingBadge, { backgroundColor: colors.surface + "F2" }]}
       onPress={onPress}
       activeOpacity={0.8}
-      accessibilityLabel={`${count} pending donation${count > 1 ? "s" : ""}. Tap to view.`}
+      accessibilityLabel={
+        syncing
+          ? "Syncing donations"
+          : `${count} pending donation${count > 1 ? "s" : ""}. Tap to view.`
+      }
       accessibilityRole="button"
     >
       <View style={[styles.badgeCircle, { backgroundColor: colors.primary }]}>
-        <Text style={styles.badgeCount}>{count > 99 ? "99+" : count}</Text>
+        {syncing ? (
+          <ActivityIndicator size="small" color="#fff" />
+        ) : (
+          <Text style={styles.badgeCount}>{count > 99 ? "99+" : count}</Text>
+        )}
       </View>
       <Text style={[styles.badgeLabel, { color: colors.primaryText }]}>
-        Pending
+        {syncing ? "Syncing" : "Pending"}
       </Text>
     </TouchableOpacity>
   );
@@ -93,10 +102,11 @@ function FloatingBadge({ count, onPress }: FloatingBadgeProps) {
 interface QueueItemProps {
   donation: QueuedDonation;
   onDismiss: (id: string) => void;
+  onRetry: (id: string) => void;
   colors: ReturnType<typeof useTheme>["colors"];
 }
 
-function QueueItem({ donation, onDismiss, colors }: QueueItemProps) {
+function QueueItem({ donation, onDismiss, onRetry, colors }: QueueItemProps) {
   const isPending =
     donation.status === "pending" || donation.status === "retrying";
   const isFailed = donation.status === "failed";
@@ -159,16 +169,28 @@ function QueueItem({ donation, onDismiss, colors }: QueueItemProps) {
       ) : null}
 
       {isFailed ? (
-        <TouchableOpacity
-          style={[styles.dismissButton, { borderColor: colors.border }]}
-          onPress={() => onDismiss(donation.id)}
-          accessibilityLabel="Dismiss this failed donation"
-          accessibilityRole="button"
-        >
-          <Text style={[styles.dismissButtonText, { color: colors.secondaryText }]}>
-            Dismiss
-          </Text>
-        </TouchableOpacity>
+        <View style={styles.actionRowItem}>
+          <TouchableOpacity
+            style={[styles.retryButton, { borderColor: colors.primary }]}
+            onPress={() => onRetry(donation.id)}
+            accessibilityLabel="Retry this failed donation"
+            accessibilityRole="button"
+          >
+            <Text style={[styles.retryButtonText, { color: colors.primary }]}>
+              Retry
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.dismissButton, { borderColor: colors.border }]}
+            onPress={() => onDismiss(donation.id)}
+            accessibilityLabel="Dismiss this failed donation"
+            accessibilityRole="button"
+          >
+            <Text style={[styles.dismissButtonText, { color: colors.secondaryText }]}>
+              Dismiss
+            </Text>
+          </TouchableOpacity>
+        </View>
       ) : null}
     </View>
   );
@@ -208,6 +230,11 @@ function DetailSheet({ visible, onClose }: DetailSheetProps) {
 
   const handleDismiss = async (id: string) => {
     await removeDonation(id);
+    await refresh();
+  };
+
+  const handleRetry = async (id: string) => {
+    await retryDonationNow(id);
     await refresh();
   };
 
@@ -254,7 +281,17 @@ function DetailSheet({ visible, onClose }: DetailSheetProps) {
 
           <Text style={[styles.sheetSubtitle, { color: colors.secondaryText }]}>
             {pendingCount} pending · {failedCount} failed
+            {failedCount > 0 ? " · tap Retry on permanent failures" : ""}
           </Text>
+
+          {submitting ? (
+            <View style={styles.syncingRow}>
+              <ActivityIndicator size="small" color={colors.primary} />
+              <Text style={[styles.syncingText, { color: colors.secondaryText }]}>
+                Syncing…
+              </Text>
+            </View>
+          ) : null}
 
           {/* Action buttons */}
           <View style={styles.actionRow}>
@@ -299,6 +336,7 @@ function DetailSheet({ visible, onClose }: DetailSheetProps) {
               <QueueItem
                 donation={item}
                 onDismiss={handleDismiss}
+                onRetry={handleRetry}
                 colors={colors}
               />
             )}
@@ -330,23 +368,30 @@ function DetailSheet({ visible, onClose }: DetailSheetProps) {
  */
 export default function DonationQueueStatus() {
   const [pendingCount, setPendingCount] = useState(0);
+  const [syncing, setSyncing] = useState(false);
   const [sheetVisible, setSheetVisible] = useState(false);
 
   useEffect(() => {
     const interval = setInterval(async () => {
       const count = await getPendingCount();
       setPendingCount(count);
+      setSyncing(isSyncing());
     }, POLL_INTERVAL_MS);
 
     // Initial load
     getPendingCount().then(setPendingCount);
+    setSyncing(isSyncing());
 
     return () => clearInterval(interval);
   }, []);
 
   return (
     <>
-      <FloatingBadge count={pendingCount} onPress={() => setSheetVisible(true)} />
+      <FloatingBadge
+        count={pendingCount}
+        syncing={syncing}
+        onPress={() => setSheetVisible(true)}
+      />
       <DetailSheet visible={sheetVisible} onClose={() => setSheetVisible(false)} />
     </>
   );
@@ -514,6 +559,34 @@ const styles = StyleSheet.create({
   },
   dismissButtonText: {
     fontSize: 12,
+    fontWeight: "600",
+  },
+  actionRowItem: {
+    flexDirection: "row",
+    marginTop: 8,
+    gap: 8,
+    alignItems: "center",
+  },
+  retryButton: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    alignSelf: "flex-start",
+  },
+  retryButtonText: {
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  syncingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 20,
+    marginBottom: 8,
+  },
+  syncingText: {
+    fontSize: 13,
     fontWeight: "600",
   },
   emptyContainer: {

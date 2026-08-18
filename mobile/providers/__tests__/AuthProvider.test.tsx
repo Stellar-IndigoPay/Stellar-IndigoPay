@@ -21,23 +21,26 @@ import {
   waitFor,
 } from "@testing-library/react-native";
 
-jest.mock("../lib/secureStore");
-jest.mock("../hooks/useBiometricAuth");
+jest.mock("../../lib/secureStore");
+jest.mock("../../hooks/useBiometricAuth");
+import * as secureStore from "../../lib/secureStore";
+import * as biometricAuth from "../../hooks/useBiometricAuth";
 jest.mock("react-native", () => {
-  // Preserve the real module's surface while exporting a mock addEventListener
-  // we can drive directly from tests.
   const RN = jest.requireActual("react-native");
-  return {
-    ...RN,
-    AppState: {
-      ...RN.AppState,
-      addEventListener: jest.fn(() => ({ remove: jest.fn() })),
-    },
+  const mockAppState = {
+    ...RN.AppState,
+    addEventListener: jest.fn(() => ({ remove: jest.fn() })),
   };
+  return new Proxy(RN, {
+    get(target, prop) {
+      if (prop === "AppState") {
+        return mockAppState;
+      }
+      return target[prop];
+    },
+  });
 });
 
-import * as secureStore from "../lib/secureStore";
-import * as biometricAuth from "../hooks/useBiometricAuth";
 import { AppState } from "react-native";
 
 import {
@@ -45,7 +48,7 @@ import {
   useAuth,
   type AuthState,
   type WalletSession,
-} from "../providers/AuthProvider";
+} from "../AuthProvider";
 
 const ssMock = secureStore as unknown as {
   get: jest.Mock;
@@ -72,6 +75,7 @@ beforeEach(() => {
   ssMock.remove.mockReset();
   authMock.authenticate.mockReset();
   appStateMock.addEventListener.mockReset();
+  appStateMock.addEventListener.mockReturnValue({ remove: jest.fn() });
 });
 
 function wrapper({ children }: { children: ReactNode }) {

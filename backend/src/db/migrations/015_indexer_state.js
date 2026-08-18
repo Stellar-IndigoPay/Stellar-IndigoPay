@@ -57,8 +57,8 @@ module.exports = {
   },
 
   async down(client) {
-    await client.query(`DROP INDEX IF EXISTS idx_indexer_dlq_next_retry`);
-    await client.query(`DROP TABLE IF EXISTS indexer_dlq`);
-    await client.query(`DROP TABLE IF EXISTS indexer_state`);
+    await client.query("DROP INDEX IF EXISTS idx_indexer_dlq_next_retry");
+    await client.query("DROP TABLE IF EXISTS indexer_dlq");
+    await client.query("DROP TABLE IF EXISTS indexer_state");
   },
 };

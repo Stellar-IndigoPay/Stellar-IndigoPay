@@ -28,7 +28,7 @@ const SecureStore = {
   // wipe this Map's contents, so each `beforeEach` should call
   // `__resetSecureStoreMock()` to start from a clean slate.
   __resetSecureStoreMock: () => storage.clear(),
-  __peekSecureStoreMock: () => new Map(storage),
+  __peekSecureStoreMock: () => storage,
 };
 
 module.exports = SecureStore;

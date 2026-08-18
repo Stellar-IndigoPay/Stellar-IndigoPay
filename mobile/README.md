@@ -59,7 +59,12 @@ The mobile app shares the API client logic with the web frontend. The API functi
 The app integrates with mobile Stellar wallets via deep links:
 
 - Freighter Mobile: `freighter://tx?xdr=...`
+- SEP-0007 payments: `web+stellar:pay?destination=G...&amount=50&memo=donation`
 - Other wallets can be added via similar deep link schemes
+
+### SEP-0007 support
+
+The mobile app now registers the `web+stellar` scheme and handles incoming `web+stellar:pay` URIs from browsers and other apps. When a donation link is opened, the app shows a confirmation screen, authenticates the user, submits the Stellar payment, appends the transaction hash to the callback URL, and records the payment in scan history.
 
 ## Architecture
 

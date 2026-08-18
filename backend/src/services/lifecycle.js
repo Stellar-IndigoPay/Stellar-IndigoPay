@@ -12,6 +12,8 @@
  */
 "use strict";
 
+const logger = require("../logger");
+
 let shuttingDown = false;
 const shutdownHandlers = [];
 
@@ -40,8 +42,10 @@ async function runShutdownHandlers() {
       await fn();
     } catch (err) {
       // Don't let one bad handler stop the others.
-      // eslint-disable-next-line no-console
-      console.error("[lifecycle] shutdown handler failed:", err.message);
+      logger.error(
+        { event: "shutdown_handler_error", err: err.message },
+        "Lifecycle shutdown handler failed",
+      );
     }
   }
 }

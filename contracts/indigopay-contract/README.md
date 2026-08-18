@@ -103,9 +103,8 @@ and passed to proptest as the case count. When unset, the default is 10 000.
 
 ### Adding fuzz tests for new functions
 
-See `fuzz_template.rs` for a reusable template with property-definition
-patterns and input-generation strategies. Key steps:
-1. Copy the template block into `fuzz_tests.rs` inside the `proptest!` macro
+To add fuzz coverage for a new state-mutating function:
+1. Add a `proptest!` block in `fuzz_tests.rs` with input-generation strategies
 2. Replace dummy strategies with real parameter ranges
 3. Assert at least one invariant (counters monotonic, state validity, etc.)
 
@@ -115,11 +114,11 @@ Coverage is measured with `cargo-tarpaulin` and enforced in CI:
 
 ```bash
 cargo install cargo-tarpaulin
-cargo tarpaulin --config .tarpaulin.toml
+cargo tarpaulin
 ```
 
 When opening a PR, the coverage job runs and uploads an HTML report.
-The minimum coverage threshold is 70% (configurable in `.tarpaulin.toml`).
+The minimum coverage threshold is 70%.
 PRs that drop coverage below the threshold will fail CI.
 
 ## Deploy
@@ -145,6 +144,17 @@ stellar contract invoke \
 ```
 
 `co2_per_xlm` = estimated grams of CO₂ offset per XLM donated (8,500 ≈ 8.5 kg per XLM)
+
+## Fuzz tests
+
+The contract includes property-based fuzz coverage in [src/fuzz_tests.rs](src/fuzz_tests.rs) for:
+
+- governance proposals and vote resolution invariants
+- upgrade timelock propose / cancel / execute flows
+- mixed XLM and USDC donations with oracle-price edge cases
+- project lifecycle transitions across pause, resume, and deactivation
+
+These tests use `proptest` with 10,000+ cases per suite and are enabled via `cargo test --features testutils`.
 
 ## Roadmap
 

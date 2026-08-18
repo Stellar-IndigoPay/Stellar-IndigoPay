@@ -8,6 +8,13 @@ const router = express.Router();
 const { v4: uuid } = require("uuid");
 const QRCode = require("qrcode");
 const pool = require("../db/pool");
+const { validate, validateRouteParam } = require("../middleware/validate");
+const {
+  stellarAddress,
+  uuid: uuidValidator,
+  projectSubmissionSchema,
+  campaignSchema,
+} = require("../validators/schemas");
 const { logAdminAction } = require("../services/audit");
 const {
   mapProjectRow,
@@ -24,18 +31,24 @@ const {
 const { enqueueAISummary } = require("../services/summaryQueue");
 const { Contract, TransactionBuilder } = require("@stellar/stellar-sdk");
 const redis = require("../services/redis");
+const { cacheResponse, invalidateCache, hashParams } = require("../middleware/cache");
 const { adminRequired } = require("../middleware/auth");
 // sanitizedStringField imported but unused — kept for future validation use
 // eslint-disable-next-line no-unused-vars
 const { sanitizedStringField } = require("../middleware/validation");
-const { AppError } = require("../errors");
+const { AppError, ERROR_CODES } = require("../errors");
 const { geocode } = require("../services/geocoder");
 const logger = require("../logger");
 
-const PROJECTS_LIST_CACHE_TTL = 60; // seconds
-const PROJECTS_LIST_CACHE_PREFIX = "projects:list:";
+const PROJECTS_LIST_CACHE_TTL = 120; // seconds
+const PROJECTS_LIST_CACHE_PREFIX = "cache:v1:projects:list:";
 const PROJECT_MILESTONES_CACHE_TTL = 300; // seconds (5 minutes)
-const PROJECT_MILESTONES_CACHE_PREFIX = "projects:milestones:";
+const PROJECT_MILESTONES_CACHE_PREFIX = "cache:v1:projects:milestones:";
+const PROJECT_DETAIL_CACHE_PREFIX = "cache:v1:projects:detail:";
+const PROJECTS_MAP_CACHE_PREFIX = "cache:v1:map:";
+
+router.param("id", validateRouteParam(uuidValidator, "id"));
+router.param("milestoneId", validateRouteParam(uuidValidator, "milestoneId"));
 
 function getProjectMilestonesCacheKey(projectId) {
   return PROJECT_MILESTONES_CACHE_PREFIX + projectId;
@@ -223,7 +236,11 @@ router.get("/nearby", async (req, res, next) => {
  * @returns {Promise<void>} Sends a paginated project list.
  * @throws {Error} If the project query or cache write fails.
  */
-router.get("/", async (req, res, next) => {
+router.get("/", cacheResponse(120, (req) => {
+  const params = { ...req.query };
+  delete params.cursor;
+  return `cache:v1:projects:list:${hashParams(params)}`;
+}), async (req, res, next) => {
   try {
     const {
       category,
@@ -238,25 +255,6 @@ router.get("/", async (req, res, next) => {
       cursor,
     } = req.query;
     const pageSize = Math.min(Number.parseInt(limit, 10) || 20, 100);
-
-    const cacheKey =
-      PROJECTS_LIST_CACHE_PREFIX +
-      JSON.stringify({
-        category,
-        status,
-        verified,
-        search,
-        location,
-        co2Min,
-        co2Max,
-        facets,
-        limit: pageSize,
-        cursor: cursor || null,
-      });
-    const cached = await redis.get(cacheKey);
-    if (cached) {
-      return res.json(cached);
-    }
 
     const where = [];
     const values = [];
@@ -403,16 +401,13 @@ router.get("/", async (req, res, next) => {
       ).toString("base64");
     }
 
-    const responseBody = {
+    res.json({
       success: true,
       data,
       next_cursor: nextCursor,
       has_more: hasMore,
       ...(facetsPayload ? { facets: facetsPayload } : {}),
-    };
-    await redis.set(cacheKey, responseBody, PROJECTS_LIST_CACHE_TTL);
-
-    res.json(responseBody);
+    });
   } catch (e) {
     next(e);
   }
@@ -432,60 +427,17 @@ router.get("/", async (req, res, next) => {
  * @returns {Promise<void>} Sends the created project payload.
  * @throws {Error} If validation or database insertion fails.
  */
-router.post("/", async (req, res, next) => {
+router.post("/", validate(projectSubmissionSchema), async (req, res, next) => {
   try {
     const {
       name,
       description,
       location,
       category,
-      wallet_address,
-      goal_xlm = 0,
+      walletAddress,
+      goalXLM = 0,
       tags = [],
     } = req.body || {};
-
-    if (
-      !name ||
-      typeof name !== "string" ||
-      name.trim().length < 3 ||
-      name.trim().length > 120
-    ) {
-      throw new AppError("VALIDATION_ERROR", {
-        field: "name",
-        detail: "name must be between 3 and 120 characters",
-      });
-    }
-    if (
-      !description ||
-      typeof description !== "string" ||
-      description.trim().length < 10 ||
-      description.trim().length > 5000
-    ) {
-      throw new AppError("VALIDATION_ERROR", {
-        field: "description",
-        detail: "description must be between 10 and 5000 characters",
-      });
-    }
-    if (
-      !location ||
-      typeof location !== "string" ||
-      location.trim().length < 2 ||
-      location.trim().length > 200
-    ) {
-      throw new AppError("VALIDATION_ERROR", {
-        field: "location",
-        detail: "location must be between 2 and 200 characters",
-      });
-    }
-    if (!category || !VALID_CATEGORIES.includes(category)) {
-      throw new AppError("VALIDATION_ERROR", {
-        field: "category",
-        detail: `category must be one of: ${VALID_CATEGORIES.join(", ")}`,
-      });
-    }
-    if (!wallet_address || typeof wallet_address !== "string") {
-      throw new AppError("VALIDATION_ERROR", { field: "wallet_address" });
-    }
 
     const id = uuid();
     const result = await pool.query(
@@ -498,13 +450,14 @@ router.post("/", async (req, res, next) => {
         description.trim(),
         category,
         location.trim(),
-        wallet_address,
-        goal_xlm,
+        walletAddress,
+        goalXLM,
         tags,
       ],
     );
 
     let project = result.rows[0];
+    const warnings = [];
     const coords = await geocode(project.location);
     if (coords) {
       const geocoded = await pool.query(
@@ -517,10 +470,19 @@ router.post("/", async (req, res, next) => {
         { event: "project_no_geocode", projectId: id, location: project.location },
         "Could not geocode project location",
       );
+      warnings.push({
+        code: "GEOCODING_ERROR",
+        message: ERROR_CODES.GEOCODING_ERROR.message,
+      });
     }
 
-    await redis.deletePattern(PROJECTS_LIST_CACHE_PREFIX + "*");
-    res.status(201).json({ success: true, data: mapProjectRow(project) });
+    await invalidateCache("cache:v1:projects:list:*");
+    await invalidateCache("cache:v1:map:*");
+    res.status(201).json({
+      success: true,
+      data: mapProjectRow(project),
+      ...(warnings.length ? { warnings } : {}),
+    });
   } catch (e) {
     next(e);
   }
@@ -596,45 +558,13 @@ router.get("/:id/verify", async (req, res) => {
  * @returns {Promise<void>} Sends the created campaign payload.
  * @throws {Error} If validation or database insertion fails.
  */
-router.post("/:id/campaigns", async (req, res, next) => {
+router.post("/:id/campaigns", validate(campaignSchema), async (req, res, next) => {
   try {
     const { title, goalXLM, deadline, description } = req.body || {};
-    const trimmedTitle = typeof title === "string" ? title.trim() : "";
-    const trimmedDescription =
-      typeof description === "string" ? description.trim() : "";
+    const trimmedTitle = title;
+    const trimmedDescription = description || "";
     const goal = Number.parseFloat(goalXLM);
     const deadlineDate = new Date(deadline);
-
-    if (trimmedTitle.length < 3 || trimmedTitle.length > 120) {
-      throw new AppError("VALIDATION_ERROR", {
-        field: "title",
-        detail: "title must be between 3 and 120 characters",
-      });
-    }
-    if (!Number.isFinite(goal) || goal <= 0) {
-      throw new AppError("VALIDATION_ERROR", {
-        field: "goalXLM",
-        detail: "goalXLM must be a positive number",
-      });
-    }
-    if (!deadline || Number.isNaN(deadlineDate.getTime())) {
-      throw new AppError("VALIDATION_ERROR", {
-        field: "deadline",
-        detail: "deadline must be a valid ISO date string",
-      });
-    }
-    if (deadlineDate.getTime() <= Date.now()) {
-      throw new AppError("VALIDATION_ERROR", {
-        field: "deadline",
-        detail: "deadline must be in the future",
-      });
-    }
-    if (trimmedDescription.length > 500) {
-      throw new AppError("VALIDATION_ERROR", {
-        field: "description",
-        detail: "description must be 500 characters or fewer",
-      });
-    }
 
     const projectResult = await pool.query(
       "SELECT id FROM projects WHERE id = $1",
@@ -827,7 +757,7 @@ router.post("/:id/milestones/:milestoneId/reach", async (req, res, next) => {
  * GET /api/projects/admin/pending
  * Admin-only endpoint returning unverified active projects for review.
  */
-router.get("/admin/pending", async (req, res, next) => {
+router.get("/admin/pending", adminRequired, async (req, res, next) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
     const offset = parseInt(req.query.offset, 10) || 0;
@@ -957,7 +887,7 @@ router.post("/admin/confirm", adminRequired, async (req, res, next) => {
  * @returns {Promise<void>} Sends the full project details payload.
  * @throws {Error} If the project lookup or related data fetch fails.
  */
-router.get("/:id", async (req, res, next) => {
+router.get("/:id", cacheResponse(300, (req) => `cache:v1:projects:detail:${req.params.id}`), async (req, res, next) => {
   try {
     const projectResult = await pool.query(
       "SELECT * FROM projects WHERE id = $1",
@@ -1074,8 +1004,8 @@ router.post("/:id/follow", async (req, res, next) => {
     // INSERT … ON CONFLICT DO NOTHING makes this idempotent.
     await pool.query(
       `INSERT INTO project_follows (project_id, wallet_address, created_at)
-       VALUES ($1, $2, NOW())
-       ON CONFLICT (project_id, wallet_address) DO NOTHING`,
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (project_id, wallet_address) DO NOTHING`,
       [req.params.id, walletAddress],
     );
 
@@ -1094,7 +1024,8 @@ router.post("/:id/follow", async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+},
+);
 
 /**
  * DELETE /api/projects/:id/follow
@@ -1133,6 +1064,63 @@ router.delete("/:id/follow", async (req, res, next) => {
         followCount: parseInt(countResult.rows[0].count, 10) || 0,
       },
     });
+  } catch (e) {
+    next(e);
+  }
+},
+);
+
+/**
+ * GET /api/projects/:id/onboarding
+ * Returns the onboarding checklist items for the project.
+ */
+router.get("/:id/onboarding", async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      "SELECT items FROM project_onboarding WHERE project_id = $1",
+      [req.params.id],
+    );
+    res.json({
+      success: true,
+      data: result.rows[0]?.items || [],
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * PATCH /api/projects/:id/onboarding/:key
+ * Marks a specific onboarding checklist item as completed.
+ */
+router.patch("/:id/onboarding/:key", async (req, res, next) => {
+  try {
+    const { key } = req.params;
+    if (!key || typeof key !== "string") {
+      throw new AppError("VALIDATION_ERROR", { field: "key" });
+    }
+
+    const existing = await pool.query(
+      "SELECT items FROM project_onboarding WHERE project_id = $1",
+      [req.params.id],
+    );
+    if (!existing.rows[0]) {
+      throw new AppError("PROJECT_NOT_FOUND");
+    }
+
+    const items = existing.rows[0].items || [];
+    const updatedItems = items.map((item) =>
+      item.key === key ? { ...item, completed: true } : item,
+    );
+
+    await pool.query(
+      `UPDATE project_onboarding
+         SET items = $1, updated_at = NOW()
+       WHERE project_id = $2`,
+      [JSON.stringify(updatedItems), req.params.id],
+    );
+
+    res.json({ success: true, data: updatedItems });
   } catch (e) {
     next(e);
   }
@@ -1312,9 +1300,12 @@ router.post("/:id/matching", async (req, res, next) => {
 router.get("/:id/matching", async (req, res, next) => {
   try {
     const result = await pool.query(
-      `SELECT id, project_id, matcher_address, cap_xlm, multiplier, matched_xlm, expires_at, created_at
+      `SELECT id, project_id, matcher_address, cap_xlm, multiplier, matched_xlm, expires_at, created_at, status
        FROM donation_matches
-       WHERE project_id = $1 AND expires_at > NOW()
+       WHERE project_id = $1
+         AND status = 'active'
+         AND expires_at > NOW()
+         AND matched_xlm < cap_xlm
        ORDER BY created_at DESC`,
       [req.params.id],
     );
@@ -1331,6 +1322,7 @@ router.get("/:id/matching", async (req, res, next) => {
       ).toFixed(7),
       expiresAt: new Date(row.expires_at).toISOString(),
       createdAt: new Date(row.created_at).toISOString(),
+      status: row.status,
     }));
 
     res.json({ success: true, data: matches });
@@ -1392,10 +1384,18 @@ router.patch("/:id/status", async (req, res, next) => {
       ipAddress: req.ip,
     });
 
-    if (typeof redis.deletePattern === "function")
-      await redis.deletePattern(PROJECTS_LIST_CACHE_PREFIX + "*");
-    if (typeof redis.deletePattern === "function")
-      await redis.deletePattern("stats:*");
+    // Cache invalidation — keep in sync with the "Cache invalidation" table in
+    // docs/api.md. A status change alters what the project list/detail, global
+    // stats AND the impact dashboard report, so the impact keys served by
+    // src/routes/impact.js (TTL 300s) must be swept here too. Without the
+    // per-project sweep the transparency dashboard serves pre-change data for
+    // up to 5 minutes after a project is paused, completed or rejected.
+    await invalidateCache("cache:v1:projects:list:*");
+    await invalidateCache(`cache:v1:projects:detail:${req.params.id}`);
+    await invalidateCache(getProjectMilestonesCacheKey(req.params.id));
+    await invalidateCache("cache:v1:stats:global");
+    await invalidateCache(`cache:v1:impact:project:${req.params.id}`);
+    await invalidateCache("cache:v1:impact:global");
 
     res.json({ success: true, data: mapProjectRow(result.rows[0]) });
   } catch (e) {
@@ -1556,7 +1556,8 @@ router.get("/:id/badge-holders", async (req, res, next) => {
     const uuidRegex =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (!uuidRegex.test(projectId)) {
-      throw new AppError("PROJECT_NOT_FOUND");
+      const err = new AppError("PROJECT_NOT_FOUND");
+      return res.status(400).json(err.toJSON());
     }
 
     const projectResult = await pool.query(

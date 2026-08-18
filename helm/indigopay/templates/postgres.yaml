@@ -71,7 +71,130 @@ spec:
         app: postgres
         role: primary
     spec:
+      {{- if .Values.postgres.failover.enabled }}
+      serviceAccountName: postgres-healthcheck-sa
+      {{- end }}
       containers:
+        {{- if .Values.postgres.failover.enabled }}
+        # ── Health-check sidecar ───────────────────────────────
+        # Continuously polls pg_isready every 5 s. After 6 consecutive
+        # failures (30 s) it uses the Kubernetes API to create the
+        # postgres-failover Job, then exits so Kubernetes restarts it.
+        - name: postgres-healthcheck
+          image: {{ .Values.postgres.failover.healthcheckImage | default "postgres:16-alpine" }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              apk add --no-cache curl > /dev/null 2>&1
+
+              NAMESPACE="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)"
+              TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+              CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+              API="https://kubernetes.default.svc"
+
+              # ── Helper: check if a failover Job is already running ──
+              has_active_failover() {
+                curl -sS --cacert "$CACERT" \
+                  -H "Authorization: Bearer $TOKEN" \
+                  "$API/apis/batch/v1/namespaces/$NAMESPACE/jobs?labelSelector=app=postgres-failover" \
+                  2>/dev/null | grep -cE '"active":1|"succeeded":1' || echo 0
+              }
+
+              FAIL_COUNT=0
+              while true; do
+                if pg_isready -h localhost -p 5432 -U "${POSTGRES_USER:-postgres}" > /dev/null 2>&1; then
+                  FAIL_COUNT=0
+                else
+                  FAIL_COUNT=$((FAIL_COUNT + 1))
+                  echo "$(date -Iseconds)  healthcheck  pg_isready failed ($FAIL_COUNT/6)"
+                  if [ "$FAIL_COUNT" -ge 6 ]; then
+                    echo "$(date -Iseconds)  healthcheck  PRIMARY_DOWN — checking for existing failover Jobs..."
+
+                    ACTIVE=$(has_active_failover)
+                    if [ "$ACTIVE" -gt 0 ]; then
+                      echo "$(date -Iseconds)  healthcheck  Failover Job already active/completed — skipping."
+                      FAIL_COUNT=0
+                      sleep 60
+                      continue
+                    fi
+
+                    echo "$(date -Iseconds)  healthcheck  Creating failover Job..."
+                    JOB_NAME="postgres-failover-$(date +%s)"
+                    HTTP_CODE=$(curl -sS --cacert "$CACERT" \
+                      -H "Authorization: Bearer $TOKEN" \
+                      -H "Content-Type: application/json" \
+                      -X POST \
+                      -w "%{http_code}" \
+                      -o /tmp/failover-response.txt \
+                      "$API/apis/batch/v1/namespaces/$NAMESPACE/jobs" \
+                      -d "{
+                        \"apiVersion\": \"batch/v1\",
+                        \"kind\": \"Job\",
+                        \"metadata\": {
+                          \"name\": \"$JOB_NAME\",
+                          \"namespace\": \"$NAMESPACE\",
+                          \"labels\": {\"app\": \"postgres-failover\", \"triggered-by\": \"healthcheck\"}
+                        },
+                        \"spec\": {
+                          \"ttlSecondsAfterFinished\": 3600,
+                          \"backoffLimit\": 1,
+                          \"template\": {
+                            \"spec\": {
+                              \"serviceAccountName\": \"postgres-failover-sa\",
+                              \"restartPolicy\": \"Never\",
+                              \"containers\": [{
+                                \"name\": \"failover\",
+                                \"image\": \"{{ .Values.postgres.failover.failoverImage | default "bitnami/kubectl:latest" }}\",
+                                \"command\": [\"/bin/sh\", \"/scripts/failover.sh\"],
+                                \"env\": [
+                                  {\"name\": \"NAMESPACE\", \"value\": \"{{ .Values.namespace }}\"},
+                                  {\"name\": \"STANDBY_POD\", \"value\": \"postgres-standby-0\"},
+                                  {\"name\": \"BACKEND_METRICS_URL\", \"value\": \"http://backend-svc:{{ .Values.backend.port }}/api/admin/failover-metric\"},
+                                  {\"name\": \"FAILOVER_TOKEN\", \"valueFrom\": {\"secretKeyRef\": {\"name\": \"stellar-indigopay-secrets\", \"key\": \"FAILOVER_METRICS_TOKEN\", \"optional\": true}}},
+                                  {\"name\": \"SLACK_WEBHOOK_URL\", \"valueFrom\": {\"secretKeyRef\": {\"name\": \"stellar-indigopay-secrets\", \"key\": \"SLACK_WEBHOOK_URL\", \"optional\": true}}}
+                                ],
+                                \"volumeMounts\": [{
+                                  \"name\": \"failover-script\",
+                                  \"mountPath\": \"/scripts\",
+                                  \"readOnly\": true
+                                }]
+                              }],
+                              \"volumes\": [{
+                                \"name\": \"failover-script\",
+                                \"configMap\": {\"name\": \"postgres-failover-script\", \"defaultMode\": 493}
+                              }]
+                            }
+                          }
+                        }
+                      }")
+
+                    if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
+                      echo "$(date -Iseconds)  healthcheck  Failover Job '$JOB_NAME' created (HTTP $HTTP_CODE)"
+                    else
+                      echo "$(date -Iseconds)  healthcheck  FAILED to create failover Job (HTTP $HTTP_CODE)"
+                      cat /tmp/failover-response.txt 2>/dev/null
+                    fi
+                    exit 1
+                  fi
+                fi
+                sleep 5
+              done
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: POSTGRES_USER
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "32Mi"
+            limits:
+              cpu: "50m"
+              memory: "64Mi"
+        {{- end }}
+        # ── Primary Postgres ────────────────────────────────────
         - name: postgres
           image: {{ .Values.postgres.image }}
           ports:

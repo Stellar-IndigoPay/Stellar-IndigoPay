@@ -18,6 +18,7 @@ const { getStatus } = require("../../services/indexerService");
 const { getStatus: getReconcilerStatus } = require("../../services/indexerReconciler");
 const pool = require("../../db/pool");
 const logger = require("../../logger");
+const { sendAppError } = require("../../errors");
 
 /**
  * Trigger a manual backfill.
@@ -59,10 +60,7 @@ router.post("/backfill", adminRequired, async (req, res) => {
       { event: "admin_backfill_error", err: err.message },
       "Admin backfill failed",
     );
-    res.status(500).json({
-      success: false,
-      error: err.message || "Backfill failed",
-    });
+    return sendAppError(res, "INTERNAL_ERROR");
   }
 });
 
@@ -85,7 +83,11 @@ router.get("/status", adminRequired, async (req, res) => {
     res.json({
       success: true,
       data: {
-        indexer: indexerStatus,
+        indexer: {
+          ...indexerStatus,
+          lagLedgers: indexerStatus.lagLedgers ?? indexerStatus.lag_ledgers,
+          status: indexerStatus.lagLedgers > 50 ? "degraded" : indexerStatus.isRunning ? "ok" : "degraded",
+        },
         cursor: {
           lastProcessedLedger: cursorState.last_processed_ledger,
           backfillInProgress: cursorState.backfill_in_progress,
@@ -96,7 +98,7 @@ router.get("/status", adminRequired, async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    return sendAppError(res, "INTERNAL_ERROR");
   }
 });
 

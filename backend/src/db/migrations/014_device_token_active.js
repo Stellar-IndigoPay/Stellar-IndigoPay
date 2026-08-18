@@ -31,10 +31,10 @@ module.exports = {
 
   async down(client) {
     await client.query(
-      `ALTER TABLE device_tokens DROP COLUMN IF EXISTS is_active`,
+      "ALTER TABLE device_tokens DROP COLUMN IF EXISTS is_active",
     );
     await client.query(
-      `ALTER TABLE profiles DROP COLUMN IF EXISTS notification_dnd`,
+      "ALTER TABLE profiles DROP COLUMN IF EXISTS notification_dnd",
     );
   },
 };

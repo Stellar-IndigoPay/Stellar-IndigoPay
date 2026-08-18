@@ -24,7 +24,7 @@ import {
 } from "recharts";
 import { fetchProjectAnalytics, fetchProject } from "@/lib/api";
 import type { ProjectAnalytics } from "@/lib/api";
-import { formatXLM, shortenAddress } from "@/utils/format";
+import { formatXLM, shortenAddress, formatNumber, formatDate } from "@/utils/format";
 
 const COLORS = ["#227239", "#4caf70", "#81c784", "#a5d6a7", "#c8e6c9"];
 
@@ -171,12 +171,12 @@ export default function ProjectAnalyticsPage() {
       {/* ── Donor Overview Cards ────────────────────────────────────────── */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-8">
         {[
-          { icon: "👥", label: "Total Donors", value: donorOverview.totalDonors.toLocaleString() },
-          { icon: "🆕", label: "New (30d)", value: donorOverview.newDonors30d.toLocaleString() },
+          { icon: "👥", label: "Total Donors", value: formatNumber(donorOverview.totalDonors) },
+          { icon: "🆕", label: "New (30d)", value: formatNumber(donorOverview.newDonors30d) },
           { icon: "💰", label: "Total Raised", value: formatXLM(donorOverview.totalRaisedXLM) },
           { icon: "📊", label: "Avg Donation", value: formatXLM(donorOverview.avgDonationXLM) },
           { icon: "🎯", label: "Median", value: formatXLM(donorOverview.medianDonationXLM) },
-          { icon: "📝", label: "Total Donations", value: donorOverview.totalDonations.toLocaleString() },
+          { icon: "📝", label: "Total Donations", value: formatNumber(donorOverview.totalDonations) },
         ].map((stat) => (
           <div
             key={stat.label}
@@ -350,7 +350,7 @@ export default function ProjectAnalyticsPage() {
                   <tr key={donor.donorAddress} className="border-b border-forest-50 hover:bg-forest-50/50">
                     <td className="py-3 px-3 font-bold text-forest-900">{idx + 1}</td>
                     <td className="py-3 px-3 font-mono text-xs text-forest-700">
-                      {shortenAddress(donor.donorAddress)}
+                      {shortenAddress(donor.donorAddress || "")}
                     </td>
                     <td className="py-3 px-3 text-right font-semibold text-forest-900">
                       {formatXLM(donor.totalContributed)}
@@ -432,7 +432,7 @@ export default function ProjectAnalyticsPage() {
                   </span>
                 </div>
                 <p className="text-xs text-[#5a7a5a] mb-2">
-                  Deadline: {new Date(c.deadline).toLocaleDateString()}
+                  Deadline: {formatDate(c.deadline)}
                 </p>
                 <div className="flex justify-between text-xs mb-1">
                   <span>{formatXLM(c.raisedXLM)} raised</span>

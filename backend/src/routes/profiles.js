@@ -4,14 +4,18 @@
 "use strict";
 const express = require("express");
 const router = express.Router();
+const { z } = require("zod");
 const pool = require("../db/pool");
 const { mapProfileRow } = require("../services/store");
 const { createRateLimiter } = require("../middleware/rateLimiter");
+const { invalidateCache } = require("../middleware/cache");
+const { validate } = require("../middleware/validate");
+const { stellarAddress, profileSchema } = require("../validators/schemas");
 const {
   sanitizedStringField,
   validateBody,
+  stripHtml,
 } = require("../middleware/validation");
-const { z } = require("zod");
 const { AppError } = require("../errors");
 
 function validateKey(k) {
@@ -22,33 +26,25 @@ function validateKey(k) {
 
 const profilePostLimiter = createRateLimiter(20, 1);
 
-const profileSchema = z.object({
-  publicKey: z.string().min(1, "publicKey is required"),
-  displayName: sanitizedStringField({
-    required: false,
-    maxLength: 30,
-    message: "must not contain HTML",
-  }).optional(),
-  bio: sanitizedStringField({
-    required: false,
-    maxLength: 300,
-    message: "must not contain HTML",
-  }).optional(),
+const profileBodySchema = profileSchema.extend({
+  publicKey: stellarAddress,
 });
 
-router.get("/:publicKey", async (req, res, next) => {
-  try {
-    validateKey(req.params.publicKey);
-    const result = await pool.query(
-      "SELECT * FROM profiles WHERE public_key = $1",
-      [req.params.publicKey],
-    );
-    if (!result.rows[0]) {
-      throw new AppError("PROFILE_NOT_FOUND");
-    }
+router.get(
+  "/:publicKey",
+  validate(z.object({ publicKey: stellarAddress }), "params"),
+  async (req, res, next) => {
+    try {
+      const result = await pool.query(
+        "SELECT * FROM profiles WHERE public_key = $1",
+        [req.params.publicKey],
+      );
+      if (!result.rows[0]) {
+        throw new AppError("PROFILE_NOT_FOUND");
+      }
 
-    const co2Result = await pool.query(
-      `SELECT COALESCE(
+      const co2Result = await pool.query(
+        `SELECT COALESCE(
         SUM(
           CASE
             WHEN p.raised_xlm > 0 THEN (d.amount_xlm * (p.co2_offset_kg::numeric / p.raised_xlm))
@@ -61,31 +57,31 @@ router.get("/:publicKey", async (req, res, next) => {
        JOIN projects p ON p.id = d.project_id
        WHERE d.donor_address = $1
          AND (d.currency = 'XLM' OR d.currency IS NULL)`,
-      [req.params.publicKey],
-    );
-    const totalCo2OffsetKg = Math.round(
-      Number.parseFloat(co2Result.rows[0]?.total_co2_offset_kg || "0"),
-    );
+        [req.params.publicKey],
+      );
+      const totalCo2OffsetKg = Math.round(
+        Number.parseFloat(co2Result.rows[0]?.total_co2_offset_kg || "0"),
+      );
 
-    res.json({
-      success: true,
-      data: { ...mapProfileRow(result.rows[0]), totalCo2OffsetKg },
-    });
-  } catch (e) {
-    next(e);
-  }
-});
+      res.json({
+        success: true,
+        data: { ...mapProfileRow(result.rows[0]), totalCo2OffsetKg },
+      });
+    } catch (e) {
+      next(e);
+    }
+  });
 
 router.post(
   "/",
   profilePostLimiter,
-  validateBody(profileSchema),
+  validateBody(profileBodySchema),
   async (req, res, next) => {
     try {
       const { publicKey, displayName, bio } = req.body;
       validateKey(publicKey);
       const trimmedDisplayName = displayName?.trim().slice(0, 30) || null;
-      const trimmedBio = bio?.trim().slice(0, 300) || null;
+      const trimmedBio = bio ? stripHtml(bio).trim().slice(0, 300) : null;
 
       const result = await pool.query(
         `INSERT INTO profiles (
@@ -99,6 +95,8 @@ router.post(
       RETURNING *`,
         [publicKey, trimmedDisplayName, trimmedBio],
       );
+
+      invalidateCache("cache:v1:leaderboard:*");
 
       res.json({ success: true, data: mapProfileRow(result.rows[0]) });
     } catch (e) {

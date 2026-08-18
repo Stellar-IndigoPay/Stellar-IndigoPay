@@ -45,7 +45,9 @@ secrets from a central store gives us:
      "admin_api_key": "...",
      "metrics_bearer_token": "...",
      "anthropic_api_key": "...",
-     "jwt_secret": "..."
+     "jwt_secret": "...",
+     "webhook_signing_secret": "...",
+     "recurring_signer_secret": "..."
    }
    ```
 
@@ -82,3 +84,97 @@ is for prod-grade clusters.
 SecretStore. To switch providers, replace the `provider` block with
 the equivalent for your store (GCP, Vault, etc.). The
 `ExternalSecret.data` mapping is provider-agnostic.
+
+## Automated Secret Rotation
+
+Stellar-IndigoPay rotates secrets automatically on a **quarterly
+schedule** with zero-downtime rollout and automatic rollback on
+health check failure.
+
+### Rotation Scope
+
+The following secrets are rotated every quarter or validated by the quarterly rotation workflow:
+
+| Secret                     | Format                                      |
+| -------------------------- | ------------------------------------------- |
+| `DATABASE_URL`             | PostgreSQL connection string (password rotated) |
+| `JWT_SECRET`               | 64-char base64 random                       |
+| `WEBHOOK_SIGNING_SECRET`   | 64-char hex random                          |
+| `ADMIN_API_KEY`            | `ip_admin_` + 48-char hex                   |
+| `ORACLE_ADMIN_SECRET`      | Stellar signer seed, rotated by managed signer ceremony |
+| `RECURRING_SIGNER_SECRET`  | Stellar signer seed, rotated by managed signer ceremony |
+
+### Rotation Workflow
+
+The rotation is implemented as a GitHub Actions workflow at
+`.github/workflows/secret-rotation.yml`.
+
+**Schedule:** Every quarter — Jan 1, Apr 1, Jul 1, Oct 1 at 02:00 UTC.
+
+**Manual trigger:** Use `workflow_dispatch` from the Actions tab with
+optional inputs:
+- `secrets_to_rotate`: comma-separated list (defaults to app secrets; signer seeds are selected only for managed-secret validation)
+- `skip_health_check`: boolean (use with caution)
+- `skip_rollback`: boolean (debugging use only)
+
+**Workflow phases:**
+
+1. **Pre-rotation validation** — verifies that every target secret
+   exists in AWS Secrets Manager. Stores old values for potential
+   rollback.
+
+2. **Generate new values** — produces cryptographically random
+   replacements using `openssl rand`. Each secret type uses an
+   appropriate format (base64, hex, or structured).
+
+3. **Update secrets manager** — writes the new values to AWS Secrets
+   Manager at `stellar-indigopay/prod`.
+
+4. **Trigger ESO force-sync** — annotates the `ExternalSecret`
+   resource with `force-sync=<timestamp>` to trigger an immediate
+   refresh (bypassing the default 1h refresh interval).
+
+5. **Rolling restart** — runs `kubectl rollout restart deployment/backend`
+   with a 5-minute timeout on the rollout status.
+
+6. **Health validation** — polls `/health/ready` (HTTP 200) every 10
+   seconds for up to 5 minutes. This endpoint validates every external
+   dependency: Postgres, Redis (if configured), Horizon, Soroban RPC,
+   and the indexer.
+
+7. **Auto-rollback** — if the health check fails, the workflow
+   automatically restores the previous secret values in AWS Secrets
+   Manager, triggers another ESO force-sync, and restarts the backend
+   to pick up the old values.
+
+8. **Audit logging** — records the rotation outcome (including
+   secrets rotated, timestamps, health check result, and rollback
+   status) to the `secret_rotations` database table via the admin API
+   at `POST /api/admin/secret-rotations`.
+
+### Monitoring
+
+Three Prometheus alerts are defined in `monitoring/alert-rules.yml`:
+
+| Alert                    | Severity | Description                                           |
+| ------------------------ | -------- | ----------------------------------------------------- |
+| `SecretRotationFailed`   | page     | Rotation failed or rolled back in the last hour       |
+| `SecretRotationStuck`    | warn     | Rotation stuck `in_progress` for more than 30 minutes |
+| `SecretRotationOverdue`  | warn     | No successful rotation in more than 95 days           |
+
+### Viewing Rotation History
+
+Administrators can view the rotation audit trail at:
+
+```
+GET /api/admin/secret-rotations        — list all rotations
+GET /api/admin/secret-rotations/:id     — view a single rotation
+GET /api/admin/secret-rotations/latest/status — quick status
+```
+
+All endpoints require admin authentication via bearer token.
+
+
+### Managed signer secret delivery
+
+`ORACLE_ADMIN_SECRET` and `RECURRING_SIGNER_SECRET` are synced from AWS Secrets Manager into the dedicated `stellar-indigopay-signer-secrets` Kubernetes Secret and mounted as read-only files in the backend Pod. The backend reads those files through `ORACLE_ADMIN_SECRET_FILE` and `RECURRING_SIGNER_SECRET_FILE`; direct long-lived env-var signer seeds are rejected outside `test`/`development`. Because Stellar seeds cannot be replaced with random bytes safely, the rotation workflow fails fast for these keys and directs operators to the managed signer/HSM-backed rotation ceremony before rollout health checks and audit logging.

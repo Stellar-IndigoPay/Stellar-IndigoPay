@@ -118,6 +118,39 @@ describe("ProjectsPage search and filters", () => {
     });
   });
 
+  test("rapid keystrokes within the window collapse into a single fetch with the final value", async () => {
+    render(<ProjectsPage />);
+    await act(async () => {
+      jest.advanceTimersByTime(300);
+    });
+    await waitFor(() => expect(mockFetchProjects).toHaveBeenCalledTimes(1));
+    mockFetchProjects.mockClear();
+    mockFetchProjectFacets.mockClear();
+
+    const input = screen.getByLabelText("Search projects");
+    // Each keystroke lands 100ms apart — inside the 300ms window, so the
+    // timer keeps resetting and no fetch fires mid-typing.
+    for (const value of ["f", "fo", "for", "fore", "fores", "forest"]) {
+      fireEvent.change(input, { target: { value } });
+      await act(async () => {
+        jest.advanceTimersByTime(100);
+      });
+    }
+    expect(mockFetchProjects).not.toHaveBeenCalled();
+
+    // 300ms after the LAST keystroke: exactly one fetch, final value only.
+    await act(async () => {
+      jest.advanceTimersByTime(300);
+    });
+    await waitFor(() => {
+      expect(mockFetchProjects).toHaveBeenCalledTimes(1);
+      expect(mockFetchProjects).toHaveBeenCalledWith(
+        expect.objectContaining({ search: "forest" }),
+      );
+      expect(mockFetchProjectFacets).toHaveBeenCalledTimes(1);
+    });
+  });
+
   test("clicking a category filter updates the URL search params", async () => {
     render(<ProjectsPage />);
     await act(async () => {

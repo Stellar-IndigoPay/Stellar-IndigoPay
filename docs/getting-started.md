@@ -10,13 +10,13 @@ Before you begin, make sure you have the following installed:
 
 | Tool             | Version           |
 | ---------------- | ----------------- |
-| Node.js          | ≥ 18              |
+| Node.js          | 22 LTS            |
 | npm              | Latest            |
 | Freighter Wallet | Browser extension |
 
 ### ✅ Node.js
 
-- Install Node.js (v18 or higher recommended)
+- Install Node.js (v22 LTS recommended)
 - Verify installation:
 
 ```
@@ -45,8 +45,8 @@ cd Stellar-IndigoPay
 - ⚙️ Run Setup Script
 
 ```
-chmod +x setup-dev.sh
-./setup-dev.sh
+chmod +x scripts/setup-dev.sh
+./scripts/setup-dev.sh
 ```
 
 Start Backend

@@ -23,6 +23,7 @@ import {
   Account,
   xdr,
 } from "@stellar/stellar-sdk";
+import { formatNumber, PINNED_LOCALE } from "@/utils/format";
 
 export const NETWORK = (process.env.NEXT_PUBLIC_STELLAR_NETWORK ||
   "testnet") as "testnet" | "mainnet";
@@ -245,6 +246,105 @@ export async function buildContractDonationTransaction({
     throw formatSimulationFailure(simulated);
   }
 }
+
+/**
+ * Builds a Soroban transaction that calls `create_recurring(donor, project_id, amount, currency, interval_ledgers, keeper_incentive, msg_hash)`
+ * on the IndigoPay contract.
+ */
+export async function buildCreateRecurringTransaction({
+  contractId,
+  donor,
+  projectId,
+  amount,
+  currency,
+  intervalLedgers,
+  keeperIncentive,
+  msgHash,
+}: {
+  contractId: string;
+  donor: string;
+  projectId: string;
+  amount: string;
+  currency: string;
+  intervalLedgers: number;
+  keeperIncentive: string;
+  msgHash: number;
+}) {
+  const source = await server.loadAccount(donor);
+  const contract = new Contract(contractId);
+
+  const donorAddress = new Address(donor);
+  const amountInStroops = Math.floor(parseFloat(amount) * 10_000_000);
+  const keeperIncentiveInStroops = Math.floor(parseFloat(keeperIncentive) * 10_000_000);
+
+  const builder = new TransactionBuilder(source, {
+    fee: "1000000",
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(
+      contract.call(
+        "create_recurring",
+        donorAddress.toScVal(),
+        nativeToScVal(projectId, { type: "string" }),
+        nativeToScVal(amountInStroops, { type: "i128" }),
+        nativeToScVal(currency, { type: "symbol" }),
+        nativeToScVal(intervalLedgers, { type: "u32" }),
+        nativeToScVal(keeperIncentiveInStroops, { type: "i128" }),
+        nativeToScVal(msgHash, { type: "u32" }),
+      )
+    )
+    .setTimeout(60);
+
+  const tx = builder.build();
+  const simulated = await rpcServer.simulateTransaction(tx);
+
+  if (rpc.Api.isSimulationSuccess(simulated)) {
+    return rpc.assembleTransaction(tx, simulated).build();
+  } else {
+    throw formatSimulationFailure(simulated);
+  }
+}
+
+/**
+ * Builds a Soroban transaction that calls `cancel_recurring(donor, recurring_id)`
+ * on the IndigoPay contract.
+ */
+export async function buildCancelRecurringTransaction({
+  contractId,
+  donor,
+  recurringId,
+}: {
+  contractId: string;
+  donor: string;
+  recurringId: number;
+}) {
+  const source = await server.loadAccount(donor);
+  const contract = new Contract(contractId);
+  const donorAddress = new Address(donor);
+
+  const builder = new TransactionBuilder(source, {
+    fee: "1000000",
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(
+      contract.call(
+        "cancel_recurring",
+        donorAddress.toScVal(),
+        nativeToScVal(recurringId, { type: "u32" }),
+      )
+    )
+    .setTimeout(60);
+
+  const tx = builder.build();
+  const simulated = await rpcServer.simulateTransaction(tx);
+
+  if (rpc.Api.isSimulationSuccess(simulated)) {
+    return rpc.assembleTransaction(tx, simulated).build();
+  } else {
+    throw formatSimulationFailure(simulated);
+  }
+}
+
 
 /**
  * Maps the frontend `BadgeTier` strings (lowercase, used across the UI and the
@@ -702,10 +802,9 @@ export async function getGlobalImpactStats() {
 
     // totalRaised is in stroops (i128), totalCO2 is in grams (i128)
     return {
-      totalRaisedXLM: (Number(totalRaised) / 10_000_000).toLocaleString(
-        undefined,
-        { minimumFractionDigits: 2 },
-      ),
+      totalRaisedXLM: formatNumber(Number(totalRaised) / 10_000_000, PINNED_LOCALE, {
+        minimumFractionDigits: 2,
+      }),
       totalCO2OffsetGrams: totalCO2.toString(),
       donationCount: Number(donationCount),
     };
@@ -744,6 +843,31 @@ export async function getDonorStats(donorAddress: string) {
   } catch (err) {
     console.error("Failed to fetch donor stats:", err);
     return null;
+  }
+}
+
+/**
+ * Queries the contract for a voter's badge-weighted voting power.
+ *
+ * @param voterAddress - Voter Stellar public key.
+ * @returns Voter weight (u32), or 0 when the contract is not configured or on errors.
+ */
+export async function getVoterWeight(voterAddress: string): Promise<number> {
+  if (!CONTRACT_ID) {
+    return 0;
+  }
+
+  const contract = new Contract(CONTRACT_ID);
+
+  try {
+    const voter = new Address(voterAddress);
+    const weight = await simulateCall(contract, "get_voter_weight", [
+      voter.toScVal(),
+    ]);
+    return Number(weight);
+  } catch (err) {
+    console.error("Failed to fetch voter weight:", err);
+    return 0;
   }
 }
 
@@ -986,3 +1110,54 @@ async function simulateCall(
   }
   throw new Error(`Simulation failed for ${method}: ${JSON.stringify(result)}`);
 }
+
+/**
+ * Builds a Soroban transaction that calls `approve(from, spender, amount, expiration_ledger)`
+ * on a Stellar asset/SAC token contract.
+ */
+export async function buildApproveTransaction({
+  tokenAddress,
+  user,
+  spender,
+  amount,
+}: {
+  tokenAddress: string;
+  user: string;
+  spender: string;
+  amount: string;
+}) {
+  const source = await server.loadAccount(user);
+  const tokenContract = new Contract(tokenAddress);
+  const userAddress = new Address(user);
+  const spenderAddress = new Address(spender);
+  const amountInStroops = Math.floor(parseFloat(amount) * 10_000_000);
+
+  // Set a very high expiration ledger (e.g. current + 2,000,000 ledgers)
+  const currentLedger = await rpcServer.getLatestLedger();
+  const expirationLedger = currentLedger.sequence + 2000000;
+
+  const builder = new TransactionBuilder(source, {
+    fee: "1000000",
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(
+      tokenContract.call(
+        "approve",
+        userAddress.toScVal(),
+        spenderAddress.toScVal(),
+        nativeToScVal(amountInStroops, { type: "i128" }),
+        nativeToScVal(expirationLedger, { type: "u32" }),
+      )
+    )
+    .setTimeout(60);
+
+  const tx = builder.build();
+  const simulated = await rpcServer.simulateTransaction(tx);
+
+  if (rpc.Api.isSimulationSuccess(simulated)) {
+    return rpc.assembleTransaction(tx, simulated).build();
+  } else {
+    throw formatSimulationFailure(simulated);
+  }
+}
+

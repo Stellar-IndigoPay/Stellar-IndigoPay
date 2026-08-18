@@ -128,9 +128,9 @@ module.exports = {
   },
 
   async down(client) {
-    await client.query(`DROP MATERIALIZED VIEW IF EXISTS mv_donor_cohorts CASCADE`);
-    await client.query(`DROP MATERIALIZED VIEW IF EXISTS mv_geographic_impact CASCADE`);
-    await client.query(`DROP MATERIALIZED VIEW IF EXISTS mv_project_performance CASCADE`);
-    await client.query(`DROP MATERIALIZED VIEW IF EXISTS mv_daily_donations CASCADE`);
+    await client.query("DROP MATERIALIZED VIEW IF EXISTS mv_donor_cohorts CASCADE");
+    await client.query("DROP MATERIALIZED VIEW IF EXISTS mv_geographic_impact CASCADE");
+    await client.query("DROP MATERIALIZED VIEW IF EXISTS mv_project_performance CASCADE");
+    await client.query("DROP MATERIALIZED VIEW IF EXISTS mv_daily_donations CASCADE");
   },
 };

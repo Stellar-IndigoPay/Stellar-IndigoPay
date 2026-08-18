@@ -8,7 +8,9 @@ This guide enables third-party developers to integrate with the **Stellar-Indigo
 - [Contract Addresses](#contract-addresses)
 - [Core Concepts](#core-concepts)
 - [Recording Donations (Cross-Contract Calls)](#recording-donations-cross-contract-calls)
+- [Settling Cross-Chain Donations](#settling-cross-chain-donations)
 - [Querying Donor Statistics](#querying-donor-statistics)
+- [On-Chain Donation Receipts](#on-chain-donation-receipts)
 - [Badge Tiers & Thresholds](#badge-tiers--thresholds)
 - [TypeScript Client Examples](#typescript-client-examples)
 - [Complete Soroban Contract Example](#complete-soroban-contract-example)
@@ -24,13 +26,14 @@ The Stellar-IndigoPay contract is a **climate donation tracking system** on Stel
 - **Records donations** immutably on-chain with project, donor, and amount
 - **Calculates donor badges** based on cumulative lifetime donations
 - **Tracks CO₂ impact** per donation using project-specific offsets
+- **Generates cryptographically signed receipts** that donors can export for tax purposes
 - **Enables cross-contract calls** so your contracts can integrate with Stellar-IndigoPay
 
 Your contract can:
 
 1. Call `donate()` to record a climate donation on behalf of your users
 2. Query `get_donor_stats()` to show a donor's impact and badge tier
-3. Emit events when donations are recorded
+3. Generate/verify donation receipts via `generate_receipt()` and `verify_receipt()`
 4. Build impact-driven features on top of Stellar-IndigoPay data
 
 ### Key Advantage
@@ -73,6 +76,25 @@ pub struct DonorStats {
 }
 ```
 
+#### **DonationReceipt**
+
+Returned by `generate_receipt(donor: Address, donation_index: u32)`.
+
+```rust
+pub struct DonationReceipt {
+    pub donation_index: u32,           // Which donation this receipt is for
+    pub donor: Address,                // The donor (must match the donation record)
+    pub project_id: String,            // Project that received the donation
+    pub amount: i128,                  // Amount in stroops
+    pub co2_offset: i128,              // CO₂ offset in grams
+    pub ledger: u32,                   // Ledger sequence when donation occurred
+    pub currency: Symbol,              // "XLM" or "USDC"
+    pub contract_signature: BytesN<32>,// SHA-256 cryptographic commitment
+}
+```
+
+The `contract_signature` is a SHA-256 hash of the deterministic XDR encoding of all other fields. Anyone can verify a receipt by recomputing the hash and comparing it to this value — no full donation history query needed.
+
 #### **Project**
 
 Returned by `get_project(id: String)`.
@@ -106,9 +128,47 @@ Represents donor impact level based on cumulative donations.
 
 ## Recording Donations (Cross-Contract Calls)
 
+### Multi-Token Donations with `donate_token()`
+
+The `donate_token()` entrypoint supports donations in any registered Stellar asset (e.g. XLM, USDC, yXLM, USDT, BTC-representative tokens).
+
+**Signature:**
+
+```rust
+pub fn donate_token(
+    env:        Env,
+    token:      Address,           // Token contract address (must be registered)
+    donor:      Address,           // Who is donating (must authorize)
+    project_id: String,            // Target project ID
+    amount:     i128,              // Amount in token stroops/units
+    msg_hash:   u32,               // Message hash (for UI reference)
+)
+```
+
+**Token Registry Management (Admin Only):**
+
+```rust
+// Register a new token with its price oracle
+pub fn register_token(
+    env: Env,
+    admin: Address,
+    token_address: Address,
+    oracle_address: Address,
+    symbol: Symbol,
+);
+
+// Deactivate a registered token
+pub fn remove_token(
+    env: Env,
+    admin: Address,
+    token_address: Address,
+);
+```
+
 ### Step 1: Understand the `donate()` Function
 
 The Stellar-IndigoPay contract's `donate()` function records a donation and transfers XLM to the project wallet.
+
 
 **Signature:**
 
@@ -177,6 +237,126 @@ impl YourContract {
 If you're submitting a transaction from a frontend app or server, use TypeScript with the Stellar SDK:
 
 See [TypeScript Client Examples](#typescript-client-examples) below for a complete implementation.
+
+---
+
+## Settling Cross-Chain Donations
+
+Donations that originate on another chain (Ethereum, Polygon, …) are recorded on the **attestation contract**, which knows nothing about projects, donor badges, or the global CO₂ counter. `settle_attestation` is the bridge that credits a verified attestation into the main contract's donation stats, so bridged and Stellar-native donations share one set of totals.
+
+### Flow
+
+```
+relayer                        anyone
+   │                              │
+   ▼                              ▼
+attestation.record_attestation → attestation.verify_attestation → indigopay.settle_attestation
+        (Pending)                        (Verified)                    (donation stats updated)
+```
+
+1. The relayer watches the source chain and, after finality, calls `record_attestation(...)` on the attestation contract. The attestation is `Pending`.
+2. Anyone calls `verify_attestation(id)` once the proof checks out. The attestation becomes `Verified`.
+3. Anyone calls `settle_attestation(attestation_contract, attestation_id)` on the IndigoPay contract.
+
+### `settle_attestation`
+
+```rust
+pub fn settle_attestation(
+    env: Env,
+    attestation_contract: Address,  // address of the attestation contract to read from
+    attestation_id: u64,            // id returned by record_attestation
+);
+```
+
+The call makes a **read-only** cross-contract call to `attestation_contract.get_attestation(attestation_id)` and then applies the attestation's `amount_xlm` exactly as a native donation of the same size would be applied:
+
+| Effect | Value |
+| ------ | ----- |
+| `Project.total_raised` | `+ amount_xlm` |
+| `Project.donor_count` | `+ 1` on the donor's first donation to that project |
+| `DonorStats.total_donated` | `+ amount_xlm` |
+| `DonorStats.donation_count` | `+ 1` |
+| `DonorStats.co2_offset_grams` | `+ amount_xlm / STROOP * project.co2_per_xlm` |
+| `DonorStats.badge` | recalculated; an Impact NFT is minted on a tier upgrade |
+| `GlobalTotalRaised` / `GlobalCO2OffsetGrams` | `+ amount_xlm` / `+ co2_grams` |
+| `DonationRecord` | appended with currency symbol `XCHAIN` |
+
+No tokens move — the funds already settled on the source chain. The attestation contract's state is never mutated.
+
+### Rules
+
+- **Verified only.** A `Pending` attestation panics with `"Attestation is not verified"`; a `Revoked` one with `"Attestation was revoked"`.
+- **Settled once.** `SettlementKey::SettledAttestation(id)` is written before any donation effect, so a second call panics with `"Attestation already settled"`. Query it with `is_attestation_settled(attestation_id) -> bool`. The key lives on its own feature-gated enum rather than on `DataKey` so it stays out of the slim `--no-default-features` build that CI size-checks; the wire encoding is the same either way, since `#[contracttype]` encodes an enum value by variant name plus payload.
+- **Project must exist.** The attestation's `project_id` must match a registered project, or the call panics with `"Attestation project is not registered"`. A failed settlement writes nothing, so registering the project and retrying works.
+- **Permissionless.** There is nothing to gate — the relayer already authorised the underlying record, and each attestation can only ever be credited once. Anyone may pay the fee to push a settlement through.
+- **Pausable.** The contract-wide pause flag blocks settlement like every other donation-path write.
+
+### Cross-contract call pattern
+
+The IndigoPay contract declares only the read it needs and generates a typed client for it. Mirror this pattern if you call the attestation contract yourself — the `Attestation` and `AttestationStatus` layouts must match the attestation contract's field names and order exactly, since that is what the XDR encoding carries:
+
+```rust
+use soroban_sdk::{contractclient, contracttype, Address, Env, String};
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum AttestationStatus {
+    Pending,
+    Verified,
+    Revoked,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Attestation {
+    pub id: u64,
+    pub source_chain: String,
+    pub source_tx_hash: String,
+    pub donor: Address,
+    pub project_id: String,
+    pub amount_usd: i128,
+    pub amount_xlm: i128,
+    pub message_hash: u32,
+    pub status: AttestationStatus,
+    pub created_at_ledger: u32,
+    pub verified_at_ledger: u32,
+    pub created_by: Address,
+}
+
+#[contractclient(name = "AttestationClient")]
+pub trait AttestationInterface {
+    fn get_attestation(env: Env, id: u64) -> Attestation;
+}
+
+// At the call site:
+let attestation = AttestationClient::new(&env, &attestation_contract).get_attestation(&id);
+```
+
+### CEI ordering
+
+`settle_attestation` follows Checks-Effects-Interactions with the external call placed so that reentrancy cannot double-credit:
+
+1. **Checks (pre-call)** — pause flag, then a cheap `SettledAttestation` lookup to fail fast on an obvious replay.
+2. **Interaction** — the read-only `get_attestation` call. Nothing has been written yet, so a malicious `attestation_contract` that reenters here finds storage untouched.
+3. **Checks (post-call)** — status, positive amount, project registration, and a second `SettledAttestation` lookup. If a reentrant frame settled the id while the external call was in flight, this re-check panics and the whole transaction reverts.
+4. **Effects** — the settled marker is written *before* the donation effects, so any nested frame sees the guard.
+
+### TypeScript
+
+```ts
+const tx = new TransactionBuilder(account, { fee, networkPassphrase })
+  .addOperation(
+    indigopayContract.call(
+      "settle_attestation",
+      new Address(ATTESTATION_CONTRACT_ID).toScVal(),
+      nativeToScVal(attestationId, { type: "u64" })
+    )
+  )
+  .setTimeout(30)
+  .build();
+```
+
+Check `is_attestation_settled` first to skip attestations a previous run already bridged.
 
 ---
 
@@ -286,6 +466,145 @@ async function getGlobalStats(): Promise<any> {
   // Submit to RPC and parse results
 }
 ```
+
+---
+
+## On-Chain Donation Receipts
+
+### Overview
+
+Each donation on Stellar-IndigoPay can produce a **cryptographically signed receipt** that the donor can export and use for tax purposes. The receipt includes a SHA-256 commitment to the donation details (amount, project, timestamp, CO₂ offset), verifiable off-chain without querying the full donation history.
+
+### Receipt Generation
+
+**Function:** `generate_receipt(donor: Address, donation_index: u32) -> DonationReceipt`
+
+Only the donor can generate a receipt for their own donation. The receipt is **deterministic** — calling `generate_receipt` twice with the same donor and donation_index returns the identical receipt.
+
+### Receipt Verification
+
+**Function:** `verify_receipt(receipt: DonationReceipt) -> bool`
+
+Anyone can verify a receipt against on-chain data. Returns `true` if:
+- The referenced donation index exists on-chain
+- All receipt fields (donor, project_id, amount, ledger, currency) match the on-chain record
+- The CO₂ offset matches the on-chain value
+- The `contract_signature` matches a recomputed SHA-256 hash of the receipt fields
+
+Returns `false` for tampered receipts or non-existent donations.
+
+### TypeScript Example
+
+```typescript
+import { rpc, Contract, Address, nativeToScVal, scValToNative } from "@stellar/stellar-sdk";
+
+const rpcServer = new rpc.Server("https://soroban-testnet.stellar.org");
+const contractId = "CABC..."; // Your Stellar-IndigoPay contract ID
+
+/**
+ * Generate a donation receipt for a specific donation.
+ * Only the donor can call this.
+ */
+async function generateReceipt(
+  donorPublicKey: string,
+  donationIndex: number,
+): Promise<any> {
+  const contract = new Contract(contractId);
+
+  // Build the transaction
+  const tx = new TransactionBuilder(
+    { source: donorPublicKey } as any,
+    { fee: "1000000", networkPassphrase: "Test SDF Network ; September 2015" },
+  )
+    .addOperation(
+      contract.call(
+        "generate_receipt",
+        new Address(donorPublicKey).toScVal(),
+        nativeToScVal(donationIndex, { type: "u32" }),
+      ),
+    )
+    .setTimeout(60)
+    .build();
+
+  // Simulate and submit
+  const simulated = await rpcServer.simulateTransaction(tx);
+  if (!rpc.Api.isSimulationSuccess(simulated)) {
+    throw new Error(`Simulation failed: ${JSON.stringify(simulated.error)}`);
+  }
+
+  const assembled = rpc.assembleTransaction(tx, simulated).build();
+  // Sign and send...
+
+  // Parse the result
+  const resultXdr = simulated.results?.[0]?.xdr;
+  if (!resultXdr) throw new Error("No result");
+  return scValToNative(resultXdr);
+}
+
+/**
+ * Verify a donation receipt against on-chain data.
+ * Anyone can call this — no authentication required.
+ */
+async function verifyReceipt(receipt: any): Promise<boolean> {
+  const contract = new Contract(contractId);
+
+  // Build a read-only call
+  const dummyAccount = {
+    source: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+  };
+
+  const tx = new TransactionBuilder(dummyAccount as any, {
+    fee: "100",
+    networkPassphrase: "Test SDF Network ; September 2015",
+  })
+    .addOperation(
+      contract.call("verify_receipt", nativeToScVal(receipt, { type: "struct" })),
+    )
+    .setTimeout(60)
+    .build();
+
+  const simulated = await rpcServer.simulateTransaction(tx);
+  if (!rpc.Api.isSimulationSuccess(simulated)) {
+    throw new Error(`Verification simulation failed`);
+  }
+
+  const resultXdr = simulated.results?.[0]?.xdr;
+  return scValToNative(resultXdr);
+}
+
+// Usage:
+// const receipt = await generateReceipt(donorPublicKey, 0);
+// console.log(`Receipt signature: ${receipt.contract_signature}`);
+//
+// const isValid = await verifyReceipt(receipt);
+// console.log(`Receipt valid: ${isValid}`);
+```
+
+### Off-Chain Verification
+
+The `contract_signature` is a SHA-256 hash of the deterministic **XDR encoding** of the receipt fields
+(`donation_index`, `donor`, `project_id`, `amount`, `co2_offset`, `ledger`, `currency`).
+Because the contract uses `soroban_sdk::xdr::ToXdr` to serialize the struct before hashing (see
+`ReceiptFields` in the contract source), the same hash can in principle be recomputed off-chain
+by any library that implements Stellar XDR serialization.
+
+**In practice, the simplest and most reliable verification method is to call the on-chain
+`verify_receipt` function** (shown above), which checks the receipt against the stored donation
+record **and** recomputes the hash — all in one RPC call. This avoids duplicating the contract's
+XDR serialization logic in client code.
+
+If you do need true off-chain verification (e.g. in an air-gapped environment), you must:
+
+1. Serialize the receipt fields **in the exact order and type encoding** used by
+   `soroban_sdk::xdr::ToXdr` — refer to the `ReceiptFields` struct in
+   `contracts/indigopay-contract/src/lib.rs`. The encoding is **not** JSON; it is the
+   binary XDR format used by the Stellar network.
+2. Compute SHA-256 of the resulting bytes.
+3. Compare with `receipt.contract_signature`.
+
+### Receipt Event
+
+When a donor generates a receipt, the contract emits a `receipt_gen` event with topics `["receipt_gen", donor]` and data `(donation_index, amount, project_id, co2_offset)`. Indexers can listen for these events to track receipt generation activity.
 
 ---
 
@@ -788,6 +1107,8 @@ stellar contract invoke \
 | `Project is not accepting donations` | Project is `active: false` | Contact project admin; can't donate to inactive projects |
 | `Donation amount must be positive`   | `amount <= 0`              | Ensure donation amount is > 0                            |
 | `Only badge holders can vote`        | Voter has no badge         | Donor must have donated ≥ 10 XLM first                   |
+| `Donation record not found`          | Invalid `donation_index`   | Verify donation index against `get_donation_count()`     |
+| `Only the donor can generate a receipt` | Wrong donor            | Call `generate_receipt` with the actual donor address    |
 | `Simulation failed`                  | Contract logic error       | Check contract logs; verify gas is sufficient            |
 | `Transaction timed out`              | RPC server slow            | Retry or increase timeout; check network status          |
 
@@ -924,52 +1245,43 @@ test("Record donation and verify stats", async () => {
     "amazon-reforestation",
     50,
   );
-  expect(txHash).toMatch(/^[0-9a-f]{64}$/); // Valid hex hash
+  expect(txHash).toBeDefined();
 
-  // Wait a moment for finality
-  await new Promise((resolve) => setTimeout(resolve, 5000));
-
-  // Query updated stats
+  // Query donor stats
   const stats = await queryDonorStats(donorPublicKey);
-  expect(stats.totalDonatedXLM).toBeGreaterThanOrEqual(50);
-  expect(stats.badge).toBe("Tree"); // ≥ 100 XLM for Tree tier
-  expect(stats.co2OffsetKg).toBeGreaterThan(0);
+  expect(stats.totalDonatedXLM).toBeCloseTo(50, 1);
+  expect(stats.badge).toBe("Seedling");
+});
+
+test("Generate and verify donation receipt", async () => {
+  const donorPublicKey =
+    "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTNYQGSHESVXNIUR3VTOLW473";
+
+  // Record a donation
+  await recordDonation(donorPublicKey, "amazon-reforestation", 25);
+
+  // Generate receipt for donation index 0
+  const receipt = await generateReceipt(donorPublicKey, 0);
+  expect(receipt.donation_index).toBe(0);
+  expect(receipt.amount).toBeGreaterThan(0);
+  expect(receipt.contract_signature).toBeDefined();
+
+  // Verify the receipt
+  const isValid = await verifyReceipt(receipt);
+  expect(isValid).toBe(true);
+
+  // Tamper with the receipt and verify it fails
+  receipt.amount = 999_999_999;
+  const isTamperedValid = await verifyReceipt(receipt);
+  expect(isTamperedValid).toBe(false);
 });
 ```
 
 ---
 
-## FAQ
+## Changelog
 
-**Q: Can I call `donate()` without the donor's authorization?**
-A: No. The contract calls `donor.require_auth()`, so the donor must sign the transaction.
-
-**Q: How long before a donation is finalized on-chain?**
-A: Typically 5–10 seconds after submission (1–2 Stellar ledgers). Check `getTransaction()` status polling.
-
-**Q: What if I want to donate on behalf of a user without their signature?**
-A: You cannot call `donate()` directly. Instead, use off-chain backends to record the donation via the REST API at `/api/donations`, then users can verify donations with `get_donor_stats()` later.
-
-**Q: What network should I use for development?**
-A: Start with **Stellar Testnet**. Deploy to Mainnet after thorough testing.
-
-**Q: Can I integrate with non-Soroban contracts (Classic Stellar)?**
-A: Not directly via on-chain calls. You'd need to submit transactions from the frontend and use the REST API `/api/donations` endpoint.
-
-**Q: How do I deploy the Stellar-IndigoPay contract myself?**
-A: See [contracts/indigopay-contract/README.md](../contracts/indigopay-contract/README.md).
-
----
-
-## Support & Links
-
-- **Contract Repo**: [contracts/indigopay-contract](../contracts/indigopay-contract)
-- **Frontend Integration**: [frontend/lib/stellar.ts](../frontend/lib/stellar.ts)
-- **Soroban Docs**: https://developers.stellar.org/soroban
-- **Stellar SDK**: https://github.com/stellar/js-stellar-sdk
-- **Stellar-IndigoPay Issues**: https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/issues
-
----
-
-**Last Updated**: June 2026  
-**Maintainers**: Stellar-IndigoPay Core Team
+| Date       | Change                                         |
+| ---------- | ---------------------------------------------- |
+| 2026-07-24 | Added `On-Chain Donation Receipts` section with `generate_receipt` and `verify_receipt` functions and TypeScript examples |
+| 2026-07-30 | Added `Settling Cross-Chain Donations` section covering `settle_attestation`, `is_attestation_settled`, the attestation client pattern, and CEI ordering |

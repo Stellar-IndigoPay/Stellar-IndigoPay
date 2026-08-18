@@ -9,6 +9,7 @@
 const crypto = require("crypto");
 const PgBoss = require("pg-boss");
 const pool = require("../db/pool");
+const logger = require("../logger");
 const { generateProjectSummary } = require("./claude");
 const { logAdminAction } = require("./audit");
 
@@ -31,12 +32,16 @@ async function start(io) {
   boss = new PgBoss(connectionString);
 
   boss.on("error", (err) =>
-    console.error("[summaryQueue] pg-boss error:", err.message),
+    logger.error(
+      { event: "summary_queue_error", err: err.message },
+      "Summary queue pg-boss error",
+    ),
   );
 
   await boss.start();
+  await boss.createQueue(QUEUE);
 
-  await boss.work(QUEUE, { teamSize: 2, teamConcurrency: 1 }, async (job) => {
+  await boss.work(QUEUE, { teamSize: 2, teamConcurrency: 1 }, async ([job]) => {
     const { projectId, name, category, description, adminAddress } = job.data;
 
     let summaryResult;
@@ -98,11 +103,12 @@ async function start(io) {
       ipAddress: null,
     });
   });
+}
 
-  console.log(
-    "[summaryQueue] pg-boss started, worker registered on queue:",
-    QUEUE,
-  );
+async function stop() {
+  if (!boss) return;
+  await boss.stop({ graceful: true, timeout: 15_000 });
+  boss = null;
 }
 
 /**
@@ -124,4 +130,4 @@ async function enqueueAISummary(projectId, projectData) {
   return jobId;
 }
 
-module.exports = { start, enqueueAISummary };
+module.exports = { start, stop, enqueueAISummary };

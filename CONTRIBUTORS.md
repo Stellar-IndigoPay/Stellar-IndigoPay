@@ -14,14 +14,61 @@ ping us in [Telegram](https://t.me/StellarIndigoPay).
 
 ## Contributors
 
-- Olasunkanmi975 — <kamzentertainer@gmail.com>
+- Eweje Kabiru
+- Kaybee973
+- Olasunkanmi975
+- Yaomin 🌹
+- scarface-dev1
+- Miss Jojo
+- Praiz089017
+- ZuLu0890
+- keweje
+- kosiso
+- softmind
+- techAlhaji
+- Alabi Ibrahim Abimbola
+- Dreamland1
+- Iyanu Majekodunmi
+- Daniel Omoloba
 - Okorie Chigozie Jehoshaphat — <okoriechigozie99@gmail.com>
+- adajala
+- bamiebot
+- Codex
+- CodingAngel1
+- oluwaseyi1996-netizen
+- temycodes
+- Justjoseph0
+- Damilola Ogunrotimi
+- ATHCornerstone
+- Ajibose Ibrahim
+- Alhassan Nuhu Idris
+- Alimzy
+- AndreyDelgado
+- Aroso Emmanuel Adedeji
+- AugistineCreates
+- Ayinkx
+- CodingBabe-1
+- Dabira Olaoluwa
+- DammmyFayo
+- Devadakene
+- EmmyKay0026
+- Fury03
 - GBOYEE — <bot@xandercorp.io>
+- Ibrahim Bamidele. S
+- JayCul
+- Joneshaves
+- MerlinTheWhiz
+- Micheal Samuel
+- MidstCodes
+- Muyideen-js
+- Myart352
 - Olatope Olaleye Olajide — <olaleyeolajide81@gmail.com>
 
 ## Bots
 
 - semantic-release-bot — automated versioning & releases
+- dependabot[bot] — dependency updates
+- GitHub Copilot — AI-assisted development
 
 ---
 

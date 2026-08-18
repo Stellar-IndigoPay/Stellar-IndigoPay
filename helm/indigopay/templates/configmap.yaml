@@ -18,3 +18,9 @@ data:
   NEXT_PUBLIC_API_URL: "http://backend-svc:{{ .Values.backend.port }}"
   NEXT_PUBLIC_CONTRACT_ID: {{ .Values.config.contractId | quote }}
   NEXT_PUBLIC_USDC_ISSUER: {{ .Values.config.usdcIssuer | quote }}
+  # ── Postgres failover tracking ──────────────────────────────
+  # Updated by the automated failover Job when the standby is
+  # promoted to primary. Backend pods pick up the new value
+  # after the failover Job triggers a rolling restart.
+  POSTGRES_PRIMARY_HOST: "postgres-primary-svc.{{ .Values.namespace }}.svc.cluster.local"
+  POSTGRES_FAILOVER_AT: ""

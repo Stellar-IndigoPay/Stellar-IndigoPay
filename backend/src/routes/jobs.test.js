@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 
 jest.mock("../db/pool", () => ({ query: jest.fn() }));
 
@@ -22,7 +22,7 @@ function buildApp() {
 }
 
 const MOCK_JOB_ROW = {
-  id: "job-1",
+  id: "22222222-2222-4222-8222-222222222222",
   status: "in_escrow",
   client_public_key: "GCLIENT",
   created_at: "2026-01-01T00:00:00.000Z",
@@ -56,15 +56,30 @@ describe("GET /api/jobs/:id", () => {
   test("returns 404 with JOB_NOT_FOUND when the job does not exist", async () => {
     pool.query.mockResolvedValueOnce({ rows: [] });
 
-    const res = await request(app).get("/api/jobs/missing").expect(404);
+    const res = await request(app)
+      .get("/api/jobs/44444444-4444-4444-8444-444444444444")
+      .expect(404);
     expect(res.body.error.code).toBe("JOB_NOT_FOUND");
+  });
+
+  test("returns 400 before querying for a malformed job ID", async () => {
+    const res = await request(app).get("/api/jobs/not-a-uuid").expect(400);
+
+    expect(res.body.error).toBe("Validation failed");
+    expect(res.body.details).toContainEqual({
+      path: "id",
+      message: "Invalid UUID",
+    });
+    expect(pool.query).not.toHaveBeenCalled();
   });
 
   test("returns the job when found", async () => {
     pool.query.mockResolvedValueOnce({ rows: [MOCK_JOB_ROW] });
 
-    const res = await request(app).get("/api/jobs/job-1").expect(200);
-    expect(res.body.data.id).toBe("job-1");
+    const res = await request(app)
+      .get("/api/jobs/22222222-2222-4222-8222-222222222222")
+      .expect(200);
+    expect(res.body.data.id).toBe("22222222-2222-4222-8222-222222222222");
   });
 });
 
@@ -80,7 +95,7 @@ describe("PATCH /api/jobs/:id/release", () => {
 
   test("returns 400 INVALID_TX_HASH for a malformed transaction hash", async () => {
     const res = await request(app)
-      .patch("/api/jobs/job-1/release")
+      .patch("/api/jobs/22222222-2222-4222-8222-222222222222/release")
       .send({ releaseTransactionHash: "bad-hash" })
       .expect(400);
 
@@ -92,7 +107,7 @@ describe("PATCH /api/jobs/:id/release", () => {
     pool.query.mockResolvedValueOnce({ rows: [] });
 
     const res = await request(app)
-      .patch("/api/jobs/missing/release")
+      .patch("/api/jobs/44444444-4444-4444-8444-444444444444/release")
       .send({ releaseTransactionHash: validHash })
       .expect(404);
 
@@ -105,7 +120,7 @@ describe("PATCH /api/jobs/:id/release", () => {
     });
 
     const res = await request(app)
-      .patch("/api/jobs/job-1/release")
+      .patch("/api/jobs/22222222-2222-4222-8222-222222222222/release")
       .send({ releaseTransactionHash: validHash })
       .expect(400);
 
@@ -127,7 +142,7 @@ describe("PATCH /api/jobs/:id/release", () => {
       });
 
     const res = await request(app)
-      .patch("/api/jobs/job-1/release")
+      .patch("/api/jobs/22222222-2222-4222-8222-222222222222/release")
       .send({ releaseTransactionHash: validHash })
       .expect(200);
 

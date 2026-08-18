@@ -444,6 +444,83 @@ psql -h localhost -U postgres indigopay \
 5. **Retention Policy:** Set appropriate backup retention based on compliance requirements
 6. **Sensitive Data:** Consider PII redaction in backups for non-production environments
 
+## Data Retention Policies
+
+IndigoPay implements automated, config-driven data-retention policies so that
+non-essential and personal data is purged or anonymized on a schedule while
+on-chain auditability and donation records are preserved.
+
+### Configuration
+
+Policies are declared centrally in `backend/src/config/retentionPolicies.js`.
+The worker (`backend/src/services/retentionWorker.js`) reads them and never
+hard-codes policy logic. Each policy defines:
+
+- `name` — unique policy identifier
+- `table` — target table (restricted to an allow-list)
+- `strategy` — `delete` or `anonymize`
+- `retentionPeriod` — `{ value, unit }` (days | months | years)
+- `schedule` — `{ cron, timezone }` for the pg-boss recurring job
+- `condition` — parameterized WHERE clause (retention value bound as `$1`)
+- `anonymizeFields` / `anonymizedAtColumn` — for the `anonymize` strategy
+- `description` — human-readable summary
+
+### Delete vs. Anonymize
+
+- **delete** — physically removes rows that are older than the retention period
+  and match the condition. Used for data with no long-term compliance value:
+  stale device push tokens, terminal webhook delivery receipts, dead-letter
+  webhook entries, and pg-boss job archives.
+- **anonymize** — nulls personally identifiable columns (e.g. `email`,
+  `donor_address`) and stamps `anonymised_at`, preserving the row so aggregate
+  counts survive. Idempotent: already-anonymized rows are excluded by the
+  WHERE clause. Currently applied to `project_subscriptions`.
+
+### Default policies
+
+| Policy | Table | Strategy | Retention | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `project-subscriptions-anonymize` | `project_subscriptions` | anonymize | 24 months | Nulls `email`/`donor_address`, sets `anonymised_at` |
+| `device-tokens-delete` | `device_tokens` | delete | 12 months | Removes un-refreshed push tokens |
+| `webhook-deliveries-delete` | `webhook_deliveries` | delete | 90 days | Only `delivered`/`dlq` rows (in-flight retries preserved) |
+| `webhook-dlq-delete` | `webhook_dlq` | delete | 180 days | Dead-letter sink purge |
+| `pgboss-archive-delete` | `pgboss.archive` | delete | 30 days | Operational job history only |
+
+### Preserved data (never retained)
+
+- **Donations** — immutable on-chain ledger (`donations`); retained indefinitely.
+- **On-chain references** — `transaction_hash`, `release_transaction_hash`, and
+  any Soroban/Stellar identifiers are never modified or deleted.
+- **Audit logs** — `admin_audit_log` is excluded from default delete policies.
+  Audit-log pruning (where required for compliance) is a separate, flag-gated
+  concern in `backend/src/services/auditRetention.js` (`AUDIT_LOG_RETENTION_ENABLED`).
+
+### Migration support
+
+Migration `018_retention_columns` adds:
+
+- `project_subscriptions.anonymised_at` — anonymization marker (indexed).
+- `device_tokens.retention_expires_at`, `webhook_deliveries.retention_expires_at`,
+  `webhook_dlq.retention_expires_at` — explicit, index-friendly expiry markers.
+
+All columns are nullable and added with `IF NOT EXISTS`, so the migration is
+idempotent and backward compatible.
+
+### Compliance notes
+
+- Table and column identifiers in policies are validated at load time against a
+  strict allow-list, so retention can never target an unexpected table (e.g.
+  `donations`) and dynamic queries are SQL-injection-safe (values are always
+  bound parameters).
+- Every policy execution writes an `admin_audit_log` entry (`action:
+  retention.run`) recording the policy, strategy, affected row count, and status.
+- Metrics: `retention_rows_cleaned_total{policy,strategy}`,
+  `retention_last_run_timestamp_seconds{policy}`,
+  `retention_run_errors_total{policy}` (exposed on `/metrics`).
+- Admin endpoints: `GET /api/admin/retention/status` and
+  `POST /api/admin/retention/run-now` (validates policy names, returns
+  structured errors, and a `207 Multi-Status` when some policies fail).
+
 ## Related Files
 
 - Backup Script: [scripts/backup-db.sh](../scripts/backup-db.sh)

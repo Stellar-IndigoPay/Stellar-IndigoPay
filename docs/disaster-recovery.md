@@ -10,7 +10,7 @@ explicit and rehearsed, not improvised.
 | ---- | ----------------------- | ---------- | ------------------------------- | ---------------------------------------------------------------------------- |
 | 1    | API + web               | 5 min      | 0                               | Multi-replica deployment + HPA, no in-flight request loss on rolling restart |
 | 1    | Stellar indexer         | 5 min      | 0 (at-rest), 5 min (in-stream)  | Restart from `cursor=now` (in-memory; gap-fill job runs after restart)       |
-| 2    | Postgres                | 30 min     | 5 min                           | WAL archiving to S3 every 5 min; base backup nightly; restore drill monthly  |
+| 2    | Postgres                | 2 min      | 5 min                           | WAL archiving to S3 every 5 min; base backup nightly; warm standby with automated failover (30 s detection + 60 s promotion) |
 | 2    | Redis cache             | 1 min      | 0 (cache rebuild on first read) | No persistence; treated as ephemeral                                         |
 | 3    | Push notification queue | 1 hour     | All un-pushed notifications     | pg-boss backed; rows persist in `webhook_deliveries` until ack               |
 
@@ -48,11 +48,16 @@ roadmap.
 
 ### Database region failure
 
-- **Detection**: cluster API unreachable from primary region.
-- **Recovery**: fail over DNS / Load Balancer to a warm standby in a
-  second region. **Not automated yet** — see roadmap.
-- **RTO**: 30 min manual.
-- **RPO**: 1 min (replication lag).
+- **Detection**: postgres-healthcheck sidecar detects primary down
+  within 30 s; Prometheus `PostgresPrimaryUnhealthy` alert fires after
+  2 min.
+- **Recovery**: automated failover promotes standby (see
+  `k8s/postgres-failover-job.yaml`). Standby becomes writable within
+  60 s; backend rolling-restarts and reconnects. If automated failover
+  fails, `PostgresFailoverFailed` alerts on-call for manual failover
+  per `docs/restore-runbook.md`.
+- **RTO**: < 2 min (automated).
+- **RPO**: < 5 min (WAL streaming + archive lag).
 
 ### Secret compromise
 
@@ -75,7 +80,8 @@ roadmap.
 ### Architecture
 
 Stellar-IndigoPay implements a warm PostgreSQL standby for multi-region
-disaster recovery using PostgreSQL native streaming replication:
+disaster recovery using PostgreSQL native streaming replication with
+automated failover orchestration:
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -83,7 +89,8 @@ disaster recovery using PostgreSQL native streaming replication:
 │  ┌──────────────────┐                  ┌──────────────────────┐ │
 │  │ postgres-primary  │  streaming WAL   │  postgres-standby    │ │
 │  │ (read/write)      │ ═══════════════► │  (hot_standby=on)    │ │
-│  │                    │                  │  (read-only)         │ │
+│  │ + healthcheck     │                  │  (read-only)         │ │
+│  │   sidecar         │                  │                      │ │
 │  └────────┬───────────┘                  └──────────────────────┘ │
 │           │ WAL archive (every 5 min)                             │
 │           ▼                                                       │
@@ -91,6 +98,16 @@ disaster recovery using PostgreSQL native streaming replication:
 │  │  S3 (cross-      │◄──────── WAL restore (fallback) ────────────│
 │  │  region repl.)   │                                              │
 │  └─────────────────┘                                              │
+│                                                                    │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │  Automated Failover Pipeline (when primary is down >30 s)   │ │
+│  │  1. healthcheck sidecar → creates failover Job via K8s API   │ │
+│  │  2. failover Job → pg_ctl promote on standby                │ │
+│  │  3. Patch Services → redirect postgres-svc to new primary    │ │
+│  │  4. Rolling restart backend → pods reconnect                │ │
+│  │  5. Slack notification → on-call informed                   │ │
+│  │  RTO: < 2 min   RPO: < 5 min                                │ │
+│  └─────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -111,7 +128,15 @@ disaster recovery using PostgreSQL native streaming replication:
    - Runs `pg_basebackup` to initialize the standby
    - Verifies replication is active
 
-4. **Failover Procedure** (see `docs/restore-runbook.md`):
+4. **Failover Procedure** (see `docs/restore-runbook.md` and `k8s/postgres-failover-job.yaml`):
+
+   **Automated** (when `postgres.failover.enabled` is `true`):
+   - The healthcheck sidecar detects primary failure within 30 s
+   - Creates the failover Job automatically
+   - Services are re-pointed and backend restarted
+   - Total RTO: < 2 min
+
+   **Manual override** (if automated failover fails):
    ```bash
    # 1. Verify primary is unreachable
    kubectl exec -n stellar-indigopay postgres-standby-0 -- pg_isready
@@ -119,15 +144,21 @@ disaster recovery using PostgreSQL native streaming replication:
    # 2. Promote standby to primary
    kubectl exec -n stellar-indigopay postgres-standby-0 -- pg_ctl promote
 
-   # 3. Update DATABASE_URL in AWS Secrets Manager to point at standby
+   # 3. Route services to new primary
+   kubectl patch svc postgres-svc -n stellar-indigopay \
+     --type=json -p='[{"op":"replace","path":"/spec/selector/role","value":"standby"}]'
+   kubectl patch svc postgres-primary-svc -n stellar-indigopay \
+     --type=json -p='[{"op":"replace","path":"/spec/selector/role","value":"standby"}]'
+
+   # 4. Update DATABASE_URL in AWS Secrets Manager to point at standby
    aws secretsmanager update-secret --secret-id stellar-indigopay/prod \
      --secret-string '{"database_url":"postgres://...@postgres-standby-svc:5432/..."}'
 
-   # 4. Force refresh the external secret
+   # 5. Force refresh the external secret
    kubectl annotate externalsecret stellar-indigopay-secrets \
      force-sync="$(date +%s)" -n stellar-indigopay
 
-   # 5. Restart backend pods
+   # 6. Restart backend pods
    kubectl rollout restart deployment/backend -n stellar-indigopay
    ```
 

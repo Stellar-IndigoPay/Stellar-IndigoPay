@@ -2,8 +2,7 @@
   "nav": {
     "home": "Home",
     "projects": "Projects",
-    "jobs": "Jobs",
-    "bridge": "Bridge",
+    "map": "Map",
     "impact": "Impact",
     "leaderboard": "Leaderboard",
     "myImpact": "My Impact",
@@ -11,7 +10,22 @@
     "disconnect": "Disconnect",
     "mainnet": "Mainnet",
     "testnet": "Testnet",
-    "apply": "Get Verified"
+    "apply": "Get Verified",
+    "transparency": "Transparency",
+    "governance": "Governance",
+    "bridge": "Bridge",
+    "jobs": "Jobs",
+    "tagline": "Climate donations",
+    "unreadNotifications": "{{count}} unread notifications"
+  },
+  "wallet": {
+    "connectTitle": "Connect Your Wallet",
+    "connectDesc": "Use Freighter to donate XLM directly to climate projects with zero platform fees.",
+    "connectBtn": "Connect Freighter Wallet",
+    "connecting": "Connecting...",
+    "noWallet": "No wallet?",
+    "installFreighter": "Install Freighter →",
+    "walletConnected": "Wallet connected successfully"
   },
   "project": {
     "about": "About this Project",
@@ -80,7 +94,135 @@
     "milestones": "Project Milestones",
     "proof": "Proof ↗",
     "loadMore": "Load more",
-    "noUpdatesYet": "No updates posted yet."
+    "noUpdatesYet": "No updates posted yet.",
+    "viewProject": "View Project",
+    "donate": "Donate →",
+    "donorCount": "{{count}} donors",
+    "noGoalSet": "No goal set",
+    "estimatedCO2Info": "Estimated CO₂ offset based on this project's declared impact rate per XLM donated. Actual results may vary."
+  },
+  "donor": {
+    "count": {
+      "one": "1 donor",
+      "other": "{{count}} donors"
+    },
+    "donation": {
+      "one": "1 donation",
+      "other": "{{count}} donations"
+    },
+    "projectsSupported": {
+      "one": "1 project supported",
+      "other": "{{count}} projects supported"
+    }
+  },
+  "certificate": {
+    "title": "Impact Certificate",
+    "subtitle": "This certificate recognizes climate impact achieved through on-chain donations.",
+    "presentedTo": "Presented to",
+    "donorAddress": "Donor Address: {{address}}",
+    "totalDonated": "Total Donated",
+    "co2Offset": "CO₂ Offset",
+    "badgeTier": "Badge Tier",
+    "supporter": "Supporter",
+    "projectsSupported": "Projects Supported",
+    "downloadPdf": "Download Certificate (PDF)",
+    "print": "Print Certificate"
+  },
+  "leaderboard": {
+    "title": "Donor Leaderboard",
+    "subtitle": "Recognizing the top climate action champions supporting verified projects on Stellar.",
+    "rank": "Rank",
+    "donor": "Donor",
+    "totalDonated": "Total Donated",
+    "co2Offset": "CO₂ Offset",
+    "badges": "Badges",
+    "allTime": "All Time",
+    "thisMonth": "This Month",
+    "thisYear": "This Year",
+    "noDonors": "No donors yet — be the first!",
+    "failedToLoad": "Couldn't load the leaderboard",
+    "searchPlaceholder": "Search by address or name..."
+  },
+  "dashboard": {
+    "title": "My Impact Dashboard",
+    "subtitle": "Track your climate contributions, active recurring donations, and impact certificates.",
+    "totalDonated": "Total Donated",
+    "co2Offset": "CO₂ Offset",
+    "projectsSupported": "Projects Supported",
+    "donationHistory": "Donation History",
+    "subscriptions": "Recurring Donations",
+    "activeSubscriptions": "Active Subscriptions",
+    "cancelSubscription": "Cancel",
+    "badgeLevel": "Badge Tier",
+    "streak": "Donation Streak",
+    "currentStreak": "Current Streak",
+    "longestStreak": "Longest Streak",
+    "noDonations": "No donations yet. Browse verified projects to get started!"
+  },
+  "governance": {
+    "title": "Platform Governance",
+    "subtitle": "Participate in decentralized decision-making for verified project approvals and fund matching.",
+    "activeProposals": "Active Proposals",
+    "createProposal": "Create Proposal",
+    "proposalTitle": "Proposal Title",
+    "proposalDesc": "Description",
+    "voteFor": "Vote For",
+    "voteAgainst": "Vote Against",
+    "status": "Status",
+    "active": "Active",
+    "passed": "Passed",
+    "rejected": "Rejected",
+    "executed": "Executed",
+    "minimumXlm": "Minimum {{amount}} XLM required to vote",
+    "totalVotes": "Total Votes",
+    "votingPower": "Voting Power"
+  },
+  "impact": {
+    "title": "Global Climate Impact",
+    "subtitle": "Real-time transparent metrics recorded directly on the Stellar blockchain.",
+    "totalImpact": "Total Impact Created",
+    "globalOffset": "Global CO₂ Offset",
+    "verifiedProjects": "Verified Projects",
+    "certificatesIssued": "Certificates Issued",
+    "calculateImpact": "Calculate Your Impact",
+    "treesPlanted": "Trees Planted Equivalent",
+    "cleanEnergy": "Clean Energy Generated"
+  },
+  "donateForm": {
+    "title": "Donate to Project",
+    "chooseAmount": "Choose Amount",
+    "customAmount": "Custom Amount",
+    "selectCurrency": "Select Currency",
+    "frequency": "Donation Frequency",
+    "oneTime": "One-time",
+    "weekly": "Weekly",
+    "monthly": "Monthly",
+    "quarterly": "Quarterly",
+    "recurringNotice": "Recurring donations are authorized via Stellar smart contract.",
+    "donateBtn": "Donate {{amount}} {{currency}}",
+    "submitting": "Processing Donation...",
+    "successMessage": "Thank you for your donation! Your impact has been recorded on-chain.",
+    "errorMessage": "Donation failed. Please try again.",
+    "offlineQueued": "Offline mode: Donation has been queued and will sync when reconnected."
+  },
+  "transparency": {
+    "title": "Transparency Dashboard",
+    "subtitle": "Real-time platform health, impact metrics, and live donation activity — all verifiable on the Stellar blockchain.",
+    "impact": "Impact Overview",
+    "totalDonated": "Total Donated",
+    "co2Offset": "CO₂ Offset",
+    "activeProjects": "Active Projects",
+    "uniqueDonors": "Unique Donors",
+    "liveMap": "Live Donation Activity",
+    "slo": "Service Level Objectives",
+    "sloAdmin": "Admin",
+    "recentDonations": "Recent Donations",
+    "waitingForDonations": "Waiting for donations to appear…",
+    "healthOperational": "All Systems Operational",
+    "healthDegraded": "Degraded Performance",
+    "healthOutage": "Service Disruption",
+    "lastChecked": "Last checked",
+    "errorLoading": "Unable to load impact stats. Please try again later."
   },
   "admin": {
     "title": "Project Admin",
@@ -130,23 +272,12 @@
   },
   "map": {
     "title": "Project World Map",
-    "subtitle": "{count} active projects around the globe",
+    "subtitle": "{{count}} active projects around the globe",
     "activeProjects": "active projects",
     "browseAll": "Browse all projects",
     "noProjects": "No active projects yet",
     "noProjectsDesc": "Check back soon — new projects are verified regularly.",
-    "dataUpdated": "Data as of {time}"
-  },
-  "common": {
-    "loading": "Loading…",
-    "error": "Error",
-    "cancel": "Cancel",
-    "save": "Save",
-    "delete": "Delete",
-    "confirm": "Confirm",
-    "back": "Back",
-    "next": "Next",
-    "close": "Close"
+    "dataUpdated": "Data as of {{time}}"
   },
   "apply": {
     "pageTitle": "Apply for Verification",
@@ -167,18 +298,18 @@
     "projectCategory": "Project category",
     "projectLocation": "Project location",
     "projectDescription": "Short description",
-    "co2PerXLM": "Expected CO\u2082 offset (kg) per XLM donated",
-    "annualTonnes": "Expected annual CO\u2082 offset (tonnes)",
+    "co2PerXLM": "Expected CO₂ offset (kg) per XLM donated",
+    "annualTonnes": "Expected annual CO₂ offset (tonnes)",
     "notes": "Anything else the review team should know? (optional)",
     "documentsTitle": "Supporting documents",
     "documentsHint": "Upload PDFs, images, or spreadsheets that back up your methodology. Skip if you don't have any on hand.",
-    "uploading": "Uploading\u2026",
+    "uploading": "Uploading…",
     "remove": "Remove",
     "noDocuments": "No documents attached yet.",
     "submit": "Submit Verification Request",
-    "submitting": "Submitting\u2026",
+    "submitting": "Submitting…",
     "subThanks": "Thank you! Your verification request is in.",
-    "subCopy": "We'll review your submission within {timeline} and email {email} with the outcome.",
+    "subCopy": "We'll review your submission within {{timeline}} and email {{email}} with the outcome.",
     "backToHome": "Back to Home",
     "storageNote": "Documents are stored using the server's configured backend (local disk by default; switches to S3 or IPFS when those env vars are set).",
     "invalidEmail": "Enter a valid email address.",
@@ -187,5 +318,19 @@
     "invalidCategory": "Pick a category.",
     "required": "Required",
     "uploadFailed": "Upload failed. Try a smaller file (<10 MB) or a different format."
+  },
+  "common": {
+    "loading": "Loading…",
+    "error": "Error",
+    "cancel": "Cancel",
+    "save": "Save",
+    "delete": "Delete",
+    "confirm": "Confirm",
+    "back": "Back",
+    "next": "Next",
+    "close": "Close",
+    "search": "Search",
+    "filter": "Filter",
+    "retry": "Retry"
   }
 }

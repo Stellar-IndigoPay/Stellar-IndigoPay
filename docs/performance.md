@@ -15,6 +15,12 @@ These targets are validated by the k6 load test at `scripts/load-test.js`
 a hard k6 `thresholds` check; the test exits with a non-zero status if it
 is violated.
 
+## Indexer SLOs
+
+- Indexer lag should stay below 50 ledgers under normal operation.
+- Autonomous backfills should recover from lag within 60 seconds for deviations of 10+ ledgers.
+- The readiness endpoint should surface indexer degradation when lag exceeds 50 ledgers.
+
 ## Running the test
 
 ```bash
@@ -84,6 +90,71 @@ infrastructure change or after merging changes to the donations route._
 > Fill in actual numbers by running `npm run load-test` against the target environment
 > and copying the summary output here before merging backend changes that touch the
 > donations route or the Stellar submission path.
+
+## SLO Definitions
+
+Stellar IndigoPay defines Service Level Objectives (SLOs) for its two critical user
+journeys. These SLOs are measured over a rolling 30-day window and are enforced via
+multi-window burn-rate alerts (see [Burn-Rate Alert Response](#burn-rate-alert-response)).
+
+| SLO                         | Target    | Error Budget | Error Definition                                      |
+| --------------------------- | --------- | ------------ | ----------------------------------------------------- |
+| Donation recording          | 99.5%     | 0.5%         | Any 5xx response on `POST /api/donations`            |
+| Project listing             | 99.9%     | 0.1%         | Any 5xx response OR >2s latency on `GET /api/projects` |
+
+Recording rules that pre-compute error ratios are defined in
+`monitoring/recording-rules.yml`. The metrics exposed are:
+
+* `slo:donations:error_ratio` — 1-minute sliding error ratio for donations
+* `slo:projects:error_ratio` — 1-minute sliding error ratio for project listing
+* `slo:donations:error_budget_remaining_pct` — remaining error budget as a percentage
+* `slo:projects:error_budget_remaining_pct` — remaining error budget for projects
+
+### Burn-Rate Alert Response
+
+Burn-rate alerts follow the Google SRE Workbook multi-window approach. Three windows
+detect different failure modes:
+
+| Alert                         | Burn Rate | Window | Severity | Meaning                                        |
+| ----------------------------- | --------- | ------ | -------- | ---------------------------------------------- |
+| DonationsHighBurnRate1h       | 14.4x     | 1h     | page     | 2% of 30-day error budget burned in 1 hour     |
+| DonationsHighBurnRate6h       | 6.0x      | 6h     | page     | 5% of 30-day error budget burned in 6 hours    |
+| DonationsHighBurnRate3d       | 1.0x      | 3d     | warn     | 10% of 30-day error budget burned in 3 days    |
+| ProjectsHighBurnRate1h        | 14.4x     | 1h     | page     | 2% of 30-day error budget burned in 1 hour     |
+| ProjectsHighBurnRate6h        | 6.0x      | 6h     | page     | 5% of 30-day error budget burned in 6 hours    |
+| ProjectsHighBurnRate3d        | 1.0x      | 3d     | warn     | 10% of 30-day error budget burned in 3 days    |
+
+**When `DonationsHighBurnRate1h` fires:**
+
+1. Acknowledge the page within 5 minutes.
+2. Post in the `#incidents` Slack channel with the alert summary.
+3. Check Soroban RPC health: `stellar network health` or the Horizon `/health` endpoint.
+4. Check the Postgres connection pool: review the Grafana dashboard → Database → Pool panels.
+5. Check for recent deployments: `git log --oneline -5` and correlate with the alert start time.
+6. Inspect Sentry for recent 5xx error spikes.
+7. If the alert resolves on its own within 10 minutes, it may be a transient Soroban RPC
+   issue — create a low-priority ticket to investigate the RPC provider's status.
+
+**When any burn-rate alert fires at severity `page`:**
+
+1. Acknowledge within 5 minutes.
+2. Post in `#incidents` Slack channel.
+3. Check the Grafana dashboard (`Stellar IndigoPay — Backend`) → SLO Error Budget panel
+   to assess current burn rate.
+4. Cross-reference with the [deployment history](https://github.com/stellar-indigopay/indigopay/deployments).
+
+**Escalation criteria:**
+
+* If error budget exceeds 50% consumed within any rolling 7-day window, schedule an
+  engineering review within 24 hours.
+* If the error budget is fully exhausted (< 5% remaining), escalate to the engineering
+  lead and consider freezing deployments until the root cause is identified.
+
+**Silencing burn-rate alerts:**
+
+Do NOT silence burn-rate alerts for more than 1 hour without an active incident. Silencing
+masks real error budget consumption. If you must silence (e.g., during planned maintenance),
+create an Alertmanager silence with a clear comment and a fixed expiry.
 
 ## CI integration
 

@@ -1,4 +1,9 @@
 import { withSentryConfig } from "@sentry/nextjs";
+import withBundleAnalyzer from "@next/bundle-analyzer";
+
+const withBundleAnalyzerConfig = withBundleAnalyzer({
+  enabled: process.env.ANALYZE === "true",
+});
 
 /** @type {import('next').NextConfig} */
 
@@ -14,7 +19,6 @@ import { withSentryConfig } from "@sentry/nextjs";
 //   • Stellar Horizon (testnet + mainnet) — REST API + EventSource streaming
 //   • Soroban RPC (testnet + mainnet)     — Soroban simulate/send calls
 //   • Stellar Friendbot                    — testnet account funding
-//   • CoinGecko                            — XLM/USD spot price
 //
 // In production set NEXT_PUBLIC_API_URL to your deployed backend; the 'self'
 // origin already covers same-domain backends.  In local dev middleware.ts
@@ -45,25 +49,36 @@ function buildStaticCsp(allowFraming = false) {
     : "frame-ancestors 'none'";
   return [
     "default-src 'self'",
-    // Static fallback uses unsafe-inline; middleware.ts replaces this with a
-    // nonce + strict-dynamic pair which achieves an A grade on csp-evaluator.
-    "script-src 'self' 'unsafe-inline'",
+    // static fallback uses placeholder nonce for inline scripts; actual nonce injected by middleware
+    `script-src 'self' 'nonce-{nonce}' https://*.stellar.org`,
     // unpkg serves the Leaflet CSS stylesheet loaded dynamically in ProjectMap.
     `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com ${UNPKG}`,
     "font-src 'self' https://fonts.gstatic.com",
     // OSM tiles loaded as images; Leaflet marker icons use data: URIs.
     `img-src 'self' data: blob: ${LEAFLET_TILE_SOURCES}`,
-    `connect-src 'self' ${STELLAR_CONNECT} https://api.coingecko.com`,
+    `connect-src 'self' ${STELLAR_CONNECT} ${process.env.NEXT_PUBLIC_API_URL ? process.env.NEXT_PUBLIC_API_URL : ''}`,
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
     frameAncestors,
     "upgrade-insecure-requests",
+    "report-uri /api/csp-report",
   ].join("; ");
 }
 
 const nextConfig = {
   reactStrictMode: true,
+  experimental: {
+    optimizePackageImports: ["@sentry/nextjs"],
+  },
+  images: {
+    remotePatterns: [
+      { protocol: "https", hostname: "**.stellar.org" },
+      { protocol: "https", hostname: "**.indigopay.com" },
+      { protocol: "http", hostname: "localhost" },
+    ],
+    formats: ["image/avif", "image/webp"],
+  },
   webpack: (config) => {
     config.resolve.fallback = {
       ...config.resolve.fallback,
@@ -78,7 +93,7 @@ const nextConfig = {
       {
         // Applied to every route.  middleware.ts overrides Content-Security-Policy
         // with the nonce-stamped version for all HTML responses.
-        source: "/(.*)",
+        source: "/((?!api/csp-report).*)",
         headers: [
           { key: "Content-Security-Policy", value: buildStaticCsp(false) },
           // Security headers (Issue #472)
@@ -128,7 +143,8 @@ const nextConfig = {
 // printing Sentry output in CI.
 const hasSentryAuth = Boolean(process.env.SENTRY_AUTH_TOKEN);
 
-export default withSentryConfig(
+export default withBundleAnalyzerConfig(
+  withSentryConfig(
   nextConfig,
   // Second arg: Sentry webpack plugin options (source-map upload config)
   {
@@ -150,4 +166,5 @@ export default withSentryConfig(
     disableServerWebpackPlugin: !hasSentryAuth,
     disableClientWebpackPlugin: !hasSentryAuth,
   },
+  ),
 );

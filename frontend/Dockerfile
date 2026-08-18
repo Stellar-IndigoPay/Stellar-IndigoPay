@@ -1,22 +1,22 @@
 # 1. Builder Stage
-# Pinned to a current LTS (Node 20). Replace with
-#   node:20.18.1-alpine@sha256:<digest>
+# Pinned to a current LTS (Node 22). Replace with
+#   node:22.14.0-alpine@sha256:<digest>
 # once you have computed the digest via:
-#   docker buildx imagetools inspect node:20.18.1-alpine
+#   docker buildx imagetools inspect node:22.14.0-alpine
 # Pinning to a digest prevents a compromised upstream from silently
 # shipping a new image under the same tag.
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci
+RUN npm ci --legacy-peer-deps
 
 COPY . .
 RUN npm run build
 
 # 2. Production Runner Stage
-FROM node:20-alpine AS runner
+FROM node:22-alpine AS runner
 
 WORKDIR /app
 

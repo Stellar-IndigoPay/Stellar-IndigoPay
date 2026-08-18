@@ -18,6 +18,7 @@ import type { GetServerSideProps } from "next";
 import type { ClimateProject } from "@/utils/types";
 import { fetchProjects } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
+import { formatTime } from "@/utils/format";
 
 // ── Dynamic import — Leaflet requires a real browser environment ───────────────
 const ProjectMap = dynamic(() => import("@/components/ProjectMap"), {
@@ -115,10 +116,10 @@ export default function MapPage({ projects, fetchedAt }: MapPageProps) {
           )}
 
           {/* Bottom-left attribution note (subtle) --------------------------- */}
-          <p className="absolute bottom-2 left-3 z-[1000] text-[10px] text-gray-400 pointer-events-none select-none hidden sm:block">
+          <p className="absolute bottom-2 left-3 z-[1000] text-[10px] text-[var(--text-secondary)] pointer-events-none select-none hidden sm:block">
             {t("map.dataUpdated").replace(
               "{time}",
-              new Date(fetchedAt).toLocaleTimeString(),
+              formatTime(fetchedAt),
             )}
           </p>
         </div>

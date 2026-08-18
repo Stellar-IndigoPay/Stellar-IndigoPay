@@ -2,8 +2,9 @@
 
 jest.mock("../db/pool", () => ({ query: jest.fn() }));
 jest.mock("../services/redis", () => ({
-  get: jest.fn(),
-  set: jest.fn(),
+  get: jest.fn().mockResolvedValue(null),
+  set: jest.fn().mockResolvedValue(undefined),
+  deletePattern: jest.fn().mockResolvedValue(undefined),
 }));
 
 const request = require("supertest");
@@ -26,8 +27,8 @@ describe("GET /api/stats/global", () => {
   let app;
 
   beforeEach(() => {
-    app = buildApp();
     jest.clearAllMocks();
+    app = buildApp();
   });
 
   test("returns the aggregate landing-page hero stats and caches them in Redis for 60 seconds", async () => {
@@ -53,7 +54,7 @@ describe("GET /api/stats/global", () => {
       totalProjects: 42,
       totalDonors: 1234,
     });
-    expect(redis.set).toHaveBeenCalledWith("stats:global", res.body, 60);
+    expect(redis.set).toHaveBeenCalledWith("cache:v1:stats:global", res.body, 300);
   });
 
   test("serves cached stats without querying Postgres", async () => {

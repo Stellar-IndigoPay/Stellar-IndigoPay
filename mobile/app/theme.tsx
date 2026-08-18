@@ -22,6 +22,10 @@ export interface ThemeColors {
   placeholder: string;
   border: string;
   statusBarStyle: "light" | "dark";
+  browseText: string;
+  cardBackground: string;
+  unreadBackground: string;
+  text: string;
 }
 
 export interface ThemeContextValue {
@@ -49,6 +53,10 @@ const themes: Record<ThemeMode, ThemeColors> = {
     placeholder: "#94A3B8",
     border: "rgba(99,102,241,0.12)",
     statusBarStyle: "dark",
+    browseText: "#FFFFFF",
+    cardBackground: "#FFFFFF",
+    unreadBackground: "rgba(0,128,128,0.06)",
+    text: "#0F172A",
   },
   dark: {
     background: "#0A0A1A",
@@ -69,6 +77,10 @@ const themes: Record<ThemeMode, ThemeColors> = {
     placeholder: "#64748B",
     border: "rgba(129,140,248,0.14)",
     statusBarStyle: "light",
+    browseText: "#E2E8F0",
+    cardBackground: "#14142D",
+    unreadBackground: "rgba(0,128,128,0.12)",
+    text: "#E2E8F0",
   },
 };
 

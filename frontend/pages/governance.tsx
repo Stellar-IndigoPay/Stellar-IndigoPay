@@ -3,13 +3,15 @@
  * Governance — Proposal voting for badge holders.
  */
 import { useEffect, useState, useCallback } from "react";
-import Head from "next/head";
+import { useRouter } from "next/router";
+import PageMeta from "@/components/PageMeta";
 import {
   CONTRACT_ID,
   NETWORK_PASSPHRASE,
   rpcServer,
   server,
   getDonorStats,
+  getVoterWeight,
   submitTransaction,
   formatTransactionError,
 } from "@/lib/stellar";
@@ -20,7 +22,8 @@ import {
 } from "@/lib/wallet";
 import { fetchProjects } from "@/lib/api";
 import { shortenAddress } from "@/utils/format";
-import { SkeletonBox } from "@/components/Skeleton";
+import GovernanceSkeleton from "@/components/GovernanceSkeleton";
+import { useI18n } from "@/lib/i18n";
 import {
   Contract,
   TransactionBuilder,
@@ -33,7 +36,7 @@ import {
 
 // Stellat ledger ≈ 5 s — approximate deadline display from ledger offset.
 const LEDGERS_PER_DAY = 17280;
-const QUORUM_THRESHOLD = 5;
+const QUORUM_THRESHOLD = 15;
 
 interface Proposal {
   projectId: string;
@@ -128,8 +131,11 @@ function ledgersToDays(ledgers: number): string {
 }
 
 export default function GovernancePage() {
+  const { t } = useI18n();
+  const router = useRouter();
   const [publicKey, setPublicKey] = useState<string | null>(null);
   const [isBadgeHolder, setIsBadgeHolder] = useState(false);
+  const [votingWeight, setVotingWeight] = useState(0);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [votingId, setVotingId] = useState<string | null>(null);
@@ -184,8 +190,11 @@ export default function GovernancePage() {
       if (pk) {
         try {
           const stats = await getDonorStats(pk);
-          if (mounted && stats && stats.badge !== "None")
+          if (mounted && stats && stats.badge !== "None") {
             setIsBadgeHolder(true);
+            const weight = await getVoterWeight(pk);
+            if (mounted) setVotingWeight(weight);
+          }
         } catch {
           // not a badge holder yet
         }
@@ -210,7 +219,11 @@ export default function GovernancePage() {
     if (pk) {
       try {
         const stats = await getDonorStats(pk);
-        if (stats && stats.badge !== "None") setIsBadgeHolder(true);
+        if (stats && stats.badge !== "None") {
+          setIsBadgeHolder(true);
+          const weight = await getVoterWeight(pk);
+          setVotingWeight(weight);
+        }
       } catch {
         /* not a badge holder */
       }
@@ -249,25 +262,34 @@ export default function GovernancePage() {
   const passPercent = (p: Proposal) =>
     totalVotes(p) === 0 ? 0 : Math.round((p.votesFor / totalVotes(p)) * 100);
 
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || "https://stellar-indigopay.app";
+  const canonicalUrl = `${appUrl}${router.asPath.split("?")[0]}`;
+  const governanceJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    name: `${t("governance.title")} | Stellar IndigoPay`,
+    url: canonicalUrl,
+    description: t("governance.subtitle"),
+  };
+
+  if (isLoading) return <GovernanceSkeleton />;
+
   return (
     <div className="min-h-screen bg-[#fcfdfc] font-body text-forest-900 pb-20">
-      <Head>
-        <title>Governance | Stellar IndigoPay</title>
-        <meta
-          name="description"
-          content="Vote on project verification proposals with your impact badge."
-        />
-      </Head>
+      <PageMeta
+        title={`${t("governance.title")} | Stellar IndigoPay`}
+        description={t("governance.subtitle")}
+        canonicalUrl={canonicalUrl}
+        jsonLd={governanceJsonLd}
+      />
 
       <main className="max-w-3xl mx-auto px-4 py-12 sm:px-6">
         <div className="mb-10">
           <h1 className="text-4xl font-display font-bold text-[#0F172A] dark:text-[#E2E8F0] tracking-tight">
-            Community <span className="text-gradient">Governance</span>
+            {t("governance.title")}
           </h1>
           <p className="mt-3 text-[#475569] dark:text-[#94A3B8]">
-            Badge holders vote to verify new climate projects. You need at least
-            a <span className="font-semibold">Seedling badge</span> (≥ 10 XLM
-            donated) to cast a vote.
+            {t("governance.subtitle")}
           </p>
         </div>
 
@@ -281,15 +303,22 @@ export default function GovernancePage() {
                   {shortenAddress(publicKey)}
                 </p>
               </div>
-              <span
-                className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                  isBadgeHolder
-                    ? "bg-[rgba(99,102,241,0.08)] dark:bg-[rgba(129,140,248,0.10)] text-[#4F46E5] dark:text-[#818CF8]"
-                    : "bg-zinc-100 text-zinc-500"
-                }`}
-              >
-                {isBadgeHolder ? "Eligible to vote" : "No badge yet"}
-              </span>
+              <div className="flex gap-2">
+                <span
+                  className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                    isBadgeHolder
+                      ? "bg-[rgba(99,102,241,0.08)] dark:bg-[rgba(129,140,248,0.10)] text-[#4F46E5] dark:text-[#818CF8]"
+                      : "bg-zinc-100 text-zinc-500"
+                  }`}
+                >
+                  {isBadgeHolder ? "Eligible to vote" : "No badge yet"}
+                </span>
+                {isBadgeHolder && (
+                  <span className="rounded-full px-3 py-1 text-xs font-semibold bg-[rgba(16,185,129,0.08)] text-[#059669] dark:bg-[rgba(52,211,153,0.1)] dark:text-[#34D399]">
+                    Weight: {votingWeight}
+                  </span>
+                )}
+              </div>
             </div>
           ) : (
             <div className="flex items-center justify-between gap-4">
@@ -308,9 +337,17 @@ export default function GovernancePage() {
 
         {/* Quorum notice */}
         <div className="mb-6 rounded-xl bg-[rgba(245,158,11,0.06)] border border-[rgba(245,158,11,0.20)] px-4 py-3 text-sm text-[#B45309] dark:text-[#FBBF24]">
-          Quorum threshold: <strong>{QUORUM_THRESHOLD} votes</strong>. A
+          Quorum threshold: <strong>{QUORUM_THRESHOLD} weighted votes</strong>. A
           proposal passes when votes&nbsp;for &gt; votes&nbsp;against and the
           deadline passes.
+        </div>
+
+        <div className="mb-6 flex flex-wrap gap-3 text-xs text-[#64748B] dark:text-[#94A3B8]">
+          <span><strong>Weights:</strong></span>
+          <span>🌱 Seedling = 1</span>
+          <span>🌳 Tree = 3</span>
+          <span>🌲 Forest = 10</span>
+          <span>🌍 Earth Guardian = 25</span>
         </div>
 
         {error && (
@@ -319,26 +356,7 @@ export default function GovernancePage() {
           </div>
         )}
 
-        {isLoading ? (
-          <div className="space-y-4 py-4">
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="card rounded-2xl p-5 animate-pulse pointer-events-none">
-                <div className="flex items-start justify-between gap-4 mb-4">
-                  <div className="flex-1 space-y-2">
-                    <SkeletonBox className="h-5 rounded w-2/3" palette="indigo" />
-                    <SkeletonBox className="h-3 rounded w-1/3" palette="indigo" />
-                  </div>
-                  <SkeletonBox className="h-6 rounded-full w-16" palette="indigo" />
-                </div>
-                <SkeletonBox className="h-2 rounded-full w-full mb-4" palette="indigo" />
-                <div className="flex gap-2">
-                  <SkeletonBox className="h-10 rounded-xl flex-1" palette="indigo" />
-                  <SkeletonBox className="h-10 rounded-xl flex-1" palette="indigo" />
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : proposals.length === 0 ? (
+        {proposals.length === 0 ? (
           <div className="card rounded-2xl p-12 text-center">
             <p className="text-[#64748B] dark:text-[#94A3B8]">
               No open proposals at the moment.
@@ -396,7 +414,7 @@ export default function GovernancePage() {
                         </strong>
                       </span>
                       <span>
-                        <strong>{votes}</strong> total votes
+                        <strong>{votes}</strong> total weighted votes
                       </span>
                       <span>
                         Against:{" "}

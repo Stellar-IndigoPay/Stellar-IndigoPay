@@ -52,6 +52,7 @@ jest.mock("../hooks/useBiometricAuth", () => {
     label: "Biometrics",
     authenticate: jest.fn(),
     refresh: jest.fn(),
+    lastResult: null as { success: boolean; error?: string } | null,
   };
   return {
     __esModule: true,
@@ -75,6 +76,7 @@ const bioMock = useBiometricAuth as unknown as () => {
   enrolled: boolean;
   label: string;
   authenticate: jest.Mock;
+  lastResult: { success: boolean; error?: string } | null;
 };
 
 // Stub theme so the donate screen doesn't pull in the full
@@ -238,6 +240,6 @@ describe("DonateScreen – biometric auth gate (issue #481)", () => {
       expect(getByText("Donate to Amazon Reforestation")).toBeTruthy(),
     );
     // 🔒 is rendered in the bio hint row
-    expect(getByText("🔒")).toBeTruthy();
+    expect(getByText("🔒", { includeHiddenElements: true })).toBeTruthy();
   });
 });

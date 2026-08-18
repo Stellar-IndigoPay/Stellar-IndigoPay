@@ -1,0 +1,71 @@
+{
+  "projects": [
+    {
+      "id": "e4aa582a-e87f-4fef-9a5c-55c32918bb12",
+      "name": "Amazon Reforestation",
+      "category": "Reforestation",
+      "description": "Planting trees in the Amazon rainforest.",
+      "location": "Brazil",
+      "goalXLM": "10000",
+      "raisedXLM": "5000",
+      "donorCount": 10,
+      "co2OffsetKg": 60000,
+      "walletAddress": "GBWARNKVFUYBSD6ZBJRLKXFWOZRXB5TIICONCHYQNYFF2J2IRQM4R2KR",
+      "organization": {
+        "name": "Save The Trees",
+        "contactEmail": "info@savethetrees.org",
+        "website": "https://savethetrees.org",
+        "country": "Brazil"
+      },
+      "co2Methodology": {
+        "name": "Gold Standard",
+        "annualTonnesCO2": "1200",
+        "verificationBody": "Verra",
+        "documentUrl": "https://verra.org/doc"
+      },
+      "impactMetrics": ["Trees planted: 5000", "CO2 offset: 1200t"],
+      "tags": ["reforestation", "carbon-offset"],
+      "createdAt": "2026-07-17T12:00:00Z",
+      "updatedAt": "2026-07-17T12:00:00Z",
+      "verified": true,
+      "status": "active"
+    }
+  ],
+  "donations": [
+    {
+      "id": "don-1",
+      "projectId": "e4aa582a-e87f-4fef-9a5c-55c32918bb12",
+      "donorAddress": "GCEZWKW744OREGLTR6Q6ZYITK5GSBVC3XRONSIJSBTRSCGNFAVSBXP33",
+      "amountXLM": "50",
+      "currency": "XLM",
+      "message": "Keep up the great work!",
+      "transactionHash": "abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+      "createdAt": "2026-07-17T12:00:00Z"
+    }
+  ],
+  "profiles": [
+    {
+      "publicKey": "GCEZWKW744OREGLTR6Q6ZYITK5GSBVC3XRONSIJSBTRSCGNFAVSBXP33",
+      "displayName": "Test Donor",
+      "bio": "Supporting global reforestation efforts",
+      "totalDonatedXLM": "500",
+      "projectsSupported": 1,
+      "badges": [
+        { "tier": "Seedling", "earnedAt": "2026-07-16T12:00:00Z" }
+      ]
+    }
+  ],
+  "stats": {
+    "global": {
+      "totalXLMRaised": "15000",
+      "totalCO2OffsetKg": 180000,
+      "totalDonations": 300,
+      "totalProjects": 5,
+      "totalDonors": 120
+    },
+    "categories": [
+      { "category": "Reforestation", "count": 3 },
+      { "category": "Solar Energy", "count": 2 }
+    ]
+  }
+}

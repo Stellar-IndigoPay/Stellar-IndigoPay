@@ -1,0 +1,586 @@
+/* ============================================================
+   IndigoPay Inline Donate Overlay Styles
+   All selectors are scoped under #indigopay-overlay to avoid
+   leaking into the host page.
+   ============================================================ */
+
+/* ── backdrop ─────────────────────────────────────────────── */
+#indigopay-overlay .igp-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  z-index: 2147483646;
+  animation: igpFadeIn 0.2s ease-out;
+}
+
+/* ── modal ───────────────────────────────────────────────── */
+#indigopay-overlay .igp-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: #ffffff;
+  border-radius: 16px;
+  width: 420px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  z-index: 2147483647;
+  box-shadow:
+    0 25px 80px rgba(0, 0, 0, 0.25),
+    0 0 0 1px rgba(0, 0, 0, 0.05);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Oxygen, Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue",
+    sans-serif;
+  color: #1a1a2e;
+  line-height: 1.5;
+  animation: igpSlideUp 0.25s ease-out;
+}
+
+/* ── close button ────────────────────────────────────────── */
+#indigopay-overlay .igp-close-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 50%;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  color: #666;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  z-index: 1;
+  padding: 0;
+}
+
+#indigopay-overlay .igp-close-btn:hover {
+  background: rgba(0, 0, 0, 0.12);
+  color: #000;
+}
+
+#indigopay-overlay .igp-close-btn:focus-visible {
+  outline: 2px solid #4f46e5;
+  outline-offset: 2px;
+}
+
+/* ── header ──────────────────────────────────────────────── */
+#indigopay-overlay .igp-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 20px 24px 0;
+}
+
+#indigopay-overlay .igp-header-icon {
+  font-size: 24px;
+  line-height: 1;
+}
+
+#indigopay-overlay .igp-header-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: #1a1a2e;
+  letter-spacing: -0.01em;
+}
+
+/* ── body ────────────────────────────────────────────────── */
+#indigopay-overlay .igp-body {
+  padding: 16px 24px 20px;
+}
+
+#indigopay-overlay .igp-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 32px 0;
+  color: #888;
+  font-size: 14px;
+}
+
+/* ── spinner ─────────────────────────────────────────────── */
+#indigopay-overlay .igp-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid #e0e0e0;
+  border-top-color: #4f46e5;
+  border-radius: 50%;
+  animation: igpSpin 0.7s linear infinite;
+}
+
+/* ── footer ──────────────────────────────────────────────── */
+#indigopay-overlay .igp-footer {
+  padding: 8px 24px 16px;
+  text-align: center;
+}
+
+#indigopay-overlay .igp-footer-text {
+  font-size: 11px;
+  color: #999;
+  letter-spacing: 0.02em;
+}
+
+/* ── project section ─────────────────────────────────────── */
+#indigopay-overlay .igp-project-section {
+  display: flex;
+  gap: 14px;
+  margin-bottom: 14px;
+  padding: 14px;
+  background: #f8f9ff;
+  border-radius: 12px;
+  border: 1px solid #eef0ff;
+}
+
+#indigopay-overlay .igp-project-avatar {
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  background: #eef0ff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+}
+
+#indigopay-overlay .igp-project-info {
+  flex: 1;
+  min-width: 0;
+}
+
+#indigopay-overlay .igp-project-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1a1a2e;
+  margin-bottom: 3px;
+}
+
+#indigopay-overlay .igp-project-category {
+  font-size: 12px;
+  color: #666;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+#indigopay-overlay .igp-project-location {
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 4px;
+}
+
+#indigopay-overlay .igp-project-desc {
+  font-size: 12px;
+  color: #777;
+  margin: 4px 0 0;
+  line-height: 1.4;
+}
+
+/* ── badges ──────────────────────────────────────────────── */
+#indigopay-overlay .igp-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+#indigopay-overlay .igp-badge-verified {
+  background: rgba(16, 185, 129, 0.12);
+  color: #059669;
+  border: 1px solid rgba(16, 185, 129, 0.2);
+}
+
+#indigopay-overlay .igp-badge-unverified {
+  background: rgba(245, 158, 11, 0.12);
+  color: #d97706;
+  border: 1px solid rgba(245, 158, 11, 0.2);
+}
+
+/* ── address row ─────────────────────────────────────────── */
+#indigopay-overlay .igp-address-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: #f5f5f7;
+  border-radius: 8px;
+}
+
+#indigopay-overlay .igp-address-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+#indigopay-overlay .igp-address-value {
+  font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #333;
+  word-break: break-all;
+}
+
+/* ── divider ──────────────────────────────────────────────── */
+#indigopay-overlay .igp-divider {
+  border: none;
+  border-top: 1px solid #eee;
+  margin: 14px 0;
+}
+
+/* ── Freighter section ───────────────────────────────────── */
+#indigopay-overlay .igp-freighter-section {
+  margin-bottom: 14px;
+}
+
+#indigopay-overlay .igp-freighter-connected {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #f0fdf4;
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  border-radius: 8px;
+  font-size: 13px;
+  color: #166534;
+}
+
+#indigopay-overlay .igp-freighter-connected code {
+  font-family: "SF Mono", "Fira Code", Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: rgba(16, 185, 129, 0.1);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+#indigopay-overlay .igp-wallet-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.5);
+  flex-shrink: 0;
+}
+
+#indigopay-overlay .igp-freighter-missing {
+  font-size: 12px;
+  color: #888;
+  margin: 0;
+  padding: 10px 12px;
+  background: #fff8f0;
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  border-radius: 8px;
+}
+
+#indigopay-overlay .igp-freighter-missing a {
+  color: #4f46e5;
+  text-decoration: underline;
+}
+
+#indigopay-overlay .igp-connect-btn {
+  width: 100%;
+  padding: 10px 16px;
+  background: linear-gradient(135deg, #4f46e5, #6366f1);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: inherit;
+}
+
+#indigopay-overlay .igp-connect-btn:hover {
+  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.35);
+  transform: translateY(-1px);
+}
+
+#indigopay-overlay .igp-connect-btn:active {
+  transform: translateY(0);
+}
+
+#indigopay-overlay .igp-connect-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+/* ── direct donate section ────────────────────────────────── */
+#indigopay-overlay .igp-direct-section {
+  text-align: center;
+  padding: 8px 0 12px;
+}
+
+#indigopay-overlay .igp-direct-icon {
+  font-size: 32px;
+  margin-bottom: 8px;
+}
+
+#indigopay-overlay .igp-direct-text {
+  font-size: 13px;
+  color: #666;
+  margin: 0 0 14px;
+  line-height: 1.5;
+}
+
+#indigopay-overlay .igp-copy-btn {
+  background: #f5f5f7;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 13px;
+  cursor: pointer;
+  color: #333;
+  transition: all 0.15s ease;
+  font-family: inherit;
+}
+
+#indigopay-overlay .igp-copy-btn:hover {
+  background: #eee;
+  border-color: #ccc;
+}
+
+/* ── donate form ──────────────────────────────────────────── */
+#indigopay-overlay .igp-donate-form {
+  margin-top: 4px;
+}
+
+#indigopay-overlay .igp-field-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #555;
+  margin-bottom: 6px;
+}
+
+#indigopay-overlay .igp-amount-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+#indigopay-overlay .igp-presets {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+#indigopay-overlay .igp-preset-btn {
+  padding: 8px 12px;
+  background: #f5f5f7;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  color: #444;
+  transition: all 0.12s ease;
+  font-family: inherit;
+  min-width: 36px;
+  text-align: center;
+}
+
+#indigopay-overlay .igp-preset-btn:hover {
+  background: #eef0ff;
+  border-color: #c7c9ff;
+}
+
+#indigopay-overlay .igp-preset-btn.active {
+  background: #4f46e5;
+  color: #fff;
+  border-color: #4f46e5;
+}
+
+#indigopay-overlay .igp-input-wrapper {
+  position: relative;
+  flex: 1;
+}
+
+#indigopay-overlay .igp-amount-input {
+  width: 100%;
+  padding: 8px 44px 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-size: 14px;
+  color: #1a1a2e;
+  background: #fff;
+  outline: none;
+  transition: border-color 0.15s ease;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+
+#indigopay-overlay .igp-amount-input:focus {
+  border-color: #4f46e5;
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
+}
+
+#indigopay-overlay .igp-currency-label {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 12px;
+  font-weight: 600;
+  color: #888;
+  pointer-events: none;
+}
+
+#indigopay-overlay .igp-memo-input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #1a1a2e;
+  background: #fff;
+  outline: none;
+  transition: border-color 0.15s ease;
+  font-family: inherit;
+  margin-bottom: 14px;
+  box-sizing: border-box;
+}
+
+#indigopay-overlay .igp-memo-input:focus {
+  border-color: #4f46e5;
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
+}
+
+#indigopay-overlay .igp-memo-input::placeholder {
+  color: #bbb;
+}
+
+/* ── submit button ────────────────────────────────────────── */
+#indigopay-overlay .igp-submit-btn {
+  width: 100%;
+  padding: 11px 16px;
+  background: linear-gradient(135deg, #4f46e5, #6366f1);
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: inherit;
+  letter-spacing: 0.01em;
+}
+
+#indigopay-overlay .igp-submit-btn:hover:not(:disabled) {
+  box-shadow: 0 4px 16px rgba(79, 70, 229, 0.4);
+  transform: translateY(-1px);
+}
+
+#indigopay-overlay .igp-submit-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+#indigopay-overlay .igp-submit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+/* ── status messages ──────────────────────────────────────── */
+#indigopay-overlay .igp-donate-status {
+  margin-top: 10px;
+  font-size: 13px;
+  text-align: center;
+  padding: 6px;
+  border-radius: 6px;
+}
+
+#indigopay-overlay .igp-status-success {
+  color: #059669;
+  background: rgba(16, 185, 129, 0.08);
+}
+
+#indigopay-overlay .igp-status-error {
+  color: #dc2626;
+  background: rgba(239, 68, 68, 0.08);
+}
+
+/* ── scrollbar styling ─────────────────────────────────────── */
+#indigopay-overlay .igp-modal::-webkit-scrollbar {
+  width: 6px;
+}
+
+#indigopay-overlay .igp-modal::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#indigopay-overlay .igp-modal::-webkit-scrollbar-thumb {
+  background: #ccc;
+  border-radius: 3px;
+}
+
+#indigopay-overlay .igp-modal::-webkit-scrollbar-thumb:hover {
+  background: #aaa;
+}
+
+/* ── animations ──────────────────────────────────────────── */
+@keyframes igpFadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes igpSlideUp {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes igpSpin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── responsive adjustments ──────────────────────────────── */
+@media (max-width: 480px) {
+  #indigopay-overlay .igp-modal {
+    width: calc(100vw - 16px);
+    max-height: calc(100vh - 32px);
+    border-radius: 12px;
+  }
+
+  #indigopay-overlay .igp-amount-row {
+    flex-direction: column;
+  }
+
+  #indigopay-overlay .igp-presets {
+    justify-content: stretch;
+  }
+
+  #indigopay-overlay .igp-preset-btn {
+    flex: 1;
+  }
+}
+
+/* ── overlay entrance animation (whole overlay) ──────────── */
+#indigopay-overlay {
+  animation: igpFadeIn 0.2s ease-out;
+}

@@ -71,7 +71,8 @@ export default function Navbar({
     { href: "/dashboard", label: t("nav.myImpact") },
     { href: "/apply", label: t("nav.apply") },
     { href: "/bridge", label: t("nav.bridge") },
-    { href: "/governance", label: "Governance" },
+    { href: "/transparency", label: t("nav.transparency") },
+    { href: "/governance", label: t("nav.governance") },
   ];
 
   // Close mobile menu on route change
@@ -108,7 +109,7 @@ export default function Navbar({
                 </span>
               </span>
               <span className="text-[10px] font-medium text-[#94A3B8] dark:text-[#64748B] tracking-wider uppercase">
-                Climate donations
+                {t("nav.tagline")}
               </span>
             </div>
           </Link>
@@ -160,7 +161,7 @@ export default function Navbar({
 
           {unreadCount > 0 && (
             <span
-              aria-label={`${unreadCount} unread notifications`}
+              aria-label={t("nav.unreadNotifications", { count: unreadCount })}
               className="min-w-5 h-5 px-1.5 rounded-full bg-gradient-to-r from-[#F43F5E] to-[#FB7185] text-white text-xs font-bold flex items-center justify-center shadow-sm"
             >
               {unreadCount > 99 ? "99+" : unreadCount}

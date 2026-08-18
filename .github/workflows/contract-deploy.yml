@@ -1,0 +1,162 @@
+name: Contract Deploy (Testnet)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "contracts/indigopay-contract/src/**"
+      - "contracts/indigopay-contract/Cargo.toml"
+      - "contracts/Cargo.toml"
+  workflow_dispatch:
+    inputs:
+      network:
+        description: "Target network (testnet or future)"
+        required: true
+        default: "testnet"
+        type: choice
+        options:
+          - testnet
+
+jobs:
+  deploy:
+    name: Deploy IndigoPay Contract to Testnet
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Only run on push to main OR manual dispatch — never on PRs
+    if: github.event_name != 'pull_request'
+    environment:
+      name: testnet
+      url: https://stellar.expert/explorer/testnet/contract/${{ steps.deploy.outputs.contract_id }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.91.0"
+          targets: wasm32v1-none
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+
+      - name: Build WASM
+        working-directory: contracts
+        run: cargo build --package indigopay-contract --target wasm32v1-none --release --no-default-features
+
+      - name: Optimize WASM with wasm-opt
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq binaryen
+          wasm-opt -Oz contracts/target/wasm32v1-none/release/indigopay_contract.wasm \
+            -o contracts/target/wasm32v1-none/release/indigopay_contract.opt.wasm
+
+      - name: Check WASM size
+        run: |
+          size=$(stat -c%s contracts/target/wasm32v1-none/release/indigopay_contract.opt.wasm)
+          echo "Optimized WASM size: $size bytes"
+          if [ $size -gt 65536 ]; then
+            echo "::error title=WASM size exceeded::Optimized WASM is $size bytes (limit: 65536)"
+            exit 1
+          fi
+          echo "WASM_SIZE=$size" >> $GITHUB_ENV
+
+      - name: Install Stellar CLI (pre-built binary)
+        run: |
+          STELLAR_VERSION="v27.1.0"
+          curl -fsSL "https://github.com/stellar/stellar-cli/releases/download/${STELLAR_VERSION}/stellar-cli-${STELLAR_VERSION#v}-x86_64-unknown-linux-gnu.tar.gz" \
+            -o /tmp/stellar.tar.gz
+          tar xzf /tmp/stellar.tar.gz -C /tmp
+          sudo mv /tmp/stellar /usr/local/bin/stellar
+          chmod +x /usr/local/bin/stellar
+          stellar --version
+
+      - name: Configure Stellar identity
+        env:
+          STELLAR_DEPLOYER_SECRET: ${{ secrets.STELLAR_DEPLOYER_SECRET }}
+        run: |
+          if [ -z "$STELLAR_DEPLOYER_SECRET" ]; then
+            echo "::warning title=Missing secret::STELLAR_DEPLOYER_SECRET is not set. Skipping deployment."
+            echo "SKIP_DEPLOY=true" >> $GITHUB_ENV
+            exit 0
+          fi
+          mkdir -p ~/.stellar
+          stellar keys add deployer --secret-key "$STELLAR_DEPLOYER_SECRET" 2>/dev/null || true
+          echo "DEPLOYER_ADDRESS=$(stellar keys address deployer)" >> $GITHUB_ENV
+
+      - name: Deploy contract to Testnet
+        id: deploy
+        if: env.SKIP_DEPLOY != 'true'
+        run: |
+          echo "Deploying IndigoPay contract to Stellar Testnet..."
+          CONTRACT_ID=$(stellar contract deploy \
+            --wasm contracts/target/wasm32v1-none/release/indigopay_contract.opt.wasm \
+            --source deployer \
+            --network testnet 2>&1)
+          echo "contract_id=$CONTRACT_ID" >> $GITHUB_OUTPUT
+          echo "DEPLOYED_CONTRACT_ID=$CONTRACT_ID" >> $GITHUB_ENV
+          echo "✅ Deployed! Contract ID: $CONTRACT_ID"
+
+      - name: Initialize contract
+        if: env.SKIP_DEPLOY != 'true'
+        run: |
+          echo "Initializing contract with admin: $DEPLOYER_ADDRESS"
+          stellar contract invoke \
+            --id "$DEPLOYED_CONTRACT_ID" \
+            --source deployer \
+            --network testnet \
+            -- initialize \
+            --admin "$DEPLOYER_ADDRESS" 2>&1 || \
+            echo "::warning title=Init skipped::Contract may already be initialized or initialization failed. Check the Stellar Expert link."
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: indigopay-contract-wasm
+          path: contracts/target/wasm32v1-none/release/indigopay_contract.opt.wasm
+          retention-days: 90
+
+      - name: Create deployment summary
+        if: env.SKIP_DEPLOY != 'true'
+        run: |
+          {
+            echo "## 🚀 IndigoPay Contract Deployment"
+            echo ""
+            echo "| Item | Value |"
+            echo "|------|-------|"
+            echo "| **Network** | Stellar Testnet |"
+            echo "| **Contract ID** | \`$DEPLOYED_CONTRACT_ID\` |"
+            echo "| **Admin** | \`$DEPLOYER_ADDRESS\` |"
+            echo "| **WASM Size** | $WASM_SIZE bytes |"
+            echo "| **Explorer** | [View on Stellar Expert](https://stellar.expert/explorer/testnet/contract/$DEPLOYED_CONTRACT_ID) |"
+            echo ""
+            echo "### Environment Variables"
+            echo '```bash'
+            echo "NEXT_PUBLIC_CONTRACT_ID=$DEPLOYED_CONTRACT_ID"
+            echo "CONTRACT_ID=$DEPLOYED_CONTRACT_ID"
+            echo '```'
+            echo ""
+            echo "### Register a project"
+            echo '```bash'
+            echo "stellar contract invoke \\"
+            echo "  --id $DEPLOYED_CONTRACT_ID \\"
+            echo "  --source deployer \\"
+            echo "  --network testnet \\"
+            echo "  -- register_project \\"
+            echo "  --admin $DEPLOYER_ADDRESS \\"
+            echo "  --project_id 'project-001' \\"
+            echo "  --name 'My Climate Project' \\"
+            echo "  --wallet <PROJECT_WALLET> \\"
+            echo "  --co2_per_xlm 8500"
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify deployment skipped
+        if: env.SKIP_DEPLOY == 'true'
+        run: |
+          echo "## ⏭️ Contract Deployment Skipped" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Set the \`STELLAR_DEPLOYER_SECRET\` repository secret to enable automated contract deployment." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**WASM build:** ✅ $WASM_SIZE bytes (within 64KB limit)" >> $GITHUB_STEP_SUMMARY

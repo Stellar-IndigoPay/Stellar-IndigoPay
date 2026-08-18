@@ -26,8 +26,23 @@ export interface ErrorBoundaryProps {
   fallback?: (error: Error, reset: () => void) => ReactNode;
   /** Optional listener for tests / side-effects; fires before capture. */
   onError?: (error: Error, info: ErrorInfo) => void;
-  /** Optional heading label for the built-in fallback. */
+  /**
+   * Optional callback invoked when the boundary is reset (e.g. after the
+   * user clicks "Try Again"). Use this to clear external state, refetch
+   * data, or otherwise recover from the failure that triggered the error.
+   */
+  onReset?: () => void;
+  /**
+   * Optional heading label for the built-in fallback.
+   */
   label?: string;
+  /**
+   * When any value in this array changes, the boundary automatically clears
+   * its captured error and remounts its children. Useful for route changes
+   * (`router.asPath`) so a transient error on one page doesn't persist after
+   * navigation. Pass the same key you use to key the page content.
+   */
+  resetKeys?: ReadonlyArray<unknown>;
 }
 
 interface ErrorBoundaryState {
@@ -54,8 +69,17 @@ export class ErrorBoundary extends Component<
     captureError(error, info);
   }
 
+  componentDidUpdate(prevProps: ErrorBoundaryProps) {
+    if (this.state.error && this.props.resetKeys !== prevProps.resetKeys) {
+      if (hasResetKeyChanged(prevProps.resetKeys, this.props.resetKeys)) {
+        this.reset();
+      }
+    }
+  }
+
   reset = () => {
     this.setState({ error: null });
+    this.props.onReset?.();
   };
 
   render() {
@@ -92,8 +116,13 @@ export class ErrorBoundary extends Component<
             {error.stack}
           </pre>
         )}
-        <button type="button" onClick={this.reset} className="btn-primary">
-          Reload this section
+        <button
+          type="button"
+          onClick={this.reset}
+          className="btn-primary"
+          data-testid="error-boundary-retry"
+        >
+          Try Again
         </button>
       </div>
     );
@@ -134,4 +163,20 @@ function captureError(error: Error, info: ErrorInfo): void {
  */
 function isProduction(): boolean {
   return process?.env?.NODE_ENV === "production";
+}
+
+/**
+ * Returns true when any value in `next` differs from the corresponding value
+ * in `prev`. Used to decide whether a change in `resetKeys` should clear the
+ * boundary's captured error. Shallow equality is sufficient because callers
+ * supply stable primitives (route strings, ids, etc.).
+ */
+function hasResetKeyChanged(
+  prev: ReadonlyArray<unknown> | undefined,
+  next: ReadonlyArray<unknown> | undefined,
+): boolean {
+  if (prev === next) return false;
+  if (!prev || !next) return true;
+  if (prev.length !== next.length) return true;
+  return prev.some((value, i) => !Object.is(value, next[i]));
 }

@@ -2,6 +2,7 @@
 
 const PgBoss = require("pg-boss");
 const pool = require("../db/pool");
+const logger = require("../logger");
 const { computeBadges } = require("./store");
 
 const QUEUE = "profile-update";
@@ -14,12 +15,16 @@ async function start(io) {
 
   boss = new PgBoss(connectionString);
   boss.on("error", (err) =>
-    console.error("[profileQueue] pg-boss error:", err.message),
+    logger.error(
+      { event: "profile_queue_error", err: err.message },
+      "Profile queue pg-boss error",
+    ),
   );
 
   await boss.start();
+  await boss.createQueue(QUEUE);
 
-  await boss.work(QUEUE, { teamSize: 2, teamConcurrency: 1 }, async (job) => {
+  await boss.work(QUEUE, { teamSize: 2, teamConcurrency: 1 }, async ([job]) => {
     const { donorAddress } = job.data;
 
     const totalResult = await pool.query(
@@ -88,11 +93,12 @@ async function start(io) {
       });
     }
   });
+}
 
-  console.log(
-    "[profileQueue] pg-boss started, worker registered on queue:",
-    QUEUE,
-  );
+async function stop() {
+  if (!boss) return;
+  await boss.stop({ graceful: true, timeout: 15_000 });
+  boss = null;
 }
 
 async function enqueueProfileUpdate(donorAddress) {
@@ -102,4 +108,4 @@ async function enqueueProfileUpdate(donorAddress) {
   return boss.send(QUEUE, { donorAddress }, { retryLimit: 3, retryDelay: 10 });
 }
 
-module.exports = { start, enqueueProfileUpdate };
+module.exports = { start, stop, enqueueProfileUpdate };

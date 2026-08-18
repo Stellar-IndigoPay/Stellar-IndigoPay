@@ -100,9 +100,9 @@ export default function LeaderboardScreen() {
               key={entry.publicKey}
               activeOpacity={0.7}
               onPress={() =>
-                router.push(`/profile/${entry.publicKey}` as `${string}`)
+                router.push(`/profile/${entry.publicKey}` as any)
               }
-              style={[styles.row, isCurrentUser && styles.rowHighlighted]}
+              style={[styles.row as any, isCurrentUser && (styles.rowHighlighted as any)]}
               accessibilityLabel={`View profile of ${entry.displayName ?? entry.publicKey.slice(0, 6)}, donated ${parseFloat(entry.totalDonatedXLM).toFixed(2)} XLM`}
               accessibilityRole="button"
             >
@@ -113,8 +113,8 @@ export default function LeaderboardScreen() {
               <View style={styles.rowInfo}>
                 <Text
                   style={[
-                    styles.donorName,
-                    isCurrentUser && styles.donorNameHighlighted,
+                    styles.donorName as any,
+                    isCurrentUser && (styles.donorNameHighlighted as any),
                   ]}
                   numberOfLines={1}
                 >
@@ -135,8 +135,8 @@ export default function LeaderboardScreen() {
                 )}
                 <Text
                   style={[
-                    styles.xlmAmount,
-                    isCurrentUser && styles.xlmAmountHighlighted,
+                    styles.xlmAmount as any,
+                    isCurrentUser && (styles.xlmAmountHighlighted as any),
                   ]}
                 >
                   {parseFloat(entry.totalDonatedXLM).toFixed(2)} XLM

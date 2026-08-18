@@ -11,6 +11,7 @@ jest.mock("../logger", () => ({
 
 const mockOn = jest.fn();
 const mockStart = jest.fn().mockResolvedValue(undefined);
+const mockCreateQueue = jest.fn().mockResolvedValue(undefined);
 const mockSchedule = jest.fn().mockResolvedValue(undefined);
 const mockWork = jest.fn().mockResolvedValue(undefined);
 const mockStop = jest.fn().mockResolvedValue(undefined);
@@ -19,6 +20,7 @@ jest.mock("pg-boss", () =>
   jest.fn().mockImplementation(() => ({
     on: mockOn,
     start: mockStart,
+    createQueue: mockCreateQueue,
     schedule: mockSchedule,
     work: mockWork,
     stop: mockStop,
@@ -53,6 +55,7 @@ describe("idempotencyCleanup", () => {
       await idempotencyCleanup.start();
 
       expect(mockStart).toHaveBeenCalledTimes(1);
+      expect(mockCreateQueue).toHaveBeenCalledWith("idempotency-cleanup");
       expect(mockSchedule).toHaveBeenCalledWith(
         "idempotency-cleanup",
         "5 * * * *",
@@ -131,7 +134,7 @@ describe("idempotencyCleanup", () => {
       expect(pool.query).toHaveBeenCalledTimes(1);
       const [sql] = pool.query.mock.calls[0];
       expect(sql).toContain("DELETE FROM idempotency_keys");
-      expect(sql).toContain("created_at < NOW() - INTERVAL '24 hours'");
+      expect(sql).toContain("expires_at < NOW()");
     });
 
     test("logs when expired rows are purged", async () => {

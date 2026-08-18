@@ -22,3 +22,6 @@ resources:
   - networkpolicy-allow-backend-egress-external.yaml
   - networkpolicy-allow-postgres-replication.yaml
   - networkpolicy-allow-exporter-postgres.yaml
+  - postgres-failover-script.yaml
+  - postgres-failover-job.yaml
+  - postgres-failover-rbac.yaml

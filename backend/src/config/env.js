@@ -27,12 +27,14 @@ const envSchema = z.object({
   CONTRACT_ID: z.string().optional().default(""),
   ORACLE_CONTRACT_ID: z.string().optional().default(""),
   ORACLE_ADMIN_SECRET: z.string().optional().default(""),
+  KEEPER_SECRET: z.string().optional().default(""),
   RESEND_API_KEY: z.string().optional().default(""),
   EMAIL_FROM: z
     .string()
     .optional()
     .default("Stellar-IndigoPay <updates@stellarindigopay.app>"),
   APP_URL: z.string().optional().default("http://localhost:3000"),
+  UNSUBSCRIBE_SECRET: z.string().optional().default(""),
   JWT_SECRET: z.string().optional().default(""),
   ADMIN_USERNAME: z.string().optional().default("admin"),
   ADMIN_PASSWORD: z.string().optional().default(""),
@@ -40,6 +42,13 @@ const envSchema = z.object({
   ADMIN_API_KEYS: z.string().optional().default(""),
   ANTHROPIC_API_KEY: z.string().optional().default(""),
   REDIS_URL: z.string().optional().default("redis://localhost:6379"),
+
+  // ── Distributed rate limiting (multi-Redis sharding) ─────────────────────
+  // Comma-separated Redis URLs for consistent-hashing-based sharding.
+  // When set, rate-limit keys are distributed across the listed instances.
+  // When absent, falls back to REDIS_URL (single-instance mode).
+  // Example: REDIS_URLS=redis://redis-0:6379,redis://redis-1:6379,redis://redis-2:6379
+  REDIS_URLS: z.string().optional().default(""),
   ENABLE_TURRETS: z.enum(["true", "false"]).optional().default("false"),
   TURRETS_PORT: z.string().optional().default("3001"),
   // Verification request admin notification target (defaults to EMAIL_FROM).
@@ -90,6 +99,10 @@ const envSchema = z.object({
 
   // ── Rate limiter ──────────────────────────────────────────────────────────
   RATE_LIMIT_MAX: z.string().optional().default("150"),
+  // Virtual nodes per Redis shard in the consistent hash ring.
+  // Higher values improve key distribution uniformity at the cost of
+  // slightly more memory in the ring map (150 × N entries).
+  RATE_LIMIT_CONSISTENT_HASH_VNODES: z.string().optional().default("150"),
 
   // ── Graceful shutdown ─────────────────────────────────────────────────────
   // Hard deadline for the drain. After this we exit(1) regardless of state.

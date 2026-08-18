@@ -1,18 +1,37 @@
 # k8s/networkpolicy-allow-backend-egress-external.yaml
 #
-# Open the backend's egress to external networks it needs to reach:
-#   - Stellar Horizon (GET /api/*) and Soroban RPC (POST /)
-#   - Anthropic API (POST /v1/messages) for AI summary generation
-#   - Sentry ingestion (optional)
-#   - Webhook receivers (the URL is project-configured, so we can't
-#     narrow to specific destinations; we cap egress to 443 with a
-#     high-level shape and rely on application-level allow-lists
-#     upstream)
+# Open the backend's egress to the *specific* external networks it needs to
+# reach. This policy is layered on top of `networkpolicy-default-deny.yaml`,
+# which blocks everything by default — every rule below is an explicit
+# allow-list entry for one dependency, scoped to that dependency's IP/CIDR
+# and port 443. Nothing outbound is allowed by default, and there is no
+# `0.0.0.0/0` (or un-scoped `to:`) rule here.
 #
-# Everything else outbound is blocked. This rule intentionally does
-# NOT use `to: ipBlock: 0.0.0.0/0` for arbitrary destinations — instead
-# we explicitly enumerate the IPs/CIDRs in use. Update this file when
-# the dependency set changes.
+# Enumerated endpoints (keep in sync with the backend's outbound calls):
+#   - Stellar Horizon          (HORIZON_URL)            — GET /api/*
+#   - Soroban RPC              (SOROBAN_RPC_URL)        — POST /
+#   - Anthropic API            (ANTHROPIC_API_KEY)      — AI summary generation
+#   - CoinGecko                (oracleService fallback) — XLM→USD price
+#   - Resend                   (RESEND_API_KEY)         — transactional email
+#   - Sentry                   (SENTRY_DSN, optional)   — error ingestion
+#   - FCM / Expo / APNs        (push providers)         — mobile notifications
+#   - Nominatim (OSM)          (geocoder)               — location geocoding
+#   - web3.storage / w3s.link  (IPFS storage backend)   — document pinning
+#
+# ⚠️  CDN-backed hosts (Cloudflare/Fastly) rotate edge IPs. The `/32` pins
+#    below were resolved at audit time and may need refreshing if a host
+#    changes its edge. For long-lived clusters prefer DNS-based egress
+#    (Cilium `FQDN` policy / Calico `DNSPolicy`), which the standard
+#    `networking.k8s.io/v1` NetworkPolicy cannot express.
+#
+# Webhook delivery to *project-configured* URLs is intentionally NOT here:
+# it requires arbitrary HTTPS egress and must be enabled explicitly via
+# `k8s/opt-in/networkpolicy-allow-backend-egress-webhooks.yaml` (see that
+# file for the SSRF trade-off). The application-level URL allow-list in
+# backend/src/services/webhookQueue.js remains the primary defense there.
+#
+# `scripts/validate-networkpolicies.js` (run in CI) fails if any applied
+# policy regresses to an un-scoped egress rule or a `0.0.0.0/0` CIDR.
 
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -26,37 +45,116 @@ spec:
   policyTypes:
     - Egress
   egress:
-    # Stellar Horizon testnet
+    # Stellar Horizon (testnet) — resolves to an AWS ELB in us-east-1.
     - to:
         - ipBlock:
-            cidr: 34.82.117.0/24 # SDF testnet approx; pin exactly when stable
+            cidr: 100.24.205.52/32
+        - ipBlock:
+            cidr: 54.157.199.98/32
       ports:
         - protocol: TCP
           port: 443
-    # Soroban RPC testnet
+
+    # Soroban RPC (testnet) — behind Cloudflare.
     - to:
         - ipBlock:
-            cidr: 34.83.112.0/24
+            cidr: 104.18.6.25/32
+        - ipBlock:
+            cidr: 104.18.7.25/32
       ports:
         - protocol: TCP
           port: 443
-    # Anthropic API
+
+    # Anthropic API (api.anthropic.com) — AI summary generation.
     - to:
         - ipBlock:
-            cidr: 160.79.104.0/24
+            cidr: 160.79.104.10/32
       ports:
         - protocol: TCP
           port: 443
-    # Sentry ingestion (sentry.io) — optional, only used when SENTRY_DSN is set
+
+    # CoinGecko (api.coingecko.com) — oracle price fallback, behind Cloudflare.
     - to:
         - ipBlock:
-            cidr: 35.186.247.0/24
+            cidr: 104.20.41.132/32
+        - ipBlock:
+            cidr: 172.66.172.219/32
       ports:
         - protocol: TCP
           port: 443
-    # Generic HTTPS egress for webhook delivery to project-configured URLs.
-    # Application-level URL allow-list in backend/src/services/webhookQueue.js
-    # is the primary defense; this network-level rule is the safety net.
-    - ports:
+
+    # Resend (api.resend.com) — transactional email, behind Cloudflare.
+    - to:
+        - ipBlock:
+            cidr: 104.20.29.242/32
+        - ipBlock:
+            cidr: 172.66.165.132/32
+      ports:
+        - protocol: TCP
+          port: 443
+
+    # Sentry ingestion (o<orgid>.ingest.sentry.io) — only used when
+    # SENTRY_DSN is set. The ingest host is org-specific; pin the CIDR of
+    # YOUR DSN host here (the value below is one resolved ingest endpoint).
+    - to:
+        - ipBlock:
+            cidr: 34.160.81.0/32
+      ports:
+        - protocol: TCP
+          port: 443
+
+    # FCM push notifications (fcm.googleapis.com) — Google-owned ranges.
+    - to:
+        - ipBlock:
+            cidr: 216.239.36.0/24
+        - ipBlock:
+            cidr: 216.239.38.0/24
+      ports:
+        - protocol: TCP
+          port: 443
+
+    # Expo push API (exp.host).
+    - to:
+        - ipBlock:
+            cidr: 34.110.201.56/32
+      ports:
+        - protocol: TCP
+          port: 443
+
+    # Apple Push Notification service (api.push.apple.com).
+    - to:
+        - ipBlock:
+            cidr: 17.188.180.0/24
+        - ipBlock:
+            cidr: 17.188.181.0/24
+      ports:
+        - protocol: TCP
+          port: 443
+
+    # Nominatim (nominatim.openstreetmap.org) — geocoding, behind Fastly.
+    - to:
+        - ipBlock:
+            cidr: 146.75.73.91/32
+      ports:
+        - protocol: TCP
+          port: 443
+
+    # web3.storage upload API (api.web3.storage) — behind Cloudflare.
+    - to:
+        - ipBlock:
+            cidr: 104.21.69.207/32
+        - ipBlock:
+            cidr: 172.67.213.24/32
+      ports:
+        - protocol: TCP
+          port: 443
+
+    # IPFS gateway (w3s.link) — behind Cloudflare.
+    - to:
+        - ipBlock:
+            cidr: 104.21.30.39/32
+        - ipBlock:
+            cidr: 172.67.150.134/32
+      ports:
         - protocol: TCP
           port: 443

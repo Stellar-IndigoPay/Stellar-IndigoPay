@@ -1,3 +1,29 @@
+# docker-compose.test.yml
+#
+# CI test topology. `ci.yml` runs:
+#
+#     docker compose -f docker-compose.test.yml up \
+#       --abort-on-container-exit --exit-code-from backend
+#
+# The backend container runs `npm test` (Jest) against the same backing
+# services production uses — Postgres (pg-boss job queues, data) and Redis
+# (caching, rate limiting) — so the queue/worker code paths (webhooks,
+# summaries, matches, retention, idempotency cleanup, etc.) are actually
+# exercised in CI rather than only unit-tested in isolation.
+#
+# Integration coverage splits two ways:
+#   - `queueWorkers.integration.test.js` connects DIRECTLY to the `postgres`
+#     service via DATABASE_URL and boots the real pg-boss workers
+#     (`profileQueue`, `matchQueue`) to enqueue and consume jobs end-to-end.
+#     It needs no Docker socket, so it runs inside this compose network.
+#   - The testcontainers-based `*.integration.test.js` suites spin up their
+#     own Postgres/Redis containers and therefore need a Docker socket; they
+#     self-skip gracefully when it is unavailable (as inside this container).
+#
+# Keep the `postgres`/`redis` service definitions aligned with the production
+# `docker-compose.yml` so a test can never pass against a service topology the
+# real app does not have.
+
 version: "3.9"
 
 services:
@@ -22,6 +48,7 @@ services:
       retries: 10
 
   backend:
+    image: indigopay-backend-test:ci
     build:
       context: ./backend
       dockerfile: Dockerfile

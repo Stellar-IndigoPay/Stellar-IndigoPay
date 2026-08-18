@@ -9,6 +9,8 @@
  *   4. onError listener fires with `(error, info)` for listener-side effects
  *      (e.g. integration tests asserting on the captured tuple).
  *   5. Stack trace is hidden in production NODE_ENV.
+ *   6. The reset button invokes the optional onReset callback.
+ *   7. Changing resetKeys clears the error automatically (remounts children).
  */
 import React, { type ReactNode } from "react";
 import { render, screen, fireEvent } from "@testing-library/react";
@@ -26,13 +28,15 @@ function Harness({
   shouldThrow,
   fallback,
   onError,
+  onReset,
 }: {
   shouldThrow: boolean;
   fallback?: (error: Error, reset: () => void) => ReactNode;
   onError?: (error: Error, info: React.ErrorInfo) => void;
+  onReset?: () => void;
 }) {
   return (
-    <ErrorBoundary fallback={fallback} onError={onError}>
+    <ErrorBoundary fallback={fallback} onError={onError} onReset={onReset}>
       <Bomb shouldThrow={shouldThrow} />
     </ErrorBoundary>
   );
@@ -61,7 +65,7 @@ describe("ErrorBoundary", () => {
     expect(region).toBeInTheDocument();
     expect(region.textContent).toMatch(/intentional render error/i);
     expect(
-      screen.getByRole("button", { name: /reload this section/i }),
+      screen.getByRole("button", { name: /try again/i }),
     ).toBeInTheDocument();
     consoleErrorSpy.mockRestore();
   });
@@ -105,9 +109,7 @@ describe("ErrorBoundary", () => {
     render(<ToggleHarness />);
     expect(screen.queryByTestId("ok")).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId("stop-booming"));
-    fireEvent.click(
-      screen.getByRole("button", { name: /reload this section/i }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
     expect(screen.getByTestId("ok")).toBeInTheDocument();
     consoleErrorSpy.mockRestore();
   });
@@ -147,5 +149,113 @@ describe("ErrorBoundary", () => {
       screen.queryByTestId("error-boundary-stack"),
     ).not.toBeInTheDocument();
     consoleErrorSpy.mockRestore();
+  });
+
+  it("invokes the onReset callback when the retry button is clicked", () => {
+    const consoleErrorSpy = jest
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const onReset = jest.fn();
+    render(<Harness shouldThrow={true} onReset={onReset} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+    expect(onReset).toHaveBeenCalledTimes(1);
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("clears the error automatically when resetKeys change", () => {
+    const consoleErrorSpy = jest
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    function KeyedHarness() {
+      const [route, setRoute] = React.useState("/a");
+      return (
+        <>
+          <button data-testid="go-b" onClick={() => setRoute("/b")}>
+            navigate
+          </button>
+          <ErrorBoundary resetKeys={[route]}>
+            <Bomb shouldThrow={route === "/a"} />
+          </ErrorBoundary>
+        </>
+      );
+    }
+    render(<KeyedHarness />);
+    // On "/a" the child throws and the fallback shows.
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    // Navigating changes resetKeys, which should clear the error and
+    // remount children (no longer throwing).
+    fireEvent.click(screen.getByTestId("go-b"));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByTestId("ok")).toBeInTheDocument();
+    consoleErrorSpy.mockRestore();
+  });
+
+  describe("error reporting via captureError", () => {
+    /**
+     * The boundary requires "@sentry/nextjs" lazily at capture time, so to
+     * swap in a mock we must (a) reset the module registry, (b) register the
+     * mock with doMock, and (c) re-require ErrorBoundary so its lazy require
+     * resolves against the new registry. The top-of-file import is bound to
+     * the original registry and would keep seeing the real module.
+     */
+    function loadBoundaryWithSentryMock(
+      factory: () => unknown,
+    ): typeof ErrorBoundary {
+      jest.resetModules();
+      jest.doMock("@sentry/nextjs", factory);
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+      return require("@/lib/ErrorBoundary").ErrorBoundary;
+    }
+
+    afterEach(() => {
+      jest.resetModules();
+      jest.dontMock("@sentry/nextjs");
+    });
+
+    it("reports the error to Sentry when @sentry/nextjs is available", () => {
+      const captureException = jest.fn();
+      const FreshBoundary = loadBoundaryWithSentryMock(() => ({
+        captureException,
+      }));
+      const consoleErrorSpy = jest
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
+
+      render(
+        <FreshBoundary>
+          <Bomb shouldThrow={true} />
+        </FreshBoundary>,
+      );
+
+      expect(captureException).toHaveBeenCalledTimes(1);
+      const [reportedError, context] = captureException.mock.calls[0];
+      expect(reportedError).toBeInstanceOf(Error);
+      expect(reportedError.message).toBe("intentional render error");
+      expect(typeof context.extra.componentStack).toBe("string");
+      consoleErrorSpy.mockRestore();
+    });
+
+    it("falls back to console.error when @sentry/nextjs is not available", () => {
+      const FreshBoundary = loadBoundaryWithSentryMock(() => {
+        throw new Error("module not found");
+      });
+      const consoleErrorSpy = jest
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
+
+      render(
+        <FreshBoundary>
+          <Bomb shouldThrow={true} />
+        </FreshBoundary>,
+      );
+
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        "[ErrorBoundary]",
+        expect.any(Error),
+        expect.any(String),
+      );
+      consoleErrorSpy.mockRestore();
+    });
   });
 });

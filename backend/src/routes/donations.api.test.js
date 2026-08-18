@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 
 jest.mock("../db/pool", () => ({
   query: jest.fn(),
@@ -6,8 +6,9 @@ jest.mock("../db/pool", () => ({
 }));
 
 jest.mock("../services/redis", () => ({
-  get: jest.fn(),
-  set: jest.fn(),
+  get: jest.fn().mockResolvedValue(null),
+  set: jest.fn().mockResolvedValue(undefined),
+  deletePattern: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock("../services/stellar", () => ({
@@ -16,6 +17,10 @@ jest.mock("../services/stellar", () => ({
   CONTRACT_ID: "test-contract",
   server: { getTransaction: jest.fn().mockResolvedValue({ successful: true }) },
   NETWORK_PASSPHRASE: "Test SDF Network ; September 2015",
+}));
+
+jest.mock("../services/oracleService", () => ({
+  getCurrentPrice: jest.fn(() => null),
 }));
 
 const pool = require("../db/pool");
@@ -35,8 +40,8 @@ function makeTxHash(char = "a") {
 }
 
 const MOCK_DONATION_ROW = {
-  id: "donation-1",
-  project_id: "proj-1",
+  id: "8d9ac19b-52eb-42f7-80d9-19a88ba59e43",
+  project_id: "11111111-2222-3333-8888-555555555555",
   donor_address: makePublicKey(),
   amount_xlm: "100",
   amount: "100",
@@ -69,7 +74,7 @@ function buildApp() {
 }
 
 const MOCK_PROJECT_ROW = {
-  id: "proj-1",
+  id: "11111111-2222-3333-8888-555555555555",
   name: "Test Project",
   description: "A test climate project",
   category: "Reforestation",
@@ -91,9 +96,10 @@ describe("GET /api/projects", () => {
   let app;
 
   beforeEach(() => {
-    app = buildApp();
-    redis.get.mockResolvedValue(null);
     jest.clearAllMocks();
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue(undefined);
+    app = buildApp();
   });
 
   test("filters by category", async () => {
@@ -159,9 +165,10 @@ describe("GET /api/projects/:id", () => {
   let app;
 
   beforeEach(() => {
-    app = buildApp();
-    redis.get.mockResolvedValue(null);
     jest.clearAllMocks();
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue(undefined);
+    app = buildApp();
   });
 
   test("returns a single project", async () => {
@@ -173,7 +180,7 @@ describe("GET /api/projects/:id", () => {
     pool.query.mockResolvedValueOnce({ rows: [] }); // milestones
     pool.query.mockResolvedValueOnce({ rows: [{ count: "0" }] }); // follow count
 
-    const res = await request(app).get("/api/projects/proj-1").expect(200);
+    const res = await request(app).get("/api/projects/11111111-2222-3333-8888-555555555555").expect(200);
 
     expect(res.body.success).toBe(true);
     expect(res.body.data.name).toBe("Test Project");
@@ -182,7 +189,7 @@ describe("GET /api/projects/:id", () => {
   test("returns 404 for non-existent project", async () => {
     pool.query.mockResolvedValue({ rows: [] });
 
-    await request(app).get("/api/projects/nonexistent").expect(404);
+    await request(app).get("/api/projects/44444444-4444-4444-8444-444444444444").expect(404);
   });
 });
 
@@ -196,7 +203,7 @@ describe("GET /api/projects/:id/on-chain-donations", () => {
   });
 
   test("returns decoded on-chain donation events", async () => {
-    pool.query.mockResolvedValueOnce({ rows: [{ id: "proj-1" }] });
+    pool.query.mockResolvedValueOnce({ rows: [{ id: "11111111-2222-3333-8888-555555555555" }] });
     stellarService.getProjectDonationEvents.mockResolvedValueOnce([
       {
         donor: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
@@ -209,7 +216,7 @@ describe("GET /api/projects/:id/on-chain-donations", () => {
     ]);
 
     const res = await request(app)
-      .get("/api/projects/proj-1/on-chain-donations?limit=10")
+      .get("/api/projects/11111111-2222-3333-8888-555555555555/on-chain-donations?limit=10")
       .expect(200);
 
     expect(res.body.success).toBe(true);
@@ -229,7 +236,7 @@ describe("GET /api/projects/:id/on-chain-donations", () => {
     pool.query.mockResolvedValueOnce({ rows: [] });
 
     await request(app)
-      .get("/api/projects/unknown/on-chain-donations")
+      .get("/api/projects/44444444-4444-4444-8444-444444444444/on-chain-donations")
       .expect(404);
   });
 });
@@ -292,6 +299,63 @@ describe("GET /api/donations/:id", () => {
   test("returns 400 for invalid UUID", async () => {
     const res = await request(app).get("/api/donations/invalid-id").expect(400);
 
-    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(res.body.error).toBe("Validation failed");
+    expect(res.body.details).toContainEqual({
+      path: "id",
+      message: "Invalid UUID",
+    });
+    expect(pool.query).not.toHaveBeenCalled();
   });
 });
+
+describe("GET /api/donations/recurring/:donorAddress", () => {
+  let app;
+
+  beforeEach(() => {
+    app = buildApp();
+    jest.clearAllMocks();
+  });
+
+  test("returns recurring donations list for a valid donor address", async () => {
+    const donor = makePublicKey("B");
+    pool.query.mockResolvedValue({
+      rows: [
+        {
+          id: "rec-uuid-1",
+          donor_address: donor,
+          recurring_id: 0,
+          project_id: "11111111-2222-3333-8888-555555555555",
+          project_name: "Amazon Reforestation",
+          project_wallet: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+          amount: "10.0000000",
+          currency: "XLM",
+          interval_seconds: 500,
+          next_execution_at: new Date("2026-07-19T18:00:00.000Z"),
+          keeper_incentive: "0.5000000",
+          active: true,
+          created_at: new Date("2026-07-19T17:00:00.000Z"),
+          updated_at: new Date("2026-07-19T17:00:00.000Z"),
+        },
+      ],
+    });
+
+    const res = await request(app)
+      .get(`/api/donations/recurring/${donor}`)
+      .expect(200);
+
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.length).toBe(1);
+    expect(res.body.data[0].amount).toBe(10);
+    expect(res.body.data[0].projectName).toBe("Amazon Reforestation");
+    expect(res.body.data[0].active).toBe(true);
+  });
+
+  test("returns 400 for invalid donor address", async () => {
+    const res = await request(app)
+      .get("/api/donations/recurring/invalid-address")
+      .expect(400);
+
+    expect(res.body.error).toBe("Validation failed");
+  });
+});
+

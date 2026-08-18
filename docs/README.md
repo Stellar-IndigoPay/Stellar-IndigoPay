@@ -48,7 +48,7 @@ for everything in this directory. Pick the section that matches what you need.
 | **[Database Schema](database.md)**               | Postgres tables, indexes, FK relationships, and the migration workflow.                                                                                |
 | **[Indexer](indexer.md)**                        | The Stellar Horizon stream → Postgres indexer, including shutdown wiring.                                                                              |
 | **[Performance & Load Testing](performance.md)** | p50 / p95 / p99 targets, k6 invocation, threshold semantics, and the baseline table.                                                                   |
-| **[CI / CD pipeline](../.github/workflows/)**    | Per-app workflows (`backend.yml`, `frontend.yml`, `extension.yml`, `mobile.yml`, `contracts.yml`), release, SBOM, image scanning, and secret-scanning. |
+| **[CI / CD pipeline](../.github/workflows/)**    | Per-app workflows (`frontend.yml`, `extension.yml`, `mobile.yml`, `contracts.yml`), main CI (backend, helm, gitleaks, OpenAPI lint, ZAP), release, SBOM, and image scanning. |
 
 ### Smart contracts
 
@@ -89,7 +89,8 @@ for everything in this directory. Pick the section that matches what you need.
 | Document                                        | What's in it                                                                                                   |
 | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | **[Deployment Guide](DEPLOYMENT.md)**           | Helm + raw k8s, ingress / TLS, post-deploy migrations, Soroban mainnet registration.                           |
-| **[Mainnet Deployment](deployment-mainnet.md)** | Step-by-step Stellar Mainnet launch checklist, env files, admin identity, network passphrase, troubleshooting. |
+| **[Mainnet Deployment Checklist](mainnet-deployment-checklist.md)** | Exhaustive 9-phase checklist covering contract deployment, project registration, backend/frontend config, k8s, monitoring, and security hardening. |
+| **[Mainnet Deployment (original)](deployment-mainnet.md)** | Original condensed runbook — kept for reference. |
 | **[External Secrets](external-secrets.md)**     | external-secrets-operator install, IAM / IRSA / Workload Identity, switching providers (AWS / GCP / Vault).    |
 | **[Helm Chart](../helm/indigopay/)**            | The chart, with `values.yaml` knobs for autoscaling, PDB, ingress, image, and resources.                       |
 | **[Raw Kubernetes Manifests](../k8s/)**         | The unrendered YAML for clusters that don't use Helm.                                                          |

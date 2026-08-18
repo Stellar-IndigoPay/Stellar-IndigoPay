@@ -3,10 +3,13 @@
     "target": "ES2022",
     "module": "ES2022",
     "moduleResolution": "node",
+    "types": ["chrome"],
+    "ignoreDeprecations": "6.0",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*"],
+  "exclude": ["src/__tests__", "dist", "node_modules"]
 }

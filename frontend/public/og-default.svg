@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Stellar IndigoPay social preview</title>
+  <desc id="desc">A vibrant abstract landscape with the Stellar IndigoPay branding.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="50%" stop-color="#312e81" />
+      <stop offset="100%" stop-color="#0f766e" />
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)" rx="36" />
+  <circle cx="940" cy="180" r="170" fill="#34d399" opacity="0.22" />
+  <circle cx="270" cy="470" r="220" fill="#f59e0b" opacity="0.16" />
+  <rect x="120" y="140" width="960" height="350" rx="28" fill="rgba(255,255,255,0.10)" stroke="rgba(255,255,255,0.24)" />
+  <path d="M220 395c74-126 118-165 179-165 57 0 95 43 144 43s95-43 161-43c42 0 82 15 126 47" fill="none" stroke="#ecfeff" stroke-width="16" stroke-linecap="round" />
+  <path d="M240 390l80-110 76 84 123-160 106 134 84-72" fill="none" stroke="#86efac" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" />
+  <text x="140" y="260" fill="#f8fafc" font-family="Arial, Helvetica, sans-serif" font-size="34" font-weight="600">Stellar IndigoPay</text>
+  <text x="140" y="330" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="74" font-weight="700">Fund the planet.</text>
+  <text x="140" y="392" fill="#d1fae5" font-family="Arial, Helvetica, sans-serif" font-size="38">One XLM at a time.</text>
+</svg>

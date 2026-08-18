@@ -4,6 +4,16 @@
  */
 import { renderHook, act, waitFor } from "@testing-library/react-native";
 import * as SecureStore from "expo-secure-store";
+
+jest.mock("@stellar/stellar-sdk", () => ({
+  StrKey: {
+    isValidEd25519PublicKey: jest.fn((key) => {
+      const cleaned = key ? key.trim() : "";
+      return cleaned === "GABCXYZ1234567890123456789012345678901234567890123456789012345";
+    }),
+  },
+}));
+
 import { useWallet } from "../src/hooks/useWallet";
 
 const VALID_PUBLIC_KEY =

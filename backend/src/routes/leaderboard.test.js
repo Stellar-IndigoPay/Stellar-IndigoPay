@@ -1,6 +1,15 @@
 "use strict";
 
 jest.mock("../db/pool", () => ({ query: jest.fn() }));
+jest.mock("../services/redis", () => ({
+  get: jest.fn().mockResolvedValue(null),
+  set: jest.fn().mockResolvedValue(undefined),
+  getClient: jest.fn(),
+  initRedis: jest.fn(),
+  deletePattern: jest.fn(),
+  shardCount: jest.fn().mockReturnValue(0),
+  _reset: jest.fn(),
+}));
 
 const pool = require("../db/pool");
 const request = require("supertest");
@@ -165,9 +174,13 @@ describe("GET /api/leaderboard — limit handling", () => {
     expect(pool.query).toHaveBeenCalledWith(expect.any(String), [100]);
   });
 
-  test("falls back to default limit of 20 when limit is non-numeric", async () => {
-    await request(app).get("/api/leaderboard?limit=abc").expect(200);
+  test("rejects non-numeric limit with 400", async () => {
+    const res = await request(app)
+      .get("/api/leaderboard?limit=abc")
+      .expect(400);
 
-    expect(pool.query).toHaveBeenCalledWith(expect.any(String), [20]);
+    expect(res.body.error).toBe("Validation failed");
+    expect(res.body.details[0].path).toBe("limit");
+    expect(pool.query).not.toHaveBeenCalled();
   });
 });

@@ -1,18 +1,14 @@
 /**
  * components/LeaderboardTable.tsx
  */
-import { useState, useEffect } from "react";
-import { fetchLeaderboard } from "@/lib/api";
-import {
-  formatXLM,
-  formatUSDEquivalent,
-  shortenAddress,
-  badgeEmoji,
-} from "@/utils/format";
+import { formatXLM, formatUSDEquivalent, shortenAddress, badgeEmoji } from "@/utils/format";
 import { accountUrl } from "@/lib/stellar";
 import { useXlmPrice } from "@/lib/priceContext";
 import type { LeaderboardEntry } from "@/utils/types";
 import { SkeletonList } from "./Skeleton";
+import { useLeaderboard } from "@/hooks/queries";
+import { QueryErrorFallback } from "@/components/QueryErrorFallback";
+import { useI18n } from "@/lib/i18n";
 
 const AVATAR_COLORS = [
   "#4F46E5",
@@ -71,34 +67,40 @@ export default function LeaderboardTable({
   limit?: number;
   period?: "all" | "month" | "year";
 }) {
-  const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const xlmUsd = useXlmPrice();
 
-  useEffect(() => {
-    setLoading(true);
-    setError(null);
-    fetchLeaderboard(limit, period)
-      .then(setEntries)
-      .catch(() => setError("Could not load leaderboard."))
-      .finally(() => setLoading(false));
-  }, [limit, period]);
+  const {
+    data: entries,
+    isLoading,
+    isError,
+    error,
+    refetch,
+    isRefetching,
+  } = useLeaderboard(limit, period);
 
-  if (loading)
-    return <LeaderboardTableSkeleton />;
+  const { t } = useI18n();
 
-  if (error)
+  if (isLoading) return <LeaderboardTableSkeleton />;
+
+  if (isError || isRefetching)
     return (
-      <p className="text-red-500 text-sm text-center py-6 font-body">{error}</p>
+      <QueryErrorFallback
+        error={error}
+        onRetry={() => refetch()}
+        isRetrying={isRefetching}
+        retryCount={0}
+        title={t("leaderboard.failedToLoad")}
+      />
     );
 
-  if (entries.length === 0)
+  const safeEntries = entries ?? [];
+
+  if (safeEntries.length === 0)
     return (
       <div className="text-center py-12">
         <p className="text-3xl mb-3">🌱</p>
         <p className="text-[#475569] dark:text-[#94A3B8] font-body">
-          No donors yet — be the first!
+          {t("leaderboard.noDonors")}
         </p>
       </div>
     );
@@ -107,7 +109,7 @@ export default function LeaderboardTable({
 
   return (
     <div className="space-y-2">
-      {entries.map((entry) => (
+      {safeEntries.map((entry) => (
         <div
           key={entry.publicKey}
           className="flex items-center gap-4 p-4 rounded-xl bg-white dark:bg-[#14142D] border border-[rgba(99,102,241,0.10)] dark:border-[rgba(129,140,248,0.12)] hover:border-[rgba(99,102,241,0.25)] dark:hover:border-[rgba(129,140,248,0.30)] transition-all"

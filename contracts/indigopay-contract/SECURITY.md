@@ -4,6 +4,8 @@ This document records the security review of the IndigoPay contract.
 
 ## Phase A — Trust model hardening (two-step admin, contract pause, 48h upgrade timelock)
 
+> **Note**: Phase A introduced two-step admin transfer with single-admin keys. Phase B (below) supersedes the admin model with multi-sig threshold signatures. The two-step transfer is preserved but redesigned as an in-place swap within the admin set. The contract pause and upgrade timelock remain unchanged.
+
 The previous design had three single-admin SPOFs:
 
 1. **Admin transfer was instant** — a single compromised signature could silently give the attacker full control.
@@ -59,20 +61,97 @@ Helpers:
 - `get_pending_upgrade() -> Option<(BytesN<32>, u32)>` — hash + effective_at ledger of the pending upgrade, or `None`.
 - `get_last_executed_upgrade() -> Option<BytesN<32>>` — hash of the most-recently executed upgrade. `None` if the contract has never been upgraded.
 
+## Phase B — Multi-sig admin with threshold signatures
+
+Phase B replaces the single-admin model (`DataKey::Admin`) with a multi-signature admin system supporting M-of-N threshold signatures.
+
+### Problem addressed
+
+A single compromised admin key could: deactivate all projects, pause the contract indefinitely, propose a malicious upgrade (with 48h delay), change the USDC token address, or change the oracle address. Multi-sig raises the bar from "compromise one key" to "compromise M of N keys simultaneously."
+
+### New data model
+
+| Key                 | Type             | Description                                     |
+| ------------------- | ---------------- | ----------------------------------------------- |
+| `DataKey::AdminSet` | `Vec<Address>`   | Set of authorized admin addresses               |
+| `DataKey::AdminThreshold` | `u32`     | Number of valid admin signatures required for critical operations |
+
+The former `DataKey::Admin` variant is removed.
+
+### Admin action tiers
+
+**Critical actions** (require M-of-N signatures):
+- `propose_upgrade`, `cancel_upgrade`
+- `pause_contract`, `unpause_contract`
+- `transfer_admin`, `cancel_admin_transfer`
+- `deactivate_all_projects`
+- `create_proposal`, `veto_proposal`
+- `add_admin`, `remove_admin`, `update_threshold`
+
+**Routine actions** (require 1-of-N signature):
+- `register_project`, `batch_register_projects`
+- `deactivate_project`, `pause_project`, `resume_project`
+- `update_project_co2_rate`
+- `set_usdc_token`, `set_oracle`, `set_donation_rate_limit`
+
+### Multi-sig verification (`verify_m_of_n`)
+
+The core verification function iterates the supplied `signers` vec:
+
+1. Calls `signer.require_auth()` on each address (Soroban host-level cryptographic verification)
+2. Checks membership in the admin set
+3. **Deduplicates**: a `counted` vec ensures each address is counted only once, preventing a single compromised key from satisfying the threshold by passing itself multiple times
+4. Panics with `"Insufficient admin signatures: M/N required"` if valid count < threshold
+
+### Admin set management
+
+All admin set mutations require M-of-N signatures:
+
+- **`add_admin(signers, new_admin)`** — adds a new address. Panics if already an admin.
+- **`remove_admin(signers, admin_to_remove)`** — removes an address. Panics if it would leave the set empty, or if the resulting set is smaller than the current threshold (forces explicit `update_threshold` first).
+- **`update_threshold(signers, new_threshold)`** — updates the threshold. Must satisfy `1 <= threshold <= admin_set.len()`.
+
+### Two-step admin transfer (in-place swap)
+
+The two-step transfer is redesigned as an in-place swap that preserves the admin set size and threshold:
+
+1. **Step 1** — M-of-N admins call `transfer_admin(signers, old_admin, new_admin)`. Validates that `old_admin` is in the set and `new_admin` is not. Stores `(old_admin, new_admin)` tuple under `DataKey::PendingAdmin`.
+2. **Step 2** — `new_admin` calls `accept_admin()`. Performs a staleness check on both `old_admin` (must still be in set) and `new_admin` (must not have been independently added). Swaps `old_admin` for `new_admin` in-place within the admin set.
+3. **Cancel** — M-of-N admins call `cancel_admin_transfer(signers)` to clear the pending entry.
+
+**Security properties**:
+- The admin set size N and threshold are never modified by a transfer
+- The M-of-N group authorizes "swap A for B", not "dissolve everything"
+- Staleness guards prevent both `old_admin` removal and `new_admin` independent addition from corrupting the set
+- `new_admin` must self-authenticate via `accept_admin` (proves key control)
+
+### Initialization
+
+```rust
+pub fn initialize(env: Env, admins: Vec<Address>, threshold: u32)
+```
+
+Validates: `admins` is non-empty, `threshold >= 1`, `threshold <= admins.len()`.
+
+**Backward compatibility**: when threshold=1 and the admin set contains one address, behavior is identical to the previous single-admin model.
+
 ### Event audit trail
 
-Every state change in the new trust model emits an indexed event for indexer consumers:
+Every state change in the trust model emits an indexed event for indexer consumers:
 
 | Event topic  | Trigger                                        |
 | ------------ | ---------------------------------------------- |
-| `ad_xfer`    | `transfer_admin` queued                        |
-| `ad_acc`     | `accept_admin` promoted                        |
+| `ad_xfer`    | `transfer_admin` queued (old_admin → new_admin) |
+| `ad_acc`     | `accept_admin` swap completed                  |
 | `ad_xfc`     | `cancel_admin_transfer` cleared                |
 | `paused`     | `pause_contract` set the pause flag            |
 | `unpause`    | `unpause_contract` lifted the pause flag       |
 | `upg_prop`   | `propose_upgrade` queued (hash + effective_at) |
 | `upg_exec`   | `execute_upgrade` swapped the WASM             |
-| `upg_cncl` | `cancel_upgrade` dropped the pending upgrade   |
+| `upg_cncl`   | `cancel_upgrade` dropped the pending upgrade   |
+| `admin_add`  | `add_admin` added a new admin to the set       |
+| `admin_rmv`  | `remove_admin` removed an admin from the set   |
+| `thresh_up`  | `update_threshold` changed the threshold       |
 
 ---
 
@@ -131,3 +210,164 @@ Max donation scenarios:
 ### Conclusion
 
 No silent overflows possible. All operations that could exceed i128::MAX will panic with descriptive messages. The contract is safe for production use with any realistic donation volume.
+
+## Donation Refund (#290)
+
+### Trust model
+
+`approve_refund` requires **both** admin authorization (`require_admin_for_routine`) **and** `project.wallet.require_auth()`. This means the token transfer from project wallet → donor happens atomically inside `approve_refund` (CEI ordering — all counter decrements are written before the transfer fires). If the project wallet does not co-sign, the normal approval reverts entirely.
+
+This provides on-chain enforcement that "Approved = Paid" for three of the four motivating scenarios:
+- Donor sent to the wrong project
+- Donor entered the wrong amount
+- Technical error in the transaction
+
+For the fourth scenario (a fraudulent or adversarial project wallet),
+`force_approve_refund` provides a separate safety valve:
+
+1. The configured M-of-N admin threshold must authorize initiation.
+2. `DataKey::ForceRefund(refund_id)` records a 72-hour (51,840-ledger)
+   timelock. The refund remains `Pending`, and no accounting changes or token
+   transfers occur at initiation.
+3. Any single current admin may cancel during the review window. Once the
+   effective ledger is reached, cancellation is disabled and anyone may call
+   `execute_force_refund`.
+4. Execution pays the donor from the canonical
+   `ProjectContractBalance(project_id, token)` contract-held pool, marks the
+   request `Approved`, and applies the same amount and CO₂ reversals as the
+   normal path.
+
+The force path does **not** seize tokens from the project wallet and does not
+assume that a Soroban token allowance will remain available. Operators must
+pre-fund the relevant project/token contract balance; execution reverts
+atomically with `Insufficient force refund pool balance` if it is insufficient.
+The pool is checked by both project ID and token address, so one project's
+force-refund cannot consume accounting attributed to another project. Contract
+token balances not represented by this canonical ledger are never used.
+
+This changes the trust model: M-of-N admins can schedule use of contract-held
+funds for a full refund, while a 72-hour public review window and single-admin
+cancellation limit colluding or compromised-admin abuse. A force escalation
+must be cancelled before the request can return to the normal approve/reject
+flow, preventing stale escalation records.
+
+### Pre-upgrade CO₂ limitation
+
+CO₂ offset values for donations are snapshotted in `DataKey::DonationCO2Offset(u32)` at donation time. Pre-upgrade donations lack this key, so refunds for those donations use `co2_offset_grams = 0` — meaning `GlobalCO2OffsetGrams` is not reversed for pre-upgrade refunds. This creates a small, bounded, one-directional drift: the global counter may be marginally overstated relative to true refunded volume. This is an accepted, documented limitation.
+
+### Badge permanence
+
+Badge tiers and minted NFTs are **never** downgraded or burned on refund. The refund adjusts `total_donated` and `co2_offset_grams` but does not call `calculate_badge()`. A donor who reaches EarthGuardian and later refunds all donations keeps their EarthGuardian badge and any minted ImpactNFTs. This is a deliberate design choice — badges are permanent artifacts, not live counters.
+
+### Underflow protection
+
+All counter decrements on refund use `checked_sub(...).expect("...underflow on refund")`, consistent with the `checked_add` convention used for donations. If a refund would drive any counter negative, the transaction panics and reverts.
+
+## Stealth Address Donation Integration (#458)
+
+### Privacy model
+
+`donate_stealth_integrated` integrates the standalone stealth address infrastructure (`DonationContract`) into `IndigoPayContract` while preserving donor privacy guarantees:
+
+1. **Unlinkable stealth addresses**: Stealth address generation uses diffie-hellman ephemeral keys (`generate_stealth_address`), ensuring on-chain indexers cannot correlate stealth donations to a single donor wallet address.
+2. **Donor stats decoupling**: `donate_stealth_integrated` updates project `total_raised`, `GlobalTotalRaised`, and `GlobalCO2OffsetGrams`, but explicitly **bypasses** `DonorStats`, `DonorProjectTotal`, `HasDonated`, and `project.donor_count` updates. No cumulative donor record or badge progress is assigned to the sender address.
+3. **Zero-address record indexing**: The `DonationRecord` on `IndigoPayContract` records `donor` as a dedicated zero-address (`0x00...00`), and emits `stlth_don` event topic with the zero-address as donor.
+4. **Cross-contract authorization**: The `sender.require_auth()` authorization gates the invocation at the `IndigoPayContract` boundary and propagates to `DonationContract.donate_stealth` for atomic token transfer from sender to stealth escrow contract.
+
+### Custody model and withdrawal path (#621)
+
+Stealth-donated tokens are held by the `DonationContract` (the stealth escrow
+contract) until the project wallet withdraws them — they are **never** held by
+`IndigoPayContract` and are **not** part of `ProjectContractBalance`.
+
+- **Per-(project_wallet, token) accounting**: `donate_stealth` credits the
+  project's withdrawable balance in the `DonationContract` for every successful
+  donation, so no stealth donation is ever stranded.
+- **Project-wallet-gated withdrawal**: `withdraw_stealth_donations` moves the
+  balance to the project wallet itself. Only the `project_wallet` address can
+  withdraw; neither the main-contract admin nor any third party can drain a
+  project's stealth funds. The main contract exposes
+  `withdraw_stealth_integrated(project_id, token, amount)` which resolves the
+  project's wallet, requires its root-level auth, and forwards the call.
+- **CEI ordering**: the withdrawable balance is decremented *before* the
+  external token transfer, so a reentrant/malicious token cannot double-drain.
+  Structured errors (`DonationError`) reject zero-amount and over-balance
+  withdrawals.
+- **Reconciliation**: both `withdraw_stealth_donations` and
+  `withdraw_stealth_integrated` emit withdrawal events (see `contracts/EVENTS.md`)
+  carrying the withdrawn amount and the remaining balance, so indexers can
+  reconcile on-chain `total_raised` with funds actually received.
+- **No strandability**: the withdrawal path is intentionally not gated on the
+  contract pause flag or the project's active state, so funds can always be
+  recovered by the project wallet (mirrors the permissionless
+  `execute_emergency_withdrawal` precedent).
+
+## Off-Chain Oracle Attestation for Project Impact Verification (#459)
+
+Gated behind the `impact_verification` Cargo feature (on by default; excluded from the size-checked `--no-default-features` CI build). Lets admin-authorised verifiers submit independent measurements of a project's actual CO₂ impact, which the contract compares against the project's self-reported (claimed) rate.
+
+### Trust model
+
+- **Verifiers are admin-appointed**, not permissionless. `add_impact_verifier` / `remove_impact_verifier` require `require_admin_for_routine`, so the same trust assumption as every other routine admin action (single admin signature, or 1-of-N under the Phase B multi-sig model) applies here too. A compromised admin key can add an adversarial verifier; this is not a new SPOF beyond what Phase B already accepts for routine operations.
+- **Reports are not adversarially aggregated.** `submit_impact_report` does not require multiple verifiers to agree before storage — each report is stored independently. Manipulation resistance comes from the *median* of all distinct verifiers' reports once the threshold is reached, not from any single report being authoritative. A minority of colluding verifiers cannot move the median unless they control a majority of the authorised verifier set.
+- **The deviation flag is sticky by design.** Once `ImpactFlagged` is set it stays set until an admin explicitly calls `clear_impact_flag` — a later report that happens to fall back within tolerance does not silently clear it. This forces a human admin decision rather than letting a flag disappear on its own.
+- **Duplicate submissions cannot inflate the verifier count.** Reports are keyed by `(project_id, verifier)`; a verifier resubmitting updates their existing record and does not add a second entry to the distinct-verifier list used for both the threshold check and the median.
+- **The threshold is admin-configurable** (`set_impact_report_threshold`, falls back to `DEFAULT_IMPACT_REPORT_THRESHOLD = 3` when unset) so operators can tune how many independent verifiers are required before the contract trusts their consensus enough to overwrite `co2_per_xlm` without further admin sign-off.
+
+### Bounds and overflow
+
+`verified_co2_rate` is checked against the same `MAX_CO2_PER_XLM` bound used at project registration and by `update_project_co2_rate`, so an auto-adjustment can never push a project's rate above the platform-wide ceiling. The median itself is additionally clamped to `[1, MAX_CO2_PER_XLM]` before being written, guarding against a `co2_per_xlm = 0` write (which `update_project_co2_rate` treats as invalid) even in a degenerate single-verifier case.
+
+### Event audit trail
+
+| Event topic | Trigger                                                        |
+| ----------- | --------------------------------------------------------------- |
+| `impv_add`  | `add_impact_verifier` authorised a new verifier                 |
+| `impv_rem`  | `remove_impact_verifier` revoked a verifier                      |
+| `impv_thr`  | `set_impact_report_threshold` changed the auto-adjust threshold  |
+| `impv_sub`  | `submit_impact_report` recorded or updated a report              |
+| `impv_flg`  | A submission deviated ≥50% from the claimed rate                |
+| `impv_adj`  | `co2_per_xlm` was auto-adjusted to the new median                |
+| `impv_clr`  | `clear_impact_flag` cleared a project's deviation flag           |
+## Anonymous donation proof trust model (#432)
+
+The optional `zk` feature adds `donate_anonymous_zk`. To keep the deployed
+WASM compact, the contract uses a verifier-attestation model: an off-chain
+prover verifies the circuit and signs the ordered public inputs with Ed25519.
+Changing the 32-byte verification key requires the configured M-of-N admin
+threshold.
+
+The signed statement is:
+
+`project_id_hash || amount_commitment || nullifier`
+
+Each component is 32 bytes. `project_id_hash` is SHA-256 of the Soroban XDR
+encoding of the project ID. The first 16 bytes of `amount_commitment` are the
+positive, big-endian `i128` amount used for public project/global accounting;
+the remaining bytes are circuit-defined blinding material. A successfully
+verified nullifier is stored and cannot be reused.
+
+This design hides donor identity from contract storage and donor-specific
+statistics, but it is not an in-WASM Groth16 verifier. Soundness depends on the
+off-chain circuit, prover, and signing-key custody. Ledger observers may still
+identify a transaction submitter unless a relayer is used. Exact public totals
+also mean the donation amount is recoverable from the public commitment.
+
+## Multi-Token Donation Support (#421)
+
+### Trust model & Registry security
+
+- **Token registration is admin-gated.** `register_token` and `remove_token` require `require_admin_for_routine` and are paused-gated by `require_not_paused`. Only authorized admins can add or deactivate tokens in the registry.
+- **Oracle rate safety.** Oracle conversion uses checked multiplication (`checked_mul`) when computing `xlm_equivalent` from token amounts and oracle price feeds. Oracles returning price <= 0 panic immediately to prevent invalid state.
+- **Per-token rate limit isolation.** `donate_token` keys rate limits on `DataKey::DonorRateLimit(donor, project_id, token_address)`. Each asset can use its own `TokenRateLimitMax` and `TokenRateLimitWindow` policy; missing overrides fall back to the global policy. This guarantees that rate limit windows and policies for distinct assets (e.g. XLM vs USDC vs custom tokens) operate independently.
+- **Backward compatibility.** Legacy `donate` and `donate_usdc` entrypoints seamlessly delegate to `donate_token_with_privacy`, ensuring existing integrations continue to function without state corruption or breakage.
+
+## Multi-Recipient Platform Fee Distribution (#434)
+
+### Security & Invariant Guarantees
+
+- **Share Sum Validation.** `set_platform_fee_recipients` requires M-of-N critical admin authorization (`require_admin_for_critical`) and validates that the sum of `share_bps` across all recipients equals exactly 10,000 basis points (100.00%). Setting an empty recipient list or shares that do not sum to 10,000 panics immediately.
+- **Exact Fee Preservation.** Fee distribution (`split_fee_recipients`) allocates any remainder from integer division to the final recipient, ensuring `sum(recipient_shares) == total_fee_amount` exactly with zero stroop loss.
+- **CEI & Transfer Ordering.** Per-recipient fee transfers execute within the Checks-Effects-Interactions pattern during donation processing before remaining funds are transferred to the project.
+- **Backward Compatibility.** Deployments with legacy single-treasury configuration (`DataKey::PlatformTreasury`) lazily fall back to a single 100% recipient share until `set_platform_fee_recipients` is invoked.
+

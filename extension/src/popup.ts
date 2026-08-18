@@ -68,6 +68,63 @@ interface ProjectResult {
   walletAddress?: string;
 }
 
+/** HTML-escape a string to prevent XSS in rendered content. */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+/** Set a status message in the popup UI (success or error). */
+function setStatus(message: string, isError = false): void {
+  const el = document.getElementById('status-message');
+  if (!el) return;
+  el.textContent = message;
+  el.className = isError ? 'status error' : 'status success';
+  el.classList.remove('hidden');
+  setTimeout(() => el.classList.add('hidden'), 5000);
+}
+
+/** Initialize the project search autocomplete input. */
+function initProjectSearch(): void {
+  const searchInput = document.getElementById('project-search') as HTMLInputElement | null;
+  if (!searchInput) return;
+
+  const dropdown = document.getElementById('search-dropdown') as HTMLUListElement | null;
+  if (!dropdown) return;
+
+  searchInput.addEventListener('input', () => {
+    const query = searchInput.value.trim();
+    if (query.length < 2) {
+      dropdown.classList.add('hidden');
+      return;
+    }
+    debounce(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/projects?search=${encodeURIComponent(query)}&limit=5`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        const projects: ProjectResult[] = (json.data || []).map((p: any) => ({
+          id: p.id,
+          name: p.name,
+          category: p.category,
+          walletAddress: p.walletAddress,
+        }));
+        renderDropdown(projects, dropdown!);
+      } catch {
+        dropdown.classList.add('hidden');
+      }
+    }, 300);
+  });
+
+  searchInput.addEventListener('blur', () => {
+    setTimeout(() => dropdown.classList.add('hidden'), 200);
+  });
+}
+
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let activeDropdownIndex = -1;
 let dropdownItems: HTMLLIElement[] = [];
@@ -382,7 +439,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       chrome.storage.local.remove('pendingDonationAddress');
       const destInput = document.getElementById('destination') as HTMLInputElement | null;
       if (destInput) {
-        destInput.value = res.pendingDonationAddress;
+        destInput.value = res.pendingDonationAddress as string;
       }
     }
   });
@@ -391,29 +448,25 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (!form) return;
 
   form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const sourceAddress = ((document.getElementById('source-address') as HTMLInputElement)?.value ?? '').trim();
-    const destination = ((document.getElementById('destination') as HTMLInputElement)?.value ?? '').trim();
-    const amount = ((document.getElementById('amount') as HTMLInputElement)?.value ?? '').trim();
-    const memo = ((document.getElementById('memo') as HTMLInputElement)?.value ?? '').trim();
+    try {
+      e.preventDefault();
+      const sourceAddress = ((document.getElementById('source-address') as HTMLInputElement)?.value ?? '').trim();
+      const destination = ((document.getElementById('destination') as HTMLInputElement)?.value ?? '').trim();
+      const amount = ((document.getElementById('amount') as HTMLInputElement)?.value ?? '').trim();
+      const memo = ((document.getElementById('memo') as HTMLInputElement)?.value ?? '').trim();
 
-    if (!sourceAddress || !destination || !amount) {
-      setStatus('Please fill in all required fields.', true);
-      return;
+      if (!sourceAddress || !destination || !amount) {
+        setStatus('Please fill in all required fields.', true);
+        return;
+      }
+    } catch {
+      // Silently ignore — the skeleton loader remains visible
     }
-  } catch {
-    // Silently ignore — the skeleton loader remains visible
-  }
+  });
 
   // Connect button
   const connectBtn = document.getElementById('connect-btn') as HTMLButtonElement | null;
   if (connectBtn) connectBtn.addEventListener('click', connectWallet);
-
-  // Settings button
-  const settingsBtn = document.getElementById('settings-btn');
-  if (settingsBtn) {
-    settingsBtn.addEventListener('click', () => window.location.href = 'settings.html');
-  }
 
   console.log('🌿 IndigoPay Extension initialized with donation badge (#490)');
 });

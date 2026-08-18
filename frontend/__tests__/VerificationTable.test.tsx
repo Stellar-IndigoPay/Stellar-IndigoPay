@@ -8,6 +8,7 @@
  */
 import { render, screen, fireEvent } from "@testing-library/react";
 import VerificationTable from "@/components/admin/VerificationTable";
+import VerificationFilters from "@/components/admin/VerificationFilters";
 import type { VerificationRequestResponse } from "@/lib/api";
 
 // Mock next/router
@@ -133,12 +134,10 @@ describe("VerificationTable", () => {
   it("renders empty state when requests array is empty", () => {
     render(<VerificationTable requests={[]} />);
     expect(
-      screen.getByText("No verification requests"),
+      screen.getByText("No verification requests match your filters"),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(
-        /When organizations submit through the apply form/,
-      ),
+      screen.getByText(/Adjust the status filter to see more requests/),
     ).toBeInTheDocument();
   });
 
@@ -165,6 +164,54 @@ describe("VerificationTable", () => {
     // Check country names
     expect(screen.getByText("Kenya")).toBeInTheDocument();
     expect(screen.getByText("India")).toBeInTheDocument();
+  });
+
+  it("supports sortable columns and shows the active sort indicator", () => {
+    const { container } = render(<VerificationTable requests={MOCK_REQUESTS} />);
+
+    const submittedSortButton = screen.getByRole("button", {
+      name: /sort by submitted/i,
+    });
+    expect(submittedSortButton).toBeInTheDocument();
+
+    fireEvent.click(submittedSortButton);
+
+    expect(submittedSortButton).toHaveAttribute(
+      "aria-label",
+      "Sort by Submitted",
+    );
+    expect(
+      screen.getByRole("columnheader", { name: /submitted/i }),
+    ).toHaveAttribute("aria-sort", "ascending");
+    expect(container.querySelector("tbody tr:first-child")).toHaveTextContent(
+      "Ocean Guardians",
+    );
+  });
+
+  it("renders pagination controls when page metadata is provided", () => {
+    render(
+      <VerificationTable
+        requests={MOCK_REQUESTS}
+        page={2}
+        pageSize={10}
+        totalCount={45}
+        onPageChange={jest.fn()}
+        onPageSizeChange={jest.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Showing 11-20 of 45")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /previous/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /next/i })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /page size/i })).toBeInTheDocument();
+  });
+
+  it("renders a filter bar that updates the selected status", () => {
+    const onChange = jest.fn();
+    render(<VerificationFilters value="pending" onChange={onChange} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Approved" }));
+    expect(onChange).toHaveBeenCalledWith("approved");
   });
 
   // ── Status badges have correct colors ──────────────────────────

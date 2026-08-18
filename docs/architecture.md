@@ -85,6 +85,137 @@ The contract is the immutable, auditable record of all donations. Anyone can ver
 
 The leaderboard and donation feed create social accountability — donors can see their rank and impact publicly, encouraging more giving.
 
+## Event Sourcing (donation pipeline)
+
+The donation recording pipeline was refactored from a CRUD/UPSERT approach to
+**event sourcing**. Soroban `donated` contract events are now the single,
+immutable source of truth; all read models are derived deterministically by
+replaying the event stream.
+
+### Event store
+
+Every donation is appended once to the append-only `donation_events` table:
+
+```
+donation_events(id BIGSERIAL, event_type, aggregate_id, event_data JSONB,
+                soroban_ledger, transaction_hash, created_at)
+```
+
+The application connects with INSERT/SELECT only (no UPDATE/DELETE) so the log
+is immutable. The `sorobanEventService.handleDonated()` handler appends the
+event and then applies it to the projections inside one transaction.
+
+### Projection engine
+
+`src/services/projectionEngine.js` holds four projections, each a pure,
+idempotent function of the event stream:
+
+| Projection table                | Read model served                         |
+| ------------------------------- | ----------------------------------------- |
+| `projection_donor_leaderboard` | `GET /api/leaderboard` (ranked donors)   |
+| `projection_project_stats`     | per-project aggregates (project stats)   |
+| `projection_donor_history`     | `GET /api/donations/project|donor`       |
+| `projection_global_stats`      | `GET /api/stats/global` (platform totals)|
+
+`processEvent(event)` runs every projection handler in a transaction; calling
+it twice with the same event yields the same state (idempotent, safe for
+at-least-once delivery). `rebuildAllProjections()` truncates every projection
+and replays the entire `donation_events` table in `id` order, so any read
+model can be reconstructed from the log with zero backfill scripts.
+
+### Admin rebuild
+
+`POST /api/admin/projections/rebuild` (admin-only) rebuilds all projections;
+`POST /api/admin/projections/rebuild/:name` rebuilds one. The legacy
+`indexerReconciler` remains as a safety net.
+
+### Metrics
+
+- `indigopay_projection_events_processed_total` — events processed per projection
+- `indigopay_projection_lag_events` — events in the store not yet projected (0 in steady state)
+- `indigopay_projection_rebuild_duration_seconds` + `indigopay_projection_rebuild_last_events` — rebuild performance
+
+## Automated CO₂ Offset Rate Verification
+
+The platform includes an automated, data-driven pipeline that verifies project-reported CO₂ offset rates against independent scientific databases and satellite-based biomass estimation.
+
+### Verification Pipeline
+
+```
+Project registered ──► verifyProjectCO2Rate(project)
+                                │
+                    ┌───────────┴───────────┐
+                    ▼                       ▼
+            fetchReferenceRates()   fetchSatelliteEstimate()
+            (Gold Standard, Verra,  (Global Forest Watch API,
+             IPCC fallback)          IPCC tier-1 fallback)
+                    │                       │
+                    └───────────┬───────────┘
+                                ▼
+                    computeConfidenceBand()
+                    [lower, upper] g CO₂/XLM
+                                │
+                                ▼
+                    computeSeverity()
+                    none / warning / critical
+                                │
+                    ┌───────────┴───────────┐
+                    ▼                       ▼
+          co2_verification_runs     projects.co2_verification_status
+          (audit history)           (updated if implausible)
+```
+
+### Reference Rate Sources (highest priority first)
+
+1. **Gold Standard Impact Registry API** — `CO2_VERIFIER_GS_API_URL` env var
+2. **Verra VCS Registry** — `CO2_VERIFIER_VERRA_API_URL` env var
+3. **IndigoPay Category Benchmarks** — static per-category rates based on IPCC-informed literature
+4. **IPCC Tier-1 Emission Factors** — universal fallback using 2006 IPCC Guidelines
+
+### Satellite Data Integration
+
+For reforestation and land-use projects, the pipeline queries:
+- **Global Forest Watch API (WRI)** — requires `CO2_VERIFIER_GFW_API_URL` and `CO2_VERIFIER_GFW_API_KEY`
+- **IPCC Tier-1 biomass factors** — selected by climate zone (tropical/temperate/boreal) based on latitude
+
+Satellite-derived estimates are converted from tCO₂/ha/yr to g CO₂/XLM and used to tighten the confidence band's upper bound.
+
+### Confidence Band & Severity
+
+| Severity   | Condition                             | Admin Action      |
+| ---------- | ------------------------------------- | ----------------- |
+| none       | rate ≤ upper × 1.5                    | None (plausible)  |
+| warning    | rate > upper × 1.5 and ≤ upper × 3.0 | Review required   |
+| critical   | rate > upper × 3.0                    | Flagged for admin |
+
+### Scheduled Verification
+
+A pg-boss cron job (configurable via `CO2_VERIFICATION_CRON`, default: weekly Sunday 03:00 UTC) re-verifies all active projects. Each run writes a row to `co2_verification_runs` for audit trail. The Prometheus counter `indigopay_co2_verifications_total` tracks outcomes.
+
+### Admin & User Surface
+
+- **Admin CO₂ Flags Dashboard** (`/admin/co2-flags`): shows confidence bands, deviation %, reference source, and severity. Admins can trigger re-verification per project or for all projects.
+- **Project Detail Page**: shows a "CO₂ Rate Verification" badge (✅ verified / 🚩 flagged / ⚠️ under review) with the verification notes
+
+## On-Chain Impact Verification (#459)
+
+The pipeline above is fully automated and off-chain — it cross-checks a project's *claimed* rate against reference databases and satellite estimates, but it never touches on-chain state. The `impact_verification` contract feature is a complementary, on-chain mechanism for a different trust model: independent human verifiers attesting to a project's *actual* measured impact.
+
+```
+Admin authorises verifier ──► add_impact_verifier(admin, verifier)
+                                        │
+Verifier measures impact off-chain     ▼
+                        submit_impact_report(verifier, project_id,
+                                              verified_co2_rate, evidence_hash)
+                                        │
+                    ┌───────────────────┴───────────────────┐
+                    ▼                                       ▼
+        deviation ≥50% from claimed rate?          N distinct verifiers reported?
+        (ImpactFlagged sticky flag set)             (co2_per_xlm ← median of reports)
+```
+
+Unlike the automated pipeline (which flags for admin review), reaching the configured verifier threshold **auto-adjusts `co2_per_xlm` on-chain** to the median verified rate — no admin action required. The two mechanisms can run side by side: the automated pipeline catches statistically implausible rates at scale, while on-chain verifiers provide an auditable, adversarial-resistant check that doesn't depend on any single off-chain data source. See `contracts/indigopay-contract/SECURITY.md` for the trust model (who can become a verifier, how the deviation flag and threshold are administered).
+
 ## Security
 
 | Concern                 | Mitigation                                                 |
@@ -94,3 +225,4 @@ The leaderboard and donation feed create social accountability — donors can se
 | Project wallet spoofing | Admin must register projects on-chain via Soroban          |
 | Sybil donors            | On-chain stats cannot be faked — all linked to real wallet |
 | Backend downtime        | Donations still work — backend is not on the critical path |
+| Inflated CO₂ rates      | Automated verification against independent scientific data |

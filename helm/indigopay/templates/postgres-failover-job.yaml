@@ -1,0 +1,74 @@
+{{- if .Values.postgres.failover.enabled }}
+# helm/indigopay/templates/postgres-failover-job.yaml
+# Automated Postgres Failover Job — mounts the canonical script from ConfigMap.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postgres-failover
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: postgres-failover
+    component: database-failover
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app: postgres-failover
+    spec:
+      serviceAccountName: postgres-failover-sa
+      restartPolicy: Never
+      containers:
+        - name: failover
+          image: {{ .Values.postgres.failover.failoverImage | default "bitnami/kubectl:latest" }}
+          command:
+            - /bin/sh
+            - /scripts/failover.sh
+          env:
+            - name: NAMESPACE
+              value: {{ .Values.namespace | quote }}
+            - name: STANDBY_POD
+              value: postgres-standby-0
+            - name: BACKEND_METRICS_URL
+              value: "http://backend-svc:{{ .Values.backend.port }}/api/admin/failover-metric"
+            {{- if .Values.postgres.failover.failoverMetricsToken }}
+            - name: FAILOVER_TOKEN
+              value: {{ .Values.postgres.failover.failoverMetricsToken | quote }}
+            {{- else }}
+            - name: FAILOVER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: FAILOVER_METRICS_TOKEN
+                  optional: true
+            {{- end }}
+            {{- if .Values.postgres.failover.slackWebhookUrl }}
+            - name: SLACK_WEBHOOK_URL
+              value: {{ .Values.postgres.failover.slackWebhookUrl | quote }}
+            {{- else }}
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: stellar-indigopay-secrets
+                  key: SLACK_WEBHOOK_URL
+                  optional: true
+            {{- end }}
+          volumeMounts:
+            - name: failover-script
+              mountPath: /scripts
+              readOnly: true
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+      volumes:
+        - name: failover-script
+          configMap:
+            name: postgres-failover-script
+            defaultMode: 0755
+{{- end }}

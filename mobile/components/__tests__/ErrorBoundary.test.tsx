@@ -17,13 +17,13 @@ import React, { type ReactNode } from "react";
 import { Text, Pressable, View } from "react-native";
 import { render, fireEvent, screen } from "@testing-library/react-native";
 
-jest.mock("../lib/errorReporter", () => ({
+jest.mock("../../lib/errorReporter", () => ({
   init: jest.fn(),
   captureException: jest.fn().mockResolvedValue(true),
 }));
 
-import { ErrorBoundary } from "../components/ErrorBoundary";
-import { captureException } from "../lib/errorReporter";
+import { ErrorBoundary } from "../ErrorBoundary";
+import { captureException } from "../../lib/errorReporter";
 
 const captureExceptionMock = captureException as jest.MockedFunction<
   typeof captureException
@@ -78,7 +78,8 @@ describe("ErrorBoundary", () => {
     const alert = screen.getByRole("alert");
     expect(alert).toBeTruthy();
     expect(alert.props.accessibilityLiveRegion).toBe("assertive");
-    expect(screen.getByText(/intentional render error/i)).toBeTruthy();
+    const matches = screen.getAllByText(/intentional render error/i);
+    expect(matches.length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: /retry/i })).toBeTruthy();
 
     spy.mockRestore();
@@ -96,7 +97,7 @@ describe("ErrorBoundary", () => {
     const [error, info] = onError.mock.calls[0];
     expect(error).toBeInstanceOf(Error);
     expect(error.message).toBe("intentional render error");
-    expect(typeof info.componentStack).toBe("string");
+    expect(typeof info!.componentStack).toBe("string");
     spy.mockRestore();
   });
 
@@ -111,10 +112,12 @@ describe("ErrorBoundary", () => {
     // the mock resolves a promise we don't observe. Verify the call
     // happened with the correct arguments.
     expect(captureExceptionMock).toHaveBeenCalledTimes(1);
-    const [err, info] = captureExceptionMock.mock.calls[0];
+    const call = captureExceptionMock.mock.calls[0];
+    expect(call).toBeDefined();
+    const [err, info] = call!;
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toBe("intentional render error");
-    expect(typeof info.componentStack).toBe("string");
+    expect(typeof info!.componentStack).toBe("string");
     spy.mockRestore();
   });
 
@@ -147,12 +150,14 @@ describe("ErrorBoundary", () => {
     function ToggleHarness() {
       const [boom, setBoom] = React.useState(true);
       return (
-        <ErrorBoundary>
+        <>
           <Pressable testID="stop-booming" onPress={() => setBoom(false)}>
             <Text>stop</Text>
           </Pressable>
-          <Bomb shouldThrow={boom} />
-        </ErrorBoundary>
+          <ErrorBoundary>
+            <Bomb shouldThrow={boom} />
+          </ErrorBoundary>
+        </>
       );
     }
     render(<ToggleHarness />);

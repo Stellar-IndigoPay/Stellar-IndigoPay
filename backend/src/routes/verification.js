@@ -30,11 +30,18 @@ const router = express.Router();
 const fs = require("fs");
 const path = require("path");
 const { v4: uuid } = require("uuid");
+const { z } = require("zod");
 const pool = require("../db/pool");
 const { adminRequired } = require("../middleware/auth");
+const { validate } = require("../middleware/validate");
+const {
+  stellarAddress,
+  PROJECT_CATEGORIES,
+} = require("../validators/schemas");
 const { logAdminAction } = require("../services/audit");
 const { createRateLimiter } = require("../middleware/rateLimiter");
 const { sendAdminVerificationNotification } = require("../services/email");
+const { onboardProject } = require("../services/onboardingService");
 const {
   backendName,
   uploadToIPFS,
@@ -42,20 +49,13 @@ const {
   UPLOAD_DIR,
 } = require("../services/storage");
 const { AppError } = require("../errors");
+const {
+  verifyCO2Rate,
+  applyCO2VerificationToProject,
+} = require("../services/co2Verifier");
+const logger = require("../logger");
 
 const submitLimiter = createRateLimiter(10, 15); // 10 submissions / 15 min / IP
-
-const VALID_CATEGORIES = [
-  "Reforestation",
-  "Solar Energy",
-  "Ocean Conservation",
-  "Clean Water",
-  "Wildlife Protection",
-  "Carbon Capture",
-  "Wind Energy",
-  "Sustainable Agriculture",
-  "Other",
-];
 
 const VALID_TRANSITIONS = {
   pending: ["in_review", "rejected"],
@@ -249,9 +249,9 @@ router.post("/", submitLimiter, async (req, res, next) => {
       typeof body.projectCategory === "string"
         ? body.projectCategory.trim()
         : "";
-    if (!VALID_CATEGORIES.includes(projectCategory)) {
+    if (!PROJECT_CATEGORIES.includes(projectCategory)) {
       errors.push(
-        `projectCategory must be one of: ${VALID_CATEGORIES.join(", ")}`,
+        `projectCategory must be one of: ${PROJECT_CATEGORIES.join(", ")}`,
       );
     }
 
@@ -347,38 +347,62 @@ router.post("/", submitLimiter, async (req, res, next) => {
        ) RETURNING *`,
       [
         id,
-        orgName,
-        website,
-        country,
-        email,
-        walletAddress,
-        projectName,
-        projectCategory,
-        projectLocation,
-        projectDescription,
-        co2PerXLM.toFixed(7),
-        expectedAnnualTonnesCO2 != null
-          ? expectedAnnualTonnesCO2.toFixed(7)
+        body.organizationName.trim(),
+        body.organizationWebsite?.trim() || null,
+        body.organizationCountry?.trim() || null,
+        body.contactEmail.trim().toLowerCase(),
+        body.walletAddress,
+        body.projectName.trim(),
+        body.projectCategory,
+        body.projectLocation.trim(),
+        body.projectDescription?.trim() || null,
+        Number.parseFloat(body.co2PerXLM).toFixed(7),
+        body.expectedAnnualTonnesCO2 != null && body.expectedAnnualTonnesCO2 !== ""
+          ? Number.parseFloat(body.expectedAnnualTonnesCO2).toFixed(7)
           : null,
         JSON.stringify(processedDocs),
         backendName(),
-        notes,
+        body.notes?.trim() || null,
       ],
     );
 
     const created = mapRequestRow(result.rows[0]);
 
+    // Early plausibility check on the claimed offset rate. The verdict is
+    // not persisted here (the projects row may not exist yet) but is
+    // surfaced to the submitter and to admins so an implausible rate is
+    // visible from the moment it is submitted, not only at approval time.
+    const co2Assessment = verifyCO2Rate(projectCategory, co2PerXLM);
+    if (co2Assessment.status === "flagged") {
+      logger.warn(
+        {
+          event: "co2_rate_flagged",
+          requestId: id,
+          projectCategory,
+          co2PerXLM,
+          reason: co2Assessment.reason,
+        },
+        "Verification request submitted with implausible CO₂ offset rate",
+      );
+    }
+
     // Fire-and-forget admin notification; failures here must NOT block the
     // persist + 201 success path. The submitter still gets their receipt.
-    sendAdminVerificationNotification(created).catch((err) => {
-      // eslint-disable-next-line no-console
-      console.error("[verification] admin notification failed:", err.message);
-    });
+    sendAdminVerificationNotification({ ...created, co2Assessment }).catch(
+      (err) => {
+        // eslint-disable-next-line no-console
+        console.error(
+          "[verification] admin notification failed:",
+          err.message,
+        );
+      },
+    );
 
     res.status(201).json({
       success: true,
       data: {
         ...created,
+        co2Assessment,
         reviewTimeline: "5–10 business days",
       },
     });
@@ -451,6 +475,75 @@ router.get("/:id", async (req, res, next) => {
       });
     }
     res.json({ success: true, data: mapRequestRow(row) });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * Build a simple timeline for a verification request.
+ * Returns an array of events in chronological order.
+ */
+function buildTimeline(row) {
+  const events = [];
+  if (row.submitted_at) {
+    events.push({
+      type: "submitted",
+      at: new Date(row.submitted_at).toISOString(),
+      details: `Verification request submitted by ${row.organization_name}`,
+    });
+  }
+  if (row.reviewed_at) {
+    events.push({
+      type: "reviewed",
+      at: new Date(row.reviewed_at).toISOString(),
+      details: `Status changed to ${row.status}`,
+    });
+  }
+  if (row.reviewer_notes) {
+    events.push({
+      type: "reviewer_notes",
+      at: new Date(row.reviewed_at || row.submitted_at).toISOString(),
+      details: row.reviewer_notes,
+    });
+  }
+  return events;
+}
+
+/**
+ * GET /api/verification-requests/:id/public
+ * Public endpoint exposing a privacy‑safe subset of verification data.
+ */
+router.get("/:id/public", async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM verification_requests WHERE id = $1",
+      [req.params.id],
+    );
+    const row = result.rows[0];
+    if (!row) throw new AppError("VERIFICATION_NOT_FOUND");
+
+    const safe = {
+      id: row.id,
+      organizationName: row.organization_name,
+      organizationWebsite: row.organization_website || null,
+      organizationCountry: row.organization_country || null,
+      projectName: row.project_name,
+      projectCategory: row.project_category,
+      projectLocation: row.project_location,
+      projectDescription: row.project_description || null,
+      co2PerXLM: row.co2_per_xlm?.toString ? row.co2_per_xlm.toString() : String(row.co2_per_xlm || "0"),
+      expectedAnnualTonnesCO2: row.expected_annual_tonnes_co2?.toString ? row.expected_annual_tonnes_co2.toString() : (row.expected_annual_tonnes_co2 ? String(row.expected_annual_tonnes_co2) : null),
+      supportingDocuments: row.supporting_documents || [],
+      storageBackend: row.storage_backend,
+      notes: row.notes || null,
+      status: row.status,
+      reviewerNotes: row.reviewer_notes || null,
+      submittedAt: row.submitted_at ? new Date(row.submitted_at).toISOString() : null,
+      reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
+      timeline: buildTimeline(row),
+    };
+    res.json({ success: true, data: safe });
   } catch (e) {
     next(e);
   }
@@ -549,6 +642,57 @@ router.patch("/:id/status", adminRequired, async (req, res, next) => {
       [status, reviewerNotesStr, actor, req.params.id],
     );
 
+    // Approval is the moment a project's claimed offset rate starts being
+    // trusted, so run the automated CO₂ benchmark check now and stamp the
+    // verdict onto the matching projects row. Failures must never roll back
+    // the approval itself — the flag can be re-derived by an admin.
+    let co2Verification = null;
+    if (status === "approved") {
+      try {
+        co2Verification = await applyCO2VerificationToProject({
+          walletAddress: row.wallet_address,
+          projectName: row.project_name,
+          category: row.project_category,
+          co2PerXLM: row.co2_per_xlm,
+          requestId: req.params.id,
+        });
+      } catch (err) {
+        logger.error(
+          { event: "co2_verification_failed", requestId: req.params.id },
+          `CO₂ verification failed after approval: ${err.message}`,
+        );
+      }
+
+      try {
+        const onboardResult = await onboardProject(mapRequestRow(row));
+        logAdminAction({
+          actor,
+          action: "verification.approved_and_onboarded",
+          targetType: "verification_request",
+          targetId: req.params.id,
+          metadata: {
+            projectId: onboardResult.projectId,
+            webhookSecret: onboardResult.webhookSecret,
+          },
+          ipAddress: req.ip,
+        });
+      } catch (err) {
+        logger.error(
+          { event: "project_onboarding_failed", requestId: req.params.id },
+          `Project onboarding failed after approval: ${err.message}`,
+        );
+      }
+    }
+
+    let co2AuditMetadata = null;
+    if (co2Verification) {
+      co2AuditMetadata = {
+        status: co2Verification.status,
+        reason: co2Verification.reason,
+        projectIds: co2Verification.projectIds,
+      };
+    }
+
     logAdminAction({
       actor,
       action: `verification.${status}`,
@@ -558,11 +702,16 @@ router.patch("/:id/status", adminRequired, async (req, res, next) => {
         fromStatus: row.status,
         toStatus: status,
         reviewerNotes: reviewerNotesStr,
+        co2Verification: co2AuditMetadata,
       },
       ipAddress: req.ip,
     });
 
-    res.json({ success: true, data: mapRequestRow(updated.rows[0]) });
+    res.json({
+      success: true,
+      data: mapRequestRow(updated.rows[0]),
+      ...(co2Verification ? { co2Verification } : {}),
+    });
   } catch (e) {
     next(e);
   }
