@@ -26,6 +26,7 @@ const {
   isRebuilding,
   computeImpactScore,
   co2OffsetForDonation,
+  toScaledInt,
 } = require("./projectionEngine");
 
 function donationEvent(overrides = {}) {
@@ -66,17 +67,35 @@ function projectionWriteCalls() {
 describe("projectionEngine — helpers", () => {
   test("computeImpactScore matches the legacy leaderboard formula", () => {
     // score = xlm*0.7 + (co2/100)*0.3  => 1000*0.7 + 50000/100*0.3 = 700 + 150
-    expect(computeImpactScore(1000, 50000)).toBeCloseTo(850);
-    expect(computeImpactScore(0, 0)).toBe(0);
+    expect(computeImpactScore(1000, 50000)).toBe("850");
+    expect(computeImpactScore(0, 0)).toBe("0");
   });
 
   test("co2OffsetForDonation distributes proportionally when raised>0", () => {
-    expect(co2OffsetForDonation(10, 100, 1000)).toBeCloseTo(100);
+    expect(co2OffsetForDonation(10, 100, 1000)).toBe("100");
   });
 
   test("co2OffsetForDonation is 0 when project has no co2 or no raised", () => {
-    expect(co2OffsetForDonation(10, 100, 0)).toBe(0);
-    expect(co2OffsetForDonation(10, 0, 1000)).toBe(0);
+    expect(co2OffsetForDonation(10, 100, 0)).toBe("0");
+    expect(co2OffsetForDonation(10, 0, 1000)).toBe("0");
+  });
+
+  test("co2OffsetForDonation is integer-exact for donations above 2^53 stroops", () => {
+    // 2^53 + 1 stroops = 900719925.4740993 XLM. A float path rounds the
+    // amount to …992 and computes 1234.5677999999998 instead of 1234.5678.
+    const amountXlm = "900719925.4740993";
+    const raisedXlm = "9007199254.740993"; // 10x the donation
+    const co2Kg = "12345.678";
+    expect(co2OffsetForDonation(amountXlm, raisedXlm, co2Kg)).toBe("1234.5678");
+  });
+
+  test("toScaledInt preserves stroop precision past Number.MAX_SAFE_INTEGER", () => {
+    // 9007199254740993 stroops = 2^53 + 1, not representable as a JS Number.
+    expect(toScaledInt("900719925.4740993", 7)).toBe(9007199254740993n);
+  });
+
+  test("computeImpactScore is integer-exact for large totals", () => {
+    expect(computeImpactScore("900719925.4740993", "12345.678")).toBe("630503984.8688");
   });
 
   test("PROJECTION_NAMES includes the four required projections", () => {
@@ -97,7 +116,7 @@ describe("projectionEngine — handler coverage", () => {
     expect(calls[0].text).toContain("ON CONFLICT (donor_address)");
     expect(calls[0].text).toContain("total_donated = projection_donor_leaderboard.total_donated + $2");
     expect(calls[0].params[0]).toBe("GAAA");
-    expect(Number(calls[0].params[1])).toBe(100);
+    expect(calls[0].params[1]).toBe("100");
   });
 
   test("project_stats issues an upsert and recomputes donor_count", async () => {
@@ -124,7 +143,18 @@ describe("projectionEngine — handler coverage", () => {
     const calls = callsForTable("projection_global_stats").filter((c) => c.text.startsWith("UPDATE"));
     expect(calls).toHaveLength(1);
     expect(calls[0].text).toContain("WHERE id = 1");
-    expect(calls[0].params).toContain(100);
+    expect(calls[0].params).toContain("100");
+  });
+
+  test("donations above 2^53 stroops are passed as exact decimal strings", async () => {
+    const amountXlm = "900719925.4740993"; // 2^53 + 1 stroops
+    const co2OffsetKg = "12345.678";
+    await processEvent(donationEvent({ donorAddress: "GAAA", projectId: "P1", amountXLM: amountXlm, co2OffsetKg }));
+    const lb = callsForTable("projection_donor_leaderboard");
+    expect(lb[0].params[1]).toBe(amountXlm);
+    const gs = callsForTable("projection_global_stats").filter((c) => c.text.startsWith("UPDATE"));
+    expect(gs[0].params[0]).toBe(amountXlm);
+    expect(gs[0].params[1]).toBe(co2OffsetKg);
   });
 
   test("non-DonationRecorded events are ignored by every projection", async () => {

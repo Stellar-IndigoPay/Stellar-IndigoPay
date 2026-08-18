@@ -2,18 +2,40 @@
  * utils/format.ts
  * Formatting helpers and small UI-friendly utilities shared across the frontend.
  */
-import { formatDistanceToNow, format } from "date-fns";
+import { formatDistanceToNow } from "date-fns";
 import type { ProjectStatus, BadgeTier } from "./types";
+
+/**
+ * Locale pinned for all locale-aware formatting. Server-rendered and
+ * client-hydrated output must never depend on the environment's default
+ * locale, so every `Intl.*` call passes an explicit locale.
+ */
+export const PINNED_LOCALE = "en-US";
+
+/**
+ * Timezone pinned for all date/time formatting. Using UTC keeps SSR output
+ * deterministic regardless of the server's or the browser's local timezone,
+ * preventing React hydration mismatches and flickering values.
+ */
+export const PINNED_TIME_ZONE = "UTC";
 
 /**
  * Format a number using Intl.NumberFormat according to the specified locale.
  *
+ * The locale defaults to {@link PINNED_LOCALE} so output is identical on the
+ * server and the client instead of following each environment's default.
+ *
  * @param value - Number to format.
- * @param locale - Locale string (default: "en").
+ * @param locale - Locale string (default: PINNED_LOCALE).
+ * @param options - Optional Intl.NumberFormatOptions.
  * @returns Formatted number string.
  */
-export function formatNumber(value: number, locale = "en"): string {
-  return new Intl.NumberFormat(locale).format(value);
+export function formatNumber(
+  value: number,
+  locale: string = PINNED_LOCALE,
+  options: Intl.NumberFormatOptions = {}
+): string {
+  return new Intl.NumberFormat(locale, options).format(value);
 }
 
 /**
@@ -21,16 +43,16 @@ export function formatNumber(value: number, locale = "en"): string {
  *
  * @param amount - Amount in XLM (string or number).
  * @param decimalsOrLocale - Maximum fractional digits or locale string.
- * @param locale - Locale string if decimals is passed as second arg.
+ * @param locale - Locale string if decimals is passed as second arg (default: PINNED_LOCALE).
  * @returns Formatted string like `"1,234.56 XLM"`.
  */
 export function formatXLM(
   amount: string | number,
   decimalsOrLocale: number | string = 2,
-  locale = "en"
+  locale: string = PINNED_LOCALE
 ): string {
   let decimals = 2;
-  let loc = "en";
+  let loc = PINNED_LOCALE;
   if (typeof decimalsOrLocale === "number") {
     decimals = decimalsOrLocale;
     loc = locale;
@@ -63,7 +85,10 @@ export function formatUSDEquivalent(
   const n = typeof xlmAmount === "string" ? parseFloat(xlmAmount) : xlmAmount;
   if (isNaN(n)) return null;
   const usd = n * price;
-  return `≈ $${usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`;
+  return `≈ $${formatNumber(usd, PINNED_LOCALE, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })} USD`;
 }
 
 /**
@@ -81,7 +106,7 @@ export function formatUSDEquivalent(
 export function formatCO2(kg: number): string {
   if (kg >= 1_000_000) return `${(kg / 1_000_000).toFixed(1)}M kg CO₂`;
   if (kg >= 1_000) return `${(kg / 1_000).toFixed(1)}k kg CO₂`;
-  return `${kg.toLocaleString()} kg CO₂`;
+  return `${formatNumber(kg)} kg CO₂`;
 }
 
 /**
@@ -120,17 +145,115 @@ export function timeAgo(d: string): string {
 }
 
 /**
- * Format an ISO date string as "MMM d, yyyy".
+ * Format an ISO date string as "MMM d, yyyy" (e.g. "Aug 15, 2026").
+ *
+ * The locale and timezone are pinned ({@link PINNED_LOCALE}, {@link PINNED_TIME_ZONE})
+ * so server-rendered and client-hydrated output is identical even when the
+ * server and browser resolve different default locales/timezones.
  *
  * @param d - ISO date string.
+ * @param locale - Locale string (default: PINNED_LOCALE).
+ * @param timeZone - IANA timezone (default: PINNED_TIME_ZONE).
+ * @param options - Optional Intl.DateTimeFormatOptions merged over the defaults.
  * @returns Formatted date string, or the original input on failure.
  * @throws {Error} Never throws.
  */
-export function formatDate(d: string): string {
+export function formatDate(
+  d: string,
+  locale: string = PINNED_LOCALE,
+  timeZone: string = PINNED_TIME_ZONE,
+  options: Intl.DateTimeFormatOptions = {}
+): string {
   try {
-    return format(new Date(d), "MMM d, yyyy");
+    return new Intl.DateTimeFormat(locale, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      timeZone,
+      ...options,
+    }).format(new Date(d));
   } catch {
     return d;
+  }
+}
+
+/**
+ * Format an ISO date string as a medium date + short time (e.g. "Aug 15, 2026, 11:30 PM").
+ *
+ * Uses the pinned locale/timezone for deterministic SSR output.
+ *
+ * @param d - ISO date string.
+ * @param locale - Locale string (default: PINNED_LOCALE).
+ * @param timeZone - IANA timezone (default: PINNED_TIME_ZONE).
+ * @returns Formatted date-time string, or the original input on failure.
+ * @throws {Error} Never throws.
+ */
+export function formatDateTime(
+  d: string,
+  locale: string = PINNED_LOCALE,
+  timeZone: string = PINNED_TIME_ZONE
+): string {
+  try {
+    return new Intl.DateTimeFormat(locale, {
+      dateStyle: "medium",
+      timeStyle: "short",
+      timeZone,
+    }).format(new Date(d));
+  } catch {
+    return d;
+  }
+}
+
+/**
+ * Format an ISO date string as a short time (e.g. "11:30 PM").
+ *
+ * Uses the pinned locale/timezone for deterministic SSR output.
+ *
+ * @param d - ISO date string.
+ * @param locale - Locale string (default: PINNED_LOCALE).
+ * @param timeZone - IANA timezone (default: PINNED_TIME_ZONE).
+ * @returns Formatted time string, or the original input on failure.
+ * @throws {Error} Never throws.
+ */
+export function formatTime(
+  d: string,
+  locale: string = PINNED_LOCALE,
+  timeZone: string = PINNED_TIME_ZONE
+): string {
+  try {
+    return new Intl.DateTimeFormat(locale, {
+      timeStyle: "short",
+      timeZone,
+    }).format(new Date(d));
+  } catch {
+    return d;
+  }
+}
+
+/**
+ * Format a date as a long month + numeric year (e.g. "August 2026").
+ *
+ * Uses the pinned locale/timezone for deterministic SSR output.
+ *
+ * @param d - ISO date string or Date object.
+ * @param locale - Locale string (default: PINNED_LOCALE).
+ * @param timeZone - IANA timezone (default: PINNED_TIME_ZONE).
+ * @returns Formatted month-year string, or the original input on failure.
+ * @throws {Error} Never throws.
+ */
+export function formatMonthYear(
+  d: string | Date,
+  locale: string = PINNED_LOCALE,
+  timeZone: string = PINNED_TIME_ZONE
+): string {
+  try {
+    return new Intl.DateTimeFormat(locale, {
+      month: "long",
+      year: "numeric",
+      timeZone,
+    }).format(d instanceof Date ? d : new Date(d));
+  } catch {
+    return typeof d === "string" ? d : String(d);
   }
 }
 

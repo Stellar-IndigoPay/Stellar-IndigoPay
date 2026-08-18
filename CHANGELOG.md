@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **backend/security:** Load guardian and recurring keeper signing seeds from managed secret files, add signer provider tests, and document signer rotation workflow.
+
 * **extension:** audit `chrome.storage` usage, confirm no plaintext wallet secrets are persisted (signing is delegated entirely to Freighter), and add CI secret-scan to enforce this going forward (closes #656)
 
 - **backend:** deduplicate push device tokens per user+device with a sliding expiry window (default 180 days) refreshed on register, soft-invalidate on unregister/expiry, and purge expired tokens from push sends (closes #717)
@@ -60,6 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **backend:** durable deduplication for Soroban event processing with atomic cursor commit to prevent double-application on restart (closes #679, GrantFox OSS)
+- **backend:** compute donation/CO₂ projection arithmetic in BigInt (and keep stroop amounts as exact decimal strings) so i128 donations beyond 2^53 stay integer-exact in the leaderboard/impact/CO₂ projections instead of being rounded by JS `Number` (closes #681)
 - **gitops:** Argo Rollouts canary strategy with Prometheus success-rate analysis
 - **k8s:** default-deny NetworkPolicy for the `indigopay` namespace with explicit allow rules
 - **k8s:** HPA (min 2, max 10) + PDB (`minAvailable: 1`) for backend and frontend
@@ -80,9 +83,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **backend/frontend Dockerfiles:** pinned to `node:22-alpine`; `npm ci --omit=dev` for reproducible installs
 - **backend,frontend:** rebrand design system with indigo/purple color palette
 - **ci:** `docker-compose.test.yml` runs integration/smoke tests against the compose Postgres/Redis services instead of blanket-skipping them (closes #702)
+- **contracts:** `batch_donate` and `batch_register_projects` now enforce a maximum batch size of 50; oversized batches are rejected with a structured contract error
 
 ### Fixed
 
+* **contracts:** add a project-authorized `withdraw_stealth_donations` path to `DonationContract` (plus a `withdraw_stealth_integrated` forward wrapper on `IndigoPayContract`) with per-(project, token) withdrawable-balance accounting, CEI ordering, structured errors, and `StealthWithdrawal`/`stlth_wdr` events so stealth-donated funds are no longer permanently locked in the `DonationContract` (closes #621)
 * **frontend:** harden the production CSP — drop `'unsafe-inline'` from `script-src` (rely on nonce + `strict-dynamic`) and report violations via `report-to` alongside the deprecated `report-uri` (closes #688)
 * **backend:** reload the keeper account before each recurring submission so transaction sequence numbers are never stale — prevents `tx_bad_seq` when the account sequence advances externally or after a failed submission (closes #705)
 * **backend:** make Horizon donation indexing idempotent by operation ID, advance the cursor on replay, and allow multiple payment operations per transaction (closes #635)
@@ -113,12 +118,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **contracts:** move `DataKey::{Nullifier, ZkDonationRecord}` from instance to persistent storage so the ZK anonymous-donation path (`donate_anonymous_zk`/`donate_anonymous`) no longer grows the always-loaded contract instance entry with every donation; each entry gets its own footprint and TTL, extended to a documented ~1-year retention window on write (closes #706)
 - **backend:** batch Horizon donation stream events to reduce Socket.IO fan-out complexity from O(clients × donations) to O(clients × batches) — configurable 500ms time window and 50-donation max batch size via `INDEXER_BATCH_WINDOW_MS` and `INDEXER_BATCH_MAX_SIZE` environment variables (closes #157)
 - **frontend:** optimize Core Web Vitals with `next/image`, `next/font`, and `next/dynamic` bundle splitting (closes #261)
 
 ### Removed
 
 - **docs:** `docs/openapi.yml` — stale duplicate of `docs/api/openapi.yaml`
+
+### Security
+
+* **contracts/escrow-contract:** harden milestone payout arithmetic against integer overflow (closes #616)
+  - `release_milestone`, `claim_milestone`, `resolve_milestone_dispute`, and `compute_remaining_funds` now compute `amount * percentage / 100` with `checked_mul` / `checked_div` via a shared `compute_proportional_payout` helper instead of raw `*` / `/`
+  - `job.amount` is fully client-controlled at `create_job` (any positive `i128`); because the contracts workspace release profile previously shipped with `overflow-checks = false`, a near-`i128::MAX` amount silently wrapped to an incorrect (small) payout while the full amount stayed locked
+  - Overflow now surfaces the reserved structured `EscrowError` codes (`ReleaseAmountCalculationFailed`, `ClaimAmountCalculationFailed`, `RefundAmountCalculationFailed`) via `panic_with_error!` instead of silently wrapping; full-payout `100`-percent milestones are short-circuited to `amount` so the tautological `amount * 100` intermediate cannot falsely overflow
+  - Enabled `overflow-checks = true` in the contracts workspace release profile as defense-in-depth
+  - Added regression tests asserting the exact contract error code for the release, claim, milestone-dispute, remaining-funds, and refund paths, plus guards confirming normal and full-payout amounts are unaffected
 
 ## [1.0.0] - 2026-07-12
 

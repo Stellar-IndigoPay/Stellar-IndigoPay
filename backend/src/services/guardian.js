@@ -1,8 +1,9 @@
 const { server: stellarServer, NETWORK_PASSPHRASE, submitTransaction } = require("./stellar");
 const { Contract, nativeToScVal, Keypair, TransactionBuilder } = require("@stellar/stellar-sdk");
 const logger = require("../logger");
-const { Gauge, Counter } = require("prom-client");
+const { Counter } = require("prom-client");
 const { registry } = require("./metrics");
+const { getSigningSecret } = require("./signingSecretProvider");
 
 const guardianLastSuccessTimestamp = new Gauge({
   name: "guardian_last_success_timestamp",
@@ -25,15 +26,11 @@ const guardianUpdateCounter = new Counter({
 
 async function buildExtendAllTtlTransaction() {
   const contractId = process.env.CONTRACT_ID;
-  const adminSecret = process.env.ORACLE_ADMIN_SECRET;
+  const adminSecret = await getSigningSecret("oracleAdmin");
 
   if (!contractId) {
     throw new Error("CONTRACT_ID not configured");
   }
-  if (!adminSecret) {
-    throw new Error("ORACLE_ADMIN_SECRET not configured");
-  }
-
   const keypair = Keypair.fromSecret(adminSecret);
   const adminPublicKey = keypair.publicKey();
 

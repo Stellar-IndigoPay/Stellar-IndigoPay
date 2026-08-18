@@ -42,6 +42,9 @@ jest.mock("../../src/services/store", () => ({
 jest.mock("../../src/services/projectionEngine", () => ({
   insertEvent: jest.fn().mockResolvedValue(),
   processEvent: jest.fn().mockResolvedValue(),
+  co2OffsetForDonation: jest.fn(() => "0"),
+  toScaledInt: jest.fn(() => 0n),
+  scaledToDecimalString: jest.fn(() => "0"),
 }));
 
 // ── Module imports (after mocks) ──────────────────────────────────────────
