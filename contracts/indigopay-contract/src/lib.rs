@@ -720,6 +720,12 @@ pub enum DataKey {
     CampaignEscrowMilestones(String),
     /// Escrow job ID for a project's campaign: (project_id) -> String.
     CampaignEscrowJobId(String),
+    // Per-donation token address — written at donation time so that the
+    // challenge-reject path (`resolve_challenge(approve=false)`) can look up
+    // the exact token contract to use when returning funds to the donor.
+    // Appended (not inserted) so existing discriminants are preserved.
+    // Fixes #661.
+    DonationToken(u32),
 }
 
 /// Storage keys for cross-chain attestation settlement (#439).
@@ -2268,6 +2274,9 @@ fn apply_donation_effects(
     env.storage()
         .instance()
         .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+    // Snapshot the token address so resolve_challenge can perform a
+    // currency-consistent refund transfer regardless of which asset was used.
+    // Fixes #661.
     let gr: i128 = env
         .storage()
         .instance()
@@ -2288,6 +2297,17 @@ fn apply_donation_effects(
         .set(&DataKey::GlobalCO2OffsetGrams, &new_gc);
 
     (project, co2_increment, dc)
+}
+
+/// Write the token address associated with a donation record so that
+/// `resolve_challenge` and any future reversal path can look it up without
+/// requiring the caller to supply it explicitly. Called by every donation
+/// entry point immediately after `apply_donation_effects`. Fixes #661.
+#[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+fn record_donation_token(env: &Env, donation_index: u32, token: &Address) {
+    env.storage()
+        .instance()
+        .set(&DataKey::DonationToken(donation_index), token);
 }
 
 /// Process a single donation's core logic: rate limiting, project validation,
@@ -2354,7 +2374,7 @@ fn process_donation_token(
     // ── Effects: all state writes BEFORE the external token transfer
     //    (Checks-Effects-Interactions to defend against reentrancy from a
     //    malicious token contract passed via `token`).
-    let (project, _co2_increment, _donation_index) = apply_donation_effects(
+    let (project, _co2_increment, donation_index) = apply_donation_effects(
         env,
         token_symbol,
         donor,
@@ -2364,6 +2384,8 @@ fn process_donation_token(
         msg_hash,
         anonymous,
     );
+    // Persist the token address for later reversal (challenge reject, etc.).
+    record_donation_token(env, donation_index, token);
 
     #[cfg(feature = "fees")]
     let (project_amount, fee_amount) = split_fee(raw_amount, read_platform_fee_bps(env));
@@ -7552,6 +7574,9 @@ impl IndigoPayContract {
                 .get(&DataKey::Project(record.project.clone()))
                 .expect("Project not found");
 
+            // Project wallet must co-sign the refund transfer from its custody.
+            project.wallet.require_auth();
+
             project.total_raised = project
                 .total_raised
                 .checked_sub(record.amount)
@@ -7612,12 +7637,24 @@ impl IndigoPayContract {
                 &gc.checked_sub(co2_offset).expect("underflow"),
             );
 
-            #[cfg(feature = "usdc")]
-            if record.currency == symbol_short!("USDC") {
-                if let Some(usdc_token) = Self::get_usdc_token(env.clone()) {
-                    let token_client = token::Client::new(&env, &usdc_token);
-                    token_client.transfer(&project.wallet, &record.donor, &record.amount);
-                }
+            // ── Interaction: return the donated tokens from the project
+            // wallet back to the donor, regardless of which asset was used.
+            //
+            // The token address is looked up from `DataKey::DonationToken`,
+            // which was written by `record_donation_token` at donation time.
+            // This mirrors exactly what `approve_refund` does and keeps
+            // accounting and fund movement in agreement. Fixes #661.
+            //
+            // Pre-#661 donations that lack the `DonationToken` entry skip the
+            // transfer rather than panicking, preserving backward compatibility
+            // (accounting-only mode for legacy records).
+            if let Some(refund_token) = env
+                .storage()
+                .instance()
+                .get::<_, Address>(&DataKey::DonationToken(donation_index))
+            {
+                let token_client = token::Client::new(&env, &refund_token);
+                token_client.transfer(&project.wallet, &record.donor, &record.amount);
             }
 
             env.events()
@@ -13818,6 +13855,68 @@ mod tests {
             global_after.total_raised,
             global_before.total_raised - 25 * STROOP
         );
+    }
+
+    // ─── #661 fix: resolve_challenge(approve=false) refunds the donated token ──
+
+    /// XLM donation: rejecting the challenge must transfer 25 XLM
+    /// (the donated amount) back from project.wallet to donor.
+    #[test]
+    fn test_resolve_challenge_reject_refunds_xlm_to_donor() {
+        let (env, _cid, client, admin, pid) = setup();
+        let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let donor_balance_before = StellarAssetClient::new(&env, &token).balance(&donor);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        let reason = String::from_str(&env, "Illicit source — XLM");
+        client.challenge_donation(&donor, &donation_index, &reason);
+
+        client.resolve_challenge(&admin, &donation_index, &false);
+
+        let donor_balance_after = StellarAssetClient::new(&env, &token).balance(&donor);
+
+        // The donor must have received the donated 25 XLM back.
+        assert_eq!(donor_balance_after, donor_balance_before + 25 * STROOP);
+    }
+
+    /// USDC donation: rejecting the challenge must transfer the USDC amount
+    /// back from project.wallet to donor.
+    #[cfg(feature = "usdc")]
+    #[test]
+    fn test_resolve_challenge_reject_refunds_usdc_to_donor() {
+        let (env, _cid, client, admin, pid) = setup();
+
+        // ── Set up USDC token and price oracle.
+        let usdc_admin = Address::generate(&env);
+        let usdc_token = env.register_stellar_asset_contract_v2(usdc_admin).address();
+        let oracle_id = env.register_contract(None, MockOracle);
+        client.set_usdc_token(&admin, &usdc_token);
+        client.set_oracle(&admin, &oracle_id);
+
+        // ── Donor donates 25 USDC (MockOracle: 1 USDC = 8 XLM stroops,
+        //    so xlm_equivalent = 200 STROOP; well above the badge and challenge thresholds).
+        let donor = Address::generate(&env);
+        let usdc_amount: i128 = 25 * STROOP;
+        StellarAssetClient::new(&env, &usdc_token).mint(&donor, &usdc_amount);
+        let donation_index: u32 = client.get_donation_count();
+        client.donate_usdc(&usdc_token, &donor, &pid, &usdc_amount, &0u32);
+
+        let donor_balance_before = StellarAssetClient::new(&env, &usdc_token).balance(&donor);
+
+        // ── Challenge and reject.
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+        let reason = String::from_str(&env, "Illicit source — USDC");
+        client.challenge_donation(&donor, &donation_index, &reason);
+        client.resolve_challenge(&admin, &donation_index, &false);
+
+        let donor_balance_after = StellarAssetClient::new(&env, &usdc_token).balance(&donor);
+
+        // The donor must have received the USDC amount back.
+        assert_eq!(donor_balance_after, donor_balance_before + usdc_amount);
     }
 
     #[test]
