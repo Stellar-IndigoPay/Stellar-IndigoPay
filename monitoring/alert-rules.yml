@@ -1,7 +1,3 @@
-# monitoring/alert-rules.yml
-# Alerting rules evaluated by Prometheus every `evaluation_interval` (15s).
-# Severity levels: page (wake someone up) | warn (look at during business hours).
-
 groups:
   - name: stellar-indigopay-backend-http
     interval: 30s
@@ -16,11 +12,10 @@ groups:
         labels:
           severity: page
         annotations:
-          summary: "Backend 5xx rate above 5% for 5m"
+          summary: Backend 5xx rate above 5% for 5m
           description: |
             More than 5% of HTTP responses in the last 5 minutes returned 5xx.
             Check Sentry and the readiness endpoint.
-
       - alert: BackendHighP99Latency
         expr: |
           histogram_quantile(0.99,
@@ -30,8 +25,7 @@ groups:
         labels:
           severity: warn
         annotations:
-          summary: "Backend p99 latency above 2s for 10m on {{ $labels.route }}"
-
+          summary: Backend p99 latency above 2s for 10m on {{ $labels.route }}
   - name: stellar-indigopay-rate-limit
     interval: 30s
     rules:
@@ -45,12 +39,11 @@ groups:
         labels:
           severity: warn
         annotations:
-          summary: "More than 10% of requests are being rate-limited"
+          summary: More than 10% of requests are being rate-limited
           description: |
             {{ $value | humanizePercentage }} of all HTTP requests in the last 5m
             were rejected with HTTP 429. This may indicate a misconfigured client,
             a DDoS attempt, or an overly aggressive retry loop.
-
       - alert: PerEndpointRateLimitSpike
         expr: |
           rate(indigopay_rate_limit_hits_total{job="stellar-indigopay-backend"}[5m]) > 5
@@ -58,12 +51,11 @@ groups:
         labels:
           severity: warn
         annotations:
-          summary: "{{ $labels.endpoint }} is being rate-limited heavily (>5/s for 5m)"
+          summary: '{{ $labels.endpoint }} is being rate-limited heavily (>5/s for 5m)'
           description: |
             Endpoint {{ $labels.endpoint }} (method={{ $labels.method }}, strategy={{ $labels.strategy }})
             is being rate-limited at {{ $value | humanize }} per second. Check for
             aggressive clients or potential abuse.
-
       - alert: TokenBucketExhausted
         expr: |
           indigopay_rate_limit_remaining{job="stellar-indigopay-backend",strategy="token-bucket"} == 0
@@ -71,7 +63,7 @@ groups:
         labels:
           severity: warn
         annotations:
-          summary: "Token bucket empty on {{ $labels.endpoint }} for 5m"
+          summary: Token bucket empty on {{ $labels.endpoint }} for 5m
           description: |
             The token-bucket rate limiter on endpoint {{ $labels.endpoint }}
             has been empty for over 5 minutes. Clients consuming at or above
@@ -79,7 +71,6 @@ groups:
             the capacity or refill rate if this is expected traffic.
             NOTE: This gauge only updates on request — if traffic stops, the
             alert resolves when the next successful request updates the gauge.
-
   - name: stellar-indigopay-backend-database
     interval: 30s
     rules:
@@ -89,13 +80,12 @@ groups:
         labels:
           severity: warn
         annotations:
-          summary: "Database connection pool has waiting clients"
+          summary: Database connection pool has waiting clients
           description: |
             {{ $value }} clients waiting for a connection.
             Active: check db_pool_total_count, Max: check db_pool_max.
             The pool may be saturated. Consider investigating slow queries
             or increasing DB_POOL_MAX.
-
       - alert: DBPoolExhausted
         expr: db_pool_total_count{job="stellar-indigopay-backend"} >= db_pool_max{job="stellar-indigopay-backend"} AND db_pool_waiting_count{job="stellar-indigopay-backend"} > 0
         for: 10m
@@ -103,13 +93,12 @@ groups:
           severity: page
           routing: pagerduty
         annotations:
-          summary: "Database connection pool exhausted for >10 minutes"
+          summary: Database connection pool exhausted for >10 minutes
           description: |
             All connections are busy and clients are waiting.
             Current active: {{ $value }} (check db_pool_total_count).
             Adaptive sizing may have already increased the limit.
             If this persists, investigate slow queries or provision more database resources.
-
       - alert: DbQuerySlow
         expr: |
           histogram_quantile(0.99,
@@ -119,8 +108,7 @@ groups:
         labels:
           severity: warn
         annotations:
-          summary: "Postgres p99 query latency above 500ms for 10m on op={{ $labels.operation }}"
-
+          summary: Postgres p99 query latency above 500ms for 10m on op={{ $labels.operation }}
   - name: stellar-indigopay-backend-backup
     interval: 30s
     rules:
@@ -131,9 +119,8 @@ groups:
           severity: page
           routing: pagerduty
         annotations:
-          summary: "Database backup verification failed"
-          description: "The nightly backup at {{ $labels.backup_path }} failed verification. Investigate immediately — the backup may be corrupt or unrecoverable."
-
+          summary: Database backup verification failed
+          description: The nightly backup at {{ $labels.backup_path }} failed verification. Investigate immediately — the backup may be corrupt or unrecoverable.
   - name: stellar-indigopay-postgres-failover-info
     interval: 30s
     rules:
@@ -143,13 +130,12 @@ groups:
         labels:
           severity: warn
         annotations:
-          summary: "Postgres failover completed successfully"
+          summary: Postgres failover completed successfully
           description: |
             Standby was promoted to primary. Backend has been restarted.
             The old primary should be investigated and re-synced before
             attempting manual failback.
             New primary host: check POSTGRES_PRIMARY_HOST in stellar-indigopay-config ConfigMap.
-
       - alert: PostgresPrimaryUnhealthy
         expr: |
           up{job="stellar-indigopay-postgres-exporter"} == 0
@@ -158,13 +144,12 @@ groups:
           severity: critical
           routing: pagerduty
         annotations:
-          summary: "Postgres primary exporter is down"
+          summary: Postgres primary exporter is down
           description: |
             The postgres-exporter scraping the primary is unreachable.
             If the primary is genuinely down, the healthcheck sidecar will
             trigger automated failover within 30 s.
             Check: kubectl get pods -n stellar-indigopay -l app=postgres,role=primary
-
   - name: stellar-indigopay-backend-readiness
     interval: 30s
     rules:
@@ -175,17 +160,15 @@ groups:
           severity: page
           routing: pagerduty
         annotations:
-          summary: "Indexer lag is >500 ledgers (~42 minutes behind)"
-          description: "The Horizon indexer is {{ $value }} ledgers behind. Auto-backfill may be failing."
-
+          summary: Indexer lag is >500 ledgers (~42 minutes behind)
+          description: The Horizon indexer is {{ $value }} ledgers behind. Auto-backfill may be failing.
       - alert: IndexerLagWarning
         expr: indigopay_indexer_lag_ledgers > 50
         for: 10m
         labels:
           severity: warn
         annotations:
-          summary: "Indexer lag is >50 ledgers"
-
+          summary: Indexer lag is >50 ledgers
       - alert: IndexerStreamDown
         expr: rate(indigopay_indexer_stream_reconnects_total[10m]) == 0 AND indigopay_indexer_lag_ledgers > 0
         for: 5m
@@ -193,37 +176,31 @@ groups:
           severity: page
           routing: pagerduty
         annotations:
-          summary: "Indexer stream appears down — no reconnects and positive lag"
+          summary: Indexer stream appears down — no reconnects and positive lag
       - alert: ReadinessProbeFailing
-        # We can't directly scrape /api/readyz, so this rule fires when the
-        # in-process readiness_log metric indicates a failure. The wrapper
-        # increments readiness_check_failed_total when /api/readyz returns 503.
         expr: increase(readiness_check_failed_total{job="stellar-indigopay-backend"}[5m]) > 0
         for: 3m
         labels:
           severity: page
         annotations:
-          summary: "Backend readiness has been failing for 3m"
-
+          summary: Backend readiness has been failing for 3m
       - alert: QueueDepthHigh
         expr: sum by (queue) (queue_failed{job="stellar-indigopay-backend"}) > 100
         for: 10m
         labels:
           severity: warn
         annotations:
-          summary: "Queue failed jobs count is high (>100) for 10m on {{ $labels.queue }}"
+          summary: Queue failed jobs count is high (>100) for 10m on {{ $labels.queue }}
           description: |
             There are more than 100 failed jobs in queue '{{ $labels.queue }}' for the last 10 minutes.
             Check the worker logs.
-
       - alert: OracleStale
         expr: time() - indigopay_oracle_price_updated_timestamp > 900
         for: 5m
         labels:
           severity: page
         annotations:
-          summary: "Oracle price is stale (>15 min since last update)"
-
+          summary: Oracle price is stale (>15 min since last update)
   - name: stellar-indigopay-secret-rotation
     interval: 30s
     rules:
@@ -234,12 +211,11 @@ groups:
         labels:
           severity: page
         annotations:
-          summary: "Secret rotation failed or was rolled back in the last hour"
+          summary: Secret rotation failed or was rolled back in the last hour
           description: |
             The most recent automated secret rotation completed with status "failed"
             or "rolled_back". Check the GitHub Actions run linked in the rotation
             audit log and the /health/ready endpoint immediately.
-
       - alert: SecretRotationStuck
         expr: |
           time() - secret_rotation_last_timestamp{status="in_progress"} > 1800
@@ -247,11 +223,10 @@ groups:
         labels:
           severity: warn
         annotations:
-          summary: "Secret rotation has been in_progress for > 30 minutes"
+          summary: Secret rotation has been in_progress for > 30 minutes
           description: |
             A secret rotation started at {{ $value | humanizeTimestamp }} but never
             completed. It may be stuck. Check the GitHub Actions workflow.
-
       - alert: SecretRotationOverdue
         expr: |
           time() - (secret_rotation_last_timestamp{status="completed"}) > 95 * 24 * 3600
@@ -259,8 +234,201 @@ groups:
         labels:
           severity: warn
         annotations:
-          summary: "No successful secret rotation in > 95 days"
+          summary: No successful secret rotation in > 95 days
           description: |
             The last successful secret rotation was {{ $value | humanizeTimestamp }}.
             Rotations are scheduled quarterly (every 91 days). Consider running
             the workflow manually if the automated schedule has been failing.
+  - name: stellar-indigopay-slo-burn-rate
+    interval: 30s
+    rules:
+      - alert: DonationSubmissionAvailabilityBurnRate1h
+        expr: |-
+          (
+            1 - (
+              (sum(rate(http_requests_total{job="stellar-indigopay-backend",route="/api/donations",method="POST",status_code!~"5.."}[1h]))
+          )
+                /
+              (sum(rate(http_requests_total{job="stellar-indigopay-backend",route="/api/donations",method="POST"}[1h]))
+          )
+            )
+          ) > 0.072000
+        for: 2m
+        labels:
+          severity: page
+          slo_id: donation-submission-availability
+          slo_window: 1h
+        annotations:
+          summary: Donation submission SLO fast burn detected
+          description: |-
+            The donation submission API is consuming error budget at 14.4x the normal rate
+            over the last hour. At this rate, the entire 30-day error budget will be
+            exhausted in ~2 days. Investigate 5xx errors and contract failures immediately.
+          runbook: https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/wiki/Runbook-Donation-Submission-SLO
+          slo_name: Donation Submission Availability
+          slo_objective: 99.5%
+      - alert: DonationSubmissionAvailabilityBurnRate6h
+        expr: |-
+          (
+            1 - (
+              (sum(rate(http_requests_total{job="stellar-indigopay-backend",route="/api/donations",method="POST",status_code!~"5.."}[6h]))
+          )
+                /
+              (sum(rate(http_requests_total{job="stellar-indigopay-backend",route="/api/donations",method="POST"}[6h]))
+          )
+            )
+          ) > 0.015000
+        for: 15m
+        labels:
+          severity: warn
+          slo_id: donation-submission-availability
+          slo_window: 6h
+        annotations:
+          summary: Donation submission SLO slow burn detected
+          description: |-
+            The donation submission API has been consuming error budget at 3x the normal
+            rate for the last 6 hours. This indicates sustained degradation. Review error
+            logs, Horizon connectivity, and database query performance.
+          runbook: https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/wiki/Runbook-Donation-Submission-SLO
+          slo_name: Donation Submission Availability
+          slo_objective: 99.5%
+      - alert: ProjectBrowsingAvailabilityBurnRate1h
+        expr: |-
+          (
+            1 - (
+              (sum(rate(http_requests_total{job="stellar-indigopay-backend",route=~"/api/projects.*",method="GET",status_code!~"5.."}[1h]))
+          )
+                /
+              (sum(rate(http_requests_total{job="stellar-indigopay-backend",route=~"/api/projects.*",method="GET"}[1h]))
+          )
+            )
+          ) > 0.014400
+        for: 2m
+        labels:
+          severity: page
+          slo_id: project-browsing-availability
+          slo_window: 1h
+        annotations:
+          summary: Project browsing SLO fast burn detected
+          description: |-
+            The project browsing API is experiencing a fast burn (14.4x) over the last hour.
+            Check database connection pool saturation, query performance, and cache hit rates.
+          runbook: https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/wiki/Runbook-Project-Browsing-SLO
+          slo_name: Project Browsing Availability
+          slo_objective: 99.9%
+      - alert: ProjectBrowsingAvailabilityBurnRate6h
+        expr: |-
+          (
+            1 - (
+              (sum(rate(http_requests_total{job="stellar-indigopay-backend",route=~"/api/projects.*",method="GET",status_code!~"5.."}[6h]))
+          )
+                /
+              (sum(rate(http_requests_total{job="stellar-indigopay-backend",route=~"/api/projects.*",method="GET"}[6h]))
+          )
+            )
+          ) > 0.003000
+        for: 15m
+        labels:
+          severity: warn
+          slo_id: project-browsing-availability
+          slo_window: 6h
+        annotations:
+          summary: Project browsing SLO slow burn detected
+          description: |-
+            Project browsing has been degraded for 6 hours at 3x the normal error rate.
+            Investigate slow queries on the projects table and materialized view freshness.
+          runbook: https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/wiki/Runbook-Project-Browsing-SLO
+          slo_name: Project Browsing Availability
+          slo_objective: 99.9%
+      - alert: DonationSubmissionLatencyBurnRate1h
+        expr: |-
+          (histogram_quantile(0.99,
+            sum by (le) (rate(http_request_duration_seconds_bucket{
+              job="stellar-indigopay-backend",
+              route="/api/donations",
+              method="POST",
+              status_code!~"5.."
+            }[1h]))
+          )
+          ) > 3
+        for: 5m
+        labels:
+          severity: page
+          slo_id: donation-submission-latency
+          slo_window: 1h
+        annotations:
+          summary: Donation submission latency SLO fast burn
+          description: |-
+            P99 donation latency is above 3s and consuming latency budget at 14.4x
+            over the last hour. Check Horizon RPC latency, contract execution time,
+            and database write performance.
+          runbook: https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/wiki/Runbook-Donation-Latency-SLO
+          slo_name: Donation Submission Latency
+          slo_objective: 99%
+      - alert: DonationSubmissionLatencyBurnRate6h
+        expr: |-
+          (histogram_quantile(0.99,
+            sum by (le) (rate(http_request_duration_seconds_bucket{
+              job="stellar-indigopay-backend",
+              route="/api/donations",
+              method="POST",
+              status_code!~"5.."
+            }[6h]))
+          )
+          ) > 3
+        for: 15m
+        labels:
+          severity: warn
+          slo_id: donation-submission-latency
+          slo_window: 6h
+        annotations:
+          summary: Donation submission latency SLO slow burn
+          description: |-
+            P99 donation latency has been elevated for 6 hours. Investigate connection
+            pool contention, slow contract calls, and transaction retry loops.
+          runbook: https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/wiki/Runbook-Donation-Latency-SLO
+          slo_name: Donation Submission Latency
+          slo_objective: 99%
+      - alert: WebhookDeliveryFreshnessBurnRate1h
+        expr: |-
+          (histogram_quantile(0.99,
+            sum by (le) (rate(webhook_delivery_duration_seconds_bucket{
+              job="stellar-indigopay-backend"
+            }[1h]))
+          )
+          ) > 60
+        for: 5m
+        labels:
+          severity: page
+          slo_id: webhook-delivery-freshness
+          slo_window: 1h
+        annotations:
+          summary: Webhook delivery SLO fast burn
+          description: |-
+            Webhook delivery is delayed beyond 60s at 14.4x burn rate. Check worker
+            queue depth (queue_depth metric), worker health, and external endpoint
+            availability (failed delivery retries may cascade).
+          runbook: https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/wiki/Runbook-Webhook-Freshness-SLO
+          slo_name: Webhook Delivery Freshness
+          slo_objective: 99%
+      - alert: WebhookDeliveryFreshnessBurnRate6h
+        expr: |-
+          (histogram_quantile(0.99,
+            sum by (le) (rate(webhook_delivery_duration_seconds_bucket{
+              job="stellar-indigopay-backend"
+            }[6h]))
+          )
+          ) > 60
+        for: 15m
+        labels:
+          severity: warn
+          slo_id: webhook-delivery-freshness
+          slo_window: 6h
+        annotations:
+          summary: Webhook delivery SLO slow burn
+          description: |-
+            Webhook delivery has been consistently slow for 6 hours. Review worker
+            concurrency settings, queue backlog, and recipient endpoint latency.
+          runbook: https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/wiki/Runbook-Webhook-Freshness-SLO
+          slo_name: Webhook Delivery Freshness
+          slo_objective: 99%

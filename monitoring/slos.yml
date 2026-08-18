@@ -1,0 +1,181 @@
+# monitoring/slos.yml
+# Service Level Objectives for Stellar-IndigoPay
+# Version: 1.0.0
+#
+# This file defines the availability and latency promises for critical user
+# journeys. Burn-rate alerts are generated from these SLOs by the generation
+# script (scripts/generate-slo-alerts.js).
+#
+# Burn rate formula (Google SRE model):
+#   - Fast burn: 14.4x consumption rate over 1h window → pages immediately
+#   - Slow burn: 3x consumption rate over 6h window → warns of sustained degradation
+#
+# References:
+#   - SRE Workbook Ch. 5: https://sre.google/workbook/alerting-on-slos/
+#   - Issue #913: Add SLO-based burn-rate alerting
+
+version: "1.0"
+slos:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Donation Submission Availability
+  # ──────────────────────────────────────────────────────────────────────────
+  - id: donation-submission-availability
+    name: Donation Submission Availability
+    description: |
+      Users can successfully submit donations via POST /api/donations.
+      Failures include 5xx responses, timeouts, and contract invocation errors.
+    objective: 99.5  # 99.5% availability
+    window: 30d      # 30-day rolling window
+    error_budget_percent: 0.5  # 0.5% error budget
+    metric:
+      success_expr: |
+        sum(rate(http_requests_total{job="stellar-indigopay-backend",route="/api/donations",method="POST",status_code!~"5.."}[{{.window}}]))
+      total_expr: |
+        sum(rate(http_requests_total{job="stellar-indigopay-backend",route="/api/donations",method="POST"}[{{.window}}]))
+    burn_rates:
+      - window: 1h
+        rate: 14.4
+        severity: page
+        for: 2m
+        annotations:
+          summary: "Donation submission SLO fast burn detected"
+          description: |
+            The donation submission API is consuming error budget at 14.4x the normal rate
+            over the last hour. At this rate, the entire 30-day error budget will be
+            exhausted in ~2 days. Investigate 5xx errors and contract failures immediately.
+          runbook: "https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/wiki/Runbook-Donation-Submission-SLO"
+      - window: 6h
+        rate: 3
+        severity: warn
+        for: 15m
+        annotations:
+          summary: "Donation submission SLO slow burn detected"
+          description: |
+            The donation submission API has been consuming error budget at 3x the normal
+            rate for the last 6 hours. This indicates sustained degradation. Review error
+            logs, Horizon connectivity, and database query performance.
+          runbook: "https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/wiki/Runbook-Donation-Submission-SLO"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Project Browsing Availability
+  # ──────────────────────────────────────────────────────────────────────────
+  - id: project-browsing-availability
+    name: Project Browsing Availability
+    description: |
+      Users can browse projects via GET /api/projects. Includes search, filtering,
+      and pagination. Failures are 5xx responses only (4xx is expected for bad params).
+    objective: 99.9  # 99.9% availability
+    window: 30d
+    error_budget_percent: 0.1
+    metric:
+      success_expr: |
+        sum(rate(http_requests_total{job="stellar-indigopay-backend",route=~"/api/projects.*",method="GET",status_code!~"5.."}[{{.window}}]))
+      total_expr: |
+        sum(rate(http_requests_total{job="stellar-indigopay-backend",route=~"/api/projects.*",method="GET"}[{{.window}}]))
+    burn_rates:
+      - window: 1h
+        rate: 14.4
+        severity: page
+        for: 2m
+        annotations:
+          summary: "Project browsing SLO fast burn detected"
+          description: |
+            The project browsing API is experiencing a fast burn (14.4x) over the last hour.
+            Check database connection pool saturation, query performance, and cache hit rates.
+          runbook: "https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/wiki/Runbook-Project-Browsing-SLO"
+      - window: 6h
+        rate: 3
+        severity: warn
+        for: 15m
+        annotations:
+          summary: "Project browsing SLO slow burn detected"
+          description: |
+            Project browsing has been degraded for 6 hours at 3x the normal error rate.
+            Investigate slow queries on the projects table and materialized view freshness.
+          runbook: "https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/wiki/Runbook-Project-Browsing-SLO"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Donation Submission Latency
+  # ──────────────────────────────────────────────────────────────────────────
+  - id: donation-submission-latency
+    name: Donation Submission Latency
+    description: |
+      P99 latency for successful donation submissions (POST /api/donations) must
+      remain below 3 seconds. Latency includes all processing time: validation,
+      contract invocation, and database writes.
+    objective: 99.0  # 99% of requests complete within target latency
+    window: 30d
+    target_latency_seconds: 3.0
+    metric:
+      latency_expr: |
+        histogram_quantile(0.99,
+          sum by (le) (rate(http_request_duration_seconds_bucket{
+            job="stellar-indigopay-backend",
+            route="/api/donations",
+            method="POST",
+            status_code!~"5.."
+          }[{{.window}}]))
+        )
+    burn_rates:
+      - window: 1h
+        rate: 14.4
+        severity: page
+        for: 5m
+        annotations:
+          summary: "Donation submission latency SLO fast burn"
+          description: |
+            P99 donation latency is above 3s and consuming latency budget at 14.4x
+            over the last hour. Check Horizon RPC latency, contract execution time,
+            and database write performance.
+          runbook: "https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/wiki/Runbook-Donation-Latency-SLO"
+      - window: 6h
+        rate: 3
+        severity: warn
+        for: 15m
+        annotations:
+          summary: "Donation submission latency SLO slow burn"
+          description: |
+            P99 donation latency has been elevated for 6 hours. Investigate connection
+            pool contention, slow contract calls, and transaction retry loops.
+          runbook: "https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/wiki/Runbook-Donation-Latency-SLO"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Worker Freshness (Webhook Delivery Delay)
+  # ──────────────────────────────────────────────────────────────────────────
+  - id: webhook-delivery-freshness
+    name: Webhook Delivery Freshness
+    description: |
+      Webhooks (project status changes, donation confirmations) must be delivered
+      within 60 seconds of the triggering event. Measures queue-to-delivery latency.
+    objective: 99.0  # 99% of webhooks delivered within 60s
+    window: 30d
+    target_latency_seconds: 60.0
+    metric:
+      latency_expr: |
+        histogram_quantile(0.99,
+          sum by (le) (rate(webhook_delivery_duration_seconds_bucket{
+            job="stellar-indigopay-backend"
+          }[{{.window}}]))
+        )
+    burn_rates:
+      - window: 1h
+        rate: 14.4
+        severity: page
+        for: 5m
+        annotations:
+          summary: "Webhook delivery SLO fast burn"
+          description: |
+            Webhook delivery is delayed beyond 60s at 14.4x burn rate. Check worker
+            queue depth (queue_depth metric), worker health, and external endpoint
+            availability (failed delivery retries may cascade).
+          runbook: "https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/wiki/Runbook-Webhook-Freshness-SLO"
+      - window: 6h
+        rate: 3
+        severity: warn
+        for: 15m
+        annotations:
+          summary: "Webhook delivery SLO slow burn"
+          description: |
+            Webhook delivery has been consistently slow for 6 hours. Review worker
+            concurrency settings, queue backlog, and recipient endpoint latency.
+          runbook: "https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/wiki/Runbook-Webhook-Freshness-SLO"
