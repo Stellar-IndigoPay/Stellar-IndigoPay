@@ -2,6 +2,15 @@
 
 ### Features
 
+* **contracts:** validate refund tokens against the asset actually donated
+  - `indigopay-contract` now supports donor refunds: `request_refund` (creates a `Pending` `RefundRequest` within the 24-hour cooldown), `approve_refund` (admin + project-wallet co-sign; atomically transfers the donated token back and reverses donation accounting), `reject_refund`, and `get_refund_request`
+  - **Security fix:** `request_refund` no longer trusts the caller-supplied token. The exact donated asset is snapshotted at donation time under the new `DataKey::DonationToken(index)` key, and any mismatched caller token is rejected with a structured contract error (`"Refund token does not match donated asset"`); the validated donated token — never the caller argument — is stored on the `RefundRequest`
+  - The fix never compares the caller token to the `DonationRecord.currency` symbol string (which would be spoofable, since `donate` records `"XLM"` for any transferred asset); validation is always against the persisted token address
+  - New storage keys (appended; existing keys and layouts unchanged): `DataKey::DonationToken(u32)`, `DataKey::DonationCO2Offset(u32)`, `DataKey::RefundRequest(u32)`, `DataKey::RefundCount`, `DataKey::RefundForDonation(u32)`
+  - `donate`, `donate_usdc`, and vested releases snapshot the exact token actually transferred plus the exact CO₂ credited (for precise reversal); `donate_asset` (DEX path-payment) records snapshot no token and are not refundable (documented)
+  - Refund accounting reversal matches upstream semantics: badges/NFTs, `DonationCount`, `HasDonated`/`donor_count`, and the `DonationRecord` itself are historical and not reversed
+  - 14 new tests: exact-asset refunds succeed (XLM + USDC forms), mismatched-token refunds rejected, stored `RefundRequest` cannot hold a wrong token, rejected refunds leave the donation intact, both asset forms refundable, plus cooldown/duplicate/authorization/approval guards
+
 * **contracts:** apply donation accounting to time-locked vested donations
   - `indigopay-contract` now exposes `donate_vested` (split a donation into equal installments released over time) and `claim_vested_installment` (release/claim subsequent installments); the full amount is held in contract custody and released to the project wallet on schedule
   - Accounting convention: **released-funds accounting** — each released installment is applied once to `project.total_raised`, `GlobalTotalRaised`, `GlobalCO2OffsetGrams`, donor stats, `DonationCount`, and `DonationRecord`, consistent with the existing semantics where totals reflect funds actually delivered to the project wallet; committed-but-unreleased funds are intentionally excluded

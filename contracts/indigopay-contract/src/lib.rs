@@ -161,6 +161,39 @@ pub struct VestingSchedule {
     pub completed_at: u32,
 }
 
+/// Lifecycle state of a donor-initiated refund request. Created `Pending` by
+/// `request_refund`, then either `Approved` (funds returned by
+/// `approve_refund`) or `Rejected`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum RefundRequestStatus {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+/// A donor-initiated refund request. Created by `request_refund` (only for the
+/// asset actually donated), resolved by `approve_refund` (which atomically
+/// transfers tokens back) or `reject_refund`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RefundRequest {
+    pub donor: Address,
+    pub project_id: String,
+    pub amount: i128,
+    pub donation_record_index: u32,
+    pub requested_at: u32,
+    pub status: RefundRequestStatus,
+    /// The token address of the asset actually donated. Always the validated
+    /// `DonationToken(donation_record_index)`, never an arbitrary
+    /// caller-supplied address — see `request_refund`.
+    pub token: Address,
+    /// Exact CO₂ offset credited at donation time, sourced from
+    /// `DonationCO2Offset(donation_record_index)`, so the approval can reverse
+    /// exactly what was credited even if the project CO₂ rate changes later.
+    pub co2_offset_grams: i128,
+}
+
 /// A community voting proposal to verify a project.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -263,6 +296,26 @@ pub enum DataKey {
     // returns. Used by indexers to confirm which WASM is currently
     // running at the contract address.
     LastExecutedUpgrade,
+    // Token address of the asset actually donated for `DonationRecord(index)`.
+    // Persisted at donation time because `DonationRecord` stores only the
+    // currency symbol — `request_refund` validates the caller-supplied token
+    // against this value so a refund can never be requested (or paid out) in
+    // anything other than the asset the donor actually donated.
+    DonationToken(u32),
+    // Exact CO₂ grams credited when `DonationRecord(index)` was written, so a
+    // refund approval can reverse exactly the credited offset even if the
+    // project's CO₂ rate changes after the donation. New key namespace per
+    // UPGRADE.md (new fields must not be appended to stored structs).
+    DonationCO2Offset(u32),
+    // Donor-initiated refund request state keyed by a monotonically
+    // increasing `RefundCount` id.
+    RefundRequest(u32),
+    // Next refund id to allocate. Monotonic so refund ids never collide on
+    // upgrades.
+    RefundCount,
+    // Maps `DonationRecord(index)` to its refund id, enforcing exactly one
+    // refund request per donation.
+    RefundForDonation(u32),
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -282,6 +335,12 @@ const MAX_VOTING_WINDOW_LEDGERS: u32 = 518_400; // 30 days @ 5s/ledger
 // Upper bound on co2_per_xlm at registration — prevents donate-time CO₂ overflow
 // panics and misleading impact figures from misconfigured projects.
 const MAX_CO2_PER_XLM: u32 = 100_000;
+
+// 24 hours × 3600 s ÷ 5 s per ledger = 17 280 ledgers. The window after a
+// donation during which the donor may request a refund. Requests are subject
+// to admin + project-wallet approval; after this window the donation stands.
+// Matches upstream IndigoPay's refund cooldown.
+const REFUND_COOLDOWN_LEDGERS: u32 = 17_280;
 
 // 48 hours × 3600 s / 5 s per ledger = 34 560 ledgers. The minimum delay
 // between `propose_upgrade` and the earliest ledger at which
@@ -358,6 +417,7 @@ fn apply_vested_donation_effects(
     env: &Env,
     donor: &Address,
     project_id: &String,
+    token: &Address,
     released_amount: i128,
     msg_hash: u32,
 ) {
@@ -466,6 +526,14 @@ fn apply_vested_donation_effects(
     env.storage()
         .instance()
         .set(&DataKey::DonationRecord(dc), &donation_record);
+    // Persist the exact token released to the project wallet and the exact
+    // CO₂ credited so a later refund can be validated/reversed precisely.
+    env.storage()
+        .instance()
+        .set(&DataKey::DonationToken(dc), token);
+    env.storage()
+        .instance()
+        .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
 
     let gr: i128 = env
         .storage()
@@ -488,6 +556,95 @@ fn apply_vested_donation_effects(
     env.storage()
         .instance()
         .set(&DataKey::GlobalCO2OffsetGrams, &new_gc);
+}
+
+/// Reverse the donation-derived accounting shared by refunds. The caller
+/// performs authorization and funding checks first, then transfers the tokens
+/// after this helper returns (checks-effects-interactions ordering).
+///
+/// The reversal mirrors exactly what the donation paths credited: project
+/// `total_raised`, donor/global totals, per-project donor totals and CO₂
+/// offsets (using the CO₂ snapshot taken at donation time). Badges, NFTs,
+/// `DonationCount`, `HasDonated`/`donor_count` and the `DonationRecord` itself
+/// are historical and intentionally NOT reversed.
+fn apply_refund_accounting(
+    env: &Env,
+    refund_id: u32,
+    request: &mut RefundRequest,
+    project: &mut Project,
+) {
+    project.total_raised = project
+        .total_raised
+        .checked_sub(request.amount)
+        .expect("underflow");
+    env.storage()
+        .instance()
+        .set(&DataKey::Project(request.project_id.clone()), project);
+
+    let mut donor_stats: DonorStats = env
+        .storage()
+        .instance()
+        .get(&DataKey::DonorStats(request.donor.clone()))
+        .unwrap_or(DonorStats {
+            total_donated: 0,
+            donation_count: 0,
+            badge: BadgeTier::None,
+            co2_offset_grams: 0,
+        });
+    donor_stats.total_donated = donor_stats
+        .total_donated
+        .checked_sub(request.amount)
+        .expect("underflow");
+    donor_stats.co2_offset_grams = donor_stats
+        .co2_offset_grams
+        .checked_sub(request.co2_offset_grams)
+        .expect("underflow");
+    env.storage()
+        .instance()
+        .set(&DataKey::DonorStats(request.donor.clone()), &donor_stats);
+
+    let project_total_key =
+        DataKey::DonorProjectTotal(request.project_id.clone(), request.donor.clone());
+    let previous_project_total: i128 = env
+        .storage()
+        .instance()
+        .get(&project_total_key)
+        .unwrap_or(0);
+    env.storage().instance().set(
+        &project_total_key,
+        &previous_project_total
+            .checked_sub(request.amount)
+            .expect("underflow"),
+    );
+
+    let global_raised: i128 = env
+        .storage()
+        .instance()
+        .get(&DataKey::GlobalTotalRaised)
+        .unwrap_or(0);
+    env.storage().instance().set(
+        &DataKey::GlobalTotalRaised,
+        &global_raised
+            .checked_sub(request.amount)
+            .expect("underflow"),
+    );
+
+    let global_co2: i128 = env
+        .storage()
+        .instance()
+        .get(&DataKey::GlobalCO2OffsetGrams)
+        .unwrap_or(0);
+    env.storage().instance().set(
+        &DataKey::GlobalCO2OffsetGrams,
+        &global_co2
+            .checked_sub(request.co2_offset_grams)
+            .expect("underflow"),
+    );
+
+    request.status = RefundRequestStatus::Approved;
+    env.storage()
+        .instance()
+        .set(&DataKey::RefundRequest(refund_id), request);
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -887,6 +1044,16 @@ impl IndigoPayContract {
             message_hash: msg_hash,
             currency: symbol_short!("XLM"),
         };
+        // Persist the exact asset transferred to the project wallet (the
+        // `token` the caller authenticated against) and the exact CO₂
+        // credited, so `request_refund` can validate the refund token against
+        // the asset actually donated.
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationToken(dc), &token);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
         env.storage()
             .instance()
             .set(&DataKey::DonationRecord(dc), &donation_record);
@@ -1056,7 +1223,12 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::DonationCount, &new_dc);
-        // Store donation record with the source asset code as currency
+        // Store donation record with the source asset code as currency.
+        // NOTE: no `DonationToken(dc)` key is written here — the delivered
+        // asset is XLM (transferred via the DEX path payment in the same
+        // Stellar transaction) and this contract has no token address to
+        // reference it by. Such records are therefore not refundable:
+        // `request_refund` panics when the token snapshot is missing.
         let donation_record = DonationRecord {
             donor: donor.clone(),
             project: project_id.clone(),
@@ -1653,7 +1825,11 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::DonationCount, &new_dc);
-        // Store USDC donation record for trustless enumeration
+        // Store USDC donation record for trustless enumeration.
+        // Persist the exact token transferred (already validated against the
+        // configured `USDCTokenAddress` above) and the exact CO₂ credited so
+        // `request_refund` can validate the refund token against the asset
+        // actually donated.
         let donation_record = DonationRecord {
             donor: donor.clone(),
             project: project_id.clone(),
@@ -1665,6 +1841,12 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::DonationRecord(dc), &donation_record);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationToken(dc), &usdc_token);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
 
         let gr: i128 = env
             .storage()
@@ -1706,6 +1888,205 @@ impl IndigoPayContract {
             (symbol_short!("donated"), donor.clone(), project_id),
             (usdc_amount, symbol_short!("USDC"), msg_hash),
         );
+    }
+
+    // ─── Donor refunds ───────────────────────────────────────────────────────
+
+    /// Create a `RefundRequest` with status `Pending` for a donation the
+    /// caller (`donor`) actually made, within `REFUND_COOLDOWN_LEDGERS` of the
+    /// original donation.
+    ///
+    /// # Security: token validation
+    ///
+    /// The donated asset is resolved from `DonationToken(donation_record_index)`
+    /// — the exact token address persisted when the donation was processed —
+    /// NOT from the caller-supplied `token`. `request_refund` panics unless
+    /// `token == DonationToken(donation_record_index)`, so a refund request can
+    /// never be created (or later paid out via `approve_refund`) in any asset
+    /// other than the one the donor actually donated. The validated donated
+    /// token — never the caller's argument — is stored on the `RefundRequest`.
+    ///
+    /// Records created via `donate_asset` (DEX path payment) have no
+    /// `DonationToken` snapshot and are not refundable; `request_refund`
+    /// panics for them.
+    ///
+    /// # Panics
+    /// - If the donation record does not exist or `donor` is not its donor.
+    /// - If the `REFUND_COOLDOWN_LEDGERS` window has expired.
+    /// - If a refund was already requested for this donation.
+    /// - If `token` does not match the asset actually donated.
+    pub fn request_refund(env: Env, donor: Address, donation_record_index: u32, token: Address) {
+        donor.require_auth();
+        require_not_paused(&env);
+        let record: DonationRecord = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationRecord(donation_record_index))
+            .expect("Donation record not found");
+        if record.donor != donor {
+            panic!("Only the donor can request a refund");
+        }
+        let current_ledger = env.ledger().sequence();
+        let deadline = record
+            .ledger
+            .checked_add(REFUND_COOLDOWN_LEDGERS)
+            .expect("overflow");
+        if current_ledger > deadline {
+            panic!("Refund cooldown expired");
+        }
+        // One refund request per donation — prevent duplicate requests.
+        let refund_for_donation_key = DataKey::RefundForDonation(donation_record_index);
+        if env.storage().instance().has(&refund_for_donation_key) {
+            panic!("Refund already requested for this donation");
+        }
+        // ── Token validation ─────────────────────────────────────────────────
+        // The donor is refunded against the donated asset's token address —
+        // never against a caller-supplied currency string. `DonationRecord`
+        // stores only the symbol, so the real token was snapshotted under
+        // `DonationToken(index)` when the donation was processed.
+        let donated_token: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationToken(donation_record_index))
+            .expect("Donation token unknown; this donation cannot be refunded");
+        if token != donated_token {
+            panic!("Refund token does not match donated asset");
+        }
+        // Snapshot the exact CO₂ credited at donation time so `approve_refund`
+        // can reverse exactly what was credited even if the project's CO₂ rate
+        // changed since.
+        let co2_offset_grams: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DonationCO2Offset(donation_record_index))
+            .unwrap_or(0);
+        let refund_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RefundCount)
+            .unwrap_or(0);
+        let refund_id = refund_count;
+        let request = RefundRequest {
+            donor: donor.clone(),
+            project_id: record.project.clone(),
+            amount: record.amount,
+            donation_record_index,
+            requested_at: current_ledger,
+            status: RefundRequestStatus::Pending,
+            // Always the validated donated asset, never the caller's token.
+            token: donated_token,
+            co2_offset_grams,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::RefundRequest(refund_id), &request);
+        env.storage()
+            .instance()
+            .set(&refund_for_donation_key, &refund_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::RefundCount, &(refund_id + 1));
+        env.events().publish(
+            (symbol_short!("rfnd_rq"), refund_id, donor),
+            (record.project, record.amount, donation_record_index),
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(VOTING_WINDOW_LEDGERS * 4, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Admin + project wallet co-sign to approve a pending refund.
+    /// Atomically transfers the donated token back from the project wallet to
+    /// the donor and decrements all counters (CEI ordering — effects before
+    /// interaction).
+    ///
+    /// Badges are permanent and NOT recalculated. `DonationRecord`,
+    /// `DonationCount`, `HasDonated` and `Project.donor_count` are historical
+    /// and NOT decremented.
+    ///
+    /// # Panics
+    /// - If the caller is not the admin or the contract is paused.
+    /// - If the refund request is not found or is not `Pending`.
+    /// - If the project wallet does not co-sign.
+    pub fn approve_refund(env: Env, admin: Address, refund_id: u32) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        require_not_paused(&env);
+
+        let mut request: RefundRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey::RefundRequest(refund_id))
+            .expect("Refund request not found");
+        if request.status != RefundRequestStatus::Pending {
+            panic!("Refund request is not pending");
+        }
+        let mut project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(request.project_id.clone()))
+            .expect("Project not found");
+        // Project wallet must co-sign — the refund is paid out of its balance.
+        project.wallet.require_auth();
+
+        // ── Effects: reverse all donation accounting BEFORE the external
+        //    token transfer (Checks-Effects-Interactions).
+        apply_refund_accounting(&env, refund_id, &mut request, &mut project);
+
+        // ── Interaction: token transfer from project wallet back to donor.
+        let token_client = token::Client::new(&env, &request.token);
+        token_client.transfer(&project.wallet, &request.donor, &request.amount);
+
+        env.events().publish(
+            (symbol_short!("rfnd_ap"), refund_id, admin),
+            (request.project_id, request.amount, request.donor),
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(VOTING_WINDOW_LEDGERS * 4, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Admin-only: reject a pending refund request. The donation stands;
+    /// no counters are adjusted and no tokens move.
+    ///
+    /// # Panics
+    /// - If the caller is not the admin or the contract is paused.
+    /// - If the refund request is not found or is not `Pending`.
+    pub fn reject_refund(env: Env, admin: Address, refund_id: u32) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        require_not_paused(&env);
+
+        let mut request: RefundRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey::RefundRequest(refund_id))
+            .expect("Refund request not found");
+        if request.status != RefundRequestStatus::Pending {
+            panic!("Refund request is not pending");
+        }
+
+        request.status = RefundRequestStatus::Rejected;
+        env.storage()
+            .instance()
+            .set(&DataKey::RefundRequest(refund_id), &request);
+
+        env.events().publish(
+            (symbol_short!("rfnd_rj"), refund_id, admin),
+            (request.project_id, request.donor),
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(VOTING_WINDOW_LEDGERS * 4, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Read-only: returns the refund request for the given ID, or panics if
+    /// not found.
+    pub fn get_refund_request(env: Env, refund_id: u32) -> RefundRequest {
+        env.storage()
+            .instance()
+            .get(&DataKey::RefundRequest(refund_id))
+            .expect("Refund request not found")
     }
 
     // ─── Time-locked vesting donations ───────────────────────────────────────
@@ -1811,7 +2192,14 @@ impl IndigoPayContract {
 
         // ── Effects: account for the first released installment before any
         //    external token transfer (Checks-Effects-Interactions).
-        apply_vested_donation_effects(&env, &donor, &project_id, amount_per_installment, msg_hash);
+        apply_vested_donation_effects(
+            &env,
+            &donor,
+            &project_id,
+            &token,
+            amount_per_installment,
+            msg_hash,
+        );
 
         // ── Interaction: transfer the full amount from the donor into
         //    contract custody, then release the first installment from the
@@ -1888,6 +2276,7 @@ impl IndigoPayContract {
             &env,
             &schedule.donor,
             &schedule.project_id,
+            &schedule.token,
             schedule.amount_per_installment,
             0,
         );
@@ -3698,5 +4087,329 @@ mod tests {
     fn test_cancel_upgrade_without_pending_fails() {
         let (_env, _cid, client, admin) = setup_admin_only();
         client.cancel_upgrade(&admin);
+    }
+
+    // ─── Refund token validation ────────────────────────────────────────────
+
+    /// Register a USDC token with the contract, configure it, and wire up the
+    /// price oracle (MockOracle returns a fixed 8 XLM/USDC rate).
+    fn setup_usdc(
+        env: &Env,
+        client: &IndigoPayContractClient<'static>,
+        admin: &Address,
+    ) -> Address {
+        let token_admin = Address::generate(env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.set_usdc_token(admin, &token);
+        let oracle_id = env.register_contract(None, MockOracle);
+        client.set_oracle(admin, &oracle_id);
+        token
+    }
+
+    // Group 1) An exact-asset refund succeeds end to end.
+    #[test]
+    fn test_refund_xlm_exact_asset_succeeds_full_lifecycle() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        let amount = 25 * STROOP;
+        token_client.mint(&donor, &amount);
+
+        client.donate(&token, &donor, &pid, &amount, &42u32);
+        assert_eq!(client.get_project(&pid).total_raised, amount);
+        assert_eq!(token_client.balance(&donor), 0);
+
+        // The exact donated token is accepted.
+        client.request_refund(&donor, &0u32, &token);
+        let request = client.get_refund_request(&0u32);
+        assert_eq!(request.status, RefundRequestStatus::Pending);
+        assert_eq!(request.amount, amount);
+        assert_eq!(request.donation_record_index, 0);
+
+        // Admin + project wallet co-approve; accounting is reversed and the
+        // donated token moves back to the donor.
+        client.approve_refund(&admin, &0u32);
+        assert_eq!(token_client.balance(&donor), amount);
+        assert_eq!(client.get_project(&pid).total_raised, 0);
+        assert_eq!(client.get_donor_stats(&donor).total_donated, 0);
+        assert_eq!(client.get_donor_stats(&donor).co2_offset_grams, 0);
+        assert_eq!(client.get_global_total(), 0);
+        assert_eq!(client.get_global_co2(), 0);
+        // DonationCount is historical and NOT decremented.
+        assert_eq!(client.get_donation_count(), 1);
+        assert_eq!(
+            client.get_refund_request(&0u32).status,
+            RefundRequestStatus::Approved
+        );
+    }
+
+    // Group 1) Exact-asset refund succeeds for the contract-token (USDC) form.
+    #[test]
+    fn test_refund_usdc_exact_asset_succeeds() {
+        let (env, _cid, client, admin, pid) = setup();
+        let usdc = setup_usdc(&env, &client, &admin);
+        let donor = Address::generate(&env);
+        let usdc_client = StellarAssetClient::new(&env, &usdc);
+        let usdc_amount: i128 = 10 * 1_000_000;
+        usdc_client.mint(&donor, &usdc_amount);
+        client.donate_usdc(&usdc, &donor, &pid, &usdc_amount, &0u32);
+
+        client.request_refund(&donor, &0u32, &usdc);
+        client.approve_refund(&admin, &0u32);
+
+        assert_eq!(usdc_client.balance(&donor), usdc_amount);
+        assert_eq!(
+            client.get_refund_request(&0u32).status,
+            RefundRequestStatus::Approved
+        );
+    }
+
+    // Group 2) A different token than the one actually donated is rejected.
+    #[test]
+    #[should_panic(expected = "Refund token does not match donated asset")]
+    fn test_refund_rejects_different_token_for_xlm_donation() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        let other = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        let amount = 25 * STROOP;
+        StellarAssetClient::new(&env, &token).mint(&donor, &amount);
+        client.donate(&token, &donor, &pid, &amount, &42u32);
+        client.request_refund(&donor, &0u32, &other);
+    }
+
+    #[test]
+    #[should_panic(expected = "Refund token does not match donated asset")]
+    fn test_refund_rejects_different_token_for_usdc_donation() {
+        let (env, _cid, client, admin, pid) = setup();
+        let usdc = setup_usdc(&env, &client, &admin);
+        let donor = Address::generate(&env);
+        let attacker_token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        let usdc_amount: i128 = 10 * 1_000_000;
+        StellarAssetClient::new(&env, &usdc).mint(&donor, &usdc_amount);
+        client.donate_usdc(&usdc, &donor, &pid, &usdc_amount, &0u32);
+
+        // An unrelated token must be rejected even though the donation record
+        // carries the "USDC" currency symbol.
+        client.request_refund(&donor, &0u32, &attacker_token);
+    }
+
+    // The fix must NOT compare the caller token to the "XLM" currency string:
+    // `donate` records currency "XLM" regardless, so only the persisted
+    // donated token may pass validation.
+    #[test]
+    #[should_panic(expected = "Refund token does not match donated asset")]
+    fn test_refund_rejects_unrelated_token_for_xlm_currency_donation() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let gifted_token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        let unrelated_token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        let amount = 25 * STROOP;
+        StellarAssetClient::new(&env, &gifted_token).mint(&donor, &amount);
+        // Donation records currency "XLM" but the actual asset transferred is
+        // `gifted_token`. A refund in `unrelated_token` must still be rejected.
+        client.donate(&gifted_token, &donor, &pid, &amount, &42u32);
+        client.request_refund(&donor, &0u32, &unrelated_token);
+    }
+
+    // Group 3) The stored RefundRequest always references the donated asset,
+    // never a caller-supplied token.
+    #[test]
+    fn test_refund_request_stores_only_donated_token() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        let other = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        let amount = 25 * STROOP;
+        StellarAssetClient::new(&env, &token).mint(&donor, &amount);
+        client.donate(&token, &donor, &pid, &amount, &7u32);
+
+        client.request_refund(&donor, &0u32, &token);
+        let request = client.get_refund_request(&0u32);
+        // The granted request captures the donated asset, not `other`.
+        assert_eq!(request.token, token);
+        assert_ne!(request.token, other);
+    }
+
+    // Group 4) A rejected refund leaves the donation fully intact.
+    #[test]
+    fn test_refund_reject_leaves_donation_stand() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        let amount = 25 * STROOP;
+        token_client.mint(&donor, &amount);
+        client.donate(&token, &donor, &pid, &amount, &42u32);
+        client.request_refund(&donor, &0u32, &token);
+
+        client.reject_refund(&admin, &0u32);
+        let request = client.get_refund_request(&0u32);
+        assert_eq!(request.status, RefundRequestStatus::Rejected);
+        // Donation stands: no tokens moved, no accounting reversed.
+        assert_eq!(token_client.balance(&donor), 0);
+        assert_eq!(client.get_project(&pid).total_raised, amount);
+        assert_eq!(client.get_global_total(), amount);
+        assert_eq!(client.get_global_co2(), 25 * 100i128);
+    }
+
+    // Group 5) Both asset forms — native/XLM-style (donate) and contract-token
+    // (donate_usdc) — are refundable, and each validates its own donated asset.
+    #[test]
+    fn test_refund_both_asset_forms() {
+        let (env, _cid, client, admin, pid) = setup();
+
+        // Token form (USDC).
+        let usdc = setup_usdc(&env, &client, &admin);
+        let donor_a = Address::generate(&env);
+        let usdc_client = StellarAssetClient::new(&env, &usdc);
+        let usdc_amount: i128 = 10 * 1_000_000;
+        usdc_client.mint(&donor_a, &usdc_amount);
+        client.donate_usdc(&usdc, &donor_a, &pid, &usdc_amount, &1u32);
+        client.request_refund(&donor_a, &0u32, &usdc);
+        client.approve_refund(&admin, &0u32);
+        assert_eq!(usdc_client.balance(&donor_a), usdc_amount);
+
+        // XLM/native form (donate).
+        let donor_b = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        let xlm_amt = 25 * STROOP;
+        token_client.mint(&donor_b, &xlm_amt);
+        client.donate(&token, &donor_b, &pid, &xlm_amt, &2u32);
+        client.request_refund(&donor_b, &1u32, &token);
+        client.approve_refund(&admin, &1u32);
+        assert_eq!(token_client.balance(&donor_b), xlm_amt);
+    }
+
+    // ─── Refund guards ───────────────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Only the donor can request a refund")]
+    fn test_refund_non_donor_fails() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let amount = 25 * STROOP;
+        StellarAssetClient::new(&env, &token).mint(&donor, &amount);
+        client.donate(&token, &donor, &pid, &amount, &42u32);
+        client.request_refund(&attacker, &0u32, &token);
+    }
+
+    #[test]
+    #[should_panic(expected = "Refund already requested for this donation")]
+    fn test_refund_duplicate_request_fails() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let amount = 25 * STROOP;
+        StellarAssetClient::new(&env, &token).mint(&donor, &amount);
+        client.donate(&token, &donor, &pid, &amount, &42u32);
+        client.request_refund(&donor, &0u32, &token);
+        client.request_refund(&donor, &0u32, &token);
+    }
+
+    #[test]
+    #[should_panic(expected = "Refund cooldown expired")]
+    fn test_refund_after_cooldown_expires_fails() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let amount = 25 * STROOP;
+        StellarAssetClient::new(&env, &token).mint(&donor, &amount);
+        client.donate(&token, &donor, &pid, &amount, &42u32);
+
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + REFUND_COOLDOWN_LEDGERS + 1);
+        client.request_refund(&donor, &0u32, &token);
+    }
+
+    #[test]
+    #[should_panic(expected = "Donation token unknown; this donation cannot be refunded")]
+    fn test_refund_donate_asset_not_refundable() {
+        // `donate_asset` delivers XLM via DEX path payment and snapshots no
+        // token address, so its records cannot be refunded.
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        client.donate_asset(&donor, &pid, &(25 * STROOP), &symbol_short!("yXLM"), &9u32);
+        let token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        client.request_refund(&donor, &0u32, &token);
+    }
+
+    #[test]
+    #[should_panic(expected = "Refund request is not pending")]
+    fn test_refund_approve_already_resolved_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let amount = 25 * STROOP;
+        StellarAssetClient::new(&env, &token).mint(&donor, &amount);
+        client.donate(&token, &donor, &pid, &amount, &42u32);
+        client.request_refund(&donor, &0u32, &token);
+        client.reject_refund(&admin, &0u32);
+        client.approve_refund(&admin, &0u32);
+    }
+
+    // Vested releases also snapshot the schedule token, so released
+    // installments remain refundable in the asset actually donated.
+    #[test]
+    fn test_refund_vested_release_tracks_schedule_token() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        let total = 30 * STROOP;
+        token_client.mint(&donor, &total);
+        client.donate_vested(&token, &donor, &pid, &total, &3u32, &100u32, &5u32);
+
+        // The first (immediately released) installment is refundable in the
+        // schedule's token.
+        client.request_refund(&donor, &0u32, &token);
+        let request = client.get_refund_request(&0u32);
+        assert_eq!(request.token, token);
+        assert_eq!(request.amount, 10 * STROOP);
     }
 }
