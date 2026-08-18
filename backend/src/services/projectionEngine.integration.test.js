@@ -212,6 +212,35 @@ describe("Projection engine integration (testcontainers)", () => {
     expect(snap.historyCount).toBe(5);
   });
 
+  test("amounts above 2^53 stroops round-trip exactly into NUMERIC projections", async () => {
+    if (!ready) return console.warn("skipping – container unavailable");
+    // 2^53 + 1 stroops = 900719925.4740993 XLM. JavaScript Number would round
+    // this to …992 before it ever reached PostgreSQL.
+    const amountXlm = "900719925.4740993";
+    const e = {
+      event_type: "DonationRecorded",
+      aggregate_id: PROJECTS[0],
+      event_data: {
+        donorAddress: DONORS[0], projectId: PROJECTS[0], amountXLM: amountXlm,
+        currency: "XLM", co2OffsetKg: "12345.678", projectsSupported: 1, transactionHash: "big-stroop-tx",
+      },
+      transaction_hash: "big-stroop-tx",
+    };
+    await insertEvent(e, testPool);
+    await processEvent(e, { pool: testPool });
+
+    const ps = await testPool.query(
+      "SELECT raised_xlm FROM projection_project_stats WHERE project_id = $1",
+      [PROJECTS[0]],
+    );
+    expect(ps.rows[0].raised_xlm).toBe(amountXlm);
+
+    const gs = await testPool.query(
+      "SELECT total_xlm_raised FROM projection_global_stats WHERE id = 1",
+    );
+    expect(gs.rows[0].total_xlm_raised).toBe(amountXlm);
+  });
+
   test("idempotent replay: same event applied twice keeps identical totals", async () => {
     if (!ready) return console.warn("skipping – container unavailable");
     const e = {

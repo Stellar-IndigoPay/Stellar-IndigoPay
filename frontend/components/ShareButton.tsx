@@ -5,6 +5,7 @@
  */
 
 import { useCallback, useState } from "react";
+import { formatNumber } from "@/utils/format";
 
 export interface ShareButtonProps {
   /** Full URL to share. */
@@ -29,7 +30,7 @@ export function donorShareText(
   const xlm = parseFloat(totalDonatedXLM);
   const formatted = isNaN(xlm)
     ? totalDonatedXLM
-    : `${xlm.toLocaleString("en-US", { maximumFractionDigits: 2 })} XLM`;
+    : `${formatNumber(xlm, "en-US", { maximumFractionDigits: 2 })} XLM`;
   return `${displayName} donated ${formatted} to ${projectsSupported} climate project${projectsSupported !== 1 ? "s" : ""} on @StellarIndigoPay! 🌍 Check out the impact:`;
 }
 

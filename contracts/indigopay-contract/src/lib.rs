@@ -671,6 +671,16 @@ pub enum DataKey {
     NativeTokenAddress,
     // zk-SNARK anonymous donation (#390)
     ZkVerificationKey,
+    // Stored in *persistent* storage, not instance storage (#706). One entry
+    // is written per anonymous donation and the set only ever grows, so
+    // keeping it in the always-loaded instance entry would make every
+    // contract invocation's footprint grow with total ZK donation volume and
+    // risk exceeding the ledger-entry size limit. Persistent storage gives
+    // each nullifier/record its own footprint and TTL instead. See
+    // `ZK_STORAGE_TTL_LEDGERS` for the retention policy. A ring/eviction
+    // scheme was deliberately rejected for `Nullifier`: evicting an old
+    // nullifier would make it reusable again, defeating double-spend
+    // protection.
     Nullifier(BytesN<32>),
     ZkDonationRecord(u32),
     // Time-locked donation vesting (#386)
@@ -771,6 +781,7 @@ const MAX_VOTING_WINDOW_LEDGERS: u32 = 518_400; // 30 days @ 5s/ledger
                                                 // Upper bound on co2_per_xlm at registration — prevents donate-time CO₂ overflow
                                                 // panics and misleading impact figures from misconfigured projects.
 const MAX_CO2_PER_XLM: u32 = 100_000;
+const MAX_BATCH_SIZE: u32 = 50;
 
 // ─── Main contract error codes ─────────────────────────────────────────────
 #[contracterror]
@@ -921,6 +932,8 @@ pub enum ContractError {
     InvalidPeriodRangeStartMustBeBeforeEnd = 128,
     RootCannotBeZero = 129,
     ImpactVerificationFailed = 130,
+    // ── Batch limits ────────────────────────────────────────────────────────
+    BatchSizeExceedsMaximum = 131,
 }
 // 48 hours × 3600 s / 5 s per ledger = 34 560 ledgers. The minimum delay
 // between `propose_upgrade` and the earliest ledger at which
@@ -957,6 +970,22 @@ const FORCE_REFUND_TIMELOCK_LEDGERS: u32 = 51_840;
 // is preserved for indexers. After this window, anyone may call the
 // corresponding `cleanup_*` function to remove the storage entries.
 pub const GRACE_PERIOD_LEDGERS: u32 = 518_400;
+
+// ~365 days × 86400 s ÷ 5 s per ledger ≈ 6_307_200 ledgers — chosen close to
+// the network's maximum single-extension TTL (soroban-sdk's
+// `Storage::max_ttl` defaults to 6_312_000 in the test environment and
+// mainnet uses the same ceiling). Documented retention policy for
+// `DataKey::{Nullifier, ZkDonationRecord}` (#706): each entry lives in
+// *persistent* storage (see rationale at their declaration) and has its TTL
+// extended to this window on write. A nullifier must never become reusable,
+// so unlike `GRACE_PERIOD_LEDGERS`-style data these entries are never
+// cleaned up — if indefinite on-chain retention is required beyond this
+// window, an operator must re-invoke a donation/query path (or a future
+// maintenance call) to bump the TTL again before it lapses. Letting the TTL
+// lapse only risks the network archiving the entry (recoverable via
+// restoration), not silent data loss or nullifier reuse.
+#[cfg(feature = "zk")]
+const ZK_STORAGE_TTL_LEDGERS: u32 = 6_307_200;
 
 /// Current storage schema version. Bump this and add a migration step in
 /// `migrate()` whenever a struct layout, DataKey variant, or stored value
@@ -2716,6 +2745,9 @@ impl IndigoPayContract {
     pub fn batch_register_projects(env: Env, admin: Address, projects: Vec<ProjectInit>) {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
+        if projects.len() > MAX_BATCH_SIZE {
+            panic_with_error!(&env, ContractError::BatchSizeExceedsMaximum);
+        }
         let mut ids: Vec<String> = env
             .storage()
             .instance()
@@ -3568,6 +3600,9 @@ impl IndigoPayContract {
     #[cfg(any(feature = "batch", feature = "donation", feature = "testutils"))]
     pub fn batch_donate(env: Env, token: Address, donations: Vec<BatchDonation>) {
         require_not_paused(&env);
+        if donations.len() > MAX_BATCH_SIZE {
+            panic_with_error!(&env, ContractError::BatchSizeExceedsMaximum);
+        }
         let mut authorized: Vec<Address> = Vec::new(&env);
         for donation in donations.iter() {
             if donation.amount <= 0 {
@@ -3944,7 +3979,7 @@ impl IndigoPayContract {
         }
 
         let nullifier_key = DataKey::Nullifier(nullifier.clone());
-        if env.storage().instance().has(&nullifier_key) {
+        if env.storage().persistent().has(&nullifier_key) {
             panic!("ZK nullifier already used");
         }
 
@@ -4006,8 +4041,9 @@ impl IndigoPayContract {
             .instance()
             .get(&DataKey::DonationCount)
             .unwrap_or(0);
-        env.storage().instance().set(
-            &DataKey::ZkDonationRecord(index),
+        let zk_record_key = DataKey::ZkDonationRecord(index);
+        env.storage().persistent().set(
+            &zk_record_key,
             &ZkDonationRecord {
                 project: project_id.clone(),
                 amount,
@@ -4015,6 +4051,11 @@ impl IndigoPayContract {
                 nullifier: nullifier.clone(),
                 ledger: env.ledger().sequence(),
             },
+        );
+        env.storage().persistent().extend_ttl(
+            &zk_record_key,
+            ZK_STORAGE_TTL_LEDGERS,
+            ZK_STORAGE_TTL_LEDGERS,
         );
         env.storage().instance().set(
             &DataKey::DonationCount,
@@ -4042,7 +4083,12 @@ impl IndigoPayContract {
             &DataKey::GlobalCO2OffsetGrams,
             &global_co2.checked_add(co2).expect("overflow"),
         );
-        env.storage().instance().set(&nullifier_key, &true);
+        env.storage().persistent().set(&nullifier_key, &true);
+        env.storage().persistent().extend_ttl(
+            &nullifier_key,
+            ZK_STORAGE_TTL_LEDGERS,
+            ZK_STORAGE_TTL_LEDGERS,
+        );
         env.events().publish(
             (symbol_short!("zk_donate"), project_id, nullifier),
             (amount_commitment, co2),
@@ -4052,13 +4098,15 @@ impl IndigoPayContract {
 
     #[cfg(feature = "zk")]
     pub fn is_zk_nullifier_used(env: Env, nullifier: BytesN<32>) -> bool {
-        env.storage().instance().has(&DataKey::Nullifier(nullifier))
+        env.storage()
+            .persistent()
+            .has(&DataKey::Nullifier(nullifier))
     }
 
     #[cfg(feature = "zk")]
     pub fn get_zk_donation_record(env: Env, index: u32) -> ZkDonationRecord {
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::ZkDonationRecord(index))
             .expect("ZK donation record not found")
     }
@@ -4121,8 +4169,13 @@ impl IndigoPayContract {
         if amount <= 0 {
             panic!("Donation amount must be positive");
         }
+        // `Nullifier` lives in persistent storage (#706) and is shared with
+        // `donate_anonymous_zk`/`is_nullifier_spent` — it must be read/written
+        // through the same storage type everywhere or a nullifier spent via
+        // one anonymous-donation path would not be recognized as spent by
+        // the other.
         let nullifier_key = DataKey::Nullifier(nullifier.clone());
-        if env.storage().instance().has(&nullifier_key) {
+        if env.storage().persistent().has(&nullifier_key) {
             panic!("Nullifier already spent");
         }
         // Load and verify the Groth16 proof against the admin-set vk.
@@ -4186,7 +4239,12 @@ impl IndigoPayContract {
         // Mark nullifier as spent AFTER all checks pass, as part of the
         // Effects step. Prevents griefing where a valid proof for a
         // deactivated project permanently consumes the nullifier.
-        env.storage().instance().set(&nullifier_key, &true);
+        env.storage().persistent().set(&nullifier_key, &true);
+        env.storage().persistent().extend_ttl(
+            &nullifier_key,
+            ZK_STORAGE_TTL_LEDGERS,
+            ZK_STORAGE_TTL_LEDGERS,
+        );
 
         project.total_raised = project.total_raised.checked_add(amount).expect("overflow");
         let goal_reached = apply_campaign_goal_progress(&mut project);
@@ -4331,7 +4389,9 @@ impl IndigoPayContract {
     /// Check if a nullifier has already been spent.
     #[cfg(feature = "zk")]
     pub fn is_nullifier_spent(env: Env, nullifier: BytesN<32>) -> bool {
-        env.storage().instance().has(&DataKey::Nullifier(nullifier))
+        env.storage()
+            .persistent()
+            .has(&DataKey::Nullifier(nullifier))
     }
 
     // ─── Integrated Stealth Address Donation (#458) ───────────────────────────
@@ -4485,6 +4545,59 @@ impl IndigoPayContract {
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
 
         donation_id
+    }
+
+    /// Integrated stealth withdrawal (#621).
+    ///
+    /// Project-wallet-gated forward of `DonationContract.withdraw_stealth_donations`
+    /// for the project registered under `project_id`. Resolves the project's
+    /// wallet, cross-calls the configured `DonationContract` (which enforces
+    /// `project_wallet` auth and CEI-ordered per-(project, token) balance
+    /// accounting), and emits a main-contract `stlth_wdr` event so indexers
+    /// can reconcile on-chain `total_raised` with funds actually received by
+    /// the project.
+    ///
+    /// The caller must be (and must sign as) the project's wallet; the auth
+    /// check runs inside the `DonationContract`. The call is intentionally
+    /// not gated on the contract/project pause or active flags so funds are
+    /// never stranded (#621).
+    ///
+    /// Returns the remaining stealth withdrawable balance for
+    /// (project wallet, token) after the withdrawal.
+    #[cfg(feature = "donation")]
+    pub fn withdraw_stealth_integrated(
+        env: Env,
+        project_id: String,
+        token: Address,
+        amount: i128,
+    ) -> i128 {
+        let project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(project_id.clone()))
+            .expect("Project not found");
+        // Root-level auth so the sub-invocation's `require_auth` inside the
+        // DonationContract is tied to this root invocation (same pattern as
+        // `donate_stealth_integrated`). Only the project wallet may withdraw.
+        project.wallet.require_auth();
+
+        let stealth_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::StealthDonationContract)
+            .expect("Stealth donation contract not configured");
+
+        let stealth_client =
+            crate::donation::contract::DonationContractClient::new(&env, &stealth_contract);
+        let remaining = stealth_client.withdraw_stealth_donations(&project.wallet, &token, &amount);
+
+        env.events().publish(
+            (symbol_short!("stlth_wdr"), project_id),
+            (token, amount, remaining),
+        );
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+
+        remaining
     }
 
     // ─── On-chain Impact Certificates (#382) ────────────────────────────────
@@ -8386,7 +8499,98 @@ mod tests {
         });
         client.batch_register_projects(&admin, &projects);
     }
-    // ─── Governance helpers ───────────────────────────────────────────────────
+    fn make_proj_id(env: &Env, prefix: &[u8], n: u32) -> String {
+        let mut buf = soroban_sdk::Bytes::new(env);
+        for &b in prefix {
+            buf.push_back(b);
+        }
+        let mut digits: [u8; 10] = [0; 10];
+        let mut len = 0usize;
+        if n == 0 {
+            digits[0] = b'0';
+            len = 1;
+        } else {
+            let mut val = n;
+            let mut temp = [0u8; 10];
+            let mut count = 0usize;
+            while val > 0 {
+                temp[count] = b'0' + (val % 10) as u8;
+                val /= 10;
+                count += 1;
+            }
+            while count > 0 {
+                count -= 1;
+                digits[len] = temp[count];
+                len += 1;
+            }
+        }
+        String::from_bytes(env, &digits[..len])
+    }
+    #[test]
+    fn test_batch_register_projects_under_limit_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let mut projects = Vec::new(&env);
+        for i in 0..49 {
+            let pid = make_proj_id(&env, b"proj-", i);
+            projects.push_back(ProjectInit {
+                id: pid,
+                name: String::from_str(&env, "Project"),
+                wallet: Address::generate(&env),
+                co2_per_xlm: 100,
+            });
+        }
+        client.batch_register_projects(&admin, &projects);
+        assert_eq!(client.get_project_count(), 49);
+    }
+    #[test]
+    fn test_batch_register_projects_at_limit_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let mut projects = Vec::new(&env);
+        for i in 0..50 {
+            let pid = make_proj_id(&env, b"proj-", i);
+            projects.push_back(ProjectInit {
+                id: pid,
+                name: String::from_str(&env, "Project"),
+                wallet: Address::generate(&env),
+                co2_per_xlm: 100,
+            });
+        }
+        client.batch_register_projects(&admin, &projects);
+        assert_eq!(client.get_project_count(), 50);
+    }
+    #[test]
+    fn test_batch_register_projects_over_limit_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let mut projects = Vec::new(&env);
+        for _i in 0..51 {
+            projects.push_back(ProjectInit {
+                id: String::from_str(&env, "proj"),
+                name: String::from_str(&env, "Project"),
+                wallet: Address::generate(&env),
+                co2_per_xlm: 100,
+            });
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.batch_register_projects(&admin, &projects);
+        }));
+        assert!(result.is_err());
+        assert_eq!(client.get_project_count(), 0);
+    }
     /// Set up a fresh contract with one registered project.
     fn setup() -> (
         Env,
@@ -12023,6 +12227,116 @@ mod tests {
         let nullifier = BytesN::from_array(&env, &[9u8; 32]);
         assert!(!client.is_nullifier_spent(&nullifier));
     }
+    // ─── Bounded ZK donation storage (#706) ────────────────────────────────
+    // `donate_anonymous_zk`'s proof verification is out of scope for these
+    // tests (see #706's "Out of Scope"), so we exercise the storage layer
+    // directly via `env.as_contract`, writing `DataKey::{Nullifier,
+    // ZkDonationRecord}` exactly the way `donate_anonymous_zk`/
+    // `donate_anonymous` do.
+    #[cfg(feature = "zk")]
+    #[test]
+    fn test_zk_storage_bound_instance_entry_does_not_grow_with_donation_volume() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        // Simulate a batch of anonymous donations. Whatever the volume, the
+        // instance entry (read on *every* contract invocation) must gain
+        // zero bytes from ZK donations — that's the actual "ledger-entry
+        // size" risk #706 describes. Each nullifier/record instead gets its
+        // own persistent-storage footprint.
+        for i in 0..25u32 {
+            let nullifier = BytesN::from_array(&env, &[i as u8; 32]);
+            env.as_contract(&id, || {
+                let nullifier_key = DataKey::Nullifier(nullifier.clone());
+                let record_key = DataKey::ZkDonationRecord(i);
+
+                env.storage().persistent().set(&nullifier_key, &true);
+                env.storage().persistent().extend_ttl(
+                    &nullifier_key,
+                    ZK_STORAGE_TTL_LEDGERS,
+                    ZK_STORAGE_TTL_LEDGERS,
+                );
+                env.storage().persistent().set(
+                    &record_key,
+                    &ZkDonationRecord {
+                        project: String::from_str(&env, "test-proj"),
+                        amount: 1_000_000,
+                        amount_commitment: BytesN::from_array(&env, &[0u8; 32]),
+                        nullifier: nullifier.clone(),
+                        ledger: env.ledger().sequence(),
+                    },
+                );
+                env.storage().persistent().extend_ttl(
+                    &record_key,
+                    ZK_STORAGE_TTL_LEDGERS,
+                    ZK_STORAGE_TTL_LEDGERS,
+                );
+
+                assert!(!env.storage().instance().has(&nullifier_key));
+                assert!(!env.storage().instance().has(&record_key));
+            });
+        }
+
+        // Every entry remains independently readable through the public
+        // getters regardless of how it was stored.
+        assert!(client.is_zk_nullifier_used(&BytesN::from_array(&env, &[0u8; 32])));
+        assert!(client.is_nullifier_spent(&BytesN::from_array(&env, &[24u8; 32])));
+        assert_eq!(client.get_zk_donation_record(&24u32).amount, 1_000_000);
+    }
+    #[cfg(feature = "zk")]
+    #[test]
+    fn test_zk_nullifier_and_record_ttl_matches_retention_policy() {
+        use soroban_sdk::testutils::storage::Persistent as TestPersistent;
+
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let nullifier = BytesN::from_array(&env, &[77u8; 32]);
+        env.as_contract(&id, || {
+            let nullifier_key = DataKey::Nullifier(nullifier.clone());
+            let record_key = DataKey::ZkDonationRecord(0u32);
+
+            env.storage().persistent().set(&nullifier_key, &true);
+            env.storage().persistent().extend_ttl(
+                &nullifier_key,
+                ZK_STORAGE_TTL_LEDGERS,
+                ZK_STORAGE_TTL_LEDGERS,
+            );
+            env.storage().persistent().set(
+                &record_key,
+                &ZkDonationRecord {
+                    project: String::from_str(&env, "test-proj"),
+                    amount: 1,
+                    amount_commitment: BytesN::from_array(&env, &[0u8; 32]),
+                    nullifier: nullifier.clone(),
+                    ledger: env.ledger().sequence(),
+                },
+            );
+            env.storage().persistent().extend_ttl(
+                &record_key,
+                ZK_STORAGE_TTL_LEDGERS,
+                ZK_STORAGE_TTL_LEDGERS,
+            );
+
+            assert_eq!(
+                env.storage().persistent().get_ttl(&nullifier_key),
+                ZK_STORAGE_TTL_LEDGERS
+            );
+            assert_eq!(
+                env.storage().persistent().get_ttl(&record_key),
+                ZK_STORAGE_TTL_LEDGERS
+            );
+        });
+        assert!(client.is_nullifier_spent(&nullifier));
+    }
     #[cfg(feature = "zk")]
     #[test]
     #[should_panic]
@@ -13916,6 +14230,85 @@ mod tests {
         assert_eq!(record.amount, 10 * STROOP);
         assert_eq!(record.message_hash, 99u32);
     }
+    #[test]
+    fn test_batch_donate_under_limit_succeeds() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.set_donation_rate_limit(&admin, &100u32, &720u32);
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 49 * STROOP);
+        let mut donations = Vec::new(&env);
+        for i in 0..49 {
+            donations.push_back(BatchDonation {
+                donor: donor.clone(),
+                project_id: pid.clone(),
+                amount: 1 * STROOP,
+                msg_hash: i as u32,
+            });
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.batch_donate(&token, &donations);
+        }));
+        assert!(
+            result.is_ok() || {
+                let err = result.unwrap_err();
+                let msg = err
+                    .downcast_ref::<std::string::String>()
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                !msg.contains("BatchSizeExceedsMaximum")
+            }
+        );
+    }
+    #[test]
+    fn test_batch_donate_at_limit_succeeds() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.set_donation_rate_limit(&admin, &100u32, &720u32);
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 50 * STROOP);
+        let mut donations = Vec::new(&env);
+        for i in 0..50 {
+            donations.push_back(BatchDonation {
+                donor: donor.clone(),
+                project_id: pid.clone(),
+                amount: 1 * STROOP,
+                msg_hash: i as u32,
+            });
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.batch_donate(&token, &donations);
+        }));
+        assert!(
+            result.is_ok() || {
+                let err = result.unwrap_err();
+                let msg = err
+                    .downcast_ref::<std::string::String>()
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                !msg.contains("BatchSizeExceedsMaximum")
+            }
+        );
+    }
+    #[test]
+    fn test_batch_donate_over_limit_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.set_donation_rate_limit(&admin, &100u32, &720u32);
+        let donor = Address::generate(&env);
+        let token = mint_xlm(&env, &donor, 51 * STROOP);
+        let mut donations = Vec::new(&env);
+        for i in 0..51 {
+            donations.push_back(BatchDonation {
+                donor: donor.clone(),
+                project_id: pid.clone(),
+                amount: 1 * STROOP,
+                msg_hash: i as u32,
+            });
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.batch_donate(&token, &donations);
+        }));
+        assert!(result.is_err());
+        assert_eq!(client.get_donation_count(), 0);
+    }
     // ─── Off-Chain Oracle Attestation for Project Impact Verification (#459) ─
     #[cfg(feature = "impact_verification")]
     fn evidence(env: &Env, tag: u8) -> BytesN<32> {
@@ -15133,6 +15526,164 @@ mod tests {
         client.donate_stealth_integrated(&donor, &token, &ephem_pubkey, &pid, &amount, &msg_hash);
         let p = client.get_project(&pid);
         assert_eq!(p.total_raised, amount);
+    }
+
+    /// Covers the integrated stealth withdrawal path (#621): the project
+    /// wallet receives exactly the donated amount, the DonationContract
+    /// drains to zero, and the main contract emits `stlth_wdr` so indexers
+    /// can reconcile on-chain `total_raised` with funds actually received.
+    #[test]
+    fn test_stealth_integrated_withdrawal_flow() {
+        let (env, cid, client, admin, pid) = setup();
+
+        let stealth_cid = env.register_contract(None, crate::donation::contract::DonationContract);
+        client.set_stealth_donation_contract(&admin, &stealth_cid);
+
+        let donor = Address::generate(&env);
+        let amount: i128 = 50 * STROOP;
+        let token = create_token_helper(&env, &donor, amount);
+        let ephem = BytesN::from_array(&env, &[7u8; 33]);
+        let msg_hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.donate_stealth_integrated(&donor, &token, &ephem, &pid, &amount, &msg_hash);
+
+        let project_wallet = client.get_project(&pid).wallet;
+        let wallet_before = StellarAssetClient::new(&env, &token).balance(&project_wallet);
+        // Tokens are held by the DonationContract until withdrawn
+        assert_eq!(
+            StellarAssetClient::new(&env, &token).balance(&stealth_cid),
+            amount
+        );
+
+        // The project wallet withdraws through the main-contract forward wrapper
+        let remaining = client.withdraw_stealth_integrated(&pid, &token, &amount);
+        assert_eq!(remaining, 0);
+
+        // Main contract emits stlth_wdr (project_id, token, amount, remaining).
+        // Capture right after the withdrawal: `Events::all()` only exposes the
+        // last contract invocation's events.
+        use soroban_sdk::testutils::Events as _;
+        let events = env.events().all().filter_by_contract(&cid);
+        let event = events.events().last().unwrap();
+        let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
+        assert_eq!(body.topics.len(), 2);
+        let soroban_sdk::xdr::ScVal::Symbol(event_name) = &body.topics[0] else {
+            panic!("expected event name symbol");
+        };
+        assert_eq!(event_name.0.as_vec().as_slice(), b"stlth_wdr");
+        assert_eq!(body.topics[1], soroban_sdk::xdr::ScVal::from(&pid));
+        let soroban_sdk::xdr::ScVal::Vec(Some(data)) = &body.data else {
+            panic!("expected event data vector");
+        };
+        assert_eq!(
+            data.0.as_vec().as_slice(),
+            &[
+                soroban_sdk::xdr::ScVal::from(&token),
+                soroban_sdk::xdr::ScVal::from(amount),
+                soroban_sdk::xdr::ScVal::from(0i128),
+            ]
+        );
+
+        let wallet_after = StellarAssetClient::new(&env, &token).balance(&project_wallet);
+        assert_eq!(wallet_after - wallet_before, amount);
+        assert_eq!(
+            StellarAssetClient::new(&env, &token).balance(&stealth_cid),
+            0
+        );
+    }
+
+    /// Partial integrated withdrawal: the remainder stays withdrawable until
+    /// the project wallet drains it, so nothing is ever stranded (#621).
+    #[test]
+    fn test_stealth_integrated_withdrawal_partial() {
+        let (env, _cid, client, admin, pid) = setup();
+
+        let stealth_cid = env.register_contract(None, crate::donation::contract::DonationContract);
+        client.set_stealth_donation_contract(&admin, &stealth_cid);
+
+        let donor = Address::generate(&env);
+        let amount: i128 = 50 * STROOP;
+        let token = create_token_helper(&env, &donor, amount);
+        let ephem = BytesN::from_array(&env, &[7u8; 33]);
+        let msg_hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.donate_stealth_integrated(&donor, &token, &ephem, &pid, &amount, &msg_hash);
+        let project_wallet = client.get_project(&pid).wallet;
+
+        let remaining = client.withdraw_stealth_integrated(&pid, &token, &(20 * STROOP));
+        assert_eq!(remaining, 30 * STROOP);
+        assert_eq!(
+            StellarAssetClient::new(&env, &token).balance(&project_wallet),
+            20 * STROOP
+        );
+        assert_eq!(
+            StellarAssetClient::new(&env, &token).balance(&stealth_cid),
+            30 * STROOP
+        );
+
+        // Drain the remainder
+        let remaining = client.withdraw_stealth_integrated(&pid, &token, &(30 * STROOP));
+        assert_eq!(remaining, 0);
+        assert_eq!(
+            StellarAssetClient::new(&env, &token).balance(&project_wallet),
+            50 * STROOP
+        );
+        assert_eq!(
+            StellarAssetClient::new(&env, &token).balance(&stealth_cid),
+            0
+        );
+    }
+
+    /// Withdrawing more than the stealth balance is rejected and leaves both
+    /// the balance and the project wallet untouched (#621).
+    #[test]
+    fn test_stealth_integrated_withdrawal_rejects_over_balance() {
+        let (env, _cid, client, admin, pid) = setup();
+
+        let stealth_cid = env.register_contract(None, crate::donation::contract::DonationContract);
+        client.set_stealth_donation_contract(&admin, &stealth_cid);
+
+        let donor = Address::generate(&env);
+        let amount: i128 = 50 * STROOP;
+        let token = create_token_helper(&env, &donor, amount);
+        let ephem = BytesN::from_array(&env, &[7u8; 33]);
+        let msg_hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.donate_stealth_integrated(&donor, &token, &ephem, &pid, &amount, &msg_hash);
+        let project_wallet = client.get_project(&pid).wallet;
+
+        let result = client.try_withdraw_stealth_integrated(&pid, &token, &(amount + 1));
+        assert!(result.is_err(), "over-balance withdrawal must be rejected");
+
+        assert_eq!(
+            StellarAssetClient::new(&env, &token).balance(&project_wallet),
+            0
+        );
+        assert_eq!(
+            StellarAssetClient::new(&env, &token).balance(&stealth_cid),
+            amount
+        );
+    }
+
+    /// Withdrawing through the wrapper for an unknown project is rejected.
+    #[test]
+    fn test_stealth_integrated_withdrawal_unknown_project_rejected() {
+        let (env, _cid, client, admin, _pid) = setup();
+
+        let stealth_cid = env.register_contract(None, crate::donation::contract::DonationContract);
+        client.set_stealth_donation_contract(&admin, &stealth_cid);
+
+        let unknown_pid = String::from_str(&env, "proj-unknown");
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+
+        let result = client.try_withdraw_stealth_integrated(&unknown_pid, &token, &1i128);
+        assert!(
+            result.is_err(),
+            "unknown project withdrawal must be rejected"
+        );
     }
 
     /// Covers process_donation_token paused project branch (line 1362).

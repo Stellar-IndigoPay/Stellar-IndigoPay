@@ -40,36 +40,165 @@ const {
   projectionRebuildInProgress,
 } = metrics;
 
+// 1 XLM = 10^7 stroops (matches the contract's `STROOP` constant), and the
+// CO₂ columns use NUMERIC(20,4) (4 decimal places). Donation amounts arrive as
+// i128 stroops that far exceed Number's 2^53 exact-integer range, so every
+// amount is carried as an exact decimal string / BigInt through this module —
+// never through IEEE-754 doubles.
+const STROOP_SCALE = 7;
+const CO2_KG_SCALE = 4;
+
+/**
+ * Normalise a numeric value (number, string, or bigint) to a plain,
+ * locale-independent decimal string. Scientific notation is expanded so the
+ * result can be consumed exactly by BigInt and PostgreSQL NUMERIC. Returns
+ * null for empty/non-finite input.
+ *
+ * @param {number|string|bigint|null|undefined} value
+ * @returns {string|null}
+ */
+function toDecimalString(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return null;
+    // maximumFractionDigits forces a plain expansion with no exponent.
+    return value.toLocaleString("en-US", {
+      useGrouping: false,
+      maximumFractionDigits: 20,
+    });
+  }
+
+  const raw = String(value).trim();
+  if (
+    raw === "" ||
+    raw === "NaN" ||
+    raw === "Infinity" ||
+    raw === "-Infinity"
+  ) {
+    return null;
+  }
+
+  const negative = raw.startsWith("-");
+  const unsigned = negative ? raw.slice(1) : raw;
+  const [mantissa, expPart] = unsigned.split(/[eE]/);
+  if (!/^\d*\.?\d*$/.test(mantissa) || mantissa === "" || mantissa === ".") {
+    return null;
+  }
+
+  let exp = 0;
+  if (expPart !== undefined) {
+    exp = Number(expPart);
+    if (!Number.isInteger(exp)) return null;
+  }
+
+  const [intPart = "", fracPart = ""] = mantissa.split(".");
+  if (intPart === "" && fracPart === "") return null;
+  const digits = intPart + fracPart;
+  const point = intPart.length + exp;
+
+  let out;
+  if (point <= 0) {
+    out = `0.${"0".repeat(-point)}${digits}`;
+  } else if (point >= digits.length) {
+    out = digits + "0".repeat(point - digits.length);
+  } else {
+    out = `${digits.slice(0, point)}.${digits.slice(point)}`;
+  }
+
+  return negative && out !== "0" ? `-${out}` : out;
+}
+
+/**
+ * Convert a decimal value to an exact BigInt scaled by 10^scale. Fractional
+ * digits beyond `scale` are truncated (floor for positives), matching the
+ * contract's integer division of stroops. Returns 0n for empty/invalid input.
+ *
+ * @param {number|string|bigint|null|undefined} value
+ * @param {number} scale
+ * @returns {bigint}
+ */
+function toScaledInt(value, scale) {
+  const str = toDecimalString(value);
+  if (str === null) return 0n;
+  const negative = str.startsWith("-");
+  const unsigned = negative ? str.slice(1) : str;
+  const [intPart = "0", fracPart = ""] = unsigned.split(".");
+  const frac = (fracPart + "0".repeat(scale)).slice(0, scale);
+  const scaled =
+    BigInt(intPart || "0") * 10n ** BigInt(scale) + BigInt(frac || "0");
+  return negative ? -scaled : scaled;
+}
+
+/**
+ * Render a BigInt scaled by 10^scale back to a plain decimal string, trimming
+ * trailing zeros.
+ *
+ * @param {bigint} scaled
+ * @param {number} scale
+ * @returns {string}
+ */
+function scaledToDecimalString(scaled, scale) {
+  const negative = scaled < 0n;
+  const abs = negative ? -scaled : scaled;
+  const factor = 10n ** BigInt(scale);
+  const whole = abs / factor;
+  const frac = abs % factor;
+  let out = whole.toString();
+  if (frac !== 0n) {
+    out += `.${frac.toString().padStart(scale, "0").replace(/0+$/, "")}`;
+  }
+  return negative ? `-${out}` : out;
+}
+
 /**
  * Compute the CO₂ offset (kg) attributable to a donation, given the project's
  * total raised and total co2_offset_kg. Falls back to the event-supplied
  * co2_offset_kg when the projection already tracks it, otherwise distributes
  * proportionally. Mirrors the existing leaderboard formula.
  *
- * @param {number} amountXlm - XLM amount of the donation.
- * @param {number} projectRaisedXlm - Projection's running raised_xlm (BEFORE this event).
- * @param {number} projectCo2Kg - Projection's running co2_offset_kg.
- * @returns {number} CO₂ offset in kg for this donation.
+ * All arithmetic is performed in BigInt integer space (stroops and decigrams)
+ * so arbitrarily large i128 donation amounts never pass through JavaScript
+ * Number and lose precision. The result is an exact decimal string of kg.
+ *
+ * @param {number|string|bigint} amountXlm - XLM amount of the donation.
+ * @param {number|string|bigint} projectRaisedXlm - Projection's running raised_xlm (BEFORE this event).
+ * @param {number|string|bigint} projectCo2Kg - Projection's running co2_offset_kg.
+ * @returns {string} CO₂ offset in kg for this donation.
  */
 function co2OffsetForDonation(amountXlm, projectRaisedXlm, projectCo2Kg) {
-  const raised = Number(projectRaisedXlm || 0);
-  const co2 = Number(projectCo2Kg || 0);
-  if (raised > 0 && co2 > 0) {
-    return (Number(amountXlm) * co2) / raised;
+  const amountStroops = toScaledInt(amountXlm, STROOP_SCALE);
+  const raisedStroops = toScaledInt(projectRaisedXlm, STROOP_SCALE);
+  const co2Decigrams = toScaledInt(projectCo2Kg, CO2_KG_SCALE);
+  if (raisedStroops > 0n && co2Decigrams > 0n) {
+    return scaledToDecimalString(
+      (amountStroops * co2Decigrams) / raisedStroops,
+      CO2_KG_SCALE,
+    );
   }
-  return 0;
+  return "0";
 }
 
 /**
  * Impact score matching the legacy leaderboard formula:
  *   score = total_xlm * 0.7 + (total_co2_kg / 100) * 0.3
  *
- * @param {number|string} totalXlm - Total XLM attributed to the donor or project.
- * @param {number|string} totalCo2Kg - Total CO2 offset in kilograms.
- * @returns {number} Weighted impact score used for leaderboard ordering.
+ * Computed in BigInt integer space so large donation totals are not corrupted
+ * by IEEE-754 rounding; the result is a decimal string at 4 decimal places.
+ *
+ * @param {number|string|bigint} totalXlm - Total XLM attributed to the donor or project.
+ * @param {number|string|bigint} totalCo2Kg - Total CO2 offset in kilograms.
+ * @returns {string} Weighted impact score used for leaderboard ordering.
  */
 function computeImpactScore(totalXlm, totalCo2Kg) {
-  return Number(totalXlm) * 0.7 + Number(totalCo2Kg || 0) / 100 * 0.3;
+  const xlmStroops = toScaledInt(totalXlm, STROOP_SCALE);
+  const co2Decigrams = toScaledInt(totalCo2Kg, CO2_KG_SCALE);
+  // score = xlm * 0.7 + (co2_kg / 100) * 0.3, expressed at 10^4 scale:
+  //   xlm term: stroops * 0.7 → XLM = stroops * 7 / 10^8, ×10^4 = stroops * 7 / 10^4
+  //   co2 term: kg * 0.003 → decigrams * 3 / 10^7, ×10^4 = decigrams * 3 / 10^3
+  const term1 = (xlmStroops * 7n) / 10000n;
+  const term2 = (co2Decigrams * 3n) / 1000n;
+  return scaledToDecimalString(term1 + term2, CO2_KG_SCALE);
 }
 
 /**
@@ -89,8 +218,8 @@ const projections = {
         // must never create or change a public donor leaderboard entry.
         if (d.anonymous) return;
         const donor = d.donorAddress;
-        const amount = Number(d.amountXLM || 0);
-        const co2 = Number(d.co2OffsetKg || 0);
+        const amount = toDecimalString(d.amountXLM) || "0";
+        const co2 = toDecimalString(d.co2OffsetKg) || "0";
         const projectsSupported = Number(d.projectsSupported || 1);
 
         await ctx.client.query(
@@ -109,10 +238,7 @@ const projections = {
             amount,
             projectsSupported,
             co2,
-            computeImpactScore(
-              Number(ctx.priorLeaderboard?.total_donated || 0) + amount,
-              Number(ctx.priorLeaderboard?.total_co2_offset || 0) + co2,
-            ),
+            computeImpactScore(amount, co2),
           ],
         );
       }
@@ -128,8 +254,8 @@ const projections = {
       const d = event.event_data || {};
       if (event.event_type === "DonationRecorded") {
         const projectId = event.aggregate_id;
-        const amount = Number(d.amountXLM || 0);
-        const co2 = Number(d.co2OffsetKg || 0);
+        const amount = toDecimalString(d.amountXLM) || "0";
+        const co2 = toDecimalString(d.co2OffsetKg) || "0";
 
         // donor_count is derived from donor_history (inserted by the
         // donor_history projection in the same event pass). Recompute from
@@ -172,8 +298,8 @@ const projections = {
       if (event.event_type === "DonationRecorded") {
         const donor = d.donorAddress;
         const projectId = event.aggregate_id;
-        const amount = Number(d.amountXLM || 0);
-        const co2 = Number(d.co2OffsetKg || 0);
+        const amount = toDecimalString(d.amountXLM) || "0";
+        const co2 = toDecimalString(d.co2OffsetKg) || "0";
         const txHash = d.transactionHash || event.transaction_hash;
 
         await ctx.client.query(
@@ -203,8 +329,8 @@ const projections = {
     async handler(event, ctx) {
       const d = event.event_data || {};
       if (event.event_type === "DonationRecorded") {
-        const amount = Number(d.amountXLM || 0);
-        const co2 = Number(d.co2OffsetKg || 0);
+        const amount = toDecimalString(d.amountXLM) || "0";
+        const co2 = toDecimalString(d.co2OffsetKg) || "0";
         const donor = d.donorAddress;
 
         // Determine if this donation introduces a new distinct donor by
@@ -463,6 +589,10 @@ module.exports = {
   isRebuilding,
   co2OffsetForDonation,
   computeImpactScore,
+  // decimal helpers exposed for precision unit tests
+  toDecimalString,
+  toScaledInt,
+  scaledToDecimalString,
   // exposed for unit tests that want to drive a handler directly
   _handlers: projections,
 };
