@@ -2301,9 +2301,18 @@ fn apply_donation_effects(
 
 /// Write the token address associated with a donation record so that
 /// `resolve_challenge` and any future reversal path can look it up without
-/// requiring the caller to supply it explicitly. Called by every donation
-/// entry point immediately after `apply_donation_effects`. Fixes #661.
-#[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+/// requiring the caller to supply it explicitly.
+///
+/// Invoked by direct donation flows (`process_donation_token`, `donate_anonymous`,
+/// `execute_recurring`, and `donate_asset_with_privacy`) that deposit funds
+/// into `project.wallet`. Fixes #661.
+#[cfg(any(
+    feature = "usdc",
+    feature = "donation",
+    feature = "testutils",
+    feature = "zk",
+    feature = "recurring"
+))]
 fn record_donation_token(env: &Env, donation_index: u32, token: &Address) {
     env.storage()
         .instance()
@@ -3905,6 +3914,13 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+        if let Some(native_token) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::NativeTokenAddress)
+        {
+            record_donation_token(&env, dc, &native_token);
+        }
         let gr: i128 = env
             .storage()
             .instance()
@@ -4347,6 +4363,7 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+        record_donation_token(&env, dc, &token);
         let gr: i128 = env
             .storage()
             .instance()
@@ -7958,6 +7975,7 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+        record_donation_token(&env, dc, &token_addr);
         // Update Globals
         let gr: i128 = env
             .storage()
