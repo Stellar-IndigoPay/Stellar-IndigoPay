@@ -204,15 +204,18 @@ mod fuzz {
         }
 
         /// Try to dispute a job.
+        ///
+        /// Mirrors the deprecated contract `dispute_job`, which flips a job
+        /// back to `Disputed` unconditionally (including an already-resolved
+        /// job). Re-disputing clears the `resolved` marker so the reference
+        /// model stays in sync with the contract.
         fn dispute_job(&mut self, job_idx: usize) -> Result<(), &'static str> {
             let job = self.jobs.get_mut(job_idx).ok_or("job not found")?;
             if job.disputed {
                 return Err("job already disputed");
             }
-            if job.resolved {
-                return Err("job already resolved");
-            }
             job.disputed = true;
+            job.resolved = false;
             Ok(())
         }
 

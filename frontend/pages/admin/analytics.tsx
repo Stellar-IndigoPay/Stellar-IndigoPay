@@ -23,6 +23,7 @@ import {
   type AdminGeographicImpact, type AdminDonorRetention,
   type AdminCategoryBreakdown, type AdminGrowthData,
 } from "@/lib/api";
+import { formatNumber } from "@/utils/format";
 
 const COLORS = ["#4F46E5", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#EC4899", "#06B6D4", "#84CC16"];
 
@@ -171,10 +172,10 @@ export default function AdminAnalyticsPage() {
       {growth && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
           {[
-            { label: "Total Raised", value: `${(parseFloat(growth.summary.totalXLM) || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} XLM` },
-            { label: "Total Donors", value: growth.summary.totalDonors.toLocaleString() },
-            { label: "Total Projects", value: growth.summary.totalProjects.toLocaleString() },
-            { label: "Active Donors (30d)", value: growth.summary.activeDonors30d.toLocaleString() },
+            { label: "Total Raised", value: `${formatNumber(parseFloat(growth.summary.totalXLM) || 0, undefined, { maximumFractionDigits: 2 })} XLM` },
+            { label: "Total Donors", value: formatNumber(growth.summary.totalDonors) },
+            { label: "Total Projects", value: formatNumber(growth.summary.totalProjects) },
+            { label: "Active Donors (30d)", value: formatNumber(growth.summary.activeDonors30d) },
           ].map((card) => (
             <div key={card.label} className="card bg-gradient-to-br from-forest-50 to-emerald-50 dark:from-zinc-800 dark:to-zinc-900 rounded-2xl p-5">
               <p className="text-xs text-[#8aaa8a] font-body uppercase tracking-wide">{card.label}</p>
@@ -234,7 +235,7 @@ export default function AdminAnalyticsPage() {
                 {geographic.slice(0, 15).map((g) => (
                   <tr key={g.country} className="hover:bg-forest-50/50">
                     <td className="px-4 py-2 font-medium text-forest-800">{g.country}</td>
-                    <td className="px-4 py-2 text-right">{Number(g.totalXLM).toLocaleString()}</td>
+                    <td className="px-4 py-2 text-right">{formatNumber(Number(g.totalXLM))}</td>
                     <td className="px-4 py-2 text-right">{g.projectCount}</td>
                     <td className="px-4 py-2 text-right">{g.donorCount}</td>
                   </tr>
@@ -285,7 +286,7 @@ export default function AdminAnalyticsPage() {
                 <tr key={p.id} className="hover:bg-forest-50/50">
                   <td className="px-4 py-2 font-medium text-forest-800 max-w-[200px] truncate">{p.name}</td>
                   <td className="px-4 py-2"><span className="badge bg-forest-50 text-forest-700 text-xs">{p.category}</span></td>
-                  <td className="px-4 py-2 text-right">{Number(p.raisedXLM).toLocaleString()}</td>
+                  <td className="px-4 py-2 text-right">{formatNumber(Number(p.raisedXLM))}</td>
                   <td className="px-4 py-2 text-right">{p.donorCount}</td>
                   <td className="px-4 py-2 text-right">
                     <div className="flex items-center justify-end gap-2">
@@ -295,7 +296,7 @@ export default function AdminAnalyticsPage() {
                       <span className="text-xs">{p.progressPct}%</span>
                     </div>
                   </td>
-                  <td className="px-4 py-2 text-right">{p.co2OffsetKg.toLocaleString()}</td>
+                  <td className="px-4 py-2 text-right">{formatNumber(p.co2OffsetKg)}</td>
                   <td className="px-4 py-2 text-right">{p.totalDonations}</td>
                 </tr>
               ))}
