@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **extension/security:** add a restrictive MV3 content security policy to Chrome and Firefox manifests, with validation coverage for privileged extension pages.
 - **backend/security:** Load guardian and recurring keeper signing seeds from managed secret files, add signer provider tests, and document signer rotation workflow.
 
 * **extension:** audit `chrome.storage` usage, confirm no plaintext wallet secrets are persisted (signing is delegated entirely to Freighter), and add CI secret-scan to enforce this going forward (closes #656)
