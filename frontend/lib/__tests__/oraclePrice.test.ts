@@ -1,13 +1,14 @@
 /**
  * lib/__tests__/oraclePrice.test.ts — Unit tests for lib/oraclePrice.ts
  *
- * Covers the oracle-backed XLM/USD price source: URL selection, response
- * envelope unwrapping, and graceful `null` fallbacks for invalid or
- * unavailable oracle responses.
+ * Covers the oracle-backed XLM/USD price source: URL selection, full
+ * PriceFetchResult envelope unwrapping, and graceful fallback values for
+ * invalid or unavailable oracle responses.
  *
  * @jest-environment jsdom
  */
 import { fetchXlmPrice } from "@/lib/oraclePrice";
+import type { PriceFetchResult } from "@/lib/oraclePrice";
 
 const ORACLE_URL = "http://localhost:4000/api/oracle/price";
 
@@ -31,7 +32,7 @@ afterEach(() => {
 });
 
 describe("fetchXlmPrice", () => {
-  it("fetches the backend oracle endpoint and returns its price", async () => {
+  it("fetches the backend oracle endpoint and returns a full PriceFetchResult", async () => {
     const mockFetch = jest.fn().mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -40,9 +41,12 @@ describe("fetchXlmPrice", () => {
     );
     global.fetch = mockFetch;
 
-    const price = await fetchXlmPrice();
+    const result: PriceFetchResult = await fetchXlmPrice();
 
-    expect(price).toBe(0.125);
+    expect(result.price).toBe(0.125);
+    expect(result.updatedAt).toBe(1_700_000_000_000);
+    expect(result.source).toBe("stellar-dex");
+    expect(result.ok).toBe(true);
     expect(mockFetch).toHaveBeenCalledWith(ORACLE_URL, { signal: undefined });
   });
 
@@ -63,7 +67,7 @@ describe("fetchXlmPrice", () => {
     });
   });
 
-  it("returns null when the oracle has no cached price", async () => {
+  it("returns ok:false with price:null when the oracle has no cached price", async () => {
     global.fetch = jest.fn().mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -71,10 +75,12 @@ describe("fetchXlmPrice", () => {
       }),
     );
 
-    await expect(fetchXlmPrice()).resolves.toBeNull();
+    const result = await fetchXlmPrice();
+    expect(result.price).toBeNull();
+    expect(result.ok).toBe(false);
   });
 
-  it("returns null when the price is not a positive number", async () => {
+  it("returns ok:false when the price is zero (not a positive number)", async () => {
     global.fetch = jest.fn().mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -82,20 +88,76 @@ describe("fetchXlmPrice", () => {
       }),
     );
 
-    await expect(fetchXlmPrice()).resolves.toBeNull();
+    const result = await fetchXlmPrice();
+    expect(result.price).toBeNull();
+    expect(result.ok).toBe(false);
   });
 
-  it("returns null on a non-ok response", async () => {
+  it("returns ok:false when the price is negative", async () => {
+    global.fetch = jest.fn().mockResolvedValue(
+      mockFetchResponse({
+        success: true,
+        data: { price: -1, updatedAt: 1_700_000_000_000, source: "stellar-dex" },
+      }),
+    );
+
+    const result = await fetchXlmPrice();
+    expect(result.price).toBeNull();
+    expect(result.ok).toBe(false);
+  });
+
+  it("returns ok:false on a non-ok HTTP response", async () => {
     global.fetch = jest
       .fn()
       .mockResolvedValue(mockFetchResponse({ error: "down" }, { status: 503 }));
 
-    await expect(fetchXlmPrice()).resolves.toBeNull();
+    const result = await fetchXlmPrice();
+    expect(result.price).toBeNull();
+    expect(result.ok).toBe(false);
+    expect(result.source).toBe("unknown");
   });
 
-  it("returns null when the fetch rejects (oracle unavailable)", async () => {
+  it("returns ok:false when the fetch rejects (oracle unavailable)", async () => {
     global.fetch = jest.fn().mockRejectedValue(new Error("network error"));
 
-    await expect(fetchXlmPrice()).resolves.toBeNull();
+    const result = await fetchXlmPrice();
+    expect(result.price).toBeNull();
+    expect(result.ok).toBe(false);
+  });
+
+  it("returns ok:false silently for AbortError (intentional cancellation)", async () => {
+    const abortErr = new DOMException("aborted", "AbortError");
+    global.fetch = jest.fn().mockRejectedValue(abortErr);
+
+    const result = await fetchXlmPrice();
+    expect(result.price).toBeNull();
+    expect(result.ok).toBe(false);
+  });
+
+  it("handles a missing updatedAt field gracefully (defaults to null)", async () => {
+    global.fetch = jest.fn().mockResolvedValue(
+      mockFetchResponse({
+        success: true,
+        data: { price: 0.1, source: "test" }, // no updatedAt
+      }),
+    );
+
+    const result = await fetchXlmPrice();
+    expect(result.price).toBe(0.1);
+    expect(result.updatedAt).toBeNull();
+    expect(result.ok).toBe(true);
+  });
+
+  it("handles a missing source field gracefully (defaults to 'unknown')", async () => {
+    global.fetch = jest.fn().mockResolvedValue(
+      mockFetchResponse({
+        success: true,
+        data: { price: 0.1, updatedAt: 1_700_000_000_000 }, // no source
+      }),
+    );
+
+    const result = await fetchXlmPrice();
+    expect(result.source).toBe("unknown");
+    expect(result.ok).toBe(true);
   });
 });

@@ -3,7 +3,8 @@
  */
 import { formatXLM, formatUSDEquivalent, shortenAddress, badgeEmoji } from "@/utils/format";
 import { accountUrl } from "@/lib/stellar";
-import { useXlmPrice } from "@/lib/priceContext";
+import { usePriceContext } from "@/lib/priceContext";
+import StalePriceIndicator from "@/components/StalePriceIndicator";
 import type { LeaderboardEntry } from "@/utils/types";
 import { SkeletonList } from "./Skeleton";
 import { useLeaderboard } from "@/hooks/queries";
@@ -67,7 +68,7 @@ export default function LeaderboardTable({
   limit?: number;
   period?: "all" | "month" | "year";
 }) {
-  const xlmUsd = useXlmPrice();
+  const { xlmUsd, isDegraded } = usePriceContext();
 
   const {
     data: entries,
@@ -109,6 +110,10 @@ export default function LeaderboardTable({
 
   return (
     <div className="space-y-2">
+      {/* Show staleness indicator once above the list when price is stale/degraded */}
+      <div className="flex justify-end mb-1">
+        <StalePriceIndicator />
+      </div>
       {safeEntries.map((entry) => (
         <div
           key={entry.publicKey}
@@ -159,10 +164,19 @@ export default function LeaderboardTable({
             <p className="font-mono font-semibold text-[#4F46E5] dark:text-[#818CF8] text-sm">
               {formatXLM(entry.totalDonatedXLM)}
             </p>
-            {formatUSDEquivalent(entry.totalDonatedXLM, xlmUsd) && (
-              <p className="text-[11px] text-[#64748B] dark:text-[#94A3B8] font-body">
-                {formatUSDEquivalent(entry.totalDonatedXLM, xlmUsd)}
+            {isDegraded ? (
+              <p
+                className="text-[11px] text-[#94A3B8] font-body"
+                data-testid="leaderboard-usd-degraded"
+              >
+                — USD
               </p>
+            ) : (
+              formatUSDEquivalent(entry.totalDonatedXLM, xlmUsd) && (
+                <p className="text-[11px] text-[#64748B] dark:text-[#94A3B8] font-body">
+                  {formatUSDEquivalent(entry.totalDonatedXLM, xlmUsd)}
+                </p>
+              )
             )}
             <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-body">
               donated

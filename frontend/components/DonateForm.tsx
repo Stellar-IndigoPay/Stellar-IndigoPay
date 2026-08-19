@@ -3,6 +3,7 @@
  * Donation form for a climate project.
  */
 import FormField from "@/components/FormField";
+import StalePriceIndicator from "@/components/StalePriceIndicator";
 import { useFormValidation } from "@/hooks/useFormValidation";
 import { donationSchema } from "@/lib/validation/schemas";
 import { useState, useEffect } from "react";
@@ -28,6 +29,7 @@ import { queueDonation, syncQueuedDonations } from "@/lib/offlineDonationQueue";
 import { formatXLM, formatCO2 } from "@/utils/format";
 import { trackEvent } from "@/lib/analytics";
 import { safeRandomUUID } from "@/utils/uuid";
+import { usePriceContext } from "@/lib/priceContext";
 import type { ClimateProject } from "@/utils/types";
 import type { DonorAsset, ConversionEstimate } from "@/lib/dex";
 
@@ -85,6 +87,8 @@ export default function DonateForm({
   const [conversionError, setConversionError] = useState<string | null>(null);
   const isOnline = useOnlineStatus();
   const recordDonationMutation = useRecordDonation();
+  // Price context for USD equivalent display.
+  const { xlmUsd, isDegraded, isStale } = usePriceContext();
 
   useEffect(() => {
     if (!initialAmount) return;
@@ -645,6 +649,28 @@ export default function DonateForm({
                 )}
               </div>
             )}
+
+          {/* USD equivalent — only shown for XLM donations when a price is available */}
+          {currency === "XLM" && amount && !isNaN(amountNum) && amountNum > 0 && (
+            <div className="mt-2 flex items-center gap-2 flex-wrap">
+              {isDegraded ? (
+                <span
+                  className="text-xs text-[#94A3B8] font-body"
+                  data-testid="usd-equivalent-degraded"
+                >
+                  ≈ <span aria-label="USD equivalent unavailable">—</span> USD
+                </span>
+              ) : xlmUsd !== null ? (
+                <span
+                  className="text-xs text-[#64748B] dark:text-[#94A3B8] font-body"
+                  data-testid="usd-equivalent"
+                >
+                  ≈ ${(amountNum * xlmUsd).toFixed(2)} USD
+                </span>
+              ) : null}
+              <StalePriceIndicator />
+            </div>
+          )}
         </div>
 
         {/* Message */}
