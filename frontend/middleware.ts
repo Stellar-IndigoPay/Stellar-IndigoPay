@@ -16,10 +16,7 @@ const LEAFLET_TILE_SOURCES = [
   "https://c.tile.openstreetmap.org",
 ].join(" ");
 
-// unpkg.com serves the Leaflet CSS loaded dynamically in ProjectMap.tsx.
-const UNPKG = "https://unpkg.com";
-
-function buildCsp(nonce: string, isWidget: boolean): string {
+export function buildCsp(nonce: string, isWidget: boolean): string {
   // API origin: 'self' covers same-origin deploys; NEXT_PUBLIC_API_URL covers
   // deployed backends and CI/E2E environments (e.g. http://localhost:4000).
   // Falls back to localhost:4000 in local dev when the env var is not set.
@@ -28,29 +25,28 @@ function buildCsp(nonce: string, isWidget: boolean): string {
   const connectSrc = [
     "'self'",
     STELLAR_CONNECT,
-    "https://api.coingecko.com",
     ...(apiUrl ? [apiUrl] : []),
   ].join(" ");
 
   // next dev's Fast Refresh runtime (react-refresh-utils) bootstraps modules
-  // via eval() for HMR; production bundles never eval(). Without this, the
-  // dev server's own client runtime throws a CSP EvalError before React can
-  // hydrate anything, breaking every page in local development.
+  // via eval() and injects inline scripts without the nonce; production
+  // bundles never do. Keep 'unsafe-inline'/'unsafe-eval' strictly dev-only so
+  // the production CSP relies solely on the nonce + strict-dynamic (#688).
   const scriptSrc = [
     "'self'",
     `'nonce-${nonce}'`,
     "'strict-dynamic'",
-    "'unsafe-inline'",
-    ...(process.env.NODE_ENV === "development" ? ["'unsafe-eval'"] : []),
+    ...(process.env.NODE_ENV === "development"
+      ? ["'unsafe-inline'", "'unsafe-eval'"]
+      : []),
   ].join(" ");
 
   const directives = [
     "default-src 'self'",
-    // nonce tags the Next.js script injection; strict-dynamic propagates trust to bundles
-    // it loads; unsafe-inline is a no-op in CSP3 but keeps CSP2 browsers working.
+    // nonce tags the Next.js script injection; strict-dynamic propagates trust
+    // to the bundles it loads (inline scripts are nonce'd, never inline-allowed).
     `script-src ${scriptSrc}`,
-    // unpkg serves the Leaflet CSS stylesheet.
-    `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com ${UNPKG}`,
+    `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com`,
     "font-src 'self' https://fonts.gstatic.com",
     // OSM tile images are loaded as <img> elements by Leaflet TileLayer.
     // Leaflet marker icons use data: URIs (our inline SVG divIcon).
@@ -60,8 +56,10 @@ function buildCsp(nonce: string, isWidget: boolean): string {
     "base-uri 'self'",
     "form-action 'self'",
     isWidget ? "frame-ancestors *" : "frame-ancestors 'none'",
-    // Reporting endpoint for CSP violations
+    // Reporting endpoint for CSP violations. `report-to` (Reporting API) is the
+    // modern directive; `report-uri` is kept for browsers that predate it.
     "report-uri /api/csp-report",
+    "report-to csp-endpoint",
     // Meaningless (and actively harmful) against a plain-HTTP local dev
     // server: it forces every subresource request to upgrade to HTTPS, and
     // WebKit (unlike Chromium/Firefox, which special-case localhost as
@@ -88,6 +86,8 @@ export function middleware(request: NextRequest) {
 
   const response = NextResponse.next({ request: { headers: requestHeaders } });
   response.headers.set("Content-Security-Policy", csp);
+  // Define the named endpoint referenced by the CSP `report-to` directive.
+  response.headers.set("Reporting-Endpoints", 'csp-endpoint="/api/csp-report"');
 
   return response;
 }

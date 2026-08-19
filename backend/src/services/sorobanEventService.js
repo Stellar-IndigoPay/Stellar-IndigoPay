@@ -35,7 +35,13 @@ const { registry } = require("./metrics");
 const { Counter, Gauge } = require("prom-client");
 const { v4: uuid } = require("uuid");
 const { computeBadges } = require("./store");
-const { insertEvent, processEvent } = require("./projectionEngine");
+const {
+  insertEvent,
+  processEvent,
+  co2OffsetForDonation,
+  toScaledInt,
+  scaledToDecimalString,
+} = require("./projectionEngine");
 
 // ── Configuration ───────────────────────────────────────────────────────────
 
@@ -358,7 +364,7 @@ async function handleDonated(evt, topics, value) {
     const num = parseFloat(amount);
     xlmStr = isNaN(num) ? "0" : (num / 10_000_000).toFixed(7);
   }
-  const xlmAmount = parseFloat(xlmStr);
+  const xlmAmount = parseFloat(xlmStr); // display-only; DB/event writes use xlmStr below
 
   // Dedup by txHash — if already recorded, skip.
   // NOTE: evt.txHash is always present for contract-invoked events.
@@ -388,7 +394,7 @@ async function handleDonated(evt, topics, value) {
     await client.query(
       `INSERT INTO donations (id, project_id, donor_address, amount_xlm, amount, currency, transaction_hash, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
-      [donationId, projectId, donor, xlmAmount, xlmAmount, "XLM", txHash || "soroban-" + donationId],
+      [donationId, projectId, donor, xlmStr, xlmStr, "XLM", txHash || "soroban-" + donationId],
     );
 
     // Update project raised_xlm + donor_count
@@ -398,7 +404,7 @@ async function handleDonated(evt, topics, value) {
            donor_count = (SELECT COUNT(DISTINCT donor_address) FROM donations WHERE project_id = $2),
            updated_at = NOW()
        WHERE id = $2`,
-      [xlmAmount, projectId],
+      [xlmStr, projectId],
     );
 
     // Update donor profile
@@ -407,9 +413,12 @@ async function handleDonated(evt, topics, value) {
       [donor],
     );
     const prevTotal = profileResult.rows[0]
-      ? parseFloat(profileResult.rows[0].total_donated_xlm || "0")
-      : 0;
-    const newTotal = prevTotal + xlmAmount;
+      ? String(profileResult.rows[0].total_donated_xlm ?? "0")
+      : "0";
+    const newTotal = scaledToDecimalString(
+      toScaledInt(prevTotal, 7) + toScaledInt(xlmStr, 7),
+      7,
+    );
 
     const projectsSupportedResult = await client.query(
       "SELECT COUNT(DISTINCT project_id) AS count FROM donations WHERE donor_address = $1",
@@ -429,7 +438,7 @@ async function handleDonated(evt, topics, value) {
          projects_supported = EXCLUDED.projects_supported,
          badges = EXCLUDED.badges,
          updated_at = NOW()`,
-      [donor, newTotal.toFixed(7), projectsSupported, JSON.stringify(badges)],
+      [donor, newTotal, projectsSupported, JSON.stringify(badges)],
     );
 
     await client.query("COMMIT");
@@ -446,15 +455,13 @@ async function handleDonated(evt, topics, value) {
         "SELECT raised_xlm, co2_offset_kg FROM projects WHERE id = $1",
         [projectId],
       );
-      const raisedXlm = Number(
-        projectStats.rows[0] ? projectStats.rows[0].raised_xlm || 0 : 0,
-      );
-      const co2Kg = Number(
-        projectStats.rows[0] ? projectStats.rows[0].co2_offset_kg || 0 : 0,
-      );
-      const co2OffsetKg = raisedXlm > 0 && co2Kg > 0
-        ? (xlmAmount * co2Kg) / raisedXlm
-        : 0;
+      const raisedXlm = projectStats.rows[0]
+        ? String(projectStats.rows[0].raised_xlm ?? "0")
+        : "0";
+      const co2Kg = projectStats.rows[0]
+        ? String(projectStats.rows[0].co2_offset_kg ?? "0")
+        : "0";
+      const co2OffsetKg = co2OffsetForDonation(xlmStr, raisedXlm, co2Kg);
 
       const donationEvent = {
         event_type: "DonationRecorded",
@@ -462,8 +469,8 @@ async function handleDonated(evt, topics, value) {
         event_data: {
           donorAddress: donor,
           projectId,
-          amountXLM: xlmAmount,
-          amount: xlmAmount,
+          amountXLM: xlmStr,
+          amount: xlmStr,
           currency: "XLM",
           message: msgHash != null ? `msg#${msgHash}` : null,
           co2OffsetKg,
