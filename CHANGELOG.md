@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **backend:** migration test harness (`backend/test/migrations/`) — verifies fresh-install chain, seeded-upgrade data safety, down-migration round-trips, and schema.sql parity against a real Postgres 16 container; irreversible migrations documented in `03-down-migrations.test.js`; CI workflow `.github/workflows/migration-tests.yml` gates every PR touching migration files (closes #937)
+
 ### Fixed
 - **backend:** Enforce match pool caps atomically at match-time using row-level locks, preventing pools from overspending under concurrent load.
 

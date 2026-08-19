@@ -14,6 +14,7 @@
     "lint": "eslint src/**/*.js",
     "docs": "typedoc --options typedoc.json",
     "test": "jest --maxWorkers=2",
+    "test:migrations": "jest --config jest.config.migrations.js --runInBand",
     "load-test": "k6 run ../scripts/load-test.js"
   },
   "dependencies": {
