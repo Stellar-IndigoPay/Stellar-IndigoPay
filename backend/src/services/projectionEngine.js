@@ -17,8 +17,11 @@
  *   - `processEvent` runs every projection handler for a single event inside
  *     one transaction. It does NOT append to the event store — the caller
  *     (sorobanEventService) appends first, then calls `processEvent`.
- *   - `rebuildAllProjections` truncates every projection table and replays
- *     the entire event store in `id` order.
+ *   - `rebuildAllProjections` is atomic: it replays the entire event store
+ *     into freshly-created staging tables and then swaps them into place
+ *     inside a single transaction. Live reads are never served from a
+ *     truncated or partially-rebuilt table — during a rebuild they observe
+ *     the previous, complete projection state until the swap commits.
  *
  * The engine is intentionally decoupled from HTTP. It speaks only to the
  * database pool and the Prometheus registry.
@@ -47,6 +50,29 @@ const {
 // never through IEEE-754 doubles.
 const STROOP_SCALE = 7;
 const CO2_KG_SCALE = 4;
+
+// Rebuilds are staged in a private schema so live reads are never served from
+// a partially-rebuilt table, then swapped into `public` atomically. The
+// advisory lock serialises rebuilds across app instances (the in-process
+// `projectionRebuildInProgress` gauge only guards a single instance).
+const STAGE_SCHEMA = "projection_stage";
+const REBUILD_LOCK_KEY = "indigopay_projection_rebuild";
+
+/**
+ * Deterministic 64-bit FNV-1a hash of the advisory-lock key, masked to the
+ * signed int8 range `pg_advisory_lock` accepts. Lets multiple app instances
+ * coordinate on the same lock without sharing a hard-coded magic number.
+ *
+ * @returns {bigint}
+ */
+function advisoryLockKey() {
+  let hash = 0xcbf29ce484222325n;
+  for (let i = 0; i < REBUILD_LOCK_KEY.length; i += 1) {
+    hash ^= BigInt(REBUILD_LOCK_KEY.charCodeAt(i));
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return hash & 0x7fffffffffffffffn;
+}
 
 /**
  * Normalise a numeric value (number, string, or bigint) to a plain,
@@ -257,9 +283,6 @@ const projections = {
         const amount = toDecimalString(d.amountXLM) || "0";
         const co2 = toDecimalString(d.co2OffsetKg) || "0";
 
-        // donor_count is derived from donor_history (inserted by the
-        // donor_history projection in the same event pass). Recompute from
-        // donor_history after the history row exists.
         const updated = await ctx.client.query(
           `INSERT INTO projection_project_stats
              (project_id, raised_xlm, donation_count, donor_count, co2_offset_kg, last_donation_at)
@@ -272,16 +295,31 @@ const projections = {
           [projectId, amount, co2],
         );
 
-        const newDonorCountRow = await ctx.client.query(
-          `SELECT COUNT(DISTINCT donor_address)::int AS c
-             FROM projection_donor_history WHERE project_id = $1`,
-          [projectId],
-        );
-        const newDonorCount = newDonorCountRow.rows[0]?.c || 0;
-        await ctx.client.query(
-          "UPDATE projection_project_stats SET donor_count = $2 WHERE project_id = $1",
-          [projectId, newDonorCount],
-        );
+        // donor_count is derived from donor_history. Recompute here and add
+        // the current donation's donor when it is not in history yet: with the
+        // current handler ordering this event's history row does not exist
+        // yet, so the recompute alone would undercount a brand-new donor by 1.
+        // During a bulk rebuild the whole history is rebuilt in the same
+        // transaction, so per-event round trips are skipped and donor_count is
+        // finalized by one aggregate after the replay (see rebuild paths).
+        if (!ctx.bulkProjectionBuild) {
+          const newDonorCountRow = await ctx.client.query(
+            `SELECT COUNT(DISTINCT donor_address)::int AS c
+               FROM projection_donor_history WHERE project_id = $1`,
+            [projectId],
+          );
+          const priorDonorA = await ctx.client.query(
+            "SELECT 1 FROM projection_donor_history WHERE project_id = $1 AND donor_address = $2 LIMIT 1",
+            [projectId, d.donorAddress],
+          );
+          const newDonorCount =
+            (newDonorCountRow.rows[0]?.c || 0) +
+            (priorDonorA.rows.length === 0 ? 1 : 0);
+          await ctx.client.query(
+            "UPDATE projection_project_stats SET donor_count = $2 WHERE project_id = $1",
+            [projectId, newDonorCount],
+          );
+        }
         return updated;
       }
     },
@@ -333,13 +371,34 @@ const projections = {
         const co2 = toDecimalString(d.co2OffsetKg) || "0";
         const donor = d.donorAddress;
 
-        // Determine if this donation introduces a new distinct donor by
-        // checking the leaderboard projection (cheap, indexed on PK).
-        const prior = await ctx.client.query(
-          "SELECT 1 FROM projection_donor_leaderboard WHERE donor_address = $1",
-          [donor],
-        );
-        const isNewDonor = prior.rows.length === 0;
+        // Determine if this donation introduces a new distinct donor. The
+        // leaderboard projection cannot be used here: its handler (and this
+        // event's donor_history row) run earlier in the same event
+        // transaction, so the current donor would always already appear.
+        // Excluding the current donation's transaction therefore leaves a row
+        // exactly when this donor has donated before.
+        let isNewDonor;
+        if (ctx.bulkProjectionBuild) {
+          // The history is being rebuilt in replay order inside this same
+          // transaction, so a donor seen earlier in the replay is exactly a
+          // donor that has donated before. Tracks the set in memory to avoid
+          // one index lookup per event.
+          isNewDonor = !ctx.seenDonors.has(donor);
+          ctx.seenDonors.add(donor);
+        } else {
+          // Live path: the leaderboard projection (and this event's
+          // donor_history row) run earlier in the same event transaction, so
+          // the current donor would always already appear. Excluding the
+          // current donation's transaction therefore leaves a row exactly when
+          // this donor has donated before.
+          const prior = await ctx.client.query(
+            `SELECT 1 FROM projection_donor_history
+              WHERE donor_address = $1 AND transaction_hash <> $2
+              LIMIT 1`,
+            [donor, d.transactionHash || event.transaction_hash],
+          );
+          isNewDonor = prior.rows.length === 0;
+        }
 
         await ctx.client.query(
           `UPDATE projection_global_stats SET
@@ -363,10 +422,11 @@ const PROJECTION_NAMES = Object.keys(projections);
  * This is the single write path for the source of truth.
  *
  * @param {object} event - { event_type, aggregate_id, event_data, soroban_ledger, transaction_hash }
+ * @param {{query: Function}} [db] - Optional pool override (for tests).
  * @returns {Promise<object>} the inserted row (with id + created_at).
  */
-async function insertEvent(event) {
-  const result = await pool.query(
+async function insertEvent(event, db = pool) {
+  const result = await db.query(
     `INSERT INTO donation_events (event_type, aggregate_id, event_data, soroban_ledger, transaction_hash)
      VALUES ($1, $2, $3, $4, $5)
      RETURNING id, created_at`,
@@ -450,22 +510,156 @@ async function refreshLag(db = pool) {
 }
 
 /**
- * Truncate all projection tables (keeps the event store intact).
+ * Truncate all projection tables (keeps the event store intact). The
+ * `projection_global_stats` singleton row (id=1) is re-seeded afterwards so
+ * the incremental UPDATE path keeps accumulating — an empty global_stats table
+ * would silently drop every subsequent donation total.
+ *
  * @param {{query: Function}} db
  */
 async function truncateProjections(db = pool) {
   const tables = PROJECTION_NAMES.map((n) => projections[n].table);
   await db.query(`TRUNCATE ${tables.join(", ")}`);
+  await db.query(
+    `INSERT INTO projection_global_stats
+       (id, total_xlm_raised, total_co2_offset_kg, total_donations, total_donors, total_projects, updated_at)
+     VALUES (1, 0, 0, 0, 0, 0, NOW())
+     ON CONFLICT (id) DO NOTHING`,
+  );
+}
+
+// Non-constraint indexes (created via CREATE [UNIQUE] INDEX, not by a
+// constraint). `LIKE ... INCLUDING ALL` copies them with auto-generated names,
+// so they have to be dropped and recreated with the canonical definitions
+// taken from the live table.
+const NON_CONSTRAINT_INDEX_SQL = `
+  SELECT i.relname AS indexname, pg_get_indexdef(i.oid) AS indexdef
+    FROM pg_index ix
+    JOIN pg_class i  ON i.oid = ix.indexrelid
+    JOIN pg_class t  ON t.oid = ix.indrelid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+   WHERE n.nspname = $1 AND t.relname = $2
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = i.oid)
+`;
+
+/**
+ * Rewrite a `pg_get_indexdef` output so it targets the staging table instead
+ * of the live table (the definition may render the table qualified or not,
+ * depending on the session's search_path).
+ *
+ * @param {string} indexdef
+ * @param {string} table
+ * @returns {string}
+ */
+function stagedIndexDef(indexdef, table) {
+  const staged = `${STAGE_SCHEMA}.${table}`;
+  let def = indexdef.replaceAll(`public.${table}`, staged);
+  // Table names come from the constant `projections` map, never from user input.
+  /* eslint-disable-next-line security/detect-non-literal-regexp */
+  def = def.replace(new RegExp(`(?<![\\w.])${table}(?![\\w.])`, "g"), staged);
+  return def;
 }
 
 /**
- * Rebuild every projection from the event store.
+ * Create empty staging tables (structure only — LIKE copies no rows) for the
+ * given projections. The `projection_global_stats` singleton row is seeded so
+ * the UPDATE-based accumulation path has a row to bump during replay.
  *
- * Steps:
- *   1. Mark rebuild in progress (gauge).
- *   2. Truncate all projection tables.
- *   3. Stream events in `id` order and apply all handlers.
- *   4. Record duration + event count, clear in-progress flag.
+ * @param {object} client
+ * @param {string[]} [names] - projections to stage (defaults to all).
+ */
+async function createStagedProjections(client, names = PROJECTION_NAMES) {
+  await client.query(`CREATE SCHEMA IF NOT EXISTS ${STAGE_SCHEMA}`);
+  for (const name of names) {
+    const table = projections[name].table;
+    await client.query(`DROP TABLE IF EXISTS ${STAGE_SCHEMA}.${table}`);
+    await client.query(
+      `CREATE TABLE ${STAGE_SCHEMA}.${table} (LIKE public.${table} INCLUDING ALL)`,
+    );
+  }
+  if (names.includes("global_stats")) {
+    await client.query(
+      `INSERT INTO ${STAGE_SCHEMA}.projection_global_stats
+         (id, total_xlm_raised, total_co2_offset_kg, total_donations, total_donors, total_projects, updated_at)
+       VALUES (1, 0, 0, 0, 0, 0, NOW())
+       ON CONFLICT (id) DO NOTHING`,
+    );
+  }
+}
+
+/**
+ * Replace the auto-named non-constraint indexes that `LIKE` created on the
+ * staged tables with the canonical index names/definitions from the live
+ * tables, so post-swap schemas stay identical to migration output.
+ *
+ * @param {object} client
+ * @param {string[]} [names]
+ */
+async function canonicalizeStagedIndexes(client, names = PROJECTION_NAMES) {
+  for (const name of names) {
+    const table = projections[name].table;
+    const stagedIndexes = await client.query(NON_CONSTRAINT_INDEX_SQL, [
+      STAGE_SCHEMA,
+      table,
+    ]);
+    for (const row of stagedIndexes.rows) {
+      await client.query(`DROP INDEX ${STAGE_SCHEMA}.${row.indexname}`);
+    }
+    const liveIndexes = await client.query(NON_CONSTRAINT_INDEX_SQL, [
+      "public",
+      table,
+    ]);
+    for (const row of liveIndexes.rows) {
+      await client.query(stagedIndexDef(row.indexdef, table));
+    }
+  }
+}
+
+/**
+ * Atomically move staged tables into `public` inside the caller's transaction.
+ *
+ * Locks every live projection table in ACCESS EXCLUSIVE mode first so
+ * concurrent readers block on the swap and can never observe a renamed or
+ * missing table. For each table the live copy is renamed out of the way (with
+ * its indexes), the staged table is moved in, and the old copy dropped.
+ *
+ * @param {object} client
+ * @param {string[]} [names] - staged projections to swap.
+ */
+async function swapStagedProjections(client, names = PROJECTION_NAMES) {
+  const tables = names.map((n) => projections[n].table);
+  await client.query(
+    `LOCK TABLE ${tables.map((t) => `public.${t}`).join(", ")} IN ACCESS EXCLUSIVE MODE`,
+  );
+  for (const table of tables) {
+    const oldName = `${table}_rebuild_old`;
+    await client.query(`ALTER TABLE public.${table} RENAME TO ${oldName}`);
+    const { rows } = await client.query(
+      "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = $1",
+      [oldName],
+    );
+    for (const row of rows) {
+      await client.query(
+        `ALTER INDEX public.${row.indexname} RENAME TO ${row.indexname}_rebuild_old`,
+      );
+    }
+    await client.query(`ALTER TABLE ${STAGE_SCHEMA}.${table} SET SCHEMA public`);
+    await client.query(`DROP TABLE public.${oldName}`);
+  }
+  await client.query(`DROP SCHEMA IF EXISTS ${STAGE_SCHEMA}`);
+}
+
+/**
+ * Rebuild every projection from the event store, atomically.
+ *
+ * The entire rebuild runs in one transaction: fresh staging tables are created
+ * and populated from the event store while the live tables keep serving the
+ * previous, complete projection state; a short ACCESS EXCLUSIVE-locked swap
+ * then moves the staged tables into `public` and commits. Live traffic can
+ * therefore never read an empty or partially-rebuilt projection — it sees the
+ * old state until the swap, and the complete new state afterwards. A
+ * cluster-wide advisory lock (transaction-scoped) prevents two instances from
+ * rebuilding concurrently.
  *
  * @param {{pool?: object}} [opts]
  * @returns {Promise<{events:number, durationMs:number}>}
@@ -475,14 +669,24 @@ async function rebuildAllProjections(opts = {}) {
   const start = Date.now();
   projectionRebuildInProgress.set(1);
 
+  const client = await db.connect();
   try {
-    await truncateProjections(db);
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock($1)", [advisoryLockKey()]);
 
-    const { rows } = await db.query(
+    await createStagedProjections(client);
+    await canonicalizeStagedIndexes(client);
+
+    // Handlers reference the projection tables unqualified, so pointing the
+    // transaction's search_path at the staging schema redirects every read and
+    // write to the staged copies. `donation_events` resolves to `public`.
+    await client.query(`SET LOCAL search_path TO ${STAGE_SCHEMA}, public`);
+    const { rows } = await client.query(
       `SELECT id, event_type, aggregate_id, event_data, soroban_ledger, transaction_hash, created_at
          FROM donation_events ORDER BY id ASC`,
     );
 
+    const seenDonors = new Set();
     for (const raw of rows) {
       const event = {
         event_type: raw.event_type,
@@ -495,8 +699,31 @@ async function rebuildAllProjections(opts = {}) {
         transaction_hash: raw.transaction_hash,
         created_at: raw.created_at,
       };
-      await processEvent(event, { pool: db });
+      for (const name of PROJECTION_NAMES) {
+        await projections[name].handler(event, {
+          client,
+          pool: db,
+          bulkProjectionBuild: true,
+          seenDonors,
+        });
+      }
     }
+
+    // donor_count is finalized from the fully-rebuilt history: one aggregate
+    // per project instead of the per-event recompute used by the live path.
+    await client.query(
+      `UPDATE projection_project_stats AS ps
+          SET donor_count = sub.c
+         FROM (
+           SELECT project_id, COUNT(DISTINCT donor_address)::int AS c
+             FROM projection_donor_history
+            GROUP BY project_id
+         ) sub
+        WHERE ps.project_id = sub.project_id`,
+    );
+
+    await swapStagedProjections(client);
+    await client.query("COMMIT");
 
     const durationMs = Date.now() - start;
     projectionRebuildDurationSeconds.observe({ outcome: "success" }, durationMs / 1000);
@@ -512,6 +739,7 @@ async function rebuildAllProjections(opts = {}) {
     );
     return { events: rows.length, durationMs };
   } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
     const durationMs = Date.now() - start;
     projectionRebuildDurationSeconds.observe({ outcome: "error" }, durationMs / 1000);
     logger.error(
@@ -520,13 +748,15 @@ async function rebuildAllProjections(opts = {}) {
     );
     throw err;
   } finally {
+    client.release();
     projectionRebuildInProgress.set(0);
   }
 }
 
 /**
- * Rebuild a single named projection from the event store. Useful for partial
- * repairs without recomputing everything.
+ * Rebuild a single named projection from the event store, atomically. Useful
+ * for partial repairs without recomputing everything. Same staging + swap
+ * strategy as `rebuildAllProjections`, scoped to one table.
  *
  * @param {string} name - projection name
  * @param {{pool?: object}} [opts]
@@ -537,35 +767,42 @@ async function rebuildProjection(name, opts = {}) {
     throw new Error(`Unknown projection: ${name}`);
   }
   const db = opts.pool || pool;
-  await db.query(`TRUNCATE ${projections[name].table}`);
-  const { rows } = await db.query(
-    `SELECT id, event_type, aggregate_id, event_data, soroban_ledger, transaction_hash, created_at
-       FROM donation_events ORDER BY id ASC`,
-  );
-  for (const raw of rows) {
-    const event = {
-      event_type: raw.event_type,
-      aggregate_id: raw.aggregate_id,
-      event_data:
-        typeof raw.event_data === "string"
-          ? JSON.parse(raw.event_data)
-          : raw.event_data,
-      soroban_ledger: raw.soroban_ledger,
-      transaction_hash: raw.transaction_hash,
-    };
-    const client = await db.connect();
-    try {
-      await client.query("BEGIN");
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock($1)", [advisoryLockKey()]);
+
+    await createStagedProjections(client, [name]);
+    await canonicalizeStagedIndexes(client, [name]);
+
+    await client.query(`SET LOCAL search_path TO ${STAGE_SCHEMA}, public`);
+    const { rows } = await client.query(
+      `SELECT id, event_type, aggregate_id, event_data, soroban_ledger, transaction_hash, created_at
+         FROM donation_events ORDER BY id ASC`,
+    );
+    for (const raw of rows) {
+      const event = {
+        event_type: raw.event_type,
+        aggregate_id: raw.aggregate_id,
+        event_data:
+          typeof raw.event_data === "string"
+            ? JSON.parse(raw.event_data)
+            : raw.event_data,
+        soroban_ledger: raw.soroban_ledger,
+        transaction_hash: raw.transaction_hash,
+      };
       await projections[name].handler(event, { client, pool: db });
-      await client.query("COMMIT");
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
     }
+
+    await swapStagedProjections(client, [name]);
+    await client.query("COMMIT");
+    return { events: rows.length };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
   }
-  return { events: rows.length };
 }
 
 /**

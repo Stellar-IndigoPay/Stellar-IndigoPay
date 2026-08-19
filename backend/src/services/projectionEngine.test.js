@@ -212,15 +212,31 @@ describe("projectionEngine — rebuild", () => {
     await insertEvent(donationEvent({ donorAddress: "GAAA", projectId: "P2", amountXLM: 25, transactionHash: "e3" }));
   });
 
-  test("rebuildAllProjections truncates all projections first", async () => {
+  test("rebuildAllProjections stages into projection_stage and swaps atomically", async () => {
     const result = await rebuildAllProjections();
     expect(result.events).toBe(3);
-    const truncates = pool.__calls().filter((c) => c.text.startsWith("TRUNCATE"));
-    expect(truncates).toHaveLength(1);
-    expect(truncates[0].text).toContain("projection_donor_leaderboard");
-    expect(truncates[0].text).toContain("projection_project_stats");
-    expect(truncates[0].text).toContain("projection_donor_history");
-    expect(truncates[0].text).toContain("projection_global_stats");
+    const texts = pool.__calls().map((c) => c.text);
+    // Live tables are never truncated during a rebuild.
+    expect(texts.some((t) => t.startsWith("TRUNCATE"))).toBe(false);
+    // Staging: one empty structure copy per projection in the private schema.
+    for (const name of PROJECTION_NAMES) {
+      expect(
+        texts.some((t) =>
+          t.includes(`CREATE TABLE projection_stage.${projections[name].table}`),
+        ),
+      ).toBe(true);
+    }
+    // The global_stats singleton row is seeded in staging so accumulation works.
+    expect(
+      texts.some((t) =>
+        t.includes("INSERT INTO projection_stage.projection_global_stats"),
+      ),
+    ).toBe(true);
+    // Swap: locks the live tables, renames the old out, moves staged into public.
+    expect(texts.some((t) => /LOCK TABLE public\.projection_/.test(t))).toBe(true);
+    expect(
+      texts.some((t) => /ALTER TABLE projection_stage\.projection_.* SET SCHEMA public/.test(t)),
+    ).toBe(true);
   });
 
   test("rebuild issues one processEvent-equivalent pass per stored event (4 projections x 3 events)", async () => {
@@ -257,7 +273,7 @@ describe("projectionEngine — rebuild", () => {
     expect(isRebuilding()).toBe(false);
   });
 
-  test("truncateProjections issues a single TRUNCATE across all tables", async () => {
+  test("truncateProjections issues a single TRUNCATE and re-seeds the global_stats singleton", async () => {
     pool.__reset();
     await truncateProjections();
     const truncates = pool.__calls().filter((c) => c.text.startsWith("TRUNCATE"));
@@ -265,6 +281,11 @@ describe("projectionEngine — rebuild", () => {
     PROJECTION_NAMES.forEach((n) =>
       expect(truncates[0].text).toContain(projections[n].table),
     );
+    // The singleton row global_stats (id=1) must survive so the incremental
+    // UPDATE path keeps accumulating totals.
+    const seed = pool.__calls().find((c) => /INSERT INTO projection_global_stats/.test(c.text));
+    expect(seed).toBeDefined();
+    expect(seed.text).toContain("ON CONFLICT (id) DO NOTHING");
   });
 });
 
