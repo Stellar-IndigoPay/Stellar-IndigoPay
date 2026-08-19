@@ -3,6 +3,7 @@
  */
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { formatMonthYear } from "@/utils/format";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 
@@ -30,8 +31,8 @@ const RANK_MEDALS: Record<number, string> = { 1: "🥇", 2: "🥈", 3: "🥉" };
 
 function monthLabel(ym: string) {
   const [year, month] = ym.split("-");
-  const date = new Date(Number(year), Number(month) - 1, 1);
-  return date.toLocaleString("default", { month: "long", year: "numeric" });
+  const date = new Date(Date.UTC(Number(year), Number(month) - 1, 1));
+  return formatMonthYear(date);
 }
 
 export default function LeaderboardHistoryPage() {

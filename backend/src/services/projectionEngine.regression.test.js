@@ -25,16 +25,16 @@ const path = require("path");
 const { GenericContainer, Wait } = require("testcontainers");
 const { Pool } = require("pg");
 
-const { insertEvent, processEvent } = require("./projectionEngine");
+const { insertEvent, processEvent, truncateProjections } = require("./projectionEngine");
 
 let container;
 let testPool;
 let ready = false;
 
 const DONORS = [
-  "GAAAREPEATREPEATREPEATREPEATREPEATREPEATREPEATREPEATREPEATREPEATRE",
-  "GBBBREPEATREPEATREPEATREPEATREPEATREPEATREPEATREPEATREPEATREPEATRE",
-  "GCCCREPEATREPEATREPEATREPEATREPEATREPEATREPEATREPEATREPEATREPEATRE",
+  "G".padEnd(56, "A"),
+  "B".padEnd(56, "A"),
+  "C".padEnd(56, "A"),
 ];
 const PROJECTS = [
   "11111111-1111-4111-8111-111111111111",
@@ -104,11 +104,13 @@ describe("Projection engine regression (legacy vs event-sourced parity)", () => 
   beforeEach(async () => {
     if (!ready) return;
     await testPool.query("TRUNCATE donations, profiles, projects, donation_events RESTART IDENTITY CASCADE");
+    await truncateProjections(testPool);
+    const wallet = "G".repeat(56);
     for (const p of PROJECTS) {
       await testPool.query(
         `INSERT INTO projects (id, name, description, category, location, wallet_address, goal_xlm, raised_xlm, donor_count, co2_offset_kg, status)
-         VALUES ($1, 'p', 'd', 'Reforestation', 'l', 'G'.repeat(56), 0, 0, 0, 0, 'active')`,
-        [p],
+         VALUES ($1, 'p', 'd', 'Reforestation', 'l', $2, 0, 0, 0, 0, 'active')`,
+        [p, wallet],
       );
     }
     for (let i = 0; i < DONATIONS.length; i++) {
@@ -116,7 +118,7 @@ describe("Projection engine regression (legacy vs event-sourced parity)", () => 
       await testPool.query(
         `INSERT INTO donations (id, project_id, donor_address, amount_xlm, amount, currency, transaction_hash, created_at)
          VALUES ($1, $2, $3, $4, $4, 'XLM', $5, NOW())`,
-        [`d-${i}`, PROJECTS[pi], DONORS[di], amount, `legacy-tx-${i}`],
+        [`00000000-0000-4000-8000-${String(i).padStart(12, "0")}`, PROJECTS[pi], DONORS[di], amount, `legacy-tx-${i}`],
       );
       const co2 = amount * 10;
       await insertEvent({

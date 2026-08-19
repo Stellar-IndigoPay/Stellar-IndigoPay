@@ -225,4 +225,66 @@ describe("Queue workers smoke (compose Postgres)", () => {
     );
     expect(Number(matchRows[0].matched_xlm)).toBeCloseTo(20, 5);
   });
+
+  test("matchQueue enforces the cap atomically under concurrent matching", async () => {
+    if (!ready) return console.warn("skipping – database unavailable");
+
+    const matchQueue = require("./matchQueue");
+    // matchQueue is already started by previous tests, but it's safe to start again or just rely on it.
+    await matchQueue.start();
+    stops.push(matchQueue.stop);
+
+    const projectId = randomUUID();
+    const matcher = makePublicKey("C");
+    const matchId = randomUUID();
+
+    // Cap is 50. We enqueue 10 donations of 10.
+    // Total attempted match is 100.
+    // If cap is enforced, only 50 should be matched.
+    await cleanDb();
+    await adminPool.query(
+      `INSERT INTO donation_matches (id, project_id, matcher_address, cap_xlm, multiplier, expires_at, matched_xlm)
+       VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '1 hour', $6)`,
+      [matchId, projectId, matcher, "50.0000000", 1, "0.0000000"],
+    );
+
+    const promises = [];
+    for (let i = 0; i < 10; i++) {
+      promises.push(
+        matchQueue.enqueueMatchDonation({
+          projectId,
+          donorAddress: makePublicKey(`D`),
+          parsedAmount: 10,
+          transactionHash: `tx-concurrent-${i}`,
+        }),
+      );
+    }
+    await Promise.all(promises);
+
+    // Wait until matched_xlm reaches 50
+    const consumed = await waitFor(async () => {
+      const { rows } = await adminPool.query(
+        "SELECT matched_xlm FROM donation_matches WHERE id = $1",
+        [matchId],
+      );
+      return Number(rows[0].matched_xlm) === 50;
+    });
+    expect(consumed).toBe(true);
+
+    // Wait an extra second to ensure no further updates occur (no overshoot)
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    const { rows: finalMatchRows } = await adminPool.query(
+      "SELECT matched_xlm FROM donation_matches WHERE id = $1",
+      [matchId],
+    );
+    expect(Number(finalMatchRows[0].matched_xlm)).toBe(50);
+
+    // Also verify exactly 5 match donations were recorded
+    const { rows: donations } = await adminPool.query(
+      "SELECT count(*) as c FROM donations WHERE transaction_hash LIKE $1",
+      [`match-tx-concurrent-%-${matchId}`],
+    );
+    expect(Number(donations[0].c)).toBe(5);
+  });
 });
