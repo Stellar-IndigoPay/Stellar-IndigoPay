@@ -13,7 +13,7 @@
     "migration:lint": "node scripts/validate-migrations.js",
     "lint": "eslint src/**/*.js",
     "docs": "typedoc --options typedoc.json",
-    "test": "jest --maxWorkers=2",
+    "test": "jest --maxWorkers=2 --forceExit",
     "test:properties": "jest --maxWorkers=2 test/properties",
     "test:properties:extended": "jest --runInBand --testTimeout=600000 test/properties",
     "load-test": "k6 run ../scripts/load-test.js",
