@@ -11,6 +11,7 @@
  */
 import { useState, useEffect, useCallback, useRef } from "react";
 import { SkeletonBox } from "./Skeleton";
+import { formatTime } from "@/utils/format";
 
 export type PlatformStatus = "operational" | "degraded" | "outage" | "loading";
 
@@ -137,7 +138,7 @@ export default function HealthBanner({
         </span>
         {details && (
           <span className="text-xs text-current/60 ml-auto font-body">
-            Last checked: {new Date().toLocaleTimeString()}
+            Last checked: {formatTime(new Date().toISOString())}
           </span>
         )}
       </div>

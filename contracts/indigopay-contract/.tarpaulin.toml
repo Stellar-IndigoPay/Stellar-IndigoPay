@@ -1,6 +1,4 @@
 [coverage]
-exclude-files = ["**/fuzz_tests.rs"]
 fail-under = 70
-
-[html]
-output-directory = "coverage"
+exclude-files = ["**/fuzz_tests.rs", "**/escrow_fuzz.rs"]
+output-dir = "coverage"

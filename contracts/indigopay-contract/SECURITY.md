@@ -274,6 +274,34 @@ All counter decrements on refund use `checked_sub(...).expect("...underflow on r
 3. **Zero-address record indexing**: The `DonationRecord` on `IndigoPayContract` records `donor` as a dedicated zero-address (`0x00...00`), and emits `stlth_don` event topic with the zero-address as donor.
 4. **Cross-contract authorization**: The `sender.require_auth()` authorization gates the invocation at the `IndigoPayContract` boundary and propagates to `DonationContract.donate_stealth` for atomic token transfer from sender to stealth escrow contract.
 
+### Custody model and withdrawal path (#621)
+
+Stealth-donated tokens are held by the `DonationContract` (the stealth escrow
+contract) until the project wallet withdraws them — they are **never** held by
+`IndigoPayContract` and are **not** part of `ProjectContractBalance`.
+
+- **Per-(project_wallet, token) accounting**: `donate_stealth` credits the
+  project's withdrawable balance in the `DonationContract` for every successful
+  donation, so no stealth donation is ever stranded.
+- **Project-wallet-gated withdrawal**: `withdraw_stealth_donations` moves the
+  balance to the project wallet itself. Only the `project_wallet` address can
+  withdraw; neither the main-contract admin nor any third party can drain a
+  project's stealth funds. The main contract exposes
+  `withdraw_stealth_integrated(project_id, token, amount)` which resolves the
+  project's wallet, requires its root-level auth, and forwards the call.
+- **CEI ordering**: the withdrawable balance is decremented *before* the
+  external token transfer, so a reentrant/malicious token cannot double-drain.
+  Structured errors (`DonationError`) reject zero-amount and over-balance
+  withdrawals.
+- **Reconciliation**: both `withdraw_stealth_donations` and
+  `withdraw_stealth_integrated` emit withdrawal events (see `contracts/EVENTS.md`)
+  carrying the withdrawn amount and the remaining balance, so indexers can
+  reconcile on-chain `total_raised` with funds actually received.
+- **No strandability**: the withdrawal path is intentionally not gated on the
+  contract pause flag or the project's active state, so funds can always be
+  recovered by the project wallet (mirrors the permissionless
+  `execute_emergency_withdrawal` precedent).
+
 ## Off-Chain Oracle Attestation for Project Impact Verification (#459)
 
 Gated behind the `impact_verification` Cargo feature (on by default; excluded from the size-checked `--no-default-features` CI build). Lets admin-authorised verifiers submit independent measurements of a project's actual CO₂ impact, which the contract compares against the project's self-reported (claimed) rate.
