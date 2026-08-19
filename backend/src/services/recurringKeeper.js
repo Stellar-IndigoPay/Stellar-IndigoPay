@@ -26,6 +26,7 @@ const {
 } = require("@stellar/stellar-sdk");
 const { metrics } = require("./metrics");
 const { getSigningSecret } = require("./signingSecretProvider");
+const { withSpan } = require("../telemetry");
 
 let intervalId = null;
 let isExecuting = false;
@@ -72,76 +73,78 @@ async function stop() {
  * Main keeper cycle logic.
  */
 async function runKeeperCycle() {
-  let keeperSecret;
-  try {
-    keeperSecret = await getSigningSecret("recurringKeeper");
-  } catch (err) {
-    logger.warn({ event: "recurring_keeper_no_secret", err: err.message }, "Recurring keeper managed signing secret not configured, skipping recurring donation keeper cycle");
-    return;
-  }
-  const contractId = process.env.CONTRACT_ID;
-  if (!contractId) {
-    logger.warn({ event: "recurring_keeper_no_contract" }, "CONTRACT_ID not configured, skipping recurring donation keeper cycle");
-    return;
-  }
+  return withSpan("recurring keeper cycle", { "worker.name": "recurring-keeper", "messaging.operation.type": "process" }, async () => {
+    let keeperSecret;
+    try {
+      keeperSecret = await getSigningSecret("recurringKeeper");
+    } catch (err) {
+      logger.warn({ event: "recurring_keeper_no_secret", err: err.message }, "Recurring keeper managed signing secret not configured, skipping recurring donation keeper cycle");
+      return;
+    }
+    const contractId = process.env.CONTRACT_ID;
+    if (!contractId) {
+      logger.warn({ event: "recurring_keeper_no_contract" }, "CONTRACT_ID not configured, skipping recurring donation keeper cycle");
+      return;
+    }
 
-  const keypair = Keypair.fromSecret(keeperSecret);
-  const keeperPublicKey = keypair.publicKey();
+    const keypair = Keypair.fromSecret(keeperSecret);
+    const keeperPublicKey = keypair.publicKey();
 
-  // Fetch pending schedules due for execution
-  const dueSchedules = await fetchDueSchedules();
+    // Fetch pending schedules due for execution
+    const dueSchedules = await fetchDueSchedules();
 
-  // Update Prometheus pending gauge
-  if (metrics.recurringPending) {
-    metrics.recurringPending.set(dueSchedules.length);
-  }
+    // Update Prometheus pending gauge
+    if (metrics.recurringPending) {
+      metrics.recurringPending.set(dueSchedules.length);
+    }
 
-  if (dueSchedules.length === 0) {
-    logger.debug({ event: "recurring_keeper_no_due_schedules" }, "No recurring donations due for execution");
-    return;
-  }
+    if (dueSchedules.length === 0) {
+      logger.debug({ event: "recurring_keeper_no_due_schedules" }, "No recurring donations due for execution");
+      return;
+    }
 
-  logger.info(
-    { event: "recurring_keeper_due_found", count: dueSchedules.length },
-    `Found ${dueSchedules.length} recurring donations due for execution`
-  );
+    logger.info(
+      { event: "recurring_keeper_due_found", count: dueSchedules.length },
+      `Found ${dueSchedules.length} recurring donations due for execution`
+    );
 
-  let account;
-  try {
-    account = await stellarServer.loadAccount(keeperPublicKey);
-  } catch (err) {
-    logger.error({ event: "recurring_keeper_load_account_failed", err: err.message }, "Failed to load keeper account from Stellar network");
-    return;
-  }
-
-  // Process each schedule sequentially to prevent transaction sequence conflicts.
-  // The keeper account is re-fetched before every submission: a single loaded
-  // account can go stale if its sequence advances between submissions (e.g. an
-  // external transaction or a failed attempt), causing later submissions to fail
-  // with tx_bad_seq.
-  for (const schedule of dueSchedules) {
+    let account;
     try {
       account = await stellarServer.loadAccount(keeperPublicKey);
-      await executeSchedule(schedule, account, keypair);
-      if (metrics.recurringExecutionsTotal) {
-        metrics.recurringExecutionsTotal.inc({ status: "success" });
-      }
     } catch (err) {
-      logger.error(
-        {
-          event: "recurring_keeper_schedule_failed",
-          donor: schedule.donor_address,
-          recurringId: schedule.recurring_id,
-          projectId: schedule.project_id,
-          err: err.message,
-        },
-        `Failed to execute recurring donation schedule for donor ${schedule.donor_address} (ID: ${schedule.recurring_id})`
-      );
-      if (metrics.recurringExecutionsTotal) {
-        metrics.recurringExecutionsTotal.inc({ status: "failed" });
+      logger.error({ event: "recurring_keeper_load_account_failed", err: err.message }, "Failed to load keeper account from Stellar network");
+      return;
+    }
+
+    // Process each schedule sequentially to prevent transaction sequence conflicts.
+    // The keeper account is re-fetched before every submission: a single loaded
+    // account can go stale if its sequence advances between submissions (e.g. an
+    // external transaction or a failed attempt), causing later submissions to fail
+    // with tx_bad_seq.
+    for (const schedule of dueSchedules) {
+      try {
+        account = await stellarServer.loadAccount(keeperPublicKey);
+        await executeSchedule(schedule, account, keypair);
+        if (metrics.recurringExecutionsTotal) {
+          metrics.recurringExecutionsTotal.inc({ status: "success" });
+        }
+      } catch (err) {
+        logger.error(
+          {
+            event: "recurring_keeper_schedule_failed",
+            donor: schedule.donor_address,
+            recurringId: schedule.recurring_id,
+            projectId: schedule.project_id,
+            err: err.message,
+          },
+          `Failed to execute recurring donation schedule for donor ${schedule.donor_address} (ID: ${schedule.recurring_id})`
+        );
+        if (metrics.recurringExecutionsTotal) {
+          metrics.recurringExecutionsTotal.inc({ status: "failed" });
+        }
       }
     }
-  }
+  });
 }
 
 /**

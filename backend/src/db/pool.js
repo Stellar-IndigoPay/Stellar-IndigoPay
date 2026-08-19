@@ -3,6 +3,7 @@
 const { AsyncLocalStorage } = require("async_hooks");
 const { Pool } = require("pg");
 const logger = require("../logger");
+const { withSpan } = require("../telemetry");
 
 let dbQueryDurationSeconds;
 let dbSlowQueriesTotal;
@@ -286,7 +287,10 @@ const pool = {
     const operation = extractOperation(sql);
 
     try {
-      const result = await getClientForCurrentRequest().query(...args);
+      const result = await withSpan("db.query", {
+        "db.system.name": "postgresql",
+        "db.operation.name": operation,
+      }, () => getClientForCurrentRequest().query(...args));
       const durationMs = Date.now() - start;
       const durationSec = durationMs / 1000;
       dbQueryDurationSeconds.observe({ operation, success: "true" }, durationSec);
