@@ -600,16 +600,12 @@ pub enum DataKey {
     // Admin-configurable donation rate limit overrides (instance storage)
     DonationRateLimitMax,
     DonationRateLimitWindow,
-    // Per-project milestone NFT: one per (project_id, donor) pair
-    ProjectMilestoneNFT(String, Address),
     // Contract upgrade and multi-currency support. ContractWasmHash was
     // removed: the single-step `upgrade` writer was replaced in Phase A
     // by the two-step `propose_upgrade` / `execute_upgrade` flow which
     // uses the cfg-gated `PendingUpgrade` variant below. No live code
     // path wrote to or read from ContractWasmHash.
     USDCTokenAddress,
-    // Price oracle for USDC → XLM conversion
-    OracleAddress,
     // Addresses of every voter on a given proposal, exposed via
     // `get_voter_list` for governance UIs. Kept separate from the
     // `Proposal` value so the proposal layout can evolve without
@@ -633,35 +629,7 @@ pub enum DataKey {
     // `pause_contract` / `unpause_contract` are themselves exempt so
     // the admin can always recover from a pause.
     ContractPaused,
-    // Pending contract upgrade — hash of the WASM that the admin has
-    // proposed via `propose_upgrade` but not yet executed. Cleared on
-    // `execute_upgrade` (after the timelock) or `cancel_upgrade`.
-    PendingUpgrade,
-    // Ledger sequence at which the pending upgrade becomes executable.
-    // Set together with `PendingUpgrade` and cleared on execute/cancel.
-    UpgradeEffectiveAt,
-    // Time-locked vesting donation schedules. `VestingSchedule(donor, id)`
-    // holds one schedule; `DonorVestingCount(donor)` allocates unique,
-    // monotonically increasing schedule ids per donor.
-    VestingSchedule(Address, u32),
-    DonorVestingCount(Address),
-    // Hash of the last EXECUTED contract upgrade. Set by
-    // `execute_upgrade` after `env.deployer().update_current_contract_wasm`
-    // returns. Used by indexers to confirm which WASM is currently
-    // running at the contract address.
-    LastExecutedUpgrade,
-    // Pending emergency withdrawal request. Keyed by (project_id, token_address)
-    // to support multiple concurrent withdrawals per project (#428).
-    EmergencyWithdrawal(String, Address),
-    // List of tokens with pending emergency withdrawals for a project. Key: project_id -> Vec<Address>
-    EmergencyWithdrawalTokens(String),
-    // Donation refund (#290)
-    RefundRequest(u32),
-    RefundCount,
-    RefundForDonation(u32),
-    DonationCO2Offset(u32),
-    // Minted donation receipt NFTs, keyed by (donor, donation_index).
-    DonationReceiptNFT(Address, u32),
+
     // Per-project per-token contract-held balance — the canonical ledger
     // for how much of each asset each project has deposited into the
     // contract. Key: (project_id, token_address) → i128.
@@ -671,61 +639,87 @@ pub enum DataKey {
     // balance concept. #277's deposit logic must increment this key on
     // deposit. See SECURITY.md and #277 for coordination notes.
     ProjectContractBalance(String, Address),
-    RecurringDonation(Address, u32),
-    DonorRecurringCount(Address),
-    VoteDelegation(Address),
-    DelegatedWeight(Address),
-    NativeTokenAddress,
-    // zk-SNARK anonymous donation (#390)
-    ZkVerificationKey,
-    // Stored in *persistent* storage, not instance storage (#706). One entry
-    // is written per anonymous donation and the set only ever grows, so
-    // keeping it in the always-loaded instance entry would make every
-    // contract invocation's footprint grow with total ZK donation volume and
-    // risk exceeding the ledger-entry size limit. Persistent storage gives
-    // each nullifier/record its own footprint and TTL instead. See
-    // `ZK_STORAGE_TTL_LEDGERS` for the retention policy. A ring/eviction
-    // scheme was deliberately rejected for `Nullifier`: evicting an old
-    // nullifier would make it reusable again, defeating double-spend
-    // protection.
-    Nullifier(BytesN<32>),
-    ZkDonationRecord(u32),
-    // Time-locked donation vesting (#386)
-    VestingSchedule(Address, u32),
-    DonorVestingCount(Address),
-    // Platform fee configuration (#385)
-    /// Fee in basis points (0–500, max 5%).
-    PlatformFeeBps,
-    /// Designated wallet that receives the platform fee.
-    PlatformTreasury,
-    // Time-Locked Donation Challenge/Response Protocol (#457)
-    ChallengeThreshold,
-    DonationChallenge(u32),
-    // Stealth Address Donation Integration (#458)
-    StealthDonationContract,
     /// Quadratic voting: credits spent by a voter on a project proposal.
     VoteCredits(String, Address),
-    // Multi-token registry
-    TokenConfig(Address),
-    TokenList,
-    // Transitional key used by the initial multi-token implementation. New
-    // donations lazily migrate it to `DonorRateLimit`.
-    DonorRateLimitPerToken(Address, String, Address),
-    // Pending M-of-N force-refund escalation. Appended to preserve the
-    // discriminants of all previously deployed DataKey variants.
-    ForceRefund(u32),
     // Per-token donation rate limit overrides. These are separate keys so
     // deployments without an override can fall back to the global policy.
     TokenRateLimitMax(Address),
     TokenRateLimitWindow(Address),
-    /// Platform fee split recipients and their share basis points (#434).
+}
+
+/// Feature-specific storage keys — kept off `DataKey` so the whole enum can be
+/// feature-gated. A `#[contracttype]` enum expands before `#[cfg]` is applied
+/// to its variants, so any variant on `DataKey` is compiled into the slim
+/// `--no-default-features` build regardless of its feature gate.
+#[cfg(any(
+    feature = "delegation",
+    feature = "recurring",
+    feature = "refund",
+    feature = "governance",
+    feature = "emergency",
+    feature = "upgrade",
+    feature = "usdc",
+    feature = "campaign",
+    feature = "donation",
+    feature = "impact",
+    feature = "impact_verification",
+    feature = "project_verification",
+    feature = "vesting",
+    feature = "zk",
+    feature = "batch",
+    feature = "fees",
+    feature = "escrow",
+    feature = "testutils"
+))]
+#[contracttype]
+pub enum FeatureKey {
+    // ── Vesting ──────────────────────────────────────────────────────────
+    VestingSchedule(Address, u32),
+    DonorVestingCount(Address),
+    // ── Recurring ────────────────────────────────────────────────────────
+    RecurringDonation(Address, u32),
+    DonorRecurringCount(Address),
+    // ── Delegation ───────────────────────────────────────────────────────
+    VoteDelegation(Address),
+    DelegatedWeight(Address),
+    // ── Refund ───────────────────────────────────────────────────────────
+    RefundRequest(u32),
+    RefundCount,
+    RefundForDonation(u32),
+    DonationCO2Offset(u32),
+    DonationToken(u32),
+    ForceRefund(u32),
+    // ── Emergency ────────────────────────────────────────────────────────
+    EmergencyWithdrawal(String, Address),
+    EmergencyWithdrawalTokens(String),
+    // ── Upgrade ──────────────────────────────────────────────────────────
+    PendingUpgrade,
+    UpgradeEffectiveAt,
+    LastExecutedUpgrade,
+    // ── Token / Oracle ──────────────────────────────────────────────────
+    OracleAddress,
+    NativeTokenAddress,
+    TokenConfig(Address),
+    TokenList,
+    DonorRateLimitPerToken(Address, String, Address),
+    // ── ZK ───────────────────────────────────────────────────────────────
+    ZkVerificationKey,
+    Nullifier(BytesN<32>),
+    ZkDonationRecord(u32),
+    // ── Fees ─────────────────────────────────────────────────────────────
+    PlatformFeeBps,
+    PlatformTreasury,
     PlatformFeeRecipients,
-    // Campaign-to-Escrow Integration (#426)
-    /// Address of the deployed escrow contract (instance storage).
+    // ── Donation-specific ────────────────────────────────────────────────
+    ChallengeThreshold,
+    DonationChallenge(u32),
+    StealthDonationContract,
+    ProjectMilestoneNFT(String, Address),
+    // Minted donation receipt NFTs, keyed by (donor, donation_index).
+    DonationReceiptNFT(Address, u32),
+    // ── Escrow ───────────────────────────────────────────────────────────
     EscrowContractAddress,
-    /// Escrow milestones for a project's campaign: (project_id) -> Vec<EscrowMilestone>.
     CampaignEscrowMilestones(String),
-    /// Escrow job ID for a project's campaign: (project_id) -> String.
     CampaignEscrowJobId(String),
 }
 
@@ -1093,10 +1087,10 @@ fn migrate_legacy_ew_key_if_present(env: &Env, project_id: &String) {
             .get::<_, EmergencyWithdrawal>(&legacy_key)
         {
             env.storage().instance().remove(&legacy_key);
-            let new_key = DataKey::EmergencyWithdrawal(project_id.clone(), w.token.clone());
+            let new_key = FeatureKey::EmergencyWithdrawal(project_id.clone(), w.token.clone());
             env.storage().instance().set(&new_key, &w);
 
-            let tokens_key = DataKey::EmergencyWithdrawalTokens(project_id.clone());
+            let tokens_key = FeatureKey::EmergencyWithdrawalTokens(project_id.clone());
             let mut tokens: Vec<Address> = env
                 .storage()
                 .instance()
@@ -1221,14 +1215,14 @@ fn apply_refund_accounting(env: &Env, refund_id: u32, request: &mut RefundReques
     request.status = RefundRequestStatus::Approved;
     env.storage()
         .instance()
-        .set(&DataKey::RefundRequest(refund_id), request);
+        .set(&FeatureKey::RefundRequest(refund_id), request);
 }
 
 #[cfg(any(feature = "donation", feature = "refund"))]
 fn challenge_reversed(env: &Env, donation_index: u32) -> bool {
     env.storage()
         .instance()
-        .get::<_, DonationChallenge>(&DataKey::DonationChallenge(donation_index))
+        .get::<_, DonationChallenge>(&FeatureKey::DonationChallenge(donation_index))
         .map(|challenge| challenge.resolved && !challenge.approved)
         .unwrap_or(false)
 }
@@ -1238,12 +1232,12 @@ fn refund_approved(env: &Env, donation_index: u32) -> bool {
     let refund_id: Option<u32> = env
         .storage()
         .instance()
-        .get(&DataKey::RefundForDonation(donation_index));
+        .get(&FeatureKey::RefundForDonation(donation_index));
     refund_id
         .and_then(|id| {
             env.storage()
                 .instance()
-                .get::<_, RefundRequest>(&DataKey::RefundRequest(id))
+                .get::<_, RefundRequest>(&FeatureKey::RefundRequest(id))
         })
         .map(|request| request.status == RefundRequestStatus::Approved)
         .unwrap_or(false)
@@ -1919,7 +1913,7 @@ fn require_project_verified_for_donation(env: &Env, project_id: &String) {
 fn read_platform_fee_bps(env: &Env) -> u32 {
     env.storage()
         .instance()
-        .get(&DataKey::PlatformFeeBps)
+        .get(&FeatureKey::PlatformFeeBps)
         .unwrap_or(0)
 }
 
@@ -1943,13 +1937,13 @@ fn read_platform_fee_recipients(env: &Env) -> Vec<FeeRecipient> {
     if let Some(recipients) = env
         .storage()
         .instance()
-        .get::<_, Vec<FeeRecipient>>(&DataKey::PlatformFeeRecipients)
+        .get::<_, Vec<FeeRecipient>>(&FeatureKey::PlatformFeeRecipients)
     {
         recipients
     } else if let Some(treasury) = env
         .storage()
         .instance()
-        .get::<_, Address>(&DataKey::PlatformTreasury)
+        .get::<_, Address>(&FeatureKey::PlatformTreasury)
     {
         soroban_sdk::vec![
             env,
@@ -2086,7 +2080,7 @@ fn require_campaign_accepts_donation(project: &Project, current_ledger: u32) {
 
 #[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
 fn get_token_config_for_donate_token(env: &Env, token: &Address) -> TokenConfig {
-    let config_key = DataKey::TokenConfig(token.clone());
+    let config_key = FeatureKey::TokenConfig(token.clone());
     if let Some(config) = env.storage().instance().get::<_, TokenConfig>(&config_key) {
         if !config.active {
             panic!("Token is inactive");
@@ -2097,7 +2091,7 @@ fn get_token_config_for_donate_token(env: &Env, token: &Address) -> TokenConfig 
     if let Some(native_token) = env
         .storage()
         .instance()
-        .get::<_, Address>(&DataKey::NativeTokenAddress)
+        .get::<_, Address>(&FeatureKey::NativeTokenAddress)
     {
         if native_token == *token {
             return TokenConfig {
@@ -2119,7 +2113,7 @@ fn get_token_config_for_donate_token(env: &Env, token: &Address) -> TokenConfig 
             let oracle_addr = env
                 .storage()
                 .instance()
-                .get::<_, Address>(&DataKey::OracleAddress)
+                .get::<_, Address>(&FeatureKey::OracleAddress)
                 .expect("Price oracle not configured");
             return TokenConfig {
                 token: token.clone(),
@@ -2183,6 +2177,7 @@ fn effective_token_rate_limit(env: &Env, token: &Address) -> (u32, u32) {
 fn apply_donation_effects(
     env: &Env,
     token_symbol: &Symbol,
+    token: Option<&Address>,
     donor: &Address,
     project_id: &String,
     raw_amount: i128,
@@ -2329,10 +2324,17 @@ fn apply_donation_effects(
         );
     }
     // Snapshot CO₂ offset for exact reversal on refund (#290) and receipt verification.
-
     env.storage()
         .instance()
-        .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+        .set(&FeatureKey::DonationCO2Offset(dc), &co2_increment);
+    // Snapshot the actually-donated token for refund token validation (#290).
+    // `None` (path-payment / cross-chain settlements) → no snapshot, so the
+    // record is non-refundable.
+    if let Some(token) = token {
+        env.storage()
+            .instance()
+            .set(&FeatureKey::DonationToken(dc), token);
+    }
     let gr: i128 = env
         .storage()
         .instance()
@@ -2379,8 +2381,11 @@ fn process_donation_token(
     let mut window: RateLimitWindow = match env.storage().instance().get(&rate_key) {
         Some(window) => window,
         None => {
-            let transitional_key =
-                DataKey::DonorRateLimitPerToken(donor.clone(), project_id.clone(), token.clone());
+            let transitional_key = FeatureKey::DonorRateLimitPerToken(
+                donor.clone(),
+                project_id.clone(),
+                token.clone(),
+            );
             match env.storage().instance().get(&transitional_key) {
                 Some(window) => {
                     env.storage().instance().remove(&transitional_key);
@@ -2422,6 +2427,7 @@ fn process_donation_token(
     let (project, _co2_increment, _donation_index) = apply_donation_effects(
         env,
         token_symbol,
+        Some(token),
         donor,
         project_id,
         raw_amount,
@@ -2453,7 +2459,7 @@ fn process_donation_token(
     let is_escrow_campaign = env
         .storage()
         .instance()
-        .has(&DataKey::CampaignEscrowMilestones(project_id.clone()));
+        .has(&FeatureKey::CampaignEscrowMilestones(project_id.clone()));
     #[cfg(not(feature = "escrow"))]
     let is_escrow_campaign = false;
 
@@ -2506,7 +2512,7 @@ fn process_donation(
     let token_symbol = if let Some(config) = env
         .storage()
         .instance()
-        .get::<_, TokenConfig>(&DataKey::TokenConfig(token.clone()))
+        .get::<_, TokenConfig>(&FeatureKey::TokenConfig(token.clone()))
     {
         config.symbol
     } else {
@@ -2588,9 +2594,9 @@ fn update_delegated_weight_if_needed(
         let old_weight = voting_weight_from_badge(prev_badge);
         let new_weight = voting_weight_from_badge(new_badge);
         if new_weight > old_weight {
-            let key = DataKey::VoteDelegation(donor.clone());
+            let key = FeatureKey::VoteDelegation(donor.clone());
             if let Some(delegate) = env.storage().instance().get::<_, Address>(&key) {
-                let del_key = DataKey::DelegatedWeight(delegate.clone());
+                let del_key = FeatureKey::DelegatedWeight(delegate.clone());
                 let mut del_weight: u32 = env.storage().instance().get(&del_key).unwrap_or(0);
                 del_weight = del_weight
                     .checked_add(new_weight - old_weight)
@@ -2613,7 +2619,7 @@ fn update_voter_credits_on_badge_change(
         let delegated_weight: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::DelegatedWeight(donor.clone()))
+            .get(&FeatureKey::DelegatedWeight(donor.clone()))
             .unwrap_or(0);
         #[cfg(not(feature = "delegation"))]
         let delegated_weight: u32 = 0;
@@ -3118,7 +3124,7 @@ impl IndigoPayContract {
         require_not_paused(&env);
         env.storage()
             .instance()
-            .set(&DataKey::EscrowContractAddress, &escrow_contract);
+            .set(&FeatureKey::EscrowContractAddress, &escrow_contract);
         env.events()
             .publish((symbol_short!("esc_set"),), escrow_contract);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
@@ -3143,7 +3149,7 @@ impl IndigoPayContract {
         if !env
             .storage()
             .instance()
-            .has(&DataKey::EscrowContractAddress)
+            .has(&FeatureKey::EscrowContractAddress)
         {
             panic!("Escrow contract not configured");
         }
@@ -3193,7 +3199,7 @@ impl IndigoPayContract {
 
         // Store escrow milestones
         env.storage().instance().set(
-            &DataKey::CampaignEscrowMilestones(project_id.clone()),
+            &FeatureKey::CampaignEscrowMilestones(project_id.clone()),
             &milestones,
         );
 
@@ -3235,7 +3241,7 @@ impl IndigoPayContract {
         let escrow_addr: Address = env
             .storage()
             .instance()
-            .get(&DataKey::EscrowContractAddress)
+            .get(&FeatureKey::EscrowContractAddress)
             .expect("Escrow contract not configured");
 
         let project: Project = env
@@ -3255,7 +3261,7 @@ impl IndigoPayContract {
         if env
             .storage()
             .instance()
-            .has(&DataKey::CampaignEscrowJobId(project_id.clone()))
+            .has(&FeatureKey::CampaignEscrowJobId(project_id.clone()))
         {
             panic!("Escrow job already funded");
         }
@@ -3264,7 +3270,7 @@ impl IndigoPayContract {
         let milestones: Vec<EscrowMilestone> = env
             .storage()
             .instance()
-            .get(&DataKey::CampaignEscrowMilestones(project_id.clone()))
+            .get(&FeatureKey::CampaignEscrowMilestones(project_id.clone()))
             .expect("Campaign escrow milestones not found");
 
         let total_raised = project.total_raised;
@@ -3290,9 +3296,10 @@ impl IndigoPayContract {
         );
 
         // Store the escrow job ID
-        env.storage()
-            .instance()
-            .set(&DataKey::CampaignEscrowJobId(project_id.clone()), &job_id);
+        env.storage().instance().set(
+            &FeatureKey::CampaignEscrowJobId(project_id.clone()),
+            &job_id,
+        );
 
         env.events().publish(
             (symbol_short!("esc_fnd"), admin, project_id),
@@ -3314,13 +3321,13 @@ impl IndigoPayContract {
         let escrow_addr: Address = env
             .storage()
             .instance()
-            .get(&DataKey::EscrowContractAddress)
+            .get(&FeatureKey::EscrowContractAddress)
             .expect("Escrow contract not configured");
 
         let job_id: String = env
             .storage()
             .instance()
-            .get(&DataKey::CampaignEscrowJobId(project_id.clone()))
+            .get(&FeatureKey::CampaignEscrowJobId(project_id.clone()))
             .expect("Campaign does not have an escrow job");
 
         let escrow_client = EscrowClient::new(&env, &escrow_addr);
@@ -3346,13 +3353,13 @@ impl IndigoPayContract {
         let escrow_addr: Address = env
             .storage()
             .instance()
-            .get(&DataKey::EscrowContractAddress)
+            .get(&FeatureKey::EscrowContractAddress)
             .expect("Escrow contract not configured");
 
         let job_id: String = env
             .storage()
             .instance()
-            .get(&DataKey::CampaignEscrowJobId(project_id.clone()))
+            .get(&FeatureKey::CampaignEscrowJobId(project_id.clone()))
             .expect("Campaign does not have an escrow job");
 
         let escrow_client = EscrowClient::new(&env, &escrow_addr);
@@ -3377,13 +3384,13 @@ impl IndigoPayContract {
         let escrow_addr: Address = env
             .storage()
             .instance()
-            .get(&DataKey::EscrowContractAddress)
+            .get(&FeatureKey::EscrowContractAddress)
             .expect("Escrow contract not configured");
 
         let job_id: String = env
             .storage()
             .instance()
-            .get(&DataKey::CampaignEscrowJobId(project_id.clone()))
+            .get(&FeatureKey::CampaignEscrowJobId(project_id.clone()))
             .expect("Campaign does not have an escrow job");
 
         let escrow_client = EscrowClient::new(&env, &escrow_addr);
@@ -3407,13 +3414,13 @@ impl IndigoPayContract {
         let escrow_addr: Address = env
             .storage()
             .instance()
-            .get(&DataKey::EscrowContractAddress)
+            .get(&FeatureKey::EscrowContractAddress)
             .expect("Escrow contract not configured");
 
         let job_id: String = env
             .storage()
             .instance()
-            .get(&DataKey::CampaignEscrowJobId(project_id.clone()))
+            .get(&FeatureKey::CampaignEscrowJobId(project_id.clone()))
             .expect("Campaign does not have an escrow job");
 
         let escrow_client = EscrowClient::new(&env, &escrow_addr);
@@ -3441,7 +3448,7 @@ impl IndigoPayContract {
         }
         env.storage()
             .instance()
-            .set(&DataKey::PlatformFeeBps, &fee_bps);
+            .set(&FeatureKey::PlatformFeeBps, &fee_bps);
         env.events()
             .publish((symbol_short!("fee_set"), signers.get(0).unwrap()), fee_bps);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
@@ -3453,7 +3460,7 @@ impl IndigoPayContract {
         require_not_paused(&env);
         env.storage()
             .instance()
-            .set(&DataKey::PlatformTreasury, &treasury);
+            .set(&FeatureKey::PlatformTreasury, &treasury);
         let single_recipient = FeeRecipient {
             address: treasury.clone(),
             share_bps: 10_000,
@@ -3461,7 +3468,7 @@ impl IndigoPayContract {
         let recipients = soroban_sdk::vec![&env, single_recipient];
         env.storage()
             .instance()
-            .set(&DataKey::PlatformFeeRecipients, &recipients);
+            .set(&FeatureKey::PlatformFeeRecipients, &recipients);
         env.events().publish(
             (symbol_short!("treas_set"), signers.get(0).unwrap()),
             treasury,
@@ -3497,7 +3504,7 @@ impl IndigoPayContract {
         }
         env.storage()
             .instance()
-            .set(&DataKey::PlatformFeeRecipients, &recipients);
+            .set(&FeatureKey::PlatformFeeRecipients, &recipients);
         env.events().publish(
             (symbol_short!("recip_set"), signers.get(0).unwrap()),
             recipients.len(),
@@ -3591,7 +3598,7 @@ impl IndigoPayContract {
     #[cfg(any(feature = "donation", feature = "testutils"))]
     pub fn mint_donation_receipt(env: Env, donor: Address, donation_index: u32) -> u32 {
         donor.require_auth();
-        let key = DataKey::DonationReceiptNFT(donor.clone(), donation_index);
+        let key = FeatureKey::DonationReceiptNFT(donor.clone(), donation_index);
         if env.storage().instance().has(&key) {
             panic!("Receipt already minted for this donation");
         }
@@ -3603,7 +3610,7 @@ impl IndigoPayContract {
         let co2_offset = env
             .storage()
             .instance()
-            .get::<_, i128>(&DataKey::DonationCO2Offset(donation_index))
+            .get::<_, i128>(&FeatureKey::DonationCO2Offset(donation_index))
             .expect("CO2 offset not found");
         let receipt = DonationReceipt {
             donation_index,
@@ -3628,7 +3635,7 @@ impl IndigoPayContract {
     pub fn has_donation_receipt(env: Env, donor: Address, donation_index: u32) -> bool {
         env.storage()
             .instance()
-            .has(&DataKey::DonationReceiptNFT(donor, donation_index))
+            .has(&FeatureKey::DonationReceiptNFT(donor, donation_index))
     }
 
     /// Read a previously minted donation receipt NFT.
@@ -3636,7 +3643,7 @@ impl IndigoPayContract {
     pub fn get_donation_receipt(env: Env, donor: Address, donation_index: u32) -> DonationReceipt {
         env.storage()
             .instance()
-            .get(&DataKey::DonationReceiptNFT(donor, donation_index))
+            .get(&FeatureKey::DonationReceiptNFT(donor, donation_index))
             .expect("Receipt not found")
     }
 
@@ -3688,6 +3695,7 @@ impl IndigoPayContract {
         let (_project, co2_increment, donation_index) = apply_donation_effects(
             &env,
             &XCHAIN_CURRENCY,
+            None,
             &attestation.donor,
             &attestation.project_id,
             attestation.amount_xlm,
@@ -4006,7 +4014,7 @@ impl IndigoPayContract {
         // Snapshot CO₂ offset for exact reversal on refund (#290).
         env.storage()
             .instance()
-            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+            .set(&FeatureKey::DonationCO2Offset(dc), &co2_increment);
         let gr: i128 = env
             .storage()
             .instance()
@@ -4067,7 +4075,7 @@ impl IndigoPayContract {
         }
         env.storage()
             .instance()
-            .set(&DataKey::ZkVerificationKey, &vk);
+            .set(&FeatureKey::ZkVerificationKey, &vk);
         env.events()
             .publish((symbol_short!("zk_vk_set"),), env.crypto().sha256(&vk));
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
@@ -4075,7 +4083,7 @@ impl IndigoPayContract {
     /// Query the current Groth16 verification key, if set.
     #[cfg(feature = "zk")]
     pub fn get_zk_verification_key(env: Env) -> Option<Bytes> {
-        env.storage().instance().get(&DataKey::ZkVerificationKey)
+        env.storage().instance().get(&FeatureKey::ZkVerificationKey)
     }
 
     /// Verify a prover attestation over
@@ -4102,7 +4110,7 @@ impl IndigoPayContract {
             panic!("Invalid ZK public inputs");
         }
 
-        let nullifier_key = DataKey::Nullifier(nullifier.clone());
+        let nullifier_key = FeatureKey::Nullifier(nullifier.clone());
         if env.storage().persistent().has(&nullifier_key) {
             panic!("ZK nullifier already used");
         }
@@ -4110,7 +4118,7 @@ impl IndigoPayContract {
         let vk: Bytes = env
             .storage()
             .instance()
-            .get(&DataKey::ZkVerificationKey)
+            .get(&FeatureKey::ZkVerificationKey)
             .expect("ZK verification key not set");
         let mut vk_array = [0u8; 32];
         vk.copy_into_slice(&mut vk_array);
@@ -4165,7 +4173,7 @@ impl IndigoPayContract {
             .instance()
             .get(&DataKey::DonationCount)
             .unwrap_or(0);
-        let zk_record_key = DataKey::ZkDonationRecord(index);
+        let zk_record_key = FeatureKey::ZkDonationRecord(index);
         env.storage().persistent().set(
             &zk_record_key,
             &ZkDonationRecord {
@@ -4224,14 +4232,14 @@ impl IndigoPayContract {
     pub fn is_zk_nullifier_used(env: Env, nullifier: BytesN<32>) -> bool {
         env.storage()
             .persistent()
-            .has(&DataKey::Nullifier(nullifier))
+            .has(&FeatureKey::Nullifier(nullifier))
     }
 
     #[cfg(feature = "zk")]
     pub fn get_zk_donation_record(env: Env, index: u32) -> ZkDonationRecord {
         env.storage()
             .persistent()
-            .get(&DataKey::ZkDonationRecord(index))
+            .get(&FeatureKey::ZkDonationRecord(index))
             .expect("ZK donation record not found")
     }
 
@@ -4298,7 +4306,7 @@ impl IndigoPayContract {
         // through the same storage type everywhere or a nullifier spent via
         // one anonymous-donation path would not be recognized as spent by
         // the other.
-        let nullifier_key = DataKey::Nullifier(nullifier.clone());
+        let nullifier_key = FeatureKey::Nullifier(nullifier.clone());
         if env.storage().persistent().has(&nullifier_key) {
             panic!("Nullifier already spent");
         }
@@ -4306,7 +4314,7 @@ impl IndigoPayContract {
         let vk: Bytes = env
             .storage()
             .instance()
-            .get(&DataKey::ZkVerificationKey)
+            .get(&FeatureKey::ZkVerificationKey)
             .expect("Verification key not set — admin must call set_zk_verification_key first");
         // Construct public inputs: [amount (i128 LE), msg_hash (u32 LE),
         // project_id hash, nullifier hash]. The circuit MUST match this layout.
@@ -4448,7 +4456,7 @@ impl IndigoPayContract {
             .set(&DataKey::DonationRecord(dc), &donation_record);
         env.storage()
             .instance()
-            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+            .set(&FeatureKey::DonationCO2Offset(dc), &co2_increment);
         let gr: i128 = env
             .storage()
             .instance()
@@ -4515,7 +4523,7 @@ impl IndigoPayContract {
     pub fn is_nullifier_spent(env: Env, nullifier: BytesN<32>) -> bool {
         env.storage()
             .persistent()
-            .has(&DataKey::Nullifier(nullifier))
+            .has(&FeatureKey::Nullifier(nullifier))
     }
 
     // ─── Integrated Stealth Address Donation (#458) ───────────────────────────
@@ -4527,7 +4535,7 @@ impl IndigoPayContract {
         require_not_paused(&env);
         env.storage()
             .instance()
-            .set(&DataKey::StealthDonationContract, &contract_address);
+            .set(&FeatureKey::StealthDonationContract, &contract_address);
         env.events()
             .publish((symbol_short!("stlth_set"), admin), contract_address);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
@@ -4538,7 +4546,7 @@ impl IndigoPayContract {
     pub fn get_stealth_donation_contract(env: Env) -> Address {
         env.storage()
             .instance()
-            .get(&DataKey::StealthDonationContract)
+            .get(&FeatureKey::StealthDonationContract)
             .expect("Stealth donation contract not configured")
     }
 
@@ -4580,7 +4588,7 @@ impl IndigoPayContract {
         let stealth_contract: Address = env
             .storage()
             .instance()
-            .get(&DataKey::StealthDonationContract)
+            .get(&FeatureKey::StealthDonationContract)
             .expect("Stealth donation contract not configured");
 
         let stealth_client =
@@ -4660,7 +4668,7 @@ impl IndigoPayContract {
             .set(&DataKey::DonationRecord(dc), &donation_record);
         env.storage()
             .instance()
-            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+            .set(&FeatureKey::DonationCO2Offset(dc), &co2_increment);
 
         env.events().publish(
             (symbol_short!("stlth_don"), stealth_pool_donor, project_id),
@@ -4708,7 +4716,7 @@ impl IndigoPayContract {
         let stealth_contract: Address = env
             .storage()
             .instance()
-            .get(&DataKey::StealthDonationContract)
+            .get(&FeatureKey::StealthDonationContract)
             .expect("Stealth donation contract not configured");
 
         let stealth_client =
@@ -5587,7 +5595,7 @@ impl IndigoPayContract {
         let co2_offset: i128 = env
             .storage()
             .instance()
-            .get(&DataKey::DonationCO2Offset(donation_index))
+            .get(&FeatureKey::DonationCO2Offset(donation_index))
             .unwrap_or(0);
 
         // Build the fields to hash (without the signature)
@@ -5669,7 +5677,7 @@ impl IndigoPayContract {
         let onchain_co2: i128 = env
             .storage()
             .instance()
-            .get(&DataKey::DonationCO2Offset(receipt.donation_index))
+            .get(&FeatureKey::DonationCO2Offset(receipt.donation_index))
             .unwrap_or(0);
         if onchain_co2 != receipt.co2_offset {
             return false;
@@ -5773,7 +5781,7 @@ impl IndigoPayContract {
         if proj_total < 100 * STROOP {
             panic!("Cumulative donation to this project has not reached 100 XLM");
         }
-        let nft_key = DataKey::ProjectMilestoneNFT(project_id.clone(), donor.clone());
+        let nft_key = FeatureKey::ProjectMilestoneNFT(project_id.clone(), donor.clone());
         if env.storage().instance().has(&nft_key) {
             panic!("Milestone NFT already minted for this project");
         }
@@ -5799,13 +5807,13 @@ impl IndigoPayContract {
     pub fn has_project_nft(env: Env, donor: Address, project_id: String) -> bool {
         env.storage()
             .instance()
-            .has(&DataKey::ProjectMilestoneNFT(project_id, donor))
+            .has(&FeatureKey::ProjectMilestoneNFT(project_id, donor))
     }
     #[cfg(feature = "donation")]
     pub fn get_project_nft(env: Env, donor: Address, project_id: String) -> ProjectMilestoneNFT {
         env.storage()
             .instance()
-            .get(&DataKey::ProjectMilestoneNFT(project_id, donor))
+            .get(&FeatureKey::ProjectMilestoneNFT(project_id, donor))
             .expect("Project milestone NFT not found")
     }
     // ─── Governance ───────────────────────────────────────────────────────────
@@ -5890,7 +5898,7 @@ impl IndigoPayContract {
         let delegated_credits: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::DelegatedWeight(voter))
+            .get(&FeatureKey::DelegatedWeight(voter))
             .unwrap_or(0);
         #[cfg(not(feature = "delegation"))]
         let delegated_credits: u32 = 0;
@@ -5906,7 +5914,7 @@ impl IndigoPayContract {
         if donor == delegate {
             panic!("Cannot delegate to self");
         }
-        let del_key = DataKey::VoteDelegation(donor.clone());
+        let del_key = FeatureKey::VoteDelegation(donor.clone());
         let old_delegate: Option<Address> = env.storage().instance().get(&del_key);
         if let Some(ref old) = old_delegate {
             if *old == delegate {
@@ -5925,12 +5933,12 @@ impl IndigoPayContract {
             });
         let weight = voting_weight_from_badge(&donor_stats.badge);
         if let Some(old) = old_delegate {
-            let old_del_key = DataKey::DelegatedWeight(old.clone());
+            let old_del_key = FeatureKey::DelegatedWeight(old.clone());
             let mut old_weight: u32 = env.storage().instance().get(&old_del_key).unwrap_or(0);
             old_weight = old_weight.checked_sub(weight).expect("underflow");
             env.storage().instance().set(&old_del_key, &old_weight);
         }
-        let new_del_key = DataKey::DelegatedWeight(delegate.clone());
+        let new_del_key = FeatureKey::DelegatedWeight(delegate.clone());
         let mut new_weight: u32 = env.storage().instance().get(&new_del_key).unwrap_or(0);
         new_weight = new_weight.checked_add(weight).expect("overflow");
 
@@ -5944,7 +5952,7 @@ impl IndigoPayContract {
     pub fn revoke_delegation(env: Env, donor: Address) {
         donor.require_auth();
         require_not_paused(&env);
-        let del_key = DataKey::VoteDelegation(donor.clone());
+        let del_key = FeatureKey::VoteDelegation(donor.clone());
         let delegate: Option<Address> = env.storage().instance().get(&del_key);
         if let Some(del) = delegate {
             let donor_stats: DonorStats = env
@@ -5958,7 +5966,7 @@ impl IndigoPayContract {
                     co2_offset_grams: 0,
                 });
             let weight = voting_weight_from_badge(&donor_stats.badge);
-            let old_del_key = DataKey::DelegatedWeight(del.clone());
+            let old_del_key = FeatureKey::DelegatedWeight(del.clone());
             let mut old_weight: u32 = env.storage().instance().get(&old_del_key).unwrap_or(0);
             old_weight = old_weight.checked_sub(weight).expect("underflow");
             env.storage().instance().set(&old_del_key, &old_weight);
@@ -5973,13 +5981,13 @@ impl IndigoPayContract {
     pub fn get_delegate(env: Env, donor: Address) -> Option<Address> {
         env.storage()
             .instance()
-            .get(&DataKey::VoteDelegation(donor))
+            .get(&FeatureKey::VoteDelegation(donor))
     }
     #[cfg(feature = "delegation")]
     pub fn get_delegated_weight(env: Env, delegate: Address) -> u32 {
         env.storage()
             .instance()
-            .get(&DataKey::DelegatedWeight(delegate))
+            .get(&FeatureKey::DelegatedWeight(delegate))
             .unwrap_or(0)
     }
     #[cfg(feature = "governance")]
@@ -5988,7 +5996,7 @@ impl IndigoPayContract {
         if env
             .storage()
             .instance()
-            .has(&DataKey::VoteDelegation(voter.clone()))
+            .has(&FeatureKey::VoteDelegation(voter.clone()))
         {
             return 0;
         }
@@ -6008,7 +6016,7 @@ impl IndigoPayContract {
         let delegated_credits: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::DelegatedWeight(voter))
+            .get(&FeatureKey::DelegatedWeight(voter))
             .unwrap_or(0);
         #[cfg(not(feature = "delegation"))]
         let delegated_credits: u32 = 0;
@@ -6073,7 +6081,7 @@ impl IndigoPayContract {
         if env
             .storage()
             .instance()
-            .has(&DataKey::VoteDelegation(voter.clone()))
+            .has(&FeatureKey::VoteDelegation(voter.clone()))
         {
             panic!("Must revoke delegation before voting directly");
         }
@@ -6383,7 +6391,7 @@ impl IndigoPayContract {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
 
-        let config_key = DataKey::TokenConfig(token_address.clone());
+        let config_key = FeatureKey::TokenConfig(token_address.clone());
         if let Some(existing) = env.storage().instance().get::<_, TokenConfig>(&config_key) {
             if existing.active {
                 panic!("Token already registered");
@@ -6403,11 +6411,11 @@ impl IndigoPayContract {
         let mut list: Vec<Address> = env
             .storage()
             .instance()
-            .get(&DataKey::TokenList)
+            .get(&FeatureKey::TokenList)
             .unwrap_or(Vec::new(&env));
         if !list.contains(&token_address) {
             list.push_back(token_address.clone());
-            env.storage().instance().set(&DataKey::TokenList, &list);
+            env.storage().instance().set(&FeatureKey::TokenList, &list);
         }
 
         env.events()
@@ -6421,7 +6429,7 @@ impl IndigoPayContract {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
 
-        let config_key = DataKey::TokenConfig(token_address.clone());
+        let config_key = FeatureKey::TokenConfig(token_address.clone());
         let mut config: TokenConfig = env
             .storage()
             .instance()
@@ -6438,11 +6446,11 @@ impl IndigoPayContract {
         let mut list: Vec<Address> = env
             .storage()
             .instance()
-            .get(&DataKey::TokenList)
+            .get(&FeatureKey::TokenList)
             .unwrap_or(Vec::new(&env));
         if let Some(idx) = list.first_index_of(&token_address) {
             list.remove(idx);
-            env.storage().instance().set(&DataKey::TokenList, &list);
+            env.storage().instance().set(&FeatureKey::TokenList, &list);
         }
 
         env.events()
@@ -6455,7 +6463,7 @@ impl IndigoPayContract {
     pub fn get_token_config(env: Env, token_address: Address) -> Option<TokenConfig> {
         env.storage()
             .instance()
-            .get(&DataKey::TokenConfig(token_address))
+            .get(&FeatureKey::TokenConfig(token_address))
     }
 
     /// Query the list of active registered tokens.
@@ -6463,7 +6471,7 @@ impl IndigoPayContract {
     pub fn get_token_list(env: Env) -> Vec<Address> {
         env.storage()
             .instance()
-            .get(&DataKey::TokenList)
+            .get(&FeatureKey::TokenList)
             .unwrap_or(Vec::new(&env))
     }
 
@@ -6500,11 +6508,14 @@ impl IndigoPayContract {
         let token_config = get_token_config_for_donate_token(&env, &token);
 
         let xlm_equivalent = if token_config.symbol == symbol_short!("XLM")
-            || (env.storage().instance().has(&DataKey::NativeTokenAddress)
+            || (env
+                .storage()
+                .instance()
+                .has(&FeatureKey::NativeTokenAddress)
                 && env
                     .storage()
                     .instance()
-                    .get::<_, Address>(&DataKey::NativeTokenAddress)
+                    .get::<_, Address>(&FeatureKey::NativeTokenAddress)
                     .unwrap()
                     == token)
         {
@@ -6544,7 +6555,7 @@ impl IndigoPayContract {
         let oracle_addr = env
             .storage()
             .instance()
-            .get(&DataKey::OracleAddress)
+            .get(&FeatureKey::OracleAddress)
             .unwrap_or(usdc_token.clone());
 
         let config = TokenConfig {
@@ -6555,17 +6566,17 @@ impl IndigoPayContract {
             registered_at: env.ledger().sequence(),
         };
 
-        let config_key = DataKey::TokenConfig(usdc_token.clone());
+        let config_key = FeatureKey::TokenConfig(usdc_token.clone());
         env.storage().instance().set(&config_key, &config);
 
         let mut list: Vec<Address> = env
             .storage()
             .instance()
-            .get(&DataKey::TokenList)
+            .get(&FeatureKey::TokenList)
             .unwrap_or(Vec::new(&env));
         if !list.contains(&usdc_token) {
             list.push_back(usdc_token.clone());
-            env.storage().instance().set(&DataKey::TokenList, &list);
+            env.storage().instance().set(&FeatureKey::TokenList, &list);
         }
 
         env.events()
@@ -6658,14 +6669,14 @@ impl IndigoPayContract {
         require_not_paused(&env);
         env.storage()
             .instance()
-            .set(&DataKey::OracleAddress, &oracle);
+            .set(&FeatureKey::OracleAddress, &oracle);
 
         if let Some(usdc_token) = env
             .storage()
             .instance()
             .get::<_, Address>(&DataKey::USDCTokenAddress)
         {
-            let config_key = DataKey::TokenConfig(usdc_token.clone());
+            let config_key = FeatureKey::TokenConfig(usdc_token.clone());
             let mut config = env
                 .storage()
                 .instance()
@@ -6683,11 +6694,11 @@ impl IndigoPayContract {
             let mut list: Vec<Address> = env
                 .storage()
                 .instance()
-                .get(&DataKey::TokenList)
+                .get(&FeatureKey::TokenList)
                 .unwrap_or(Vec::new(&env));
             if !list.contains(&usdc_token) {
                 list.push_back(usdc_token.clone());
-                env.storage().instance().set(&DataKey::TokenList, &list);
+                env.storage().instance().set(&FeatureKey::TokenList, &list);
             }
         }
 
@@ -6697,7 +6708,7 @@ impl IndigoPayContract {
     /// Get the configured price oracle address.
     #[cfg(feature = "usdc")]
     pub fn get_oracle(env: Env) -> Option<Address> {
-        env.storage().instance().get(&DataKey::OracleAddress)
+        env.storage().instance().get(&FeatureKey::OracleAddress)
     }
 
     // ─── Two-step admin transfer ─────────────────────────────────────────────
@@ -6874,7 +6885,7 @@ impl IndigoPayContract {
     #[cfg(feature = "upgrade")]
     pub fn propose_upgrade(env: Env, signers: Vec<Address>, new_wasm_hash: BytesN<32>) {
         require_admin_for_critical(&env, &signers);
-        if env.storage().instance().has(&DataKey::PendingUpgrade) {
+        if env.storage().instance().has(&FeatureKey::PendingUpgrade) {
             panic!("Upgrade already pending; cancel first");
         }
         let effective_at = env
@@ -6884,10 +6895,10 @@ impl IndigoPayContract {
             .expect("overflow");
         env.storage()
             .instance()
-            .set(&DataKey::PendingUpgrade, &new_wasm_hash);
+            .set(&FeatureKey::PendingUpgrade, &new_wasm_hash);
         env.storage()
             .instance()
-            .set(&DataKey::UpgradeEffectiveAt, &effective_at);
+            .set(&FeatureKey::UpgradeEffectiveAt, &effective_at);
         env.events().publish(
             (symbol_short!("upg_prop"), signers.get(0).unwrap()),
             (new_wasm_hash, effective_at),
@@ -6910,12 +6921,12 @@ impl IndigoPayContract {
         let pending: BytesN<32> = env
             .storage()
             .instance()
-            .get(&DataKey::PendingUpgrade)
+            .get(&FeatureKey::PendingUpgrade)
             .expect("No pending upgrade");
         let effective_at: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::UpgradeEffectiveAt)
+            .get(&FeatureKey::UpgradeEffectiveAt)
             .expect("No pending upgrade effective-at");
         if env.ledger().sequence() < effective_at {
             panic!("Upgrade timelock not yet elapsed");
@@ -6923,11 +6934,11 @@ impl IndigoPayContract {
         env.deployer().update_current_contract_wasm(pending.clone());
         env.storage()
             .instance()
-            .set(&DataKey::LastExecutedUpgrade, &pending);
-        env.storage().instance().remove(&DataKey::PendingUpgrade);
+            .set(&FeatureKey::LastExecutedUpgrade, &pending);
+        env.storage().instance().remove(&FeatureKey::PendingUpgrade);
         env.storage()
             .instance()
-            .remove(&DataKey::UpgradeEffectiveAt);
+            .remove(&FeatureKey::UpgradeEffectiveAt);
         env.events().publish((symbol_short!("upg_exec"),), pending);
         // Run storage migrations so any schema changes in the new WASM are
         // applied before the next contract invocation.
@@ -6940,13 +6951,13 @@ impl IndigoPayContract {
     #[cfg(feature = "upgrade")]
     pub fn cancel_upgrade(env: Env, signers: Vec<Address>) {
         require_admin_for_critical(&env, &signers);
-        if !env.storage().instance().has(&DataKey::PendingUpgrade) {
+        if !env.storage().instance().has(&FeatureKey::PendingUpgrade) {
             panic!("No pending upgrade");
         }
-        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.storage().instance().remove(&FeatureKey::PendingUpgrade);
         env.storage()
             .instance()
-            .remove(&DataKey::UpgradeEffectiveAt);
+            .remove(&FeatureKey::UpgradeEffectiveAt);
         env.events()
             .publish((symbol_short!("upg_cncl"), signers.get(0).unwrap()), ());
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
@@ -6955,8 +6966,11 @@ impl IndigoPayContract {
     /// upgrade, or `None` if no upgrade is currently proposed.
     #[cfg(feature = "upgrade")]
     pub fn get_pending_upgrade(env: Env) -> Option<(BytesN<32>, u32)> {
-        let hash: Option<BytesN<32>> = env.storage().instance().get(&DataKey::PendingUpgrade);
-        let effective: Option<u32> = env.storage().instance().get(&DataKey::UpgradeEffectiveAt);
+        let hash: Option<BytesN<32>> = env.storage().instance().get(&FeatureKey::PendingUpgrade);
+        let effective: Option<u32> = env
+            .storage()
+            .instance()
+            .get(&FeatureKey::UpgradeEffectiveAt);
         match (hash, effective) {
             (Some(h), Some(e)) => Some((h, e)),
             _ => None,
@@ -6967,7 +6981,9 @@ impl IndigoPayContract {
     /// `execute_upgrade`.
     #[cfg(feature = "upgrade")]
     pub fn get_last_executed_upgrade(env: Env) -> Option<BytesN<32>> {
-        env.storage().instance().get(&DataKey::LastExecutedUpgrade)
+        env.storage()
+            .instance()
+            .get(&FeatureKey::LastExecutedUpgrade)
     }
     /// Read the current storage schema version. Returns 1 when the key is
     /// absent (pre-versioning deployments are implicitly v1).
@@ -7008,10 +7024,14 @@ impl IndigoPayContract {
         }
         migrate_legacy_ew_key_if_present(&env, &project_id);
 
-        if env.storage().instance().has(&DataKey::EmergencyWithdrawal(
-            project_id.clone(),
-            token.clone(),
-        )) {
+        if env
+            .storage()
+            .instance()
+            .has(&FeatureKey::EmergencyWithdrawal(
+                project_id.clone(),
+                token.clone(),
+            ))
+        {
             panic!("Emergency withdrawal already pending for this project");
         }
         let current_ledger = env.ledger().sequence();
@@ -7027,7 +7047,7 @@ impl IndigoPayContract {
             executable_at,
         };
         env.storage().instance().set(
-            &DataKey::EmergencyWithdrawal(project_id.clone(), token.clone()),
+            &FeatureKey::EmergencyWithdrawal(project_id.clone(), token.clone()),
             &withdrawal,
         );
         env.events().publish(
@@ -7051,14 +7071,14 @@ impl IndigoPayContract {
 
         migrate_legacy_ew_key_if_present(&env, &project_id);
 
-        let key = DataKey::EmergencyWithdrawal(project_id.clone(), token.clone());
+        let key = FeatureKey::EmergencyWithdrawal(project_id.clone(), token.clone());
         if !env.storage().instance().has(&key) {
             panic!("No pending emergency withdrawal");
         }
 
         env.storage().instance().remove(&key);
 
-        let tokens_key = DataKey::EmergencyWithdrawalTokens(project_id.clone());
+        let tokens_key = FeatureKey::EmergencyWithdrawalTokens(project_id.clone());
         if let Some(mut tokens) = env.storage().instance().get::<_, Vec<Address>>(&tokens_key) {
             if let Some(idx) = tokens.iter().position(|t| t == token) {
                 tokens.remove(idx as u32);
@@ -7083,7 +7103,7 @@ impl IndigoPayContract {
     pub fn execute_emergency_withdrawal(env: Env, project_id: String, token: Address) {
         migrate_legacy_ew_key_if_present(&env, &project_id);
 
-        let key = DataKey::EmergencyWithdrawal(project_id.clone(), token.clone());
+        let key = FeatureKey::EmergencyWithdrawal(project_id.clone(), token.clone());
         let withdrawal: EmergencyWithdrawal = env
             .storage()
             .instance()
@@ -7103,7 +7123,7 @@ impl IndigoPayContract {
         // ── Effects: clear withdrawal AND decrement balance before transfer
         env.storage().instance().remove(&key);
 
-        let tokens_key = DataKey::EmergencyWithdrawalTokens(project_id.clone());
+        let tokens_key = FeatureKey::EmergencyWithdrawalTokens(project_id.clone());
         if let Some(mut tokens) = env.storage().instance().get::<_, Vec<Address>>(&tokens_key) {
             if let Some(idx) = tokens.iter().position(|t| t == withdrawal.token) {
                 tokens.remove(idx as u32);
@@ -7136,7 +7156,7 @@ impl IndigoPayContract {
     pub fn exec_all_emergency_withdrawals(env: Env, project_id: String) -> u32 {
         migrate_legacy_ew_key_if_present(&env, &project_id);
 
-        let tokens_key = DataKey::EmergencyWithdrawalTokens(project_id.clone());
+        let tokens_key = FeatureKey::EmergencyWithdrawalTokens(project_id.clone());
         let tokens: Vec<Address> = env
             .storage()
             .instance()
@@ -7152,7 +7172,7 @@ impl IndigoPayContract {
         let mut remaining_tokens: Vec<Address> = Vec::new(&env);
 
         for token in tokens.iter() {
-            let key = DataKey::EmergencyWithdrawal(project_id.clone(), token.clone());
+            let key = FeatureKey::EmergencyWithdrawal(project_id.clone(), token.clone());
             if let Some(withdrawal) = env.storage().instance().get::<_, EmergencyWithdrawal>(&key) {
                 if current_ledger >= withdrawal.executable_at {
                     // Check balance
@@ -7219,7 +7239,7 @@ impl IndigoPayContract {
         migrate_legacy_ew_key_if_present(&env, &project_id);
         env.storage()
             .instance()
-            .get(&DataKey::EmergencyWithdrawal(project_id, token))
+            .get(&FeatureKey::EmergencyWithdrawal(project_id, token))
     }
 
     /// Read-only: returns all pending emergency withdrawals for a project.
@@ -7227,11 +7247,11 @@ impl IndigoPayContract {
     pub fn get_all_emergency_withdrawals(env: Env, project_id: String) -> Vec<EmergencyWithdrawal> {
         migrate_legacy_ew_key_if_present(&env, &project_id);
         let mut list = Vec::new(&env);
-        let tokens_key = DataKey::EmergencyWithdrawalTokens(project_id.clone());
+        let tokens_key = FeatureKey::EmergencyWithdrawalTokens(project_id.clone());
         if let Some(tokens) = env.storage().instance().get::<_, Vec<Address>>(&tokens_key) {
             for token in tokens.iter() {
                 if let Some(w) = env.storage().instance().get::<_, EmergencyWithdrawal>(
-                    &DataKey::EmergencyWithdrawal(project_id.clone(), token),
+                    &FeatureKey::EmergencyWithdrawal(project_id.clone(), token),
                 ) {
                     list.push_back(w);
                 }
@@ -7265,12 +7285,26 @@ impl IndigoPayContract {
             panic!("Refund cooldown expired");
         }
         // One refund request per donation — prevent duplicate requests.
-        let refund_for_donation_key = DataKey::RefundForDonation(donation_record_index);
+        let refund_for_donation_key = FeatureKey::RefundForDonation(donation_record_index);
         if env.storage().instance().has(&refund_for_donation_key) {
             panic!("Refund already requested for this donation");
         }
         if challenge_reversed(&env, donation_record_index) {
             panic_with_error!(&env, ContractError::DonationAlreadyReversed);
+        }
+        // Validate the refund token against the asset actually donated (#290).
+        // `DonationToken(index)` is snapshotted at donation time from the
+        // real token contract — never derived from the spoofable `currency`
+        // symbol. Path-payment (`donate_asset`) and cross-chain
+        // (`settle_attestation`) donations have no token and are not
+        // refundable.
+        let donated_token: Address = env
+            .storage()
+            .instance()
+            .get(&FeatureKey::DonationToken(donation_record_index))
+            .expect("Donation token unknown; this donation cannot be refunded");
+        if token != donated_token {
+            panic!("Refund token does not match donated asset");
         }
         // Snapshot CO₂ offset from the separate key written at donation time.
         // Pre-upgrade donations lack this key; CO₂ reversal defaults to 0
@@ -7278,12 +7312,12 @@ impl IndigoPayContract {
         let co2_offset_grams: i128 = env
             .storage()
             .instance()
-            .get(&DataKey::DonationCO2Offset(donation_record_index))
+            .get(&FeatureKey::DonationCO2Offset(donation_record_index))
             .unwrap_or(0);
         let refund_count: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::RefundCount)
+            .get(&FeatureKey::RefundCount)
             .unwrap_or(0);
         let refund_id = refund_count;
         let request = RefundRequest {
@@ -7293,18 +7327,18 @@ impl IndigoPayContract {
             donation_record_index,
             requested_at: current_ledger,
             status: RefundRequestStatus::Pending,
-            token,
+            token: donated_token.clone(),
             co2_offset_grams,
         };
         env.storage()
             .instance()
-            .set(&DataKey::RefundRequest(refund_id), &request);
+            .set(&FeatureKey::RefundRequest(refund_id), &request);
         env.storage()
             .instance()
             .set(&refund_for_donation_key, &refund_id);
         env.storage()
             .instance()
-            .set(&DataKey::RefundCount, &(refund_id + 1));
+            .set(&FeatureKey::RefundCount, &(refund_id + 1));
         env.events().publish(
             (symbol_short!("rfnd_rq"), refund_id, donor),
             (record.project, record.amount, donation_record_index),
@@ -7324,7 +7358,7 @@ impl IndigoPayContract {
         if env
             .storage()
             .instance()
-            .has(&DataKey::ForceRefund(refund_id))
+            .has(&FeatureKey::ForceRefund(refund_id))
         {
             panic!("Force refund escalation pending; cancel it first");
         }
@@ -7332,7 +7366,7 @@ impl IndigoPayContract {
         let mut request: RefundRequest = env
             .storage()
             .instance()
-            .get(&DataKey::RefundRequest(refund_id))
+            .get(&FeatureKey::RefundRequest(refund_id))
             .expect("Refund request not found");
         if request.status != RefundRequestStatus::Pending {
             panic!("Refund request is not pending");
@@ -7371,7 +7405,7 @@ impl IndigoPayContract {
         if env
             .storage()
             .instance()
-            .has(&DataKey::ForceRefund(refund_id))
+            .has(&FeatureKey::ForceRefund(refund_id))
         {
             panic!("Force refund escalation pending; cancel it first");
         }
@@ -7379,7 +7413,7 @@ impl IndigoPayContract {
         let mut request: RefundRequest = env
             .storage()
             .instance()
-            .get(&DataKey::RefundRequest(refund_id))
+            .get(&FeatureKey::RefundRequest(refund_id))
             .expect("Refund request not found");
 
         if request.status != RefundRequestStatus::Pending {
@@ -7389,7 +7423,7 @@ impl IndigoPayContract {
         request.status = RefundRequestStatus::Rejected;
         env.storage()
             .instance()
-            .set(&DataKey::RefundRequest(refund_id), &request);
+            .set(&FeatureKey::RefundRequest(refund_id), &request);
 
         env.events().publish(
             (symbol_short!("rfnd_rj"), refund_id, admin),
@@ -7409,13 +7443,13 @@ impl IndigoPayContract {
         let request: RefundRequest = env
             .storage()
             .instance()
-            .get(&DataKey::RefundRequest(refund_id))
+            .get(&FeatureKey::RefundRequest(refund_id))
             .expect("Refund request not found");
         if request.status != RefundRequestStatus::Pending {
             panic!("Refund request is not pending");
         }
 
-        let force_key = DataKey::ForceRefund(refund_id);
+        let force_key = FeatureKey::ForceRefund(refund_id);
         if env.storage().instance().has(&force_key) {
             panic!("Force refund already pending");
         }
@@ -7445,7 +7479,7 @@ impl IndigoPayContract {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
 
-        let force_key = DataKey::ForceRefund(refund_id);
+        let force_key = FeatureKey::ForceRefund(refund_id);
         let force_refund: ForceRefund = env
             .storage()
             .instance()
@@ -7469,7 +7503,7 @@ impl IndigoPayContract {
     /// spent.
     #[cfg(feature = "refund")]
     pub fn execute_force_refund(env: Env, refund_id: u32) {
-        let force_key = DataKey::ForceRefund(refund_id);
+        let force_key = FeatureKey::ForceRefund(refund_id);
         let force_refund: ForceRefund = env
             .storage()
             .instance()
@@ -7482,7 +7516,7 @@ impl IndigoPayContract {
         let mut request: RefundRequest = env
             .storage()
             .instance()
-            .get(&DataKey::RefundRequest(refund_id))
+            .get(&FeatureKey::RefundRequest(refund_id))
             .expect("Refund request not found");
         if request.status != RefundRequestStatus::Pending {
             panic!("Refund request is not pending");
@@ -7490,7 +7524,13 @@ impl IndigoPayContract {
         request.status = RefundRequestStatus::Rejected;
         env.storage()
             .instance()
-            .set(&DataKey::RefundRequest(refund_id), &request);
+            .set(&FeatureKey::RefundRequest(refund_id), &request);
+        let _project: Project = env
+            .storage()
+            .instance()
+            .get(&DataKey::Project(request.project_id.clone()))
+            .expect("Project not found");
+
         let balance_key =
             DataKey::ProjectContractBalance(request.project_id.clone(), request.token.clone());
         let pool_balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
@@ -7525,7 +7565,7 @@ impl IndigoPayContract {
     pub fn get_force_refund(env: Env, refund_id: u32) -> Option<ForceRefund> {
         env.storage()
             .instance()
-            .get(&DataKey::ForceRefund(refund_id))
+            .get(&FeatureKey::ForceRefund(refund_id))
     }
     /// Read-only: returns the refund request for the given ID, or panics if
     /// not found.
@@ -7533,7 +7573,7 @@ impl IndigoPayContract {
     pub fn get_refund_request(env: Env, refund_id: u32) -> RefundRequest {
         env.storage()
             .instance()
-            .get(&DataKey::RefundRequest(refund_id))
+            .get(&FeatureKey::RefundRequest(refund_id))
             .expect("Refund request not found")
     }
 
@@ -7550,7 +7590,7 @@ impl IndigoPayContract {
         }
         env.storage()
             .instance()
-            .set(&DataKey::ChallengeThreshold, &threshold);
+            .set(&FeatureKey::ChallengeThreshold, &threshold);
         env.events().publish(
             (symbol_short!("chg_thrsh"), signers.get(0).unwrap()),
             threshold,
@@ -7563,7 +7603,7 @@ impl IndigoPayContract {
     pub fn get_challenge_threshold(env: Env) -> i128 {
         env.storage()
             .instance()
-            .get(&DataKey::ChallengeThreshold)
+            .get(&FeatureKey::ChallengeThreshold)
             .unwrap_or(0i128)
     }
 
@@ -7611,7 +7651,7 @@ impl IndigoPayContract {
         if env
             .storage()
             .instance()
-            .has(&DataKey::DonationChallenge(donation_index))
+            .has(&FeatureKey::DonationChallenge(donation_index))
         {
             panic!("Donation already challenged");
         }
@@ -7625,7 +7665,7 @@ impl IndigoPayContract {
         };
         env.storage()
             .instance()
-            .set(&DataKey::DonationChallenge(donation_index), &challenge);
+            .set(&FeatureKey::DonationChallenge(donation_index), &challenge);
 
         env.events().publish(
             (symbol_short!("chg_sub"), donation_index, challenger),
@@ -7643,7 +7683,7 @@ impl IndigoPayContract {
         let mut challenge: DonationChallenge = env
             .storage()
             .instance()
-            .get(&DataKey::DonationChallenge(donation_index))
+            .get(&FeatureKey::DonationChallenge(donation_index))
             .expect("Challenge not found");
 
         if !challenge.challenged || challenge.resolved {
@@ -7659,7 +7699,7 @@ impl IndigoPayContract {
         challenge.approved = approve;
         env.storage()
             .instance()
-            .set(&DataKey::DonationChallenge(donation_index), &challenge);
+            .set(&FeatureKey::DonationChallenge(donation_index), &challenge);
 
         if approve {
             env.events()
@@ -7674,7 +7714,7 @@ impl IndigoPayContract {
             let co2_offset: i128 = env
                 .storage()
                 .instance()
-                .get(&DataKey::DonationCO2Offset(donation_index))
+                .get(&FeatureKey::DonationCO2Offset(donation_index))
                 .unwrap_or(0);
 
             let project: Project = env
@@ -7711,7 +7751,7 @@ impl IndigoPayContract {
     pub fn get_donation_challenge(env: Env, donation_index: u32) -> Option<DonationChallenge> {
         env.storage()
             .instance()
-            .get(&DataKey::DonationChallenge(donation_index))
+            .get(&FeatureKey::DonationChallenge(donation_index))
     }
 
     /// Read-only: check whether a donation is finalized.
@@ -7784,7 +7824,7 @@ impl IndigoPayContract {
         if !env.storage().instance().has(&project_key) {
             panic!("Project not found");
         }
-        let count_key = DataKey::DonorRecurringCount(donor.clone());
+        let count_key = FeatureKey::DonorRecurringCount(donor.clone());
         let count: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
         let recurring_id = count;
         let next_count = count.checked_add(1).expect("overflow");
@@ -7806,7 +7846,7 @@ impl IndigoPayContract {
             active: true,
             created_at: env.ledger().sequence(),
         };
-        let recurring_key = DataKey::RecurringDonation(donor.clone(), recurring_id);
+        let recurring_key = FeatureKey::RecurringDonation(donor.clone(), recurring_id);
         env.storage().instance().set(&recurring_key, &recurring);
         env.events().publish(
             (symbol_short!("rec_cr"), donor, project_id),
@@ -7825,7 +7865,7 @@ impl IndigoPayContract {
     pub fn cancel_recurring(env: Env, donor: Address, recurring_id: u32) {
         donor.require_auth();
         require_not_paused(&env);
-        let recurring_key = DataKey::RecurringDonation(donor.clone(), recurring_id);
+        let recurring_key = FeatureKey::RecurringDonation(donor.clone(), recurring_id);
         let mut recurring: RecurringDonation = env
             .storage()
             .instance()
@@ -7843,7 +7883,7 @@ impl IndigoPayContract {
     pub fn execute_recurring(env: Env, keeper: Address, donor: Address, recurring_id: u32) {
         keeper.require_auth();
         require_not_paused(&env);
-        let recurring_key = DataKey::RecurringDonation(donor.clone(), recurring_id);
+        let recurring_key = FeatureKey::RecurringDonation(donor.clone(), recurring_id);
         let mut recurring: RecurringDonation = env
             .storage()
             .instance()
@@ -7876,7 +7916,7 @@ impl IndigoPayContract {
             token_addr = env
                 .storage()
                 .instance()
-                .get(&DataKey::NativeTokenAddress)
+                .get(&FeatureKey::NativeTokenAddress)
                 .expect("Native token not configured");
             xlm_equivalent = recurring.amount;
         } else if recurring.currency == symbol_short!("USDC") {
@@ -7886,7 +7926,7 @@ impl IndigoPayContract {
             let oracle_addr: Address = env
                 .storage()
                 .instance()
-                .get(&DataKey::OracleAddress)
+                .get(&FeatureKey::OracleAddress)
                 .expect("Price oracle not configured");
             let oracle = OracleClient::new(&env, &oracle_addr);
             let rate = oracle.get_price();
@@ -7999,7 +8039,7 @@ impl IndigoPayContract {
             .set(&DataKey::DonationRecord(dc), &donation_record);
         env.storage()
             .instance()
-            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+            .set(&FeatureKey::DonationCO2Offset(dc), &co2_increment);
         // Update Globals
         let gr: i128 = env
             .storage()
@@ -8057,20 +8097,23 @@ impl IndigoPayContract {
     pub fn get_recurring(env: Env, donor: Address, recurring_id: u32) -> RecurringDonation {
         env.storage()
             .instance()
-            .get(&DataKey::RecurringDonation(donor, recurring_id))
+            .get(&FeatureKey::RecurringDonation(donor, recurring_id))
             .expect("Recurring donation not found")
     }
 
     #[cfg(feature = "recurring")]
     pub fn get_donor_recurrings(env: Env, donor: Address) -> Vec<RecurringDonation> {
-        let count_key = DataKey::DonorRecurringCount(donor.clone());
+        let count_key = FeatureKey::DonorRecurringCount(donor.clone());
         let count: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
         let mut list = Vec::new(&env);
         for id in 0..count {
             if let Some(recurring) = env
                 .storage()
                 .instance()
-                .get::<DataKey, RecurringDonation>(&DataKey::RecurringDonation(donor.clone(), id))
+                .get::<FeatureKey, RecurringDonation>(&FeatureKey::RecurringDonation(
+                    donor.clone(),
+                    id,
+                ))
             {
                 list.push_back(recurring);
             }
@@ -8142,7 +8185,7 @@ impl IndigoPayContract {
             .checked_add(installment_interval_ledgers)
             .expect("overflow");
 
-        let count_key = DataKey::DonorVestingCount(donor.clone());
+        let count_key = FeatureKey::DonorVestingCount(donor.clone());
         let count: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
         let schedule_id = count;
         let next_count = count.checked_add(1).expect("overflow");
@@ -8160,7 +8203,7 @@ impl IndigoPayContract {
             token: token.clone(),
             completed_at: 0,
         };
-        let schedule_key = DataKey::VestingSchedule(donor.clone(), schedule_id);
+        let schedule_key = FeatureKey::VestingSchedule(donor.clone(), schedule_id);
         env.storage().instance().set(&schedule_key, &schedule);
         // ── Transfer full amount from donor to contract (custody),
         //    then release first installment from contract to project.
@@ -8195,7 +8238,7 @@ impl IndigoPayContract {
     #[cfg(feature = "vesting")]
     pub fn claim_vested_installment(env: Env, donor: Address, schedule_id: u32) {
         require_not_paused(&env);
-        let schedule_key = DataKey::VestingSchedule(donor.clone(), schedule_id);
+        let schedule_key = FeatureKey::VestingSchedule(donor.clone(), schedule_id);
         let mut schedule: VestingSchedule = env
             .storage()
             .instance()
@@ -8257,7 +8300,7 @@ impl IndigoPayContract {
     #[cfg(feature = "vesting")]
     pub fn cancel_vesting(env: Env, donor: Address, schedule_id: u32) {
         donor.require_auth();
-        let schedule_key = DataKey::VestingSchedule(donor.clone(), schedule_id);
+        let schedule_key = FeatureKey::VestingSchedule(donor.clone(), schedule_id);
         let mut schedule: VestingSchedule = env
             .storage()
             .instance()
@@ -8299,7 +8342,7 @@ impl IndigoPayContract {
     /// - If the grace period has not elapsed since completion.
     #[cfg(feature = "vesting")]
     pub fn cleanup_vesting_schedule(env: Env, donor: Address, schedule_id: u32) {
-        let schedule_key = DataKey::VestingSchedule(donor.clone(), schedule_id);
+        let schedule_key = FeatureKey::VestingSchedule(donor.clone(), schedule_id);
         let schedule: VestingSchedule = env
             .storage()
             .instance()
@@ -8326,19 +8369,23 @@ impl IndigoPayContract {
     pub fn get_vesting_schedule(env: Env, donor: Address, schedule_id: u32) -> VestingSchedule {
         env.storage()
             .instance()
-            .get(&DataKey::VestingSchedule(donor, schedule_id))
+            .get(&FeatureKey::VestingSchedule(donor, schedule_id))
             .expect("Vesting schedule not found")
     }
+    #[cfg(any(feature = "vesting", feature = "testutils"))]
     pub fn set_native_token(env: Env, admin: Address, native_token: Address) {
         require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
         env.storage()
             .instance()
-            .set(&DataKey::NativeTokenAddress, &native_token);
+            .set(&FeatureKey::NativeTokenAddress, &native_token);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
+    #[cfg(any(feature = "vesting", feature = "testutils"))]
     pub fn get_native_token(env: Env) -> Option<Address> {
-        env.storage().instance().get(&DataKey::NativeTokenAddress)
+        env.storage()
+            .instance()
+            .get(&FeatureKey::NativeTokenAddress)
     }
 }
 // ─── Mock oracle (test / integration use only) ────────────────────────────────
@@ -12340,8 +12387,8 @@ mod tests {
         for i in 0..25u32 {
             let nullifier = BytesN::from_array(&env, &[i as u8; 32]);
             env.as_contract(&id, || {
-                let nullifier_key = DataKey::Nullifier(nullifier.clone());
-                let record_key = DataKey::ZkDonationRecord(i);
+                let nullifier_key = FeatureKey::Nullifier(nullifier.clone());
+                let record_key = FeatureKey::ZkDonationRecord(i);
 
                 env.storage().persistent().set(&nullifier_key, &true);
                 env.storage().persistent().extend_ttl(
@@ -12390,8 +12437,8 @@ mod tests {
 
         let nullifier = BytesN::from_array(&env, &[77u8; 32]);
         env.as_contract(&id, || {
-            let nullifier_key = DataKey::Nullifier(nullifier.clone());
-            let record_key = DataKey::ZkDonationRecord(0u32);
+            let nullifier_key = FeatureKey::Nullifier(nullifier.clone());
+            let record_key = FeatureKey::ZkDonationRecord(0u32);
 
             env.storage().persistent().set(&nullifier_key, &true);
             env.storage().persistent().extend_ttl(
@@ -15971,7 +16018,7 @@ mod tests {
         let stored = env.as_contract(&_cid, || {
             env.storage()
                 .instance()
-                .get::<_, Address>(&DataKey::OracleAddress)
+                .get::<_, Address>(&FeatureKey::OracleAddress)
         });
         assert_eq!(stored, Some(oracle));
     }
@@ -16758,6 +16805,46 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Donation token unknown; this donation cannot be refunded")]
+    fn test_refund_donate_asset_not_refundable() {
+        // `donate_asset` delivers XLM via DEX path payment and snapshots no
+        // token address, so its records cannot be refunded.
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let attester = Address::generate(&env);
+        client.add_path_payment_attester(&admin, &attester);
+        client.donate_asset(
+            &donor,
+            &attester,
+            &pid,
+            &(25 * STROOP),
+            &symbol_short!("yXLM"),
+            &0u32,
+        );
+        let token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        client.request_refund(&donor, &0u32, &token);
+    }
+
+    #[test]
+    #[should_panic(expected = "Refund request is not pending")]
+    fn test_refund_approve_already_resolved_fails() {
+        let (env, _cid, client, admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let amount = 25 * STROOP;
+        StellarAssetClient::new(&env, &token).mint(&donor, &amount);
+        client.donate(&token, &donor, &pid, &amount, &42u32);
+        client.request_refund(&donor, &0u32, &token);
+        client.reject_refund(&admin, &0u32);
+        client.approve_refund(&admin, &0u32);
+    }
+
+    #[test]
     fn test_mint_donation_receipt_multiple_donations() {
         let (env, _cid, client, _admin, pid) = setup();
         let donor = Address::generate(&env);
@@ -16775,5 +16862,34 @@ mod tests {
         assert!(client.has_donation_receipt(&donor, &1u32));
         let receipt = client.get_donation_receipt(&donor, &1u32);
         assert_eq!(receipt.amount, 25 * STROOP);
+    }
+
+    #[test]
+    fn test_refund_vested_schedule_not_a_refundable_record() {
+        // Vested donations (#386) are held in contract custody and released
+        // in installments to the project wallet. They create NO DonationRecord
+        // — so the refund path (which is per DonationRecord, validated against
+        // the `DonationToken` snapshot) never applies to a vested schedule and
+        // the schedule's token cannot be recycled to fabricate a refund entry.
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let token_client = StellarAssetClient::new(&env, &token);
+        let total = 30 * STROOP;
+        token_client.mint(&donor, &total);
+        client.donate_vested(&token, &donor, &pid, &total, &3u32, &100u32, &5u32);
+
+        // No DonationRecord was created (index 0 is empty), so no refund
+        // request can be submitted for it.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.request_refund(&donor, &0u32, &token);
+        }));
+        assert!(
+            result.is_err(),
+            "vested schedules must not be refundable via request_refund"
+        );
     }
 }
