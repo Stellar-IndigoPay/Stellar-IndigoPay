@@ -8,15 +8,61 @@ const ACCESS_TOKEN_EXPIRY = "15m";
 const ACCESS_TOKEN_EXPIRY_SECONDS = 900;
 const REFRESH_TOKEN_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * Return the JWT signing secret.
+ *
+ * Fails closed: if JWT_SECRET is not set the server must not issue or
+ * accept tokens — a missing secret is a configuration error, not a
+ * reason to fall back to a publicly-known string.
+ *
+ * The only exception is NODE_ENV === 'test', where an explicit
+ * TEST_JWT_SECRET (set in test-setup.js) is accepted so the test suite
+ * can run without a real secret manager.  Any other missing-secret
+ * situation throws so callers propagate a 503 SERVICE_UNAVAILABLE.
+ *
+ * @returns {string} The configured JWT secret.
+ * @throws {Error} When JWT_SECRET is unset outside of the test environment.
+ */
 function getSecret() {
-  return process.env.JWT_SECRET || "dev-secret-do-not-use-in-prod";
+  const secret = process.env.JWT_SECRET;
+
+  if (secret) return secret;
+
+  // Explicit dev/test escape hatch — must be NODE_ENV=test and the caller
+  // must have set TEST_JWT_SECRET themselves (test-setup.js does this).
+  if (process.env.NODE_ENV !== "production" && process.env.TEST_JWT_SECRET) {
+    // Emit a loud warning so nobody accidentally ships this path.
+    console.warn(
+      "[auth] WARNING: JWT_SECRET is unset. Using TEST_JWT_SECRET for non-production environment. " +
+        "Set JWT_SECRET before deploying to production.",
+    );
+    return process.env.TEST_JWT_SECRET;
+  }
+
+  throw new Error(
+    "JWT_SECRET environment variable is not set. " +
+      "Token signing and verification are unavailable. " +
+      "Set JWT_SECRET to a strong random secret (openssl rand -hex 32) before starting the server.",
+  );
 }
 
+/**
+ * Sign a JWT payload.
+ * Throws if JWT_SECRET is not configured — callers must propagate this as
+ * a 503 SERVICE_UNAVAILABLE rather than swallowing the error.
+ */
 function signToken(payload, expiresIn) {
+  // getSecret() throws when JWT_SECRET is absent; let it bubble.
   return jwt.sign(payload, getSecret(), { expiresIn });
 }
 
+/**
+ * Verify and decode a JWT.
+ * Throws jsonwebtoken errors (TokenExpiredError, JsonWebTokenError, etc.)
+ * AND throws when JWT_SECRET is absent — callers must handle both cases.
+ */
 function verifyToken(token) {
+  // getSecret() throws when JWT_SECRET is absent; let it bubble.
   return jwt.verify(token, getSecret());
 }
 
@@ -270,6 +316,12 @@ async function adminRequired(req, res, next) {
   try {
     decoded = verifyToken(token);
   } catch (err) {
+    // JWT_SECRET not configured — refuse to verify, never fall back.
+    if (err.message && err.message.startsWith("JWT_SECRET environment variable")) {
+      return sendAppError(res, "SERVICE_UNAVAILABLE", {
+        reason: "Token authentication is not configured on this server",
+      });
+    }
     if (err.name === "TokenExpiredError") {
       return sendAppError(res, "TOKEN_EXPIRED");
     }
