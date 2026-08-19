@@ -35,7 +35,16 @@ const envSchema = z.object({
     .default("Stellar-IndigoPay <updates@stellarindigopay.app>"),
   APP_URL: z.string().optional().default("http://localhost:3000"),
   UNSUBSCRIBE_SECRET: z.string().optional().default(""),
-  JWT_SECRET: z.string().optional().default(""),
+  // ── JWT secret ────────────────────────────────────────────────────────────
+  // Required in production; optional elsewhere so local dev and CI can boot
+  // without a secrets manager.  auth.js enforces the same rule at runtime:
+  // getSecret() throws when JWT_SECRET is absent in production, so the admin
+  // auth path always fails closed.
+  // Generate with: openssl rand -hex 32
+  JWT_SECRET: z
+    .string()
+    .optional()
+    .default(""),
   ADMIN_USERNAME: z.string().optional().default("admin"),
   ADMIN_PASSWORD: z.string().optional().default(""),
   ADMIN_API_KEY: z.string().optional().default(""),
@@ -150,10 +159,31 @@ function validateEnv() {
     process.exit(1);
   }
 
-  return {
+  const env = {
     ...result.data,
     STELLAR_NETWORK: result.data.STELLAR_NETWORK || "testnet",
   };
+
+  // JWT_SECRET is required in production. Fail loudly at startup so the
+  // process never enters a state where the auth fallback could be reached.
+  if (env.NODE_ENV === "production" && !env.JWT_SECRET) {
+    console.error(
+      "\n[Startup] JWT_SECRET must be set in production. " +
+        "Generate one with: openssl rand -hex 32\n",
+    );
+    process.exit(1);
+  }
+
+  // Warn in non-production environments so developers notice the gap before
+  // it reaches staging or production.
+  if (env.NODE_ENV !== "production" && env.NODE_ENV !== "test" && !env.JWT_SECRET) {
+    console.warn(
+      "[Startup] WARNING: JWT_SECRET is not set. Admin token signing/verification will " +
+        "fail closed. Set JWT_SECRET or TEST_JWT_SECRET for local development.",
+    );
+  }
+
+  return env;
 }
 
 module.exports = { validateEnv };
