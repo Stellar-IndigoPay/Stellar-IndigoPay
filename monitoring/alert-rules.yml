@@ -264,3 +264,36 @@ groups:
             The last successful secret rotation was {{ $value | humanizeTimestamp }}.
             Rotations are scheduled quarterly (every 91 days). Consider running
             the workflow manually if the automated schedule has been failing.
+
+  - name: stellar-indigopay-bulk-ops
+    interval: 30s
+    rules:
+      - alert: BulkOpHighFailureRate
+        expr: |
+          sum by (type) (rate(bulk_op_row_outcomes_total{outcome="failed"}[15m]))
+            /
+          sum by (type) (rate(bulk_op_row_outcomes_total[15m]))
+            > 0.20
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Bulk op {{ $labels.type }} has a per-row failure rate above 20%"
+          description: |
+            More than 20% of rows touched by confirmed bulk operations of type
+            {{ $labels.type }} failed in the last 15m. This usually means a
+            confirmed op ran with bad parameters. Check GET /api/admin/bulk-ops
+            for the affected op ids and their outcome rows.
+
+      - alert: BulkOpFailedOutright
+        expr: |
+          increase(bulk_ops_total{status="failed"}[15m]) > 0
+        for: 1m
+        labels:
+          severity: warn
+        annotations:
+          summary: "A bulk operation of type {{ $labels.type }} failed outright"
+          description: |
+            A confirmed bulk operation finished with status "failed" (every row
+            failed, or confirm was rejected). Check the admin audit log for the
+            bulk_op.confirm / bulk_op.confirm_rejected entries.
