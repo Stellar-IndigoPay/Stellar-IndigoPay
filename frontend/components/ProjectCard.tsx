@@ -14,7 +14,8 @@ import {
   CATEGORY_ICONS,
 } from "@/utils/format";
 import CircularProgress from "./CircularProgress";
-import { useXlmPrice } from "@/lib/priceContext";
+import { usePriceContext } from "@/lib/priceContext";
+import StalePriceIndicator from "@/components/StalePriceIndicator";
 import { useWishlist } from "@/hooks/useWishlist";
 import ProjectProgressBar from "./ProjectProgressBar";
 import { SkeletonCard } from "./Skeleton";
@@ -24,7 +25,7 @@ export default function ProjectCard({ project }: { project: ClimateProject }) {
   const { t, tPlural } = useI18n();
   const pct = progressPercent(project.raisedXLM, project.goalXLM);
   const isComplete = pct >= 100;
-  const xlmUsd = useXlmPrice();
+  const { xlmUsd, isDegraded, isStale } = usePriceContext();
   const { toggleWishlist, isInWishlist } = useWishlist();
   const isWishlisted = isInWishlist(project.id);
 
@@ -114,13 +115,23 @@ export default function ProjectCard({ project }: { project: ClimateProject }) {
                 className="w-full"
               />
               <div className="flex items-center justify-between text-[11px] text-[var(--text-secondary)] font-body">
-                <span>{formatXLM(project.raisedXLM)} {t("project.raised")}</span>
+                <span>
+                  {formatXLM(project.raisedXLM)} {t("project.raised")}
+                  {!isDegraded && xlmUsd !== null && (
+                    <span className="text-[#94A3B8] ml-1">
+                      (≈ ${(parseFloat(String(project.raisedXLM)) * xlmUsd).toFixed(0)})
+                    </span>
+                  )}
+                </span>
                 <span>
                   {project.goalXLM && Number(project.goalXLM) > 0
                     ? `${t("project.goal")}: ${formatXLM(project.goalXLM)}`
                     : t("project.noGoalSet")}
                 </span>
               </div>
+              {(isStale || isDegraded) && (
+                <StalePriceIndicator className="mt-1" />
+              )}
             </div>
           )}
         </div>
