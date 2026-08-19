@@ -13,7 +13,7 @@
     "migration:lint": "node scripts/validate-migrations.js",
     "lint": "eslint src/**/*.js",
     "docs": "typedoc --options typedoc.json",
-    "test": "jest --maxWorkers=2 --forceExit",
+    "test": "jest --testPathIgnorePatterns='integration' --maxWorkers=2 && jest --testPathPattern='integration' --forceExit",
     "load-test": "k6 run ../scripts/load-test.js"
   },
   "dependencies": {
