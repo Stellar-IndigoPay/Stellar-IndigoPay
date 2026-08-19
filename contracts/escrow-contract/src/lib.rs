@@ -80,6 +80,7 @@ pub enum DataKey {
 /// to `create_job`.
 pub const RELEASE_AFTER_LEDGERS: u32 = 10;
 pub const DEFAULT_DEADLINE_LEDGERS: u32 = 1_555_200; // 90 days @ 5s/ledger
+pub const MAX_MILESTONE_NAME_LEN: u32 = 64; // bytes; enforced at create + amend
 
 // ─── Contract error codes ───────────────────────────────────────────────────
 //
@@ -158,6 +159,45 @@ pub enum EscrowError {
     ThresholdExceedsAdminCount = 60,
     AdminTransferInProgress = 61,
     AdminSetUpdateFailed = 62,
+}
+
+/// Validate a milestone vector against the invariants that must hold at every
+/// mutation point (`create_job` and `amend_job_milestones`):
+///
+/// 1. Non-empty (`MilestoneVectorEmpty`)
+/// 2. Every milestone has a non-zero percentage (`MilestonePercentageZero`)
+/// 3. Every milestone name fits within `MAX_MILESTONE_NAME_LEN` bytes
+///    (`MilestoneNameTooLong`)
+/// 4. No two milestones share a name (`DuplicateMilestoneName`)
+///
+/// The sum-to-100 invariant is computed by the callers and intentionally not
+/// duplicated here.
+fn validate_milestones(env: &Env, milestones: &Vec<Milestone>) {
+    if milestones.is_empty() {
+        panic_with_error!(env, EscrowError::MilestoneVectorEmpty);
+    }
+
+    for milestone in milestones.iter() {
+        if milestone.percentage == 0 {
+            panic_with_error!(env, EscrowError::MilestonePercentageZero);
+        }
+        if milestone.name.len() > MAX_MILESTONE_NAME_LEN {
+            panic_with_error!(env, EscrowError::MilestoneNameTooLong);
+        }
+    }
+
+    // Duplicate-name detection. Milestone vectors are small (the fuzz harness
+    // caps them at 10 entries), so an O(n²) scan avoids allocating a second
+    // Vec and keeps the comparison independent of storage.
+    for i in 0..milestones.len() {
+        for j in (i + 1)..milestones.len() {
+            let a = milestones.get(i).unwrap();
+            let b = milestones.get(j).unwrap();
+            if a.name == b.name {
+                panic_with_error!(env, EscrowError::DuplicateMilestoneName);
+            }
+        }
+    }
 }
 
 /// Compute `amount * proportion / 100` with checked arithmetic, panicking
@@ -397,6 +437,8 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::JobAlreadyExists);
         }
 
+        validate_milestones(&env, &milestones);
+
         // Validate milestones sum to 100%
         let mut total_percentage: u32 = 0;
         for milestone in milestones.iter() {
@@ -498,6 +540,8 @@ impl EscrowContract {
         if job.status != JobStatus::Escrowed {
             panic_with_error!(&env, EscrowError::AmendmentOnlyBeforeRelease);
         }
+
+        validate_milestones(&env, &new_milestones);
 
         let mut total_percentage: u32 = 0;
         for milestone in new_milestones.iter() {

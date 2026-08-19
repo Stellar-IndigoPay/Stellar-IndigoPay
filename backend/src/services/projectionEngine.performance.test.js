@@ -31,7 +31,10 @@ let testPool;
 let ready = false;
 
 const DONORS = Array.from({ length: 200 }, (_, i) => `G${i}`.padEnd(56, "A"));
-const PROJECTS = Array.from({ length: 50 }, (_, i) => `p-${i}`.padEnd(36, "0"));
+const PROJECTS = Array.from(
+  { length: 50 },
+  (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+);
 
 describe("Projection engine performance (100k event rebuild)", () => {
   jest.setTimeout(300000);
@@ -67,12 +70,13 @@ describe("Projection engine performance (100k event rebuild)", () => {
         "utf8",
       );
       await testPool.query(schemaSql);
+      const wallet = "G".repeat(56);
       for (const p of PROJECTS) {
         await testPool.query(
           `INSERT INTO projects (id, name, description, category, location, wallet_address, goal_xlm, raised_xlm, donor_count, co2_offset_kg, status)
-           VALUES ($1, 'p', 'd', 'Reforestation', 'l', 'G'.repeat(56), 0, 0, 0, 0, 'active')
+           VALUES ($1, 'p', 'd', 'Reforestation', 'l', $2, 0, 0, 0, 0, 'active')
            ON CONFLICT (id) DO NOTHING`,
-          [p],
+          [p, wallet],
         );
       }
       ready = true;
