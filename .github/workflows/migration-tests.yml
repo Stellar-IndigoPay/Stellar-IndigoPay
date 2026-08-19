@@ -1,0 +1,80 @@
+name: Migration Tests
+
+# Closes #937 — migration test harness that verifies forward and backward
+# migrations on a real database.
+#
+# Trigger policy:
+#   - On every PR that touches a migration file, the migration runner, or the
+#     checked-in schema (mandatory gate).
+#   - On every push to main (post-merge safety net).
+#   - Manually via workflow_dispatch for ad-hoc verification.
+#
+# This workflow runs serially (maxWorkers=1) against a real Postgres 16 service
+# container — the same version used in docker-compose.test.yml — so the results
+# are equivalent to what production upgrade would encounter.
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "backend/src/db/migrations/**"
+      - "backend/src/db/migrate.js"
+      - "backend/src/db/schema.sql"
+      - "backend/test/migrations/**"
+      - "backend/jest.config.migrations.js"
+  pull_request:
+    paths:
+      - "backend/src/db/migrations/**"
+      - "backend/src/db/migrate.js"
+      - "backend/src/db/schema.sql"
+      - "backend/test/migrations/**"
+      - "backend/jest.config.migrations.js"
+  workflow_dispatch:
+
+jobs:
+  migration-tests:
+    name: Migration harness (Postgres 16)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The migration harness boots its own disposable Postgres containers via
+      # testcontainers (@testcontainers/postgresql). Docker is already available
+      # on ubuntu-latest runners so no extra setup is needed.
+      #
+      # We pass DOCKER_HOST so testcontainers can locate the socket on the
+      # runner. This is the standard approach used by the existing
+      # *.integration.test.js suites in this project.
+      - name: Run migration tests
+        run: npm run test:migrations
+        env:
+          NODE_ENV: test
+          # testcontainers connects to the Docker daemon on the runner
+          DOCKER_HOST: unix:///var/run/docker.sock
+          # Ensure testcontainers does not try to pull Ryuk (reaper) images
+          # in environments where that could be restricted.
+          TESTCONTAINERS_RYUK_DISABLED: "false"
+
+      - name: Upload migration test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-test-results
+          path: backend/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
