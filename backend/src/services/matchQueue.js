@@ -22,6 +22,8 @@ const QUEUE = "donation-match";
 let boss = null;
 
 async function start() {
+  if (boss) return; // already running — prevent leaked instances
+
   const connectionString =
     process.env.DATABASE_URL ||
     "postgres://postgres:postgres@localhost:5432/indigopay";

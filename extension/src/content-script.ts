@@ -123,14 +123,19 @@ window.addEventListener("beforeunload", () => {
 
 // ── message listener from background script ──────────────────────────
 
-chrome.runtime.onMessage.addListener((message: any) => {
-  if (message.type === "TRIGGER_RESCAN") {
-    scanAndInject();
-  }
-  if (message.type === "CLOSE_OVERLAY") {
-    if (overlayCleanup) {
-      overlayCleanup();
-      setOverlayCleanup(null);
+chrome.runtime.onMessage.addListener(
+  (message: any, sender: chrome.runtime.MessageSender) => {
+    // Only accept messages from the extension's own background script.
+    if (sender.id !== chrome.runtime.id) return;
+
+    if (message.type === "TRIGGER_RESCAN") {
+      scanAndInject();
     }
-  }
-});
+    if (message.type === "CLOSE_OVERLAY") {
+      if (overlayCleanup) {
+        overlayCleanup();
+        setOverlayCleanup(null);
+      }
+    }
+  },
+);
