@@ -26,9 +26,10 @@ async function start(io) {
   );
 
   await boss.start();
+  await boss.createQueue(QUEUE);
 
   // teamSize 1 as per requirement
-  await boss.work(QUEUE, { teamSize: 1, teamConcurrency: 1 }, async (job) => {
+  await boss.work(QUEUE, { teamSize: 1, teamConcurrency: 1 }, async ([job]) => {
     const { donationId, projectId, donorAddress, amountXLM } = job.data;
 
     // Idempotency: check log – if already completed, skip

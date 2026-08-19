@@ -1022,6 +1022,7 @@ async function startCO2VerificationCron() {
     );
 
     await boss.start();
+    await boss.createQueue(QUEUE);
 
     // Register the cron schedule (idempotent — pg-boss deduplicates by name)
     await boss.schedule(QUEUE, cronSchedule, {}, { tz: "UTC" });

@@ -80,6 +80,7 @@ pub enum DataKey {
 /// to `create_job`.
 pub const RELEASE_AFTER_LEDGERS: u32 = 10;
 pub const DEFAULT_DEADLINE_LEDGERS: u32 = 1_555_200; // 90 days @ 5s/ledger
+pub const MAX_MILESTONE_NAME_LEN: u32 = 64; // bytes; enforced at create + amend
 
 // ─── Contract error codes ───────────────────────────────────────────────────
 //
@@ -160,14 +161,85 @@ pub enum EscrowError {
     AdminSetUpdateFailed = 62,
 }
 
-fn compute_remaining_funds(job: &Job) -> i128 {
+/// Validate a milestone vector against the invariants that must hold at every
+/// mutation point (`create_job` and `amend_job_milestones`):
+///
+/// 1. Non-empty (`MilestoneVectorEmpty`)
+/// 2. Every milestone has a non-zero percentage (`MilestonePercentageZero`)
+/// 3. Every milestone name fits within `MAX_MILESTONE_NAME_LEN` bytes
+///    (`MilestoneNameTooLong`)
+/// 4. No two milestones share a name (`DuplicateMilestoneName`)
+///
+/// The sum-to-100 invariant is computed by the callers and intentionally not
+/// duplicated here.
+fn validate_milestones(env: &Env, milestones: &Vec<Milestone>) {
+    if milestones.is_empty() {
+        panic_with_error!(env, EscrowError::MilestoneVectorEmpty);
+    }
+
+    for milestone in milestones.iter() {
+        if milestone.percentage == 0 {
+            panic_with_error!(env, EscrowError::MilestonePercentageZero);
+        }
+        if milestone.name.len() > MAX_MILESTONE_NAME_LEN {
+            panic_with_error!(env, EscrowError::MilestoneNameTooLong);
+        }
+    }
+
+    // Duplicate-name detection. Milestone vectors are small (the fuzz harness
+    // caps them at 10 entries), so an O(n²) scan avoids allocating a second
+    // Vec and keeps the comparison independent of storage.
+    for i in 0..milestones.len() {
+        for j in (i + 1)..milestones.len() {
+            let a = milestones.get(i).unwrap();
+            let b = milestones.get(j).unwrap();
+            if a.name == b.name {
+                panic_with_error!(env, EscrowError::DuplicateMilestoneName);
+            }
+        }
+    }
+}
+
+/// Compute `amount * proportion / 100` with checked arithmetic, panicking
+/// with the given structured `EscrowError` on overflow.
+///
+/// `amount` is fully client-controlled at `create_job` (any positive `i128`),
+/// so a value near `i128::MAX` would silently wrap in an unchecked release
+/// build and produce an incorrect (small) payout while the full amount stays
+/// locked. `checked_mul` / `checked_div` guarantee the payout math panics
+/// with a structured error instead of wrapping.
+///
+/// A `proportion` of `100` is returned as `amount` directly: the intermediate
+/// `amount * 100` would otherwise overflow for large amounts even though the
+/// mathematically exact result (`amount`) is itself a valid `i128`.
+fn compute_proportional_payout(
+    env: &Env,
+    amount: i128,
+    proportion: i128,
+    err: EscrowError,
+) -> i128 {
+    if proportion == 100 {
+        return amount;
+    }
+    amount
+        .checked_mul(proportion)
+        .and_then(|product| product.checked_div(100i128))
+        .unwrap_or_else(|| panic_with_error!(env, err))
+}
+
+/// Sum the payout of every unreleased milestone using checked arithmetic.
+///
+/// `err` is the structured error surfaced on overflow, so the dispute and
+/// refund paths can report distinct codes.
+fn compute_remaining_funds(env: &Env, job: &Job, err: EscrowError) -> i128 {
     let mut remaining_amount: i128 = 0;
     for milestone in job.milestones.iter() {
         if !milestone.released {
             let proportion = milestone.percentage as i128;
+            let payout = compute_proportional_payout(env, job.amount, proportion, err);
             remaining_amount = remaining_amount
-                .checked_add((job.amount * proportion) / 100i128)
-                .expect("remaining_amount overflow");
+                .checked_add(payout)
+                .unwrap_or_else(|| panic_with_error!(env, err));
         }
     }
     remaining_amount
@@ -365,6 +437,8 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::JobAlreadyExists);
         }
 
+        validate_milestones(&env, &milestones);
+
         // Validate milestones sum to 100%
         let mut total_percentage: u32 = 0;
         for milestone in milestones.iter() {
@@ -467,6 +541,8 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::AmendmentOnlyBeforeRelease);
         }
 
+        validate_milestones(&env, &new_milestones);
+
         let mut total_percentage: u32 = 0;
         for milestone in new_milestones.iter() {
             if milestone.released || milestone.disputed {
@@ -552,7 +628,12 @@ impl EscrowContract {
         }
 
         let proportion = milestone.percentage as i128;
-        let release_amount = (job.amount * proportion) / 100i128;
+        let release_amount = compute_proportional_payout(
+            &env,
+            job.amount,
+            proportion,
+            EscrowError::ReleaseAmountCalculationFailed,
+        );
 
         // ── Effects: rebuild the milestone vector, recompute status,
         //    and persist state BEFORE the external token movement (CEI ordering).
@@ -727,7 +808,8 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::JobIsNotDisputed);
         }
 
-        let remaining_amount = compute_remaining_funds(&job);
+        let remaining_amount =
+            compute_remaining_funds(&env, &job, EscrowError::ReleaseAmountCalculationFailed);
 
         let mut updated_milestones = job.milestones.clone();
         for i in 0..updated_milestones.len() {
@@ -836,7 +918,12 @@ impl EscrowContract {
         }
 
         let proportion = milestone.percentage as i128;
-        let release_amount = (job.amount * proportion) / 100i128;
+        let release_amount = compute_proportional_payout(
+            &env,
+            job.amount,
+            proportion,
+            EscrowError::ReleaseAmountCalculationFailed,
+        );
 
         milestone.disputed = false;
         milestone.released = true;
@@ -898,7 +985,8 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::CannotRefundMilestonesClaimed);
         }
 
-        let remaining = compute_remaining_funds(&job);
+        let remaining =
+            compute_remaining_funds(&env, &job, EscrowError::RefundAmountCalculationFailed);
 
         job.status = JobStatus::Completed;
         env.storage()
@@ -946,7 +1034,12 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::MilestoneAlreadyReleased);
         }
         let proportion = milestone.percentage as i128;
-        let release_amount = (job.amount * proportion) / 100i128;
+        let release_amount = compute_proportional_payout(
+            &env,
+            job.amount,
+            proportion,
+            EscrowError::ClaimAmountCalculationFailed,
+        );
 
         // ── Effects: mark milestone released and update status BEFORE
         //    the external token transfer (CEI ordering).

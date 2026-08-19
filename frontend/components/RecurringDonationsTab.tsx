@@ -12,7 +12,7 @@ import {
   CONTRACT_ID,
 } from "@/lib/stellar";
 import { signTransactionWithWallet } from "@/lib/wallet";
-import { formatXLM } from "@/utils/format";
+import { formatXLM, formatDate } from "@/utils/format";
 
 interface RecurringDonation {
   id: string;
@@ -167,7 +167,7 @@ export default function RecurringDonationsTab({ publicKey }: RecurringDonationsT
                   </p>
                   {sub.active && (
                     <p className="text-xs text-gray-500 font-body">
-                      Next execution: {new Date(sub.nextExecutionAt).toLocaleDateString()} (approx)
+                      Next execution: {formatDate(sub.nextExecutionAt)} (approx)
                     </p>
                   )}
                 </div>

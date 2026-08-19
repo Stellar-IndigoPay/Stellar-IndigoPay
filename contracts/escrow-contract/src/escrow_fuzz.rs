@@ -204,15 +204,18 @@ mod fuzz {
         }
 
         /// Try to dispute a job.
+        ///
+        /// Mirrors the deprecated contract `dispute_job`, which flips a job
+        /// back to `Disputed` unconditionally (including an already-resolved
+        /// job). Re-disputing clears the `resolved` marker so the reference
+        /// model stays in sync with the contract.
         fn dispute_job(&mut self, job_idx: usize) -> Result<(), &'static str> {
             let job = self.jobs.get_mut(job_idx).ok_or("job not found")?;
             if job.disputed {
                 return Err("job already disputed");
             }
-            if job.resolved {
-                return Err("job already resolved");
-            }
             job.disputed = true;
+            job.resolved = false;
             Ok(())
         }
 
@@ -851,9 +854,8 @@ mod fuzz {
 
         /// Fuzz test specifically for milestone percentage validation in `create_job`.
         /// Generates random percentage distributions (0-100, 1-10 milestones) and verifies:
-        /// - If percentages sum to 100, `create_job` succeeds
-        /// - If percentages sum != 100, `create_job` panics
-        /// - Edge cases: individual percentages of 0, overflow scenarios
+        /// - If every percentage is positive and they sum to 100, `create_job` succeeds
+        /// - If any percentage is 0 (or the sum != 100), `create_job` panics
         #[test]
         fn fuzz_milestone_percentage_validation(
             percentages in prop::collection::vec(0..=100u32, 1..=10),
@@ -905,11 +907,13 @@ mod fuzz {
                 );
             }));
 
-            // Assert the expected behavior
-            if total_sum == 100 {
+            // Assert the expected behavior: a job is only valid when every
+            // milestone is positive and the percentages sum to exactly 100.
+            let all_positive = percentages.iter().all(|&p| p > 0);
+            if total_sum == 100 && all_positive {
                 assert!(
                     result.is_ok(),
-                    "create_job panicked unexpectedly when percentages summed to {} (valid sum)",
+                    "create_job panicked unexpectedly when percentages summed to {} (all positive)",
                     total_sum
                 );
                 // Verify the job was actually created
@@ -918,7 +922,7 @@ mod fuzz {
             } else {
                 assert!(
                     result.is_err(),
-                    "create_job did NOT panic when percentages summed to {} (invalid sum)",
+                    "create_job did NOT panic when percentages summed to {} (invalid sum or zero percentage)",
                     total_sum
                 );
             }
@@ -945,7 +949,8 @@ mod fuzz {
             .address();
         StellarAssetClient::new(&env, &token).mint(&client_addr, &(MAX_AMOUNT * 10));
 
-        // Test case 1: Valid sum with a zero percentage (e.g., [0, 100])
+        // Test case 1: A zero-percentage milestone is rejected even when the
+        // remaining milestones sum to 100 (e.g., [0, 100]).
         let job_id_1 = SorobanString::from_str(&env, "zero-pct-test");
         let mut milestones_1: SorobanVec<Milestone> = SorobanVec::new(&env);
         milestones_1.push_back(Milestone {
@@ -979,11 +984,12 @@ mod fuzz {
             );
         }));
         assert!(
-            result_1.is_ok(),
-            "Job with valid sum [0, 100] should succeed"
+            result_1.is_err(),
+            "Job with a zero-percentage milestone [0, 100] should be rejected"
         );
 
-        // Test case 2: Valid sum with multiple zeros (e.g., [0, 0, 100])
+        // Test case 2: Multiple zero-percentage milestones are rejected
+        // (e.g., [0, 0, 100]).
         let job_id_2 = SorobanString::from_str(&env, "multiple-zeros-test");
         let mut milestones_2: SorobanVec<Milestone> = SorobanVec::new(&env);
         milestones_2.push_back(Milestone {
@@ -1026,8 +1032,8 @@ mod fuzz {
             );
         }));
         assert!(
-            result_2.is_ok(),
-            "Job with valid sum [0, 0, 100] should succeed"
+            result_2.is_err(),
+            "Job with zero-percentage milestones [0, 0, 100] should be rejected"
         );
 
         // Test case 3: Invalid sum with overflow (percentages > 100 each)

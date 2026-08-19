@@ -35,8 +35,9 @@ async function start() {
   );
 
   await boss.start();
+  await boss.createQueue(QUEUE);
 
-  await boss.work(QUEUE, { teamSize: 2, teamConcurrency: 1 }, async (job) => {
+  await boss.work(QUEUE, { teamSize: 2, teamConcurrency: 1 }, async ([job]) => {
     const { projectId, donorAddress, parsedAmount, transactionHash } =
       job.data;
 
@@ -44,11 +45,13 @@ async function start() {
     try {
       await client.query("BEGIN");
 
-      // Check for active matching offers
+      // Check for active matching offers with a row-level lock (FOR UPDATE)
+      // to ensure concurrent matching jobs do not over-allocate beyond the cap.
       const matchesResult = await client.query(
         `SELECT id, matcher_address, cap_xlm, matched_xlm, multiplier
          FROM donation_matches
-         WHERE project_id = $1 AND expires_at > NOW()`,
+         WHERE project_id = $1 AND expires_at > NOW()
+         FOR UPDATE`,
         [projectId],
       );
 

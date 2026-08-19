@@ -1,0 +1,49 @@
+# k8s/opt-in/networkpolicy-allow-backend-egress-webhooks.yaml
+#
+# ⚠️  OPT-IN — NOT applied by default. ⚠️
+#
+# This policy is deliberately excluded from `k8s/kustomization.yaml` and
+# therefore from the default deployment. Apply it ONLY if you actually run
+# webhook delivery to arbitrary project-configured URLs:
+#
+#     kubectl apply -f k8s/opt-in/networkpolicy-allow-backend-egress-webhooks.yaml
+#
+# ── Why this exists ─────────────────────────────────────────────────────────
+# `webhookQueue.js` POSTs signed milestone payloads to a `webhook_url` that
+# project owners configure at runtime. That URL is arbitrary by design, so it
+# cannot be enumerated as an `ipBlock` CIDR — it requires broad HTTPS egress.
+# Enabling it means the backend pod can reach ANY internet host on 443, which
+# is exactly the posture the default-deny NetworkPolicy is meant to prevent.
+#
+# ── Trade-off & mitigations ─────────────────────────────────────────────────
+#   1. The application-level URL allow-list in
+#      backend/src/services/webhookQueue.js is the primary defense and must be
+#      kept strict (allow-list, scheme https, no private/loopback targets).
+#   2. Prefer routing webhooks through a dedicated egress proxy or a separate
+#      worker namespace so this broad rule never applies to the main API pod.
+#   3. Where your CNI supports it (Cilium `FQDN`, Calico `DNSPolicy`), use
+#      DNS-based egress instead of this `0.0.0.0/0` rule.
+#
+# This is intentionally NOT validated by `scripts/validate-networkpolicies.js`
+# because it is not listed in `k8s/kustomization.yaml`; that script enforces
+# the strict (no `0.0.0.0/0`) posture only on the applied default set.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-backend-egress-webhooks
+  namespace: stellar-indigopay
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  policyTypes:
+    - Egress
+  egress:
+    # Arbitrary HTTPS for webhook delivery to project-configured URLs.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443

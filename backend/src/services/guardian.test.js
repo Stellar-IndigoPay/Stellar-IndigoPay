@@ -27,6 +27,7 @@ describe("Guardian Service", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     process.env = { ...originalEnv };
+    process.env.NODE_ENV = "test";
     process.env.CONTRACT_ID = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
     // Dummy secret key
     process.env.ORACLE_ADMIN_SECRET = Keypair.random().secret();
@@ -43,9 +44,9 @@ describe("Guardian Service", () => {
       await expect(buildExtendAllTtlTransaction()).rejects.toThrow("CONTRACT_ID not configured");
     });
 
-    it("should throw if ORACLE_ADMIN_SECRET is missing", async () => {
+    it("should throw if managed oracle admin secret is missing", async () => {
       delete process.env.ORACLE_ADMIN_SECRET;
-      await expect(buildExtendAllTtlTransaction()).rejects.toThrow("ORACLE_ADMIN_SECRET not configured");
+      await expect(buildExtendAllTtlTransaction()).rejects.toThrow("oracle admin signer must be loaded from a managed secret file");
     });
 
     it("should return a base64 XDR string on success", async () => {
