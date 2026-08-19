@@ -8,7 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+
+- Admin audit-log CSV export now streams results in fixed-size batches via keyset
+  pagination instead of materializing the full filtered result set (and full CSV
+  string) in memory, removing an OOM/UI-blocking risk on large exports.
+  (`backend/src/routes/admin/audit-export.js`)
+
 - **backend:** Enforce match pool caps atomically at match-time using row-level locks, preventing pools from overspending under concurrent load.
+
 
 ### Added
 - **backend:** make projection rebuild atomic by replaying into staging tables and swapping within a transaction; concurrent reads now observe either the complete previous or complete new state, never empty/partial projections (closes #639)
