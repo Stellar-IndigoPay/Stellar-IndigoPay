@@ -21,7 +21,7 @@ import Head from "next/head";
 import DonateForm from "@/components/DonateForm";
 import WalletConnect from "@/components/WalletConnect";
 import { fetchProject } from "@/lib/api";
-import { formatXLM, formatCO2, progressPercent } from "@/utils/format";
+import { formatXLM, formatCO2, formatNumber, progressPercent } from "@/utils/format";
 import type { ClimateProject } from "@/utils/types";
 
 // ---------------------------------------------------------------------------
@@ -250,7 +250,7 @@ export default function WidgetPage() {
                   className="p-3 rounded-xl text-center"
                   style={{ backgroundColor: `rgba(${hexToRgb(theme.primary)}, 0.06)` }}
                 >
-                  <p className="text-2xl font-bold">{project.donorCount.toLocaleString()}</p>
+                  <p className="text-2xl font-bold">{formatNumber(project.donorCount)}</p>
                   <p className="text-xs opacity-60 font-semibold mt-1">Donors</p>
                 </div>
                 <div

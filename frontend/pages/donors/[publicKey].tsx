@@ -22,7 +22,7 @@ import {
 } from "@/lib/wallet";
 import { useDonorHistory, useDonorProfile } from "@/hooks/queries";
 import type { DonorProfile, Donation, BadgeTier } from "@/utils/types";
-import { formatXLM } from "@/utils/format";
+import { formatXLM, formatDate, formatNumber } from "@/utils/format";
 import DonorProfileSkeleton from "@/components/DonorProfileSkeleton";
 import ShareButton, { donorShareText } from "@/components/ShareButton";
 import { QueryErrorFallback } from "@/components/QueryErrorFallback";
@@ -66,14 +66,6 @@ const BADGE_META: Record<
 function shortenKey(pk: string): string {
   if (!pk || pk.length < 12) return pk;
   return `${pk.slice(0, 6)}…${pk.slice(-6)}`;
-}
-
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -342,7 +334,7 @@ function ClaimNftCard({ profile }: { profile: DonorProfile }) {
             <p className="text-xs text-[#5a7a5a] font-body">
               Minted at ledger{" "}
               <span className="font-semibold text-[#227239]">
-                #{minted.ledger.toLocaleString()}
+                #{formatNumber(minted.ledger)}
               </span>
             </p>
             <a
