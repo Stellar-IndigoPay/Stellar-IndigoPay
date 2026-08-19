@@ -40,6 +40,33 @@ stealth donations, including scans that find no donations.
 
 ---
 
+## `StealthWithdrawal`
+
+**Description**: Emitted by the `DonationContract` when a project wallet
+withdraws stealth-donated funds to its own wallet. `remaining_balance` lets
+indexers reconcile on-chain `total_raised` with funds actually received by
+the project, so stealth donations are never left stranded in the
+`DonationContract` (closes #621).
+
+| Event Name          | Topics                                  | Data                                                          | When Emitted |
+| ------------------- | --------------------------------------- | ------------------------------------------------------------- | ------------ |
+| `StealthWithdrawal` | `["StealthWithdrawal", project_wallet]` | `(token: Address, amount: i128, remaining_balance: i128, timestamp: u64)` | After `withdraw_stealth_donations` transfers the tokens |
+
+---
+
+## `stlth_wdr`
+
+**Description**: Emitted by `IndigoPayContract.withdraw_stealth_integrated`
+after forwarding a stealth withdrawal to the `DonationContract`. Keyed by
+`project_id` so main-contract indexers can reconcile `total_raised` with
+funds actually received (closes #621).
+
+| Event Name   | Topics                       | Data                                       | When Emitted |
+| ------------ | ---------------------------- | ------------------------------------------ | ------------ |
+| `stlth_wdr`  | `["stlth_wdr", project_id]` | `(token: Address, amount: i128, remaining_balance: i128)` | After `withdraw_stealth_integrated` completes |
+
+---
+
 ## 1. `donated`
 
 **Description**: Emitted after a successful XLM donation to a project.

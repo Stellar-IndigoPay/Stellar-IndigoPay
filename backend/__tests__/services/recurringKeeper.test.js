@@ -108,6 +108,7 @@ describe("recurringKeeper Service", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    process.env.NODE_ENV = "test";
     process.env.KEEPER_SECRET = mockKeeperSecret;
     process.env.CONTRACT_ID = "test-contract-id";
     metrics.recurringPending = { set: jest.fn() };
@@ -118,7 +119,7 @@ describe("recurringKeeper Service", () => {
     await recurringKeeper.stop();
   });
 
-  test("skips cycle if KEEPER_SECRET is missing", async () => {
+  test("skips cycle if managed keeper signing secret is missing", async () => {
     delete process.env.KEEPER_SECRET;
     
     await recurringKeeper.runKeeperCycle();
