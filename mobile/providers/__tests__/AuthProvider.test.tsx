@@ -15,8 +15,6 @@
 import React, { type ReactNode } from "react";
 import {
   act,
-  fireEvent,
-  render,
   renderHook,
   waitFor,
 } from "@testing-library/react-native";

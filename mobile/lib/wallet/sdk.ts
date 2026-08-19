@@ -40,7 +40,6 @@ const NETWORK_PASSPHRASE =
     ? Networks.PUBLIC
     : Networks.TESTNET;
 
-const MNEMONIC_ENTROPY_BITS = 128; // 12 words
 const MNEMONIC_WORD_COUNT = 12;
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -325,7 +324,7 @@ export function importWallet(input: string): { publicKey: string; secretKey: str
     seed.set(entropy);
     const keypair = Keypair.fromRawEd25519Seed(Buffer.from(seed));
     return { publicKey: keypair.publicKey(), secretKey: keypair.secret() };
-  } catch (err) {
+  } catch {
     throw new Error(
       "Invalid wallet input. Provide a Stellar secret key (S…) or a 12-word recovery phrase.",
     );

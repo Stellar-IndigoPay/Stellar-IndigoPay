@@ -20,8 +20,6 @@ import { useTheme } from "../theme";
 import { getBalance, WalletBalance } from "../../lib/wallet/sdk";
 import * as Clipboard from "expo-clipboard";
 
-const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
-
 export default function WalletScreen() {
   const { colors } = useTheme();
   const router = useRouter();

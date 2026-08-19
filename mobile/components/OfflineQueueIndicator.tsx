@@ -22,7 +22,7 @@ import {
   View,
 } from "react-native";
 import { useConnectivity } from "../lib/connectivity";
-import { getPendingCount, getQueueSummary } from "../lib/offlineQueue";
+import { getQueueSummary } from "../lib/offlineQueue";
 import { useTheme } from "../app/theme";
 
 const POLL_INTERVAL_MS = 10_000;

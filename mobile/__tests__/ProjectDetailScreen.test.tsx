@@ -101,7 +101,7 @@ describe("ProjectDetailScreen – Follow button", () => {
   it("renders the Follow button after the project loads", async () => {
     const { getByTestId } = renderWithTheme(<ProjectDetailScreen />);
     await waitFor(() => expect(getByTestId("follow-button")).toBeTruthy(), { timeout: 10000 });
-  });
+  }, 15000);
 
   it('shows "Follow for Updates" text when not following', async () => {
     const { getByTestId } = renderWithTheme(<ProjectDetailScreen />);

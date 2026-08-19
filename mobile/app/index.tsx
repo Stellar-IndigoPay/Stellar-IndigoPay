@@ -24,7 +24,6 @@ import {
 } from "../utils/notifications";
 import DonationQueueStatus from "../components/DonationQueueStatus";
 import { startQueueWorker, stopQueueWorker } from "../utils/donationQueueWorker";
-import SyncStatusIcon from "../components/SyncStatusIcon";
 import OfflineQueueIndicator from "../components/OfflineQueueIndicator";
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
@@ -410,11 +409,17 @@ function Header({
         </Text>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
           {unreadCount > 0 && (
-            <View style={styles.unreadBadge}>
-              <Text style={styles.unreadBadgeText}>
-                {unreadCount > 99 ? "99+" : unreadCount}
-              </Text>
-            </View>
+            <TouchableOpacity
+              onPress={onPressNotifications}
+              accessibilityLabel="Open notifications"
+              accessibilityRole="button"
+            >
+              <View style={styles.unreadBadge}>
+                <Text style={styles.unreadBadgeText}>
+                  {unreadCount > 99 ? "99+" : unreadCount}
+                </Text>
+              </View>
+            </TouchableOpacity>
           )}
           <TouchableOpacity
             onPress={() => router.push("/settings" as `${string}`)}

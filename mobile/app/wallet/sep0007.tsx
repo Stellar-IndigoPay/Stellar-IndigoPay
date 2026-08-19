@@ -18,11 +18,8 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { useAuth } from "../../providers/AuthProvider";
 import { useTheme } from "../theme";
 import { useBiometricAuth } from "../../hooks/useBiometricAuth";
-import { loadSecretKey, signTransaction, submitTransaction } from "../../lib/wallet/sdk";
-import { Networks, TransactionBuilder, Operation, Asset } from "@stellar/stellar-sdk";
-
-const HORIZON_URL =
-  process.env.EXPO_PUBLIC_HORIZON_URL || "https://horizon-testnet.stellar.org";
+import { loadSecretKey, buildPaymentTransaction, signTransaction, submitTransaction } from "../../lib/wallet/sdk";
+import { Networks, TransactionBuilder } from "@stellar/stellar-sdk";
 
 interface ParsedOp {
   type: "payment";
@@ -114,7 +111,6 @@ export default function Sep0007Screen() {
       if ((parsed as any)._xdr) {
         xdr = (parsed as any)._xdr;
       } else {
-        const { buildPaymentTransaction } = require("../../lib/wallet/sdk");
         xdr = await buildPaymentTransaction({
           sourcePublicKey: publicKey,
           destination: parsed.destination,

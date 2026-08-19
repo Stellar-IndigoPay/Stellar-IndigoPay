@@ -87,7 +87,7 @@ describe("DonationQueueStatus", () => {
       failedDonation,
     ]);
 
-    const { getByText, queryByText } = renderComponent();
+    const { getByText } = renderComponent();
 
     // Open the sheet (wait for the badge to populate)
     await waitFor(() => {

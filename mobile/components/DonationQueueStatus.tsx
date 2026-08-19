@@ -17,7 +17,6 @@ import {
   Modal,
   FlatList,
   ActivityIndicator,
-  Alert,
 } from "react-native";
 import { useTheme } from "../app/theme";
 import {
@@ -107,8 +106,6 @@ interface QueueItemProps {
 }
 
 function QueueItem({ donation, onDismiss, onRetry, colors }: QueueItemProps) {
-  const isPending =
-    donation.status === "pending" || donation.status === "retrying";
   const isFailed = donation.status === "failed";
 
   return (
