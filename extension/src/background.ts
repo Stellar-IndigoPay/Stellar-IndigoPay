@@ -11,6 +11,7 @@
  */
 
 import { loadSettings, type ExtensionSettings } from "./settings";
+import { runStartupIntegrityCheck } from "./lib/storage";
 
 // ── constants ────────────────────────────────────────────────────────
 
@@ -37,7 +38,28 @@ chrome.runtime.onInstalled.addListener(() => {
     visible: false,
     documentUrlPatterns: ["<all_urls>"],
   });
+
+  runStorageIntegrityCheck();
 });
+
+// Also run on every service worker wake-up (not just install/update), so a
+// namespace corrupted mid-session gets caught and recovered promptly.
+if (chrome.runtime.onStartup) {
+  chrome.runtime.onStartup.addListener(() => {
+    runStorageIntegrityCheck();
+  });
+}
+
+/**
+ * Validate/migrate/quarantine the versioned storage namespaces (see
+ * `src/lib/storage.ts`). Failures here must never block the extension
+ * from working, so they're caught and logged rather than thrown.
+ */
+function runStorageIntegrityCheck(): void {
+  runStartupIntegrityCheck().catch((err) => {
+    console.error("[IndigoPay Storage] Startup integrity check failed:", err);
+  });
+}
 
 // ── message handler ──────────────────────────────────────────────────
 
