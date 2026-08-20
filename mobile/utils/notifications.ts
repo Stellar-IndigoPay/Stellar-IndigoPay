@@ -5,7 +5,7 @@
 import * as Notifications from "expo-notifications";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Platform, Linking as RNLinking } from "react-native";
-import * as Linking from "expo-linking";
+import { parseLink, buildRoutePath } from "../lib/linkRouter";
 
 // Configure notification behavior
 Notifications.setNotificationHandler({
@@ -285,23 +285,21 @@ export function isNotificationHandled(id: string): boolean {
 
 /**
  * Parses deep links like indigopay://project/123 -> /projects/123
+ *
+ * #906: delegates to `lib/linkRouter.ts` — the single place scheme
+ * allowlists and entity-id formats are defined — instead of parsing the
+ * URL ad hoc here. Malformed/disallowed urls resolve to null (safe
+ * fallback) rather than reaching a screen unvalidated.
  */
 export function parseDeepLinkUrl(url: string): string | null {
   try {
-    const parsed = Linking.parse(url);
-    const path = parsed.path;
-    if (!path) return null;
-    const [segment, param] = path.replace(/^\//, "").split("/");
-    if (!param) return null;
-    if (segment === "project") {
-      return `/projects/${param}`;
-    } else if (segment === "donate") {
-      return `/donate/${param}`;
-    }
+    const result = parseLink(url, "notification");
+    if (result.status !== "valid") return null;
+    return buildRoutePath(result.target);
   } catch (e) {
     console.error("Failed to parse deep link url:", e);
+    return null;
   }
-  return null;
 }
 
 /**
