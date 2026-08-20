@@ -202,6 +202,17 @@ const webhookDeliveriesTotal = new client.Counter({
   registers: [registry],
 });
 
+const dsrExportCompleted = new client.Counter({
+  name: "dsr_export_completed",
+  help: "Total number of completed DSR export requests.",
+  registers: [registry],
+});
+
+const dsrErasureCompleted = new client.Counter({
+  name: "dsr_erasure_completed",
+  help: "Total number of completed DSR erasure requests.",
+  registers: [registry],
+});
 const webhookAttemptsTotal = new client.Counter({
   name: "webhook_attempts_total",
   help: "Number of webhook HTTP attempts, labelled by event_type.",
@@ -529,6 +540,8 @@ const metrics = {
   cacheMisses,
   cacheCoalesced,
   queueJobsTotal,
+  dsrExportCompleted,
+  dsrErasureCompleted,
   indexerLagSeconds,
   indexerRunning,
   secretRotationLastTimestamp,

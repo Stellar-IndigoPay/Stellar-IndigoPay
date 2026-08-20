@@ -285,6 +285,7 @@ const routeMounts = [
   "oracle",
   "map",
   "matches",
+  "dsr",
 ];
 
 for (const name of routeMounts) {
@@ -660,6 +661,14 @@ async function startServer() {
       if (typeof metricsTimer.unref === "function") metricsTimer.unref();
     },
     stop: () => clearInterval(metricsTimer),
+  });
+
+  const dsrQueue = require("./services/dsr/dsrQueue");
+  await startManagedWorker({
+    name: "dsr_queue",
+    label: "DSR queue workers",
+    start: () => dsrQueue.start(),
+    stop: () => dsrQueue.stop()
   });
 
   server.listen(PORT, () => {
