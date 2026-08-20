@@ -6084,6 +6084,9 @@ impl IndigoPayContract {
 
         let mut total_credits_required: u32 = 0;
         for alloc in allocations.iter() {
+            if alloc.votes_for == 0 && alloc.votes_against == 0 {
+                panic_with_error!(&env, ContractError::VoteAllocationMustBePositive);
+            }
             let voted_key = DataKey::HasVoted(alloc.project_id.clone(), voter.clone());
             if env.storage().instance().has(&voted_key) {
                 panic!("Already voted on this proposal");
@@ -16589,6 +16592,26 @@ mod tests {
             votes_for: 11,
             votes_against: 0,
             credits_spent: 121,
+        });
+        client.vote_on_proposals(&voter, &allocations);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_zero_value_allocation_rejected() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        let voter = Address::generate(&env);
+        grant_badge(&env, &cid, &voter); // 100 credits
+
+        // votes_for == 0 && votes_against == 0 must be rejected so a voter's
+        // one-shot vote is never silently consumed with no effect on the tally.
+        let mut allocations = Vec::new(&env);
+        allocations.push_back(VoteAllocation {
+            project_id: pid,
+            votes_for: 0,
+            votes_against: 0,
+            credits_spent: 0,
         });
         client.vote_on_proposals(&voter, &allocations);
     }
