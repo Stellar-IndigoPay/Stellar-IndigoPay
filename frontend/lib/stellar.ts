@@ -215,7 +215,7 @@ export async function buildContractDonationTransaction({
   // Convert parameters to Soroban types
   const donorAddress = new Address(donor);
   const tokenAddr = new Address(tokenAddress);
-  const amountInStroops = Math.floor(parseFloat(amount) * 10_000_000);
+  const amountInStroops = xlmToStroops(amount);
 
   // Build the contract invocation transaction
   const builder = new TransactionBuilder(source, {
@@ -274,8 +274,8 @@ export async function buildCreateRecurringTransaction({
   const contract = new Contract(contractId);
 
   const donorAddress = new Address(donor);
-  const amountInStroops = Math.floor(parseFloat(amount) * 10_000_000);
-  const keeperIncentiveInStroops = Math.floor(parseFloat(keeperIncentive) * 10_000_000);
+  const amountInStroops = xlmToStroops(amount);
+  const keeperIncentiveInStroops = xlmToStroops(keeperIncentive);
 
   const builder = new TransactionBuilder(source, {
     fee: "1000000",
@@ -1130,7 +1130,7 @@ export async function buildApproveTransaction({
   const tokenContract = new Contract(tokenAddress);
   const userAddress = new Address(user);
   const spenderAddress = new Address(spender);
-  const amountInStroops = Math.floor(parseFloat(amount) * 10_000_000);
+  const amountInStroops = xlmToStroops(amount);
 
   // Set a very high expiration ledger (e.g. current + 2,000,000 ledgers)
   const currentLedger = await rpcServer.getLatestLedger();

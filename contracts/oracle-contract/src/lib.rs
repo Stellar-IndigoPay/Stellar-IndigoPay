@@ -835,15 +835,42 @@ impl SimpleOracle {
                 &symbol_short!("get_price"),
                 Vec::new(&env),
             );
-            if let Ok(Ok(price)) = result {
-                if price > 0 {
-                    prices.push_back(price);
+            match result {
+                Ok(Ok(price)) => {
+                    if price > 0 {
+                        // The source response contains only a raw price.
+                        // Per-source staleness cannot be checked here because the
+                        // source oracle does not return a timestamp with the price.
+                        // We rely on the external source oracle to revert if its data is stale.
+                        prices.push_back(price);
+                    } else {
+                        env.events().publish(
+                            (symbol_short!("src_skip"), source),
+                            OracleError::SourceOracleReturnedInvalidPrice as u32,
+                        );
+                    }
+                }
+                Ok(Err(_)) => {
+                    env.events().publish(
+                        (symbol_short!("src_skip"), source),
+                        OracleError::SourceOracleUnresponsive as u32,
+                    );
+                }
+                Err(_) => {
+                    env.events().publish(
+                        (symbol_short!("src_skip"), source),
+                        OracleError::SourceOracleReturnedUnexpectedType as u32,
+                    );
                 }
             }
         }
 
-        if prices.is_empty() {
-            return internal_price(&env);
+        // Quorum Requirement:
+        // A minimum of 2 healthy sources is required for safety (if multiple sources exist).
+        // If only 1 source is configured, we require it to be healthy.
+        let quorum_required = if sources.len() == 1 { 1 } else { 2 };
+        if prices.len() < quorum_required {
+            panic_with_error!(&env, OracleError::SourceOracleAggregationFailed);
         }
 
         for i in 1..prices.len() {
@@ -1135,10 +1162,11 @@ mod tests {
         let client = SimpleOracleClient::new(&env, &contract_id);
         let zero = register_price_source(&env, 0);
         let negative = register_price_source(&env, -5);
-        let valid = register_price_source(&env, 25);
+        let valid1 = register_price_source(&env, 25);
+        let valid2 = register_price_source(&env, 25);
         let panicking = env.register(PanickingPriceSource, ());
 
-        for source in [zero, negative, panicking, valid] {
+        for source in [zero, negative, panicking, valid1, valid2] {
             client.add_source_oracle(&admin, &source);
         }
 
@@ -1146,12 +1174,19 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregate_fallback() {
+    fn test_aggregate_fallback_empty_sources() {
         let (env, contract_id, admin, _) = setup();
         let client = SimpleOracleClient::new(&env, &contract_id);
         client.set_fallback_price(&admin, &7);
 
         assert_eq!(client.get_aggregated_price(), 7);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_all_sources_down_fails_with_quorum_error() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
 
         let error_source = env.register(ErrorPriceSource, ());
         let incompatible_source = env.register(IncompatiblePriceSource, ());
@@ -1160,7 +1195,58 @@ mod tests {
         client.add_source_oracle(&admin, &incompatible_source);
         client.add_source_oracle(&admin, &missing_source);
 
-        assert_eq!(client.get_aggregated_price(), 7);
+        client.get_aggregated_price();
+    }
+
+    #[test]
+    fn test_one_source_unresponsive_is_skipped() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        let valid1 = register_price_source(&env, 25);
+        let valid2 = register_price_source(&env, 25);
+        let panicking = env.register(PanickingPriceSource, ());
+
+        client.add_source_oracle(&admin, &valid1);
+        client.add_source_oracle(&admin, &panicking);
+        client.add_source_oracle(&admin, &valid2);
+
+        assert_eq!(client.get_aggregated_price(), 25);
+    }
+
+    #[test]
+    fn test_unexpected_response_type_is_skipped() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        let low = register_price_source(&env, 10);
+        let high = register_price_source(&env, 30);
+        let incompatible = env.register(IncompatiblePriceSource, ());
+
+        client.add_source_oracle(&admin, &low);
+        client.add_source_oracle(&admin, &incompatible);
+        client.add_source_oracle(&admin, &high);
+
+        // median of [10,30] -> 20
+        assert_eq!(client.get_aggregated_price(), 20);
+    }
+
+    #[test]
+    fn test_majority_failure_succeeds_with_quorum() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        // 7 sources, 5 healthy (value 42), 2 panicking
+        let mut sources = Vec::new(&env);
+        for _ in 0..5 {
+            let s = register_price_source(&env, 42);
+            client.add_source_oracle(&admin, &s);
+            sources.push_back(s);
+        }
+        for _ in 0..2 {
+            let p = env.register(PanickingPriceSource, ());
+            client.add_source_oracle(&admin, &p);
+        }
+
+        assert_eq!(client.get_aggregated_price(), 42);
     }
 
     #[test]
@@ -1168,7 +1254,6 @@ mod tests {
         let (env, contract_id, admin, reporter) = setup();
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter);
-        client.add_source_oracle(&admin, &Address::generate(&env));
 
         env.ledger().set_sequence_number(100);
         client.report_price(&reporter, &100_000_000);
@@ -1187,7 +1272,6 @@ mod tests {
         let (env, contract_id, admin, reporter) = setup();
         let client = SimpleOracleClient::new(&env, &contract_id);
         add_reporter(&env, &contract_id, &admin, &reporter);
-        client.add_source_oracle(&admin, &Address::generate(&env));
         client.set_fallback_price(&admin, &6);
         client.set_staleness_threshold(&admin, &MAX_OBSERVATIONS);
 
@@ -1198,6 +1282,108 @@ mod tests {
         env.ledger().set_sequence_number(100 + MAX_OBSERVATIONS + 1);
         assert_eq!(client.get_aggregated_price(), 6);
         assert_eq!(client.get_price(), 6);
+    }
+
+    #[test]
+    fn test_one_source_unresponsive_succeeds() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        let valid1 = register_price_source(&env, 10);
+        let valid2 = register_price_source(&env, 12);
+        let panicking = env.register(PanickingPriceSource, ());
+
+        client.add_source_oracle(&admin, &valid1);
+        client.add_source_oracle(&admin, &valid2);
+        client.add_source_oracle(&admin, &panicking);
+
+        assert_eq!(client.get_aggregated_price(), 11);
+    }
+
+    #[test]
+    fn test_one_source_invalid_succeeds() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        let valid1 = register_price_source(&env, 10);
+        let valid2 = register_price_source(&env, 12);
+        let invalid = register_price_source(&env, 0);
+
+        client.add_source_oracle(&admin, &valid1);
+        client.add_source_oracle(&admin, &valid2);
+        client.add_source_oracle(&admin, &invalid);
+
+        assert_eq!(client.get_aggregated_price(), 11);
+    }
+
+    #[test]
+    fn test_unexpected_response_type_succeeds() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        let valid1 = register_price_source(&env, 10);
+        let valid2 = register_price_source(&env, 12);
+        let incompatible = env.register(IncompatiblePriceSource, ());
+
+        client.add_source_oracle(&admin, &valid1);
+        client.add_source_oracle(&admin, &valid2);
+        client.add_source_oracle(&admin, &incompatible);
+
+        assert_eq!(client.get_aggregated_price(), 11);
+    }
+
+    #[test]
+    fn test_minority_failure_succeeds() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        // 7 sources: 5 healthy, 2 failed
+        for price in [10, 11, 12, 13, 14] {
+            client.add_source_oracle(&admin, &register_price_source(&env, price));
+        }
+        client.add_source_oracle(&admin, &env.register(PanickingPriceSource, ()));
+        client.add_source_oracle(&admin, &env.register(ErrorPriceSource, ()));
+
+        assert_eq!(client.get_aggregated_price(), 12);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_below_quorum_fails() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        // 3 configured sources, 1 healthy, 2 failed (quorum required is 2)
+        client.add_source_oracle(&admin, &register_price_source(&env, 10));
+        client.add_source_oracle(&admin, &env.register(PanickingPriceSource, ()));
+        client.add_source_oracle(&admin, &env.register(ErrorPriceSource, ()));
+
+        client.get_aggregated_price();
+    }
+
+    #[test]
+    fn test_exactly_quorum_healthy() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        // 4 configured sources, 2 healthy (quorum is 2)
+        client.add_source_oracle(&admin, &register_price_source(&env, 10));
+        client.add_source_oracle(&admin, &register_price_source(&env, 12));
+        client.add_source_oracle(&admin, &env.register(PanickingPriceSource, ()));
+        client.add_source_oracle(&admin, &env.register(ErrorPriceSource, ()));
+
+        assert_eq!(client.get_aggregated_price(), 11);
+    }
+
+    #[test]
+    fn test_single_source_quorum() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        // 1 configured source, 1 healthy (quorum is 1)
+        client.add_source_oracle(&admin, &register_price_source(&env, 42));
+
+        assert_eq!(client.get_aggregated_price(), 42);
     }
 
     #[test]

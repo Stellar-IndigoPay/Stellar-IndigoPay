@@ -43,6 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **contracts:** enforce Rust formatting via pre-commit hook (closes #60)
 - **contracts:** emit `StealthScan` events with project wallet, donation count, and ledger timestamp (closes #514)
 - **contracts:** add multi-source TWAP price oracle with freshness protection (closes #281)
+- **contracts:** multi-source oracle aggregation now tolerates individual unhealthy sources and requires a quorum of healthy sources
 - **contracts:** 48h upgrade timelock (`propose_upgrade` / `execute_upgrade` / `cancel`)
 - **contracts:** contract-level pause (`pause_contract` / `unpause_contract`)
 - **contracts:** two-step admin transfer (`transfer_admin` / `accept_admin` / `cancel`)
