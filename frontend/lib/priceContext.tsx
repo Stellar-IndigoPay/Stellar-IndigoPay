@@ -1,6 +1,6 @@
 /**
  * lib/priceContext.tsx — Global XLM/USD price context.
- * Fetches once on mount from CoinGecko free API; fails silently.
+ * Fetches once on mount from the backend on-chain oracle; fails silently.
  */
 import {
   createContext,
@@ -9,6 +9,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { fetchXlmPrice } from "./oraclePrice";
 
 interface PriceContextValue {
   xlmUsd: number | null;
@@ -22,17 +23,9 @@ export function PriceProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const controller = new AbortController();
 
-    fetch(
-      "https://api.coingecko.com/api/v3/simple/price?ids=stellar&vs_currencies=usd",
-      { signal: controller.signal },
-    )
-      .then((res) => {
-        if (!res.ok) return;
-        return res.json();
-      })
-      .then((data) => {
-        const price = data?.stellar?.usd;
-        if (typeof price === "number" && price > 0) {
+    fetchXlmPrice(controller.signal)
+      .then((price) => {
+        if (price !== null) {
           setXlmUsd(price);
         }
       })

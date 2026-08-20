@@ -19,7 +19,6 @@ const withBundleAnalyzerConfig = withBundleAnalyzer({
 //   • Stellar Horizon (testnet + mainnet) — REST API + EventSource streaming
 //   • Soroban RPC (testnet + mainnet)     — Soroban simulate/send calls
 //   • Stellar Friendbot                    — testnet account funding
-//   • CoinGecko                            — XLM/USD spot price
 //
 // In production set NEXT_PUBLIC_API_URL to your deployed backend; the 'self'
 // origin already covers same-domain backends.  In local dev middleware.ts
@@ -41,9 +40,6 @@ const LEAFLET_TILE_SOURCES = [
   "https://c.tile.openstreetmap.org",
 ].join(" ");
 
-// unpkg serves the Leaflet CSS (dynamically injected by ProjectMap.tsx)
-const UNPKG = "https://unpkg.com";
-
 function buildStaticCsp(allowFraming = false) {
   const frameAncestors = allowFraming
     ? "frame-ancestors *"
@@ -52,12 +48,11 @@ function buildStaticCsp(allowFraming = false) {
     "default-src 'self'",
     // static fallback uses placeholder nonce for inline scripts; actual nonce injected by middleware
     `script-src 'self' 'nonce-{nonce}' https://*.stellar.org`,
-    // unpkg serves the Leaflet CSS stylesheet loaded dynamically in ProjectMap.
-    `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com ${UNPKG}`,
+    `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com`,
     "font-src 'self' https://fonts.gstatic.com",
     // OSM tiles loaded as images; Leaflet marker icons use data: URIs.
     `img-src 'self' data: blob: ${LEAFLET_TILE_SOURCES}`,
-    `connect-src 'self' ${STELLAR_CONNECT} https://api.coingecko.com ${process.env.NEXT_PUBLIC_API_URL ? process.env.NEXT_PUBLIC_API_URL : ''}`,
+    `connect-src 'self' ${STELLAR_CONNECT} ${process.env.NEXT_PUBLIC_API_URL ? process.env.NEXT_PUBLIC_API_URL : ''}`,
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",

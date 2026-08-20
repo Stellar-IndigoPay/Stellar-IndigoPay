@@ -4,6 +4,7 @@ jest.mock("../db/pool", () => ({ query: jest.fn() }));
 
 const mockOn = jest.fn();
 const mockStart = jest.fn().mockResolvedValue(undefined);
+const mockCreateQueue = jest.fn().mockResolvedValue(undefined);
 const mockWork = jest.fn().mockResolvedValue(undefined);
 const mockSend = jest.fn().mockResolvedValue("job-id");
 const mockStop = jest.fn().mockResolvedValue(undefined);
@@ -12,6 +13,7 @@ jest.mock("pg-boss", () =>
   jest.fn().mockImplementation(() => ({
     on: mockOn,
     start: mockStart,
+    createQueue: mockCreateQueue,
     work: mockWork,
     send: mockSend,
     stop: mockStop,
@@ -69,6 +71,7 @@ describe("pushQueue", () => {
     await pushQueue.start();
 
     expect(mockStart).toHaveBeenCalledTimes(1);
+    expect(mockCreateQueue).toHaveBeenCalledWith("push-notifications");
     expect(mockWork).toHaveBeenCalledWith(
       "push-notifications",
       { teamSize: 2, teamConcurrency: 1 },
@@ -124,7 +127,7 @@ describe("pushQueue", () => {
         rows: [{ name: "Mangrove Restoration" }],
       });
 
-      await handler({
+      await handler([{
         data: {
           type: "donation_receipt",
           payload: {
@@ -135,7 +138,7 @@ describe("pushQueue", () => {
             currency: "XLM",
           },
         },
-      });
+      }]);
 
       expect(pool.query).toHaveBeenCalledWith(
         "SELECT name FROM projects WHERE id = $1",
@@ -154,7 +157,7 @@ describe("pushQueue", () => {
       const { handler, pool, pushService } = await getWorkerHandler();
       pool.query.mockResolvedValueOnce({ rows: [] });
 
-      await handler({
+      await handler([{
         data: {
           type: "donation_receipt",
           payload: {
@@ -165,7 +168,7 @@ describe("pushQueue", () => {
             currency: "XLM",
           },
         },
-      });
+      }]);
 
       expect(pushService.sendDonationReceipt).toHaveBeenCalledWith(
         "GDONOR",
@@ -179,12 +182,12 @@ describe("pushQueue", () => {
         rows: [{ name: "Mangrove Restoration" }],
       });
 
-      await handler({
+      await handler([{
         data: {
           type: "milestone_reached",
           payload: { projectId: "proj-1", percentage: 75 },
         },
-      });
+      }]);
 
       expect(
         pushService.sendMilestoneReachedNotifications,
@@ -201,9 +204,9 @@ describe("pushQueue", () => {
       const project = { id: "proj-1", name: "Mangrove Restoration" };
       const update = { id: "update-1", title: "We planted 500 trees!" };
 
-      await handler({
+      await handler([{
         data: { type: "project_update", payload: { project, update } },
-      });
+      }]);
 
       expect(pushService.sendProjectUpdateNotifications).toHaveBeenCalledWith({
         project,
@@ -215,7 +218,7 @@ describe("pushQueue", () => {
       const { handler, pushService } = await getWorkerHandler();
 
       await expect(
-        handler({ data: { type: "smoke_signal", payload: {} } }),
+        handler([{ data: { type: "smoke_signal", payload: {} } }]),
       ).resolves.toBeUndefined();
 
       expect(pushService.sendDonationReceipt).not.toHaveBeenCalled();
@@ -226,7 +229,7 @@ describe("pushQueue", () => {
     test("governance_proposal job calls sendGovernanceProposalNotifications", async () => {
       const { handler, pushService } = await getWorkerHandler();
 
-      await handler({
+      await handler([{
         data: {
           type: "governance_proposal",
           payload: {
@@ -236,7 +239,7 @@ describe("pushQueue", () => {
             endsAt: "2026-08-01T00:00:00Z",
           },
         },
-      });
+      }]);
 
       expect(
         pushService.sendGovernanceProposalNotifications,
@@ -251,7 +254,7 @@ describe("pushQueue", () => {
     test("recurring_reminder job calls sendRecurringReminder", async () => {
       const { handler, pushService } = await getWorkerHandler();
 
-      await handler({
+      await handler([{
         data: {
           type: "recurring_reminder",
           payload: {
@@ -264,7 +267,7 @@ describe("pushQueue", () => {
             recurringId: "rec-99",
           },
         },
-      });
+      }]);
 
       expect(pushService.sendRecurringReminder).toHaveBeenCalledWith({
         donorAddress: "GDONOR",

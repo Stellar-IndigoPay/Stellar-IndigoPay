@@ -15,7 +15,7 @@ import {
   fetchCategoryStats,
 } from "@/lib/api";
 import { streamGlobalProjectDonations } from "@/lib/stellar";
-import { formatCO2, formatXLM, progressPercent } from "@/utils/format";
+import { formatCO2, formatXLM, formatNumber, progressPercent } from "@/utils/format";
 import type { GlobalStats, CategoryStats } from "@/lib/api";
 import type { ClimateProject } from "@/utils/types";
 
@@ -532,7 +532,7 @@ function FeaturedProjectCard({ project }: { project: ClimateProject }) {
             </p>
             <div className="flex flex-wrap gap-4 text-sm mb-5">
               <span className="flex items-center gap-1 text-[#4F46E5] dark:text-[#818CF8] font-body">
-                👥 <strong>{project.donorCount.toLocaleString()}</strong> donors
+                👥 <strong>{formatNumber(project.donorCount)}</strong> donors
               </span>
               <span className="flex items-center gap-1 text-[#4F46E5] dark:text-[#818CF8] font-body">
                 ♻️ <strong>{formatCO2(project.co2OffsetKg)}</strong> offset
@@ -612,9 +612,9 @@ function CO2OffsetTicker({ stats }: { stats: GlobalStats }) {
         Total CO₂ Offset Across All Donations
       </p>
       <p className="text-[#C7D2FE] text-xs font-body mt-2">
-        {stats.totalDonations.toLocaleString()} donations ·{" "}
-        {stats.totalDonors.toLocaleString()} donors ·{" "}
-        {parseFloat(stats.totalXLMRaised).toLocaleString()} XLM raised
+        {formatNumber(stats.totalDonations)} donations ·{" "}
+        {formatNumber(stats.totalDonors)} donors ·{" "}
+        {formatNumber(parseFloat(stats.totalXLMRaised))} XLM raised
       </p>
     </div>
   );
@@ -629,7 +629,7 @@ function StatItem({ stat }: { stat: any }) {
     >
       <div className="font-display text-4xl font-bold text-gradient mb-1">
         {stat.prefix}
-        {count.toLocaleString()}
+        {formatNumber(count)}
         {stat.suffix}
       </div>
       <div className="text-[#475569] dark:text-[#94A3B8] text-sm font-body uppercase tracking-widest font-bold">

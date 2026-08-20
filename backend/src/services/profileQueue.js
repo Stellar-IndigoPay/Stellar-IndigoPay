@@ -9,6 +9,8 @@ const QUEUE = "profile-update";
 let boss = null;
 
 async function start(io) {
+  if (boss) return;
+
   const connectionString =
     process.env.DATABASE_URL ||
     "postgres://postgres:postgres@localhost:5432/indigopay";
@@ -22,8 +24,9 @@ async function start(io) {
   );
 
   await boss.start();
+  await boss.createQueue(QUEUE);
 
-  await boss.work(QUEUE, { teamSize: 2, teamConcurrency: 1 }, async (job) => {
+  await boss.work(QUEUE, { teamSize: 2, teamConcurrency: 1 }, async ([job]) => {
     const { donorAddress } = job.data;
 
     const totalResult = await pool.query(

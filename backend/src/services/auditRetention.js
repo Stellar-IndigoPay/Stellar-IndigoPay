@@ -82,6 +82,7 @@ async function registerRetentionJob(boss, opts = {}) {
     throw new Error("registerRetentionJob requires a started PgBoss instance");
   }
   const client = opts.pool || require("../db/pool");
+  await boss.createQueue(RETENTION_JOB_NAME);
   await boss.work(RETENTION_JOB_NAME, async () => {
     await dropOldPartitions(client);
   });

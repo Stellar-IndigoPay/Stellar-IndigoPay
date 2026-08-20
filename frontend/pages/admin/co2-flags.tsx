@@ -21,6 +21,7 @@ import { useRouter } from "next/router";
 import Head from "next/head";
 import AdminLayout from "@/components/admin/AdminLayout";
 import { adminFetch, isAdminAuthenticated } from "@/lib/adminAuth";
+import { formatNumber } from "@/utils/format";
 
 const PAGE_SIZE = 20;
 
@@ -393,7 +394,7 @@ export default function AdminCO2FlagsPage() {
                     </td>
                     <td className="px-4 py-3 text-[var(--text-secondary)] text-xs font-mono">
                       {p.confidenceLower != null && p.confidenceUpper != null
-                        ? `${p.confidenceLower.toLocaleString()} – ${p.confidenceUpper.toLocaleString()} g/XLM`
+                        ? `${formatNumber(p.confidenceLower)} – ${formatNumber(p.confidenceUpper)} g/XLM`
                         : "—"}
                     </td>
                     <td className="px-4 py-3">
