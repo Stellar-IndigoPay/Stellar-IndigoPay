@@ -6,7 +6,7 @@ import { useState, useEffect } from "react";
 import Head from "next/head";
 import Link from "next/link";
 import { getPublicKey } from "@stellar/freighter-api";
-import { shortenAddress } from "@/utils/format";
+import { shortenAddress, formatDateTime } from "@/utils/format";
 import { safeRandomUUID } from "@/utils/uuid";
 import { fetchProjects, recordDonation, csrfFetch } from "@/lib/api";
 import type { ClimateProject } from "@/utils/types";
@@ -644,7 +644,7 @@ export default function BridgePage() {
                         {entry.sourceChain} → Stellar
                       </p>
                       <p className="text-xs text-[#475569] dark:text-[#94A3B8]">
-                        {new Date(entry.timestamp).toLocaleString()}
+                        {formatDateTime(entry.timestamp)}
                       </p>
                     </div>
                     <div className="text-right">

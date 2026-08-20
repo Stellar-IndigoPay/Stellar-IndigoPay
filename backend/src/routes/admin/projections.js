@@ -36,10 +36,11 @@ router.post("/rebuild", adminRequired, async (req, res) => {
       });
     }
 
-    // Kick off synchronously so the response reflects completion. The
-    // rebuild is idempotent and trims the event store first, so re-running
-    // is safe. (For very large stores an async job would be preferable, but
-    // the spec requires a single admin trigger that returns when done.)
+    // Kick off synchronously so the response reflects completion. The rebuild
+    // is atomic (staging + swap, see rebuildAllProjections) and idempotent,
+    // so re-running is safe. (For very large stores an async job would be
+    // preferable, but the spec requires a single admin trigger that returns
+    // when done.)
     const result = await rebuildAllProjections();
 
     try {
@@ -82,6 +83,11 @@ router.post("/rebuild/:name", adminRequired, async (req, res) => {
     if (!PROJECTION_NAMES.includes(name)) {
       return sendAppError(res, "NOT_FOUND", {
         detail: `Unknown projection "${name}". Valid: ${PROJECTION_NAMES.join(", ")}`,
+      });
+    }
+    if (isRebuilding()) {
+      return sendAppError(res, "CONFLICT", {
+        detail: "A projection rebuild is already in progress",
       });
     }
 

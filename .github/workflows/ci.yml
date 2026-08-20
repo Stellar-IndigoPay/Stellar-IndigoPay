@@ -36,6 +36,31 @@ jobs:
       - run: docker compose -f docker-compose.test.yml up --abort-on-container-exit --exit-code-from backend
         working-directory: .
 
+  mobile:
+    name: Mobile (jest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: mobile/package-lock.json
+      # --legacy-peer-deps tolerates the pre-existing Expo/React Navigation
+      # peer conflicts (@react-navigation/native-stack@7 needs native@7 while
+      # expo-router pins native@6; react-native-screens@4.25 needs
+      # react-native>=0.82 against the pinned react-native@0.74.1).
+      - run: npm ci --legacy-peer-deps
+      - run: npm test -- --ci --forceExit
+
   helm:
     name: Helm Chart Validation
     runs-on: ubuntu-latest

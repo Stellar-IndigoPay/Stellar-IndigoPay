@@ -3,7 +3,18 @@ import { Text, Pressable, View } from "react-native";
 import { render, act, waitFor, fireEvent } from "@testing-library/react-native";
 import * as LocalAuthentication from "expo-local-authentication";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { useBiometricAuth } from "../hooks/useBiometricAuth";
+import { authenticate, useBiometricAuth } from "../hooks/useBiometricAuth";
+
+// Mock the device-integrity module so tests drive "clean" vs
+// "compromised" without any native jailbreak/root detection (issue #693).
+jest.mock("../lib/deviceIntegrity", () => ({
+  checkDeviceIntegrity: jest.fn(),
+  enforceIntegrityPolicy: jest.fn(),
+  getIntegrityPolicy: jest.fn(() => "block"),
+  getLastIntegrityWarning: jest.fn(() => null),
+}));
+
+import * as deviceIntegrity from "../lib/deviceIntegrity";
 
 jest.setTimeout(20000);
 
@@ -12,6 +23,13 @@ const LA = LocalAuthentication as unknown as {
   isEnrolledAsync: jest.Mock;
   authenticateAsync: jest.Mock;
   supportedAuthenticationTypesAsync: jest.Mock;
+};
+
+const integrityMock = deviceIntegrity as unknown as {
+  checkDeviceIntegrity: jest.Mock;
+  enforceIntegrityPolicy: jest.Mock;
+  getIntegrityPolicy: jest.Mock;
+  getLastIntegrityWarning: jest.Mock;
 };
 
 // We mock AsyncStorage with a simple in-memory mock if the package mock isn't loaded
@@ -38,6 +56,19 @@ beforeEach(() => {
     LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION,
   ]);
   LA.authenticateAsync.mockResolvedValue({ success: true });
+  integrityMock.checkDeviceIntegrity.mockResolvedValue({
+    isCompromised: false,
+    reasons: [],
+    supported: true,
+  });
+  integrityMock.enforceIntegrityPolicy.mockResolvedValue({
+    action: "allow",
+    policy: "block",
+    isCompromised: false,
+    result: { isCompromised: false, reasons: [], supported: true },
+  });
+  integrityMock.getIntegrityPolicy.mockReturnValue("block");
+  integrityMock.getLastIntegrityWarning.mockReturnValue(null);
 });
 
 describe("useBiometricAuth (enhanced hook)", () => {
@@ -48,6 +79,7 @@ describe("useBiometricAuth (enhanced hook)", () => {
       threshold,
       isEnabled,
       isAuthenticating,
+      isDeviceCompromised,
       confirmDonation,
       setBiometricThreshold,
       setIsEnabled,
@@ -59,6 +91,7 @@ describe("useBiometricAuth (enhanced hook)", () => {
       `threshold=${threshold}`,
       `isEnabled=${isEnabled}`,
       `isAuthenticating=${isAuthenticating}`,
+      `isDeviceCompromised=${isDeviceCompromised}`,
     ].join("|");
 
     return (
@@ -136,6 +169,69 @@ describe("useBiometricAuth (enhanced hook)", () => {
     });
 
     expect(LA.authenticateAsync).toHaveBeenCalled();
+  });
+
+  it("refuses to confirm a donation on a compromised device under block policy", async () => {
+    integrityMock.enforceIntegrityPolicy.mockResolvedValue({
+      action: "block",
+      policy: "block",
+      isCompromised: true,
+      result: { isCompromised: true, reasons: ["mock rooted"], supported: true },
+    });
+    integrityMock.getLastIntegrityWarning.mockReturnValue("mock rooted");
+
+    const { getByTestId } = render(<TestComponent amount={100} />);
+    await waitFor(() => {
+      expect(getByTestId("status").props.children).toMatch(/isAvailable=true/);
+    });
+
+    await act(async () => {
+      fireEvent.press(getByTestId("confirm-btn"));
+    });
+
+    expect(LA.authenticateAsync).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(getByTestId("status").props.children).toMatch(
+        /isDeviceCompromised=true/,
+      );
+    });
+  });
+
+  it("still authenticates on a compromised device under warn policy", async () => {
+    integrityMock.enforceIntegrityPolicy.mockResolvedValue({
+      action: "warn",
+      policy: "warn",
+      isCompromised: true,
+      result: { isCompromised: true, reasons: ["mock rooted"], supported: true },
+    });
+    integrityMock.getLastIntegrityWarning.mockReturnValue("mock rooted");
+
+    const { getByTestId } = render(<TestComponent amount={100} />);
+    await waitFor(() => {
+      expect(getByTestId("status").props.children).toMatch(/isAvailable=true/);
+    });
+
+    await act(async () => {
+      fireEvent.press(getByTestId("confirm-btn"));
+    });
+
+    await waitFor(() => {
+      expect(LA.authenticateAsync).toHaveBeenCalled();
+    });
+  });
+
+  it("standalone authenticate() refuses on a compromised device under block policy", async () => {
+    integrityMock.enforceIntegrityPolicy.mockResolvedValue({
+      action: "block",
+      policy: "block",
+      isCompromised: true,
+      result: { isCompromised: true, reasons: ["mock rooted"], supported: true },
+    });
+
+    const ok = await authenticate("test reason");
+
+    expect(ok).toBe(false);
+    expect(LA.authenticateAsync).not.toHaveBeenCalled();
   });
 
   it("saves preferences to AsyncStorage when updating settings", async () => {
