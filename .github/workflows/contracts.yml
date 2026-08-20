@@ -12,7 +12,7 @@ jobs:
   test:
     name: Build & Test
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     defaults:
       run:
         working-directory: contracts
@@ -44,7 +44,15 @@ jobs:
         run: cargo build --workspace --target wasm32v1-none --release --no-default-features
 
       - name: Install wasm-opt
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq binaryen
+        run: |
+          BINARYEN_VERSION="132"
+          ARCH=$(uname -m)
+          curl --fail --show-error --silent --location --retry 5 --retry-all-errors \
+            "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-${ARCH}-linux.tar.gz" \
+            -o /tmp/binaryen.tar.gz
+          tar xzf /tmp/binaryen.tar.gz -C /tmp
+          sudo cp "/tmp/binaryen-version_${BINARYEN_VERSION}/bin/wasm-opt" /usr/local/bin/wasm-opt
+          wasm-opt --version
 
       - name: Check WASM size
         run: |
