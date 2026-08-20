@@ -33,46 +33,9 @@ interface ProjectMapProps {
 
 // ── Component ──────────────────────────────────────────────────────────────────
 
+import "leaflet/dist/leaflet.css";
+
 export default function ProjectMap({ projects }: ProjectMapProps) {
-  const [tileError, setTileError] = useState(false);
-  const [tileKey, setTileKey] = useState(0);
-  const retryCount = useRef(0);
-
-  const handleTileError = useCallback(() => {
-    if (retryCount.current < 3) {
-      const timeout = Math.pow(2, retryCount.current) * 1000;
-      setTimeout(() => {
-        retryCount.current += 1;
-        setTileKey((prev) => prev + 1);
-      }, timeout);
-    } else {
-      setTileError(true);
-    }
-  }, []);
-
-  const handleRetry = useCallback(() => {
-    retryCount.current = 0;
-    setTileError(false);
-    setTileKey((prev) => prev + 1);
-  }, []);
-
-  // Leaflet needs the CSS — import it once at runtime (not at module level so
-  // it doesn't run on the server via accidental imports).
-  useEffect(() => {
-    // Only import once; subsequent HMR reloads skip this because the link
-    // element already exists in the document head.
-    if (
-      typeof document !== "undefined" &&
-      !document.head.querySelector('link[href*="leaflet"]')
-    ) {
-      const link = document.createElement("link");
-      link.rel = "stylesheet";
-      link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
-      link.integrity = "sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=";
-      link.crossOrigin = "anonymous";
-      document.head.appendChild(link);
-    }
-  }, []);
 
   return (
     <div className="relative h-full w-full">
