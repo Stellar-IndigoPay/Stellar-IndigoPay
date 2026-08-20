@@ -574,7 +574,19 @@ model.
 
 ---
 
-## 41. `mmr_app` (MMR Root Appended)
+## 30. `slash_ev` (Oracle Slash Event)
+
+**Description**: Emitted when an admin slashes a reporter in the oracle contract. Each event records the timestamp, admin who performed the slash, and a reason symbol.
+
+| Event Name  | Topics                        | Data                                                                             | When Emitted                                        |
+| ----------- | ----------------------------- | -------------------------------------------------------------------------------- | --------------------------------------------------- |
+| `slash_ev`  | `["slash_ev", reporter]`      | `{ "at": u32, "slashed_by": Address, "reason": Symbol }`                        | When admin calls `slash_reporter` on SimpleOracle    |
+
+**Note**: Slash history is bounded to the 20 most recent events per reporter. Older entries are evicted in ring-buffer order to prevent unbounded storage growth. Off-chain observers should capture `slash_ev` events in real time for complete history.
+
+---
+
+## Coordination Note for #277 (Matching Pool)
 
 **Description**: Emitted when an admin appends a new period's Merkle root to a
 project's Merkle Mountain Range for cumulative impact certificate verification.
