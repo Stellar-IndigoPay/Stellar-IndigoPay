@@ -20,6 +20,7 @@ groups:
           description: |
             More than 5% of HTTP responses in the last 5 minutes returned 5xx.
             Check Sentry and the readiness endpoint.
+          runbook: docs/runbooks/backend-http-5xx-rate.md
 
       - alert: BackendHighP99Latency
         expr: |
@@ -31,6 +32,7 @@ groups:
           severity: warn
         annotations:
           summary: "Backend p99 latency above 2s for 10m on {{ $labels.route }}"
+          runbook: docs/runbooks/backend-http-p99-latency.md
 
   - name: stellar-indigopay-rate-limit
     interval: 30s
@@ -50,6 +52,7 @@ groups:
             {{ $value | humanizePercentage }} of all HTTP requests in the last 5m
             were rejected with HTTP 429. This may indicate a misconfigured client,
             a DDoS attempt, or an overly aggressive retry loop.
+          runbook: docs/runbooks/rate-limit-exhaustion.md
 
       - alert: PerEndpointRateLimitSpike
         expr: |
@@ -63,6 +66,7 @@ groups:
             Endpoint {{ $labels.endpoint }} (method={{ $labels.method }}, strategy={{ $labels.strategy }})
             is being rate-limited at {{ $value | humanize }} per second. Check for
             aggressive clients or potential abuse.
+          runbook: docs/runbooks/rate-limit-exhaustion.md
 
       - alert: TokenBucketExhausted
         expr: |
@@ -79,6 +83,7 @@ groups:
             the capacity or refill rate if this is expected traffic.
             NOTE: This gauge only updates on request — if traffic stops, the
             alert resolves when the next successful request updates the gauge.
+          runbook: docs/runbooks/rate-limit-exhaustion.md
 
   - name: stellar-indigopay-backend-database
     interval: 30s
@@ -95,6 +100,7 @@ groups:
             Active: check db_pool_total_count, Max: check db_pool_max.
             The pool may be saturated. Consider investigating slow queries
             or increasing DB_POOL_MAX.
+          runbook: docs/runbooks/database-pool-saturated.md
 
       - alert: DBPoolExhausted
         expr: db_pool_total_count{job="stellar-indigopay-backend"} >= db_pool_max{job="stellar-indigopay-backend"} AND db_pool_waiting_count{job="stellar-indigopay-backend"} > 0
@@ -109,6 +115,7 @@ groups:
             Current active: {{ $value }} (check db_pool_total_count).
             Adaptive sizing may have already increased the limit.
             If this persists, investigate slow queries or provision more database resources.
+          runbook: docs/runbooks/database-pool-saturated.md
 
       - alert: DbQuerySlow
         expr: |
@@ -120,6 +127,7 @@ groups:
           severity: warn
         annotations:
           summary: "Postgres p99 query latency above 500ms for 10m on op={{ $labels.operation }}"
+          runbook: docs/runbooks/database-pool-saturated.md
 
   - name: stellar-indigopay-backend-backup
     interval: 30s
@@ -133,6 +141,7 @@ groups:
         annotations:
           summary: "Database backup verification failed"
           description: "The nightly backup at {{ $labels.backup_path }} failed verification. Investigate immediately — the backup may be corrupt or unrecoverable."
+          runbook: docs/runbooks/database-backup-verification.md
 
   - name: stellar-indigopay-postgres-failover-info
     interval: 30s
@@ -149,6 +158,7 @@ groups:
             The old primary should be investigated and re-synced before
             attempting manual failback.
             New primary host: check POSTGRES_PRIMARY_HOST in stellar-indigopay-config ConfigMap.
+          runbook: docs/runbooks/postgres-failover.md
 
       - alert: PostgresPrimaryUnhealthy
         expr: |
@@ -164,6 +174,7 @@ groups:
             If the primary is genuinely down, the healthcheck sidecar will
             trigger automated failover within 30 s.
             Check: kubectl get pods -n stellar-indigopay -l app=postgres,role=primary
+          runbook: docs/runbooks/postgres-failover.md
 
   - name: stellar-indigopay-backend-readiness
     interval: 30s
@@ -177,6 +188,7 @@ groups:
         annotations:
           summary: "Indexer lag is >500 ledgers (~42 minutes behind)"
           description: "The Horizon indexer is {{ $value }} ledgers behind. Auto-backfill may be failing."
+          runbook: docs/runbooks/indexer-lag.md
 
       - alert: IndexerLagWarning
         expr: indigopay_indexer_lag_ledgers > 50
@@ -185,6 +197,7 @@ groups:
           severity: warn
         annotations:
           summary: "Indexer lag is >50 ledgers"
+          runbook: docs/runbooks/indexer-lag.md
 
       - alert: IndexerStreamDown
         expr: rate(indigopay_indexer_stream_reconnects_total[10m]) == 0 AND indigopay_indexer_lag_ledgers > 0
@@ -194,16 +207,16 @@ groups:
           routing: pagerduty
         annotations:
           summary: "Indexer stream appears down — no reconnects and positive lag"
+          runbook: docs/runbooks/indexer-lag.md
+
       - alert: ReadinessProbeFailing
-        # We can't directly scrape /api/readyz, so this rule fires when the
-        # in-process readiness_log metric indicates a failure. The wrapper
-        # increments readiness_check_failed_total when /api/readyz returns 503.
         expr: increase(readiness_check_failed_total{job="stellar-indigopay-backend"}[5m]) > 0
         for: 3m
         labels:
           severity: page
         annotations:
           summary: "Backend readiness has been failing for 3m"
+          runbook: docs/runbooks/indexer-lag.md
 
       - alert: QueueDepthHigh
         expr: sum by (queue) (queue_failed{job="stellar-indigopay-backend"}) > 100
@@ -215,6 +228,7 @@ groups:
           description: |
             There are more than 100 failed jobs in queue '{{ $labels.queue }}' for the last 10 minutes.
             Check the worker logs.
+          runbook: docs/runbooks/indexer-lag.md
 
       - alert: OracleStale
         expr: time() - indigopay_oracle_price_updated_timestamp > 900
@@ -223,6 +237,7 @@ groups:
           severity: page
         annotations:
           summary: "Oracle price is stale (>15 min since last update)"
+          runbook: docs/runbooks/indexer-lag.md
 
   - name: stellar-indigopay-secret-rotation
     interval: 30s
@@ -239,6 +254,7 @@ groups:
             The most recent automated secret rotation completed with status "failed"
             or "rolled_back". Check the GitHub Actions run linked in the rotation
             audit log and the /health/ready endpoint immediately.
+          runbook: docs/runbooks/secret-rotation.md
 
       - alert: SecretRotationStuck
         expr: |
@@ -251,6 +267,7 @@ groups:
           description: |
             A secret rotation started at {{ $value | humanizeTimestamp }} but never
             completed. It may be stuck. Check the GitHub Actions workflow.
+          runbook: docs/runbooks/secret-rotation.md
 
       - alert: SecretRotationOverdue
         expr: |
@@ -264,3 +281,29 @@ groups:
             The last successful secret rotation was {{ $value | humanizeTimestamp }}.
             Rotations are scheduled quarterly (every 91 days). Consider running
             the workflow manually if the automated schedule has been failing.
+          runbook: docs/runbooks/secret-rotation.md
+
+  - name: stellar-indigopay-gitops-drift
+    interval: 30s
+    rules:
+      - alert: ArgoCDAppOutOfSync
+        expr: argocd_app_info{sync_status="OutOfSync"} == 1
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "ArgoCD application {{ $labels.name }} is OutOfSync"
+          description: |
+            Cluster state has drifted from repository gitops/ manifests for >5m.
+          runbook: docs/runbooks/gitops-argocd-drift.md
+
+      - alert: ArgoCDAppDegraded
+        expr: argocd_app_info{health_status="Degraded"} == 1
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "ArgoCD application {{ $labels.name }} health is Degraded"
+          description: |
+            One or more resources managed by ArgoCD are degraded.
+          runbook: docs/runbooks/gitops-argocd-drift.md

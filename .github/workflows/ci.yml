@@ -26,9 +26,8 @@ jobs:
       - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7
         with:
-          context: ./backend
-          file: ./backend/Dockerfile
-          target: test
+          context: .
+          file: ./backend/Dockerfile.test
           load: true
           tags: indigopay-backend-test:ci
           cache-from: type=gha
@@ -53,6 +52,29 @@ jobs:
         # helm template validates Go template syntax and value rendering; no
         # cluster access is required, unlike kubectl apply --dry-run (which
         # needs a running K8s API server even with --validate=false).
+
+  monitoring-and-gitops-lint:
+    name: Alert Rules, Runbooks, and GitOps Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - name: Ensure npm uses POSIX shell on Linux
+        run: |
+          npm config delete script-shell || true
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Verify generated runbook index is committed
+        run: |
+          node scripts/generate-runbook-index.js
+          git diff --exit-code -- docs/runbooks/README.md
+      - name: Validate Alert Rule Linkages and Runbooks
+        run: node scripts/validate-alert-rules.js
+      - name: Validate GitOps and Helm Consistency
+        run: node scripts/validate-gitops.js
 
   gitleaks:
     name: Secret scanning
