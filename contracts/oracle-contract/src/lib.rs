@@ -112,6 +112,7 @@ pub enum DataKey {
     StalenessThreshold,
     SourceOracle(Address),
     SourceOracleList,
+    SourceLastUpdatedLedger(Address),
     StakeToken,
     MinStake,
     StakeTreasury,
@@ -631,6 +632,9 @@ impl SimpleOracle {
         }
 
         env.storage().instance().remove(&source_key);
+        env.storage()
+            .instance()
+            .remove(&DataKey::SourceLastUpdatedLedger(oracle_address.clone()));
         let mut sources: Vec<Address> = env
             .storage()
             .instance()
@@ -642,6 +646,32 @@ impl SimpleOracle {
         env.storage()
             .instance()
             .set(&DataKey::SourceOracleList, &sources);
+    }
+
+    pub fn set_source_last_updated_ledger(
+        env: Env,
+        admin: Address,
+        oracle_address: Address,
+        ledger: u32,
+    ) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+
+        let source_key = DataKey::SourceOracle(oracle_address.clone());
+        let is_registered: bool = env.storage().instance().get(&source_key).unwrap_or(false);
+        if !is_registered {
+            panic_with_error!(&env, OracleError::SourceOracleNotRegistered);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::SourceLastUpdatedLedger(oracle_address), &ledger);
+    }
+
+    pub fn get_source_last_updated_ledger(env: Env, oracle_address: Address) -> Option<u32> {
+        env.storage()
+            .instance()
+            .get(&DataKey::SourceLastUpdatedLedger(oracle_address))
     }
 
     pub fn report_price(env: Env, reporter: Address, price: i128) {
@@ -795,6 +825,29 @@ impl SimpleOracle {
             .publish((symbol_short!("stale_th"), admin), threshold);
     }
 
+    pub fn last_updated_ledger(env: Env) -> u32 {
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ObservationCount)
+            .unwrap_or(0);
+        if count == 0 {
+            return 0;
+        }
+        let next_index: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ObservationIndex)
+            .unwrap_or(0);
+        let latest_index = (next_index + MAX_OBSERVATIONS - 1) % MAX_OBSERVATIONS;
+        let latest: PriceObservation = env
+            .storage()
+            .instance()
+            .get(&DataKey::Observations(latest_index))
+            .expect("Oracle observation missing");
+        latest.ledger
+    }
+
     pub fn get_twap_window(env: Env) -> u32 {
         read_twap_window(&env)
     }
@@ -828,7 +881,10 @@ impl SimpleOracle {
             return internal_price(&env);
         }
 
+        let current_ledger = env.ledger().sequence();
+        let staleness_threshold = read_staleness_threshold(&env);
         let mut prices: Vec<i128> = Vec::new(&env);
+
         for source in sources.iter() {
             let result = env.try_invoke_contract::<i128, InvokeError>(
                 &source,
@@ -837,7 +893,37 @@ impl SimpleOracle {
             );
             if let Ok(Ok(price)) = result {
                 if price > 0 {
-                    prices.push_back(price);
+                    let source_ledger = if let Ok(Ok(ledger)) = env
+                        .try_invoke_contract::<u32, InvokeError>(
+                            &source,
+                            &Symbol::new(&env, "last_updated_ledger"),
+                            Vec::new(&env),
+                        ) {
+                        Some(ledger)
+                    } else if let Ok(Ok(ledger)) = env
+                        .try_invoke_contract::<u32, InvokeError>(
+                            &source,
+                            &Symbol::new(&env, "get_last_updated_ledger"),
+                            Vec::new(&env),
+                        ) {
+                        Some(ledger)
+                    } else {
+                        env.storage()
+                            .instance()
+                            .get::<_, u32>(&DataKey::SourceLastUpdatedLedger(source.clone()))
+                    };
+
+                    let is_fresh = match source_ledger {
+                        Some(ledger) if ledger <= current_ledger => {
+                            current_ledger - ledger <= staleness_threshold
+                        }
+                        Some(_) => false,
+                        None => true,
+                    };
+
+                    if is_fresh {
+                        prices.push_back(price);
+                    }
                 }
             }
         }
@@ -881,12 +967,41 @@ mod tests {
     };
 
     const TEST_PRICE_KEY: Symbol = symbol_short!("price");
+    const TEST_LEDGER_KEY: Symbol = symbol_short!("ldgr");
 
     #[contract]
     struct TestPriceSource;
 
     #[contractimpl]
     impl TestPriceSource {
+        pub fn set_price(env: Env, price: i128) {
+            env.storage().instance().set(&TEST_PRICE_KEY, &price);
+            env.storage()
+                .instance()
+                .set(&TEST_LEDGER_KEY, &env.ledger().sequence());
+        }
+
+        pub fn set_last_updated_ledger(env: Env, ledger: u32) {
+            env.storage().instance().set(&TEST_LEDGER_KEY, &ledger);
+        }
+
+        pub fn get_price(env: Env) -> i128 {
+            env.storage().instance().get(&TEST_PRICE_KEY).unwrap()
+        }
+
+        pub fn last_updated_ledger(env: Env) -> u32 {
+            env.storage()
+                .instance()
+                .get(&TEST_LEDGER_KEY)
+                .unwrap_or(env.ledger().sequence())
+        }
+    }
+
+    #[contract]
+    struct PlainPriceSource;
+
+    #[contractimpl]
+    impl PlainPriceSource {
         pub fn set_price(env: Env, price: i128) {
             env.storage().instance().set(&TEST_PRICE_KEY, &price);
         }
@@ -1161,6 +1276,133 @@ mod tests {
         client.add_source_oracle(&admin, &missing_source);
 
         assert_eq!(client.get_aggregated_price(), 7);
+    }
+
+    #[test]
+    fn stale_source_prices_are_excluded_from_aggregate() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        client.set_staleness_threshold(&admin, &100);
+
+        env.ledger().set_sequence_number(200);
+
+        let high = register_price_source(&env, 30);
+        let low = register_price_source(&env, 10);
+        let middle = register_price_source(&env, 20);
+
+        // Stale source with last updated ledger = 50 (age 150 > threshold 100)
+        let stale_source = env.register(TestPriceSource, ());
+        let stale_client = TestPriceSourceClient::new(&env, &stale_source);
+        stale_client.set_price(&100);
+        stale_client.set_last_updated_ledger(&50);
+
+        client.add_source_oracle(&admin, &high);
+        client.add_source_oracle(&admin, &low);
+        client.add_source_oracle(&admin, &middle);
+        client.add_source_oracle(&admin, &stale_source);
+
+        // Stale price (100) must be excluded; median of [10, 20, 30] is 20
+        assert_eq!(client.get_aggregated_price(), 20);
+    }
+
+    #[test]
+    fn future_source_ledger_is_rejected_as_stale() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        client.set_staleness_threshold(&admin, &100);
+
+        env.ledger().set_sequence_number(200);
+
+        let fresh_1 = register_price_source(&env, 10);
+        let fresh_2 = register_price_source(&env, 20);
+
+        // Source reporting a future ledger (e.g. 250 > 200)
+        let future_source = env.register(TestPriceSource, ());
+        let future_client = TestPriceSourceClient::new(&env, &future_source);
+        future_client.set_price(&99);
+        future_client.set_last_updated_ledger(&250);
+
+        // Source reporting u32::MAX
+        let max_ledger_source = env.register(TestPriceSource, ());
+        let max_ledger_client = TestPriceSourceClient::new(&env, &max_ledger_source);
+        max_ledger_client.set_price(&999);
+        max_ledger_client.set_last_updated_ledger(&u32::MAX);
+
+        client.add_source_oracle(&admin, &fresh_1);
+        client.add_source_oracle(&admin, &fresh_2);
+        client.add_source_oracle(&admin, &future_source);
+        client.add_source_oracle(&admin, &max_ledger_source);
+
+        // Future sources (99, 999) must be rejected; median of [10, 20] is 15
+        assert_eq!(client.get_aggregated_price(), 15);
+    }
+
+    #[test]
+    fn stored_source_last_updated_ledger_staleness_is_enforced() {
+        let (env, contract_id, admin, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        client.set_staleness_threshold(&admin, &100);
+
+        env.ledger().set_sequence_number(200);
+
+        // PlainPriceSource implements ONLY get_price, testing the aggregator storage fallback path
+        let fresh_source = env.register(PlainPriceSource, ());
+        PlainPriceSourceClient::new(&env, &fresh_source).set_price(&15);
+
+        let stale_source = env.register(PlainPriceSource, ());
+        PlainPriceSourceClient::new(&env, &stale_source).set_price(&50);
+
+        client.add_source_oracle(&admin, &fresh_source);
+        client.add_source_oracle(&admin, &stale_source);
+
+        // Explicitly set source ledgers in aggregator instance storage
+        client.set_source_last_updated_ledger(&admin, &fresh_source, &200);
+        client.set_source_last_updated_ledger(&admin, &stale_source, &50);
+        assert_eq!(
+            client.get_source_last_updated_ledger(&stale_source),
+            Some(50)
+        );
+
+        // stale_source (50) is excluded (age 150 > 100); only fresh_source (15) is aggregated
+        assert_eq!(client.get_aggregated_price(), 15);
+    }
+
+    #[test]
+    fn all_stale_sources_fall_back_to_internal_price() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+        client.set_staleness_threshold(&admin, &100);
+
+        env.ledger().set_sequence_number(150);
+        client.report_price(&reporter, &80_000_000);
+
+        env.ledger().set_sequence_number(200);
+        let stale_source = env.register(TestPriceSource, ());
+        let stale_client = TestPriceSourceClient::new(&env, &stale_source);
+        stale_client.set_price(&999);
+        stale_client.set_last_updated_ledger(&50);
+        client.add_source_oracle(&admin, &stale_source);
+
+        // All external sources are stale; falls back to internal TWAP (8)
+        assert_eq!(client.get_aggregated_price(), 8);
+    }
+
+    #[test]
+    fn test_oracle_last_updated_ledger() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        add_reporter(&env, &contract_id, &admin, &reporter);
+
+        assert_eq!(client.last_updated_ledger(), 0);
+
+        env.ledger().set_sequence_number(123);
+        client.report_price(&reporter, &100_000_000);
+        assert_eq!(client.last_updated_ledger(), 123);
+
+        env.ledger().set_sequence_number(456);
+        client.report_price(&reporter, &105_000_000);
+        assert_eq!(client.last_updated_ledger(), 456);
     }
 
     #[test]
