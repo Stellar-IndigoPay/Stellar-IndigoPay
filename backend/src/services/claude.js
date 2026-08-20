@@ -50,48 +50,83 @@ const SUMMARY_SYSTEM_PROMPT = [
 ].join("\n");
 
 /**
+ * Classify a thrown error into a low-cardinality `reason` label suitable
+ * for the ai_summary_outcomes_total metric (see services/metrics.js and
+ * services/summaryQueue.js, which reads err.reason after a failed call).
+ *
+ * @param {Error & { code?: string, status?: number, error?: object }} err
+ * @returns {"api_key"|"empty_response"|"rate_limit"|"provider_error"}
+ */
+function classifyErrorReason(err) {
+  if (err.code === "MISSING_API_KEY") return "api_key";
+  if (err.code === "EMPTY_RESPONSE") return "empty_response";
+  // The Anthropic SDK surfaces HTTP errors with a numeric `status` and,
+  // for structured API errors, an `error.type` field — check both since
+  // depending on SDK version/error path either may be present.
+  if (err.status === 429 || err.error?.type === "rate_limit_error") {
+    return "rate_limit";
+  }
+  return "provider_error";
+}
+
+/**
  * Generate a 3-sentence donor-facing impact summary for a project.
  *
  * @param {{ name: string, category: string, description: string }} project
- * @returns {Promise<{ summary: string, model: string, usage: object }>}
+ * @returns {Promise<{ summary: string, model: string, usage: object, latencyMs: number }>}
+ * @throws {Error & { code?: string, reason: string, latencyMs: number }}
+ *   On failure, the thrown error always carries `reason` (see
+ *   classifyErrorReason) and `latencyMs` so the caller can record metrics
+ *   without duplicating classification/timing logic.
  */
 async function generateProjectSummary(project) {
-  const anthropic = getClient();
+  const startedAt = process.hrtime.bigint();
 
-  const userPrompt =
-    `Project name: ${project.name}\n` +
-    `Category: ${project.category}\n` +
-    `Description:\n${project.description}`;
+  try {
+    const anthropic = getClient();
 
-  const response = await anthropic.messages.create({
-    model: SUMMARY_MODEL,
-    max_tokens: 400,
-    // Single-call summarisation: skip thinking, keep effort low so the
-    // response stays in the cost/latency budget the UI promises.
-    thinking: { type: "disabled" },
-    output_config: { effort: "low" },
-    system: [
-      {
-        type: "text",
-        text: SUMMARY_SYSTEM_PROMPT,
-        cache_control: { type: "ephemeral" },
-      },
-    ],
-    messages: [{ role: "user", content: userPrompt }],
-  });
+    const userPrompt =
+      `Project name: ${project.name}\n` +
+      `Category: ${project.category}\n` +
+      `Description:\n${project.description}`;
 
-  const textBlock = response.content.find((block) => block.type === "text");
-  if (!textBlock) {
-    const err = new Error("Claude returned no text content");
-    err.code = "EMPTY_RESPONSE";
+    const response = await anthropic.messages.create({
+      model: SUMMARY_MODEL,
+      max_tokens: 400,
+      // Single-call summarisation: skip thinking, keep effort low so the
+      // response stays in the cost/latency budget the UI promises.
+      thinking: { type: "disabled" },
+      output_config: { effort: "low" },
+      system: [
+        {
+          type: "text",
+          text: SUMMARY_SYSTEM_PROMPT,
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+      messages: [{ role: "user", content: userPrompt }],
+    });
+
+    const textBlock = response.content.find((block) => block.type === "text");
+    if (!textBlock) {
+      const err = new Error("Claude returned no text content");
+      err.code = "EMPTY_RESPONSE";
+      throw err;
+    }
+
+    const latencyMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+
+    return {
+      summary: textBlock.text.trim(),
+      model: response.model,
+      usage: response.usage,
+      latencyMs,
+    };
+  } catch (err) {
+    err.latencyMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+    err.reason = classifyErrorReason(err);
     throw err;
   }
-
-  return {
-    summary: textBlock.text.trim(),
-    model: response.model,
-    usage: response.usage,
-  };
 }
 
 module.exports = { generateProjectSummary, SUMMARY_MODEL };

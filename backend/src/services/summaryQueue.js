@@ -3,6 +3,28 @@
  *
  * pg-boss job queue for async AI summary generation.
  * Keeps the HTTP request lifecycle decoupled from the Claude API call.
+ *
+ * Throttling
+ * ----------
+ * Two independent guards protect against unbounded LLM cost:
+ *
+ * 1. Per-project cooldown — enqueueAISummary() atomically claims the right
+ *    to (re)generate a project's summary via
+ *      UPDATE projects SET ai_summary_generated_at = NOW() WHERE ... AND <cooldown expired>
+ *    reusing the existing ai_summary_generated_at column rather than a new
+ *    table. If the UPDATE matches no row, the project is still within its
+ *    cooldown window and the call is rejected before anything is enqueued.
+ *
+ *    Trade-off: this stamps ai_summary_generated_at at CLAIM time, not at
+ *    successful-completion time. If the job subsequently fails, the
+ *    cooldown still holds for the rest of the window even though nothing
+ *    was generated. This is deliberate — the risk this issue addresses is
+ *    cost from bursts, and a failed job retrying a few minutes later is a
+ *    much smaller cost than leaving the door open to another burst.
+ *
+ * 2. Global concurrency cap — boss.work's teamSize limits how many summary
+ *    jobs can be processing at once across the whole system, regardless of
+ *    how many are queued. Configurable via AI_SUMMARY_CONCURRENCY.
  */
 "use strict";
 
@@ -10,12 +32,72 @@ const crypto = require("crypto");
 const PgBoss = require("pg-boss");
 const pool = require("../db/pool");
 const logger = require("../logger");
-const { generateProjectSummary } = require("./claude");
+const { generateProjectSummary, SUMMARY_MODEL } = require("./claude");
 const { logAdminAction } = require("./audit");
+const { metrics } = require("./metrics");
+const { calculateCostUsd } = require("../lib/anthropicPricing");
 
 const QUEUE = "ai-summary";
 
+// Per-project cooldown: minimum time between summary generations for the
+// same project. Overridable via AI_SUMMARY_COOLDOWN_MS for ops tuning.
+const DEFAULT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+
+// Global concurrency cap: max summary jobs processing at once, system-wide.
+// Overridable via AI_SUMMARY_CONCURRENCY. Was previously a bare `teamSize: 2`
+// with no explanation or way to tune it without a code change.
+const DEFAULT_CONCURRENCY = 2;
+
 let boss = null;
+
+function resolveCooldownMs() {
+  const parsed = Number.parseInt(process.env.AI_SUMMARY_COOLDOWN_MS, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_COOLDOWN_MS;
+}
+
+function resolveConcurrency() {
+  const parsed = Number.parseInt(process.env.AI_SUMMARY_CONCURRENCY, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CONCURRENCY;
+}
+
+/**
+ * Record outcome/latency/token/cost metrics for one generateProjectSummary
+ * attempt. Called from the job worker below for both success and failure —
+ * factored out so the two paths can't drift out of sync with each other.
+ */
+function recordSummaryMetrics({ outcome, reason, model, latencyMs, usage }) {
+  metrics.aiSummaryOutcomesTotal.inc({ outcome, reason });
+  metrics.aiSummaryLatencySeconds.observe(
+    { model: model || SUMMARY_MODEL, outcome },
+    (latencyMs || 0) / 1000,
+  );
+
+  if (outcome !== "success" || !usage) return;
+
+  metrics.aiSummaryTokensTotal.inc({ model, direction: "input" }, usage.input_tokens || 0);
+  metrics.aiSummaryTokensTotal.inc({ model, direction: "output" }, usage.output_tokens || 0);
+  if (usage.cache_creation_input_tokens) {
+    metrics.aiSummaryTokensTotal.inc(
+      { model, direction: "cache_write" },
+      usage.cache_creation_input_tokens,
+    );
+  }
+  if (usage.cache_read_input_tokens) {
+    metrics.aiSummaryTokensTotal.inc(
+      { model, direction: "cache_read" },
+      usage.cache_read_input_tokens,
+    );
+  }
+
+  const { costUsd, priced } = calculateCostUsd(model, usage);
+  metrics.aiSummaryCostUsdTotal.inc({ model }, costUsd);
+  if (!priced) {
+    logger.warn(
+      { event: "ai_summary_unpriced_model", model },
+      `[summaryQueue] No pricing entry for model "${model}" — cost metric used the fallback rate`,
+    );
+  }
+}
 
 /**
  * Start the pg-boss scheduler and register the AI-summary worker.
@@ -25,6 +107,8 @@ let boss = null;
  * @param {import('socket.io').Server} io  Socket.IO server instance
  */
 async function start(io) {
+  if (boss) return;
+
   const connectionString =
     process.env.DATABASE_URL ||
     "postgres://postgres:postgres@localhost:5432/indigopay";
@@ -40,7 +124,8 @@ async function start(io) {
 
   await boss.start();
 
-  await boss.work(QUEUE, { teamSize: 2, teamConcurrency: 1 }, async (job) => {
+  const teamSize = resolveConcurrency();
+  await boss.work(QUEUE, { teamSize, teamConcurrency: 1 }, async (job) => {
     const { projectId, name, category, description, adminAddress } = job.data;
 
     let summaryResult;
@@ -51,6 +136,13 @@ async function start(io) {
         description,
       });
     } catch (err) {
+      recordSummaryMetrics({
+        outcome: "error",
+        reason: err.reason || "provider_error",
+        model: SUMMARY_MODEL,
+        latencyMs: err.latencyMs,
+      });
+
       if (err.code === "MISSING_API_KEY") {
         // Permanent misconfiguration — log and give up without retrying.
         console.error(
@@ -61,6 +153,14 @@ async function start(io) {
       }
       throw err; // pg-boss will retry according to retryLimit
     }
+
+    recordSummaryMetrics({
+      outcome: "success",
+      reason: "ok",
+      model: summaryResult.model,
+      latencyMs: summaryResult.latencyMs,
+      usage: summaryResult.usage,
+    });
 
     const sourceHash = crypto
       .createHash("sha256")
@@ -102,6 +202,11 @@ async function start(io) {
       ipAddress: null,
     });
   });
+
+  logger.info(
+    { event: "summary_queue_started", teamSize, cooldownMs: resolveCooldownMs() },
+    `[summaryQueue] started (concurrency=${teamSize})`,
+  );
 }
 
 async function stop() {
@@ -111,16 +216,64 @@ async function stop() {
 }
 
 /**
- * Enqueue an AI summary generation job.
+ * Enqueue an AI summary generation job for a project, subject to the
+ * per-project cooldown.
+ *
+ * Atomically claims the cooldown window via a conditional UPDATE before
+ * enqueueing — see the module doc comment above for why this reuses
+ * ai_summary_generated_at rather than a separate claim table, and the
+ * trade-off that implies.
  *
  * @param {string} projectId
  * @param {{ name: string, category: string, description: string, adminAddress?: string }} projectData
  * @returns {Promise<string>} job ID
+ * @throws {Error & { code: "SUMMARY_COOLDOWN_ACTIVE", retryAfterSeconds?: number }}
+ *   if the project generated a summary within the cooldown window
  */
 async function enqueueAISummary(projectId, projectData) {
   if (!boss) {
     throw new Error("summaryQueue not started — call start(io) first");
   }
+
+  const cooldownMs = resolveCooldownMs();
+  const claim = await pool.query(
+    `UPDATE projects
+        SET ai_summary_generated_at = NOW()
+      WHERE id = $1
+        AND (
+          ai_summary_generated_at IS NULL
+          OR ai_summary_generated_at < NOW() - (INTERVAL '1 millisecond' * $2)
+        )
+      RETURNING ai_summary_generated_at`,
+    [projectId, cooldownMs],
+  );
+
+  if (claim.rows.length === 0) {
+    // Best-effort lookup purely to give the caller a useful retryAfter —
+    // not part of the atomic claim itself, so it's fine if this is
+    // slightly stale by the time the caller reads it.
+    const current = await pool.query(
+      "SELECT ai_summary_generated_at FROM projects WHERE id = $1",
+      [projectId],
+    );
+    const lastGeneratedAt = current.rows[0]?.ai_summary_generated_at;
+    const retryAfterSeconds = lastGeneratedAt
+      ? Math.max(
+          0,
+          Math.ceil(
+            (new Date(lastGeneratedAt).getTime() + cooldownMs - Date.now()) / 1000,
+          ),
+        )
+      : undefined;
+
+    const err = new Error(
+      "AI summary generation is on cooldown for this project",
+    );
+    err.code = "SUMMARY_COOLDOWN_ACTIVE";
+    err.retryAfterSeconds = retryAfterSeconds;
+    throw err;
+  }
+
   const jobId = await boss.send(
     QUEUE,
     { projectId, ...projectData },

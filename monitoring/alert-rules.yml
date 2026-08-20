@@ -264,3 +264,43 @@ groups:
             The last successful secret rotation was {{ $value | humanizeTimestamp }}.
             Rotations are scheduled quarterly (every 91 days). Consider running
             the workflow manually if the automated schedule has been failing.
+
+
+      - name: stellar-indigopay-ai-summary
+    interval: 30s
+    rules:
+      # *** PLACEHOLDER THRESHOLD — VERIFY BEFORE MERGING ***
+      # $5 per 10 minutes is illustrative, not a number derived from actual
+      # traffic or budget. Set this to whatever spend rate would actually
+      # warrant a human looking at it for this project.
+      - alert: AISummaryCostSpike
+        expr: |
+          sum(rate(ai_summary_cost_usd_total{job="stellar-indigopay-backend"}[10m])) * 600
+            > 5
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "AI summary spend rate is elevated"
+          description: |
+            Estimated AI summary generation cost has exceeded $5 over the
+            last 10 minutes ({{ $value | humanize }} USD). Check for a
+            burst of project updates, a client repeatedly triggering
+            regenerations, or a per-project cooldown / concurrency-cap
+            regression in summaryQueue.js.
+
+      - alert: AISummaryErrorRateHigh
+        expr: |
+          sum(rate(ai_summary_outcomes_total{job="stellar-indigopay-backend",outcome="error"}[10m]))
+            /
+          sum(rate(ai_summary_outcomes_total{job="stellar-indigopay-backend"}[10m]))
+            > 0.25
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "AI summary generation error rate above 25% for 10m"
+          description: |
+            {{ $value | humanizePercentage }} of AI summary generation
+            attempts are failing. Check ANTHROPIC_API_KEY configuration
+            and Anthropic API status.

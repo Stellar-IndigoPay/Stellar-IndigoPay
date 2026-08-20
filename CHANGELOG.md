@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+### Added
+- AI project-summary generation is now rate-limited: a per-project cooldown
+  (default 5 minutes, `AI_SUMMARY_COOLDOWN_MS`) prevents repeated regeneration
+  from burning API cost, and the existing concurrency cap is now explicit and
+  tunable (`AI_SUMMARY_CONCURRENCY`, default 2) instead of a hardcoded number.
+  Token usage, estimated USD cost, latency, and outcome are now recorded via
+  Prometheus metrics that existed but were never wired up
+  (`ai_summary_tokens_total`, `ai_summary_cost_usd_total`,
+  `ai_summary_latency_seconds`, `ai_summary_outcomes_total`), plus new
+  cost-spike and error-rate alert rules.
+  (`backend/src/services/summaryQueue.js`, `claude.js`, `backend/src/lib/anthropicPricing.js`)
+
+  
 ### Added
 
 * **frontend:** announce `DonateForm` validation errors to screen readers via `aria-live="assertive"` region (GrantFox GF-a11y-donate-form)
