@@ -9,6 +9,8 @@ const QUEUE = "profile-update";
 let boss = null;
 
 async function start(io) {
+  if (boss) return;
+
   const connectionString =
     process.env.DATABASE_URL ||
     "postgres://postgres:postgres@localhost:5432/indigopay";

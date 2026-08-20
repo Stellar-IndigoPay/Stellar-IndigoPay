@@ -41,6 +41,7 @@ describe("Admin projections router", () => {
   let app;
   beforeEach(() => {
     jest.clearAllMocks();
+    isRebuilding.mockReturnValue(false);
     app = buildApp();
   });
 
@@ -79,6 +80,19 @@ describe("Admin projections router", () => {
       .expect(200);
     expect(rebuildProjection).toHaveBeenCalledWith("donor_leaderboard");
     expect(res.body.data.projection).toBe("donor_leaderboard");
+  });
+
+  test("POST /rebuild/:name returns 409 if a rebuild is already in progress", async () => {
+    isRebuilding.mockReturnValue(true);
+    const res = await request(app)
+      .post("/api/admin/projections/rebuild/donor_leaderboard")
+      .set("X-Admin-Key", "test-admin-key")
+      .expect(409);
+    expect(rebuildProjection).not.toHaveBeenCalled();
+    expect(res.body.error).toMatchObject({
+      code: "CONFLICT",
+      detail: "A projection rebuild is already in progress",
+    });
   });
 
   test("POST /rebuild/:name returns 404 for an unknown projection", async () => {
