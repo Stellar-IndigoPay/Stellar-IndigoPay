@@ -71,6 +71,10 @@ function validateRegistrySchema(registry) {
   }
 
   registry.deployments.forEach((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      issues.push(`deployments[${index}]: entry must be an object (got ${JSON.stringify(entry)})`);
+      return;
+    }
     for (const field of REQUIRED_FIELDS) {
       const value = entry[field];
       if (value === undefined || value === null || value === "") {
@@ -136,8 +140,68 @@ function writeRegistryAtomic(registryPath, registry) {
     dir,
     `.${path.basename(registryPath)}.${process.pid}.${Date.now()}.tmp`,
   );
-  fs.writeFileSync(tmpPath, `${JSON.stringify(registry, null, 2)}\n`, "utf8");
-  fs.renameSync(tmpPath, registryPath);
+  try {
+    const fd = fs.openSync(tmpPath, "w");
+    try {
+      fs.writeFileSync(fd, `${JSON.stringify(registry, null, 2)}\n`, "utf8");
+      fs.fsyncSync(fd); // durable before the rename that makes it visible
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmpPath, registryPath);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {
+      // Temp file was never created, or already gone — nothing to clean up.
+    }
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-process lock
+// ---------------------------------------------------------------------------
+// recordDeployment() is a read-modify-write: without mutual exclusion, two
+// deploys (e.g. two concurrent CI runs) racing to append could each read the
+// same starting registry and one write would clobber the other's entry.
+// Node's single-threaded event loop doesn't protect against this — the race
+// is across *processes*. A lock file created with the exclusive `wx` flag
+// (fails if the file already exists) gives simple, dependency-free mutual
+// exclusion on POSIX filesystems.
+
+const LOCK_RETRY_DELAY_MS = 25;
+
+function acquireLockSync(registryPath, timeoutMs = 10_000) {
+  const lockPath = `${registryPath}.lock`;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const fd = fs.openSync(lockPath, "wx");
+      fs.writeFileSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      return lockPath;
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+      if (Date.now() > deadline) {
+        throw new Error(
+          `Timed out waiting for deployment registry lock at ${lockPath} (another deploy may be in progress, or a stale lock was left behind)`,
+        );
+      }
+      // Busy-wait with a short synchronous sleep — recordDeployment is a
+      // CLI-invoked, one-shot operation, so blocking the event loop here
+      // is fine and keeps the implementation dependency-free.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_RETRY_DELAY_MS);
+    }
+  }
+}
+
+function releaseLockSync(lockPath) {
+  try {
+    fs.unlinkSync(lockPath);
+  } catch {
+    // Already removed — nothing to do.
+  }
 }
 
 /**
@@ -149,7 +213,6 @@ function writeRegistryAtomic(registryPath, registry) {
  * @returns {object} the stored entry (with its generated `id`).
  */
 function recordDeployment(registryPath, entryInput) {
-  const registry = loadRegistry(registryPath);
   const entry = {
     id: crypto.randomUUID(),
     verified: true,
@@ -157,8 +220,15 @@ function recordDeployment(registryPath, entryInput) {
     ...entryInput,
   };
   validateRegistrySchema({ deployments: [entry] });
-  registry.deployments.push(entry);
-  writeRegistryAtomic(registryPath, registry);
+
+  const lockPath = acquireLockSync(registryPath);
+  try {
+    const registry = loadRegistry(registryPath);
+    registry.deployments.push(entry);
+    writeRegistryAtomic(registryPath, registry);
+  } finally {
+    releaseLockSync(lockPath);
+  }
   return entry;
 }
 
@@ -182,19 +252,31 @@ function getLatestDeployment(registry, network, contractId) {
 // CLI
 // ---------------------------------------------------------------------------
 
+/**
+ * Parses `--key value` and `--key=value` pairs, plus bare `--flag` booleans.
+ * The `--key=value` form is the only safe way to pass a value that itself
+ * starts with `--` (e.g. forwarded stderr text) — `--key value` would
+ * otherwise misread such a value as the next flag.
+ */
 function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i += 1) {
     const tok = argv[i];
-    if (tok.startsWith("--")) {
-      const key = tok.slice(2);
-      const next = argv[i + 1];
-      if (next === undefined || next.startsWith("--")) {
-        args[key] = true;
-      } else {
-        args[key] = next;
-        i += 1;
-      }
+    if (!tok.startsWith("--")) continue;
+
+    const eq = tok.indexOf("=");
+    if (eq !== -1) {
+      args[tok.slice(2, eq)] = tok.slice(eq + 1);
+      continue;
+    }
+
+    const key = tok.slice(2);
+    const next = argv[i + 1];
+    if (next === undefined || next.startsWith("--")) {
+      args[key] = true;
+    } else {
+      args[key] = next;
+      i += 1;
     }
   }
   return args;
@@ -242,6 +324,20 @@ function cliRecord(argv) {
     process.exit(2);
   }
 
+  // Fail closed on an unrecognized --verified value rather than silently
+  // treating a typo ("True", "0", "no") as verified=true.
+  let verified = true;
+  if (args.verified !== undefined && args.verified !== true) {
+    if (args.verified === "true") {
+      verified = true;
+    } else if (args.verified === "false") {
+      verified = false;
+    } else {
+      console.error(`Invalid --verified value: "${args.verified}" (expected "true" or "false")`);
+      process.exit(2);
+    }
+  }
+
   try {
     const entry = recordDeployment(registryPath, {
       network: args.network,
@@ -252,7 +348,7 @@ function cliRecord(argv) {
       identity: args.identity,
       deployerAddress: args["deployer-address"],
       env: args.env,
-      verified: args.verified === "false" ? false : true,
+      verified,
       verificationDetail: args["verification-detail"] || null,
     });
     console.log(`Recorded deployment ${entry.id} in ${registryPath}`);

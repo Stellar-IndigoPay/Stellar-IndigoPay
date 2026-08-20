@@ -52,15 +52,29 @@ DRY_RUN="false"
 SKIP_VERIFY="false"
 
 print_help() {
-  sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # Print the leading comment block (everything from line 2 up to the
+  # first line that isn't a `#` comment), rather than a hardcoded line
+  # range that silently goes stale as the header is edited.
+  awk 'NR==1 { next } /^#/ { print; next } { exit }' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+require_value() {
+  # $1 = flag name (for the error message), $2 = the candidate value —
+  # passed in by the caller as "${2-}" so a missing outer argument
+  # arrives here as an empty string rather than tripping `set -u`.
+  # Empty and "looks like the next flag" are both treated as missing.
+  if [[ -z "$2" || "$2" == --* ]]; then
+    echo "❌ $1 requires a value" >&2
+    exit 2
+  fi
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --network) NETWORK="$2"; shift 2 ;;
-    --identity) IDENTITY="$2"; shift 2 ;;
+    --network) require_value "$1" "${2-}"; NETWORK="$2"; shift 2 ;;
+    --identity) require_value "$1" "${2-}"; IDENTITY="$2"; shift 2 ;;
     --confirm) CONFIRM="true"; shift ;;
-    --registry) REGISTRY="$2"; shift 2 ;;
+    --registry) require_value "$1" "${2-}"; REGISTRY="$2"; shift 2 ;;
     --dry-run) DRY_RUN="true"; shift ;;
     --skip-verify) SKIP_VERIFY="true"; shift ;;
     -h|--help) print_help; exit 0 ;;
@@ -146,6 +160,12 @@ CONTRACT_ID=$(stellar contract deploy \
 echo "✅ Deployed! Contract ID: $CONTRACT_ID"
 
 DEPLOYER_ADDRESS=$(stellar keys address "$IDENTITY" 2>/dev/null || echo "")
+if [[ -z "$DEPLOYER_ADDRESS" ]]; then
+  echo "❌ Could not resolve an address for identity '$IDENTITY' via 'stellar keys address'." >&2
+  echo "   The contract was deployed (id: $CONTRACT_ID) but cannot be initialized without" >&2
+  echo "   an admin address — refusing to report success for an uninitialized contract." >&2
+  exit 1
+fi
 
 # ── Post-deploy verification ────────────────────────────────────────────────
 # Fetch the on-chain WASM and compare its hash against what we just built —
@@ -155,6 +175,16 @@ DEPLOYER_ADDRESS=$(stellar keys address "$IDENTITY" 2>/dev/null || echo "")
 
 VERIFIED="true"
 VERIFICATION_DETAIL=""
+VERIFY_TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$VERIFY_TMP_DIR"' EXIT
+
+# Strips anything that could carry a credential or a local filesystem
+# layout out of CLI stderr before it's persisted in the (committed,
+# non-secret) registry: URL query strings/auth (RPC endpoints sometimes
+# embed an API key) and home-directory paths.
+redact() {
+  sed -E 's#https?://[^ ]+#[URL]#g; s#(/home/|/Users/)[^ /]+#\1[USER]#g' | tail -c 300
+}
 
 if [[ "$SKIP_VERIFY" == "true" ]]; then
   VERIFIED="false"
@@ -163,8 +193,9 @@ if [[ "$SKIP_VERIFY" == "true" ]]; then
 else
   echo ""
   echo "🔍 Verifying deployed bytecode against the build..."
-  FETCHED_WASM="$(mktemp -d)/deployed.wasm"
-  if stellar contract fetch --id "$CONTRACT_ID" --network "$NETWORK" --out-file "$FETCHED_WASM" 2>/tmp/deploy-verify-stderr.log; then
+  FETCHED_WASM="$VERIFY_TMP_DIR/deployed.wasm"
+  FETCH_STDERR="$VERIFY_TMP_DIR/fetch-stderr.log"
+  if stellar contract fetch --id "$CONTRACT_ID" --network "$NETWORK" --out-file "$FETCHED_WASM" 2>"$FETCH_STDERR"; then
     ONCHAIN_SHA256="$(node "$REGISTRY_HELPER" hash "$FETCHED_WASM")"
     if [[ "$ONCHAIN_SHA256" == "$WASM_SHA256" ]]; then
       echo "   ✅ On-chain WASM hash matches the build ($ONCHAIN_SHA256)"
@@ -175,7 +206,7 @@ else
     fi
   else
     VERIFIED="false"
-    VERIFICATION_DETAIL="RPC fetch failed: $(tail -c 300 /tmp/deploy-verify-stderr.log 2>/dev/null || echo unknown error)"
+    VERIFICATION_DETAIL="RPC fetch failed: $(redact < "$FETCH_STDERR" || echo unknown error)"
     echo "⚠️  Could not fetch on-chain WASM for verification — recording as unverified, not as a pass." >&2
   fi
 fi
@@ -186,6 +217,9 @@ DEPLOYED_AT="$(node -e 'console.log(new Date().toISOString())')"
 ENV_LABEL="${DEPLOY_ENV:-${CI:+ci}}"
 ENV_LABEL="${ENV_LABEL:-local}"
 
+# `--verified=` / `--verification-detail=` use the equals form so a value
+# that happens to start with "--" (plausible in redacted stderr text) is
+# never misread as another flag by the registry helper's arg parser.
 node "$REGISTRY_HELPER" record \
   --registry "$REGISTRY" \
   --network "$NETWORK" \
@@ -194,22 +228,20 @@ node "$REGISTRY_HELPER" record \
   --wasm-sha256 "$WASM_SHA256" \
   --deployed-at "$DEPLOYED_AT" \
   --identity "$IDENTITY" \
-  --deployer-address "${DEPLOYER_ADDRESS:-unknown}" \
+  --deployer-address "$DEPLOYER_ADDRESS" \
   --env "$ENV_LABEL" \
-  --verified "$VERIFIED" \
-  --verification-detail "$VERIFICATION_DETAIL"
+  --verified="$VERIFIED" \
+  --verification-detail="$VERIFICATION_DETAIL"
 
-if [[ -n "$DEPLOYER_ADDRESS" ]]; then
-  echo ""
-  echo "🔧 Initializing contract..."
-  stellar contract invoke \
-    --id "$CONTRACT_ID" \
-    --source "$IDENTITY" \
-    --network "$NETWORK" \
-    -- initialize \
-    --admin "$DEPLOYER_ADDRESS"
-  echo "   ✅ Initialized with admin: $DEPLOYER_ADDRESS"
-fi
+echo ""
+echo "🔧 Initializing contract..."
+stellar contract invoke \
+  --id "$CONTRACT_ID" \
+  --source "$IDENTITY" \
+  --network "$NETWORK" \
+  -- initialize \
+  --admin "$DEPLOYER_ADDRESS"
+echo "   ✅ Initialized with admin: $DEPLOYER_ADDRESS"
 
 echo ""
 echo "──────────────────────────────────────────"
@@ -228,7 +260,7 @@ echo "  Next: Register your first climate project:"
 echo "  stellar contract invoke --id $CONTRACT_ID \\"
 echo "    --source $IDENTITY --network $NETWORK \\"
 echo "    -- register_project \\"
-echo "    --admin ${DEPLOYER_ADDRESS:-<ADMIN_ADDRESS>} \\"
+echo "    --admin $DEPLOYER_ADDRESS \\"
 echo "    --project_id 'project-001' \\"
 echo "    --name 'Amazon Reforestation' \\"
 echo "    --wallet <PROJECT_WALLET_ADDRESS> \\"
