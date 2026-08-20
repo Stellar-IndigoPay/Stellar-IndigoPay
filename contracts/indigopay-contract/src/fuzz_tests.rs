@@ -17,8 +17,16 @@ mod fuzz {
     use proptest::prelude::*;
     use soroban_sdk::BytesN;
     use soroban_sdk::{
-        testutils::Address as _, token::StellarAssetClient, Address, Env, String as SorobanString,
+        testutils::{Address as _, EnvTestConfig},
+        token::StellarAssetClient,
+        Address, Env, String as SorobanString,
     };
+
+    fn fuzz_env() -> Env {
+        Env::new_with_config(EnvTestConfig {
+            capture_snapshot_at_drop: false,
+        })
+    }
 
     /// Upper bound for a single donation: 1 billion XLM in stroops (10^16).
     /// Chosen so that a single donation is large but a few thousand back-to-back
@@ -40,7 +48,7 @@ mod fuzz {
         SorobanString,
         Address,
     ) {
-        let env = Env::default();
+        let env = fuzz_env();
         env.mock_all_auths();
 
         let cid = env.register_contract(None, IndigoPayContract);
@@ -84,7 +92,7 @@ mod fuzz {
         SorobanString,
         Address,
     ) {
-        let env = Env::default();
+        let env = fuzz_env();
         env.mock_all_auths();
 
         let contract_id = env.register_contract(None, IndigoPayContract);
@@ -293,7 +301,7 @@ mod fuzz {
         /// available to call `deactivate_project`.
         #[test]
         fn prop_usdc_inactive_project(amount in 1i128..=100_000_000i128) {
-            let env = Env::default();
+            let env = fuzz_env();
             env.mock_all_auths();
             let cid = env.register_contract(None, IndigoPayContract);
             let client = IndigoPayContractClient::new(&env, &cid);
@@ -384,7 +392,7 @@ mod fuzz {
         fn prop_donate_token_random_token(
             amount in 1i128..=100_000_000i128,
         ) {
-            let env = Env::default();
+            let env = fuzz_env();
             env.mock_all_auths();
             let cid = env.register_contract(None, IndigoPayContract);
             let client = IndigoPayContractClient::new(&env, &cid);
@@ -439,7 +447,7 @@ mod fuzz {
             duplicate_first in any::<bool>(),
             include_outsider in any::<bool>(),
         ) {
-            let env = Env::default();
+            let env = fuzz_env();
             env.mock_all_auths();
             let contract_id = env.register_contract(None, IndigoPayContract);
             let client = IndigoPayContractClient::new(&env, &contract_id);
@@ -488,7 +496,7 @@ mod fuzz {
 
         #[test]
         fn prop_archive_index_sequential(n in 1u32..=10u32) {
-            let env = Env::default();
+            let env = fuzz_env();
             env.mock_all_auths();
             let cid = env.register_contract(None, IndigoPayContract);
             let client = IndigoPayContractClient::new(&env, &cid);
@@ -568,7 +576,7 @@ mod fuzz {
 
         #[test]
         fn prop_fee_sum_equals_total(fee_amount in 1i128..=1_000_000_000_000i128, s1 in 1u32..=9998u32) {
-            let env = Env::default();
+            let env = fuzz_env();
             let r1 = crate::FeeRecipient {
                 address: Address::generate(&env),
                 share_bps: s1,

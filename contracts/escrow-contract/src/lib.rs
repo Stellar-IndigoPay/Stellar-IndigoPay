@@ -159,6 +159,8 @@ pub enum EscrowError {
     ThresholdExceedsAdminCount = 60,
     AdminTransferInProgress = 61,
     AdminSetUpdateFailed = 62,
+    // Disputing an already-finalized (Completed) job is not allowed.
+    JobAlreadyCompleted = 63,
 }
 
 /// Validate a milestone vector against the invariants that must hold at every

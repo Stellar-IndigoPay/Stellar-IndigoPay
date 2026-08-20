@@ -33,11 +33,17 @@ mod fuzz {
     use crate::{EscrowContract, EscrowContractClient, JobStatus, Milestone};
     use proptest::prelude::*;
     use soroban_sdk::{
-        testutils::{Address as _, Ledger},
+        testutils::{Address as _, EnvTestConfig, Ledger},
         token::StellarAssetClient,
         Address, Env, String as SorobanString, Vec as SorobanVec,
     };
     use std::string::String as StdString;
+
+    fn fuzz_env() -> Env {
+        Env::new_with_config(EnvTestConfig {
+            capture_snapshot_at_drop: false,
+        })
+    }
 
     // ─── Constants ────────────────────────────────────────────────────────────
 
@@ -440,7 +446,7 @@ mod fuzz {
         #[test]
         fn escrow_stateful_fuzz(ops in prop::collection::vec(operation(10, 10), 1..=30)) {
             // ── Setup ────────────────────────────────────────────────────────
-            let env = Env::default();
+            let env = fuzz_env();
             env.mock_all_auths();
 
             let contract_id = env.register_contract(None, EscrowContract);
@@ -708,7 +714,7 @@ mod fuzz {
             initial_pcts in milestone_set(),
             amended_pcts in milestone_set(),
         ) {
-            let env = Env::default();
+            let env = fuzz_env();
             env.mock_all_auths();
 
             let contract_id = env.register_contract(None, EscrowContract);
@@ -788,7 +794,7 @@ mod fuzz {
             admin_indices in admin_index_set(),
             signer_indices in signer_index_list(),
         ) {
-            let env = Env::default();
+            let env = fuzz_env();
 
             let pool: std::vec::Vec<Address> = (0..ADDRESS_POOL_SIZE)
                 .map(|_| Address::generate(&env))
@@ -860,7 +866,7 @@ mod fuzz {
         fn fuzz_milestone_percentage_validation(
             percentages in prop::collection::vec(0..=100u32, 1..=10),
         ) {
-            let env = Env::default();
+            let env = fuzz_env();
             env.mock_all_auths();
 
             let contract_id = env.register_contract(None, EscrowContract);
@@ -932,7 +938,7 @@ mod fuzz {
     /// Explicit edge-case tests for zero percentages and overflow scenarios
     #[test]
     fn test_milestone_percentage_edge_cases() {
-        let env = Env::default();
+        let env = fuzz_env();
         env.mock_all_auths();
 
         let contract_id = env.register_contract(None, EscrowContract);
