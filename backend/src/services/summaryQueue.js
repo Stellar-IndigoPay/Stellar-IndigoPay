@@ -11,6 +11,7 @@ const PgBoss = require("pg-boss");
 const pool = require("../db/pool");
 const logger = require("../logger");
 const { generateProjectSummary } = require("./claude");
+const { sanitizeSummary } = require("../lib/summarySanitize");
 const { logAdminAction } = require("./audit");
 
 const QUEUE = "ai-summary";
@@ -68,6 +69,17 @@ async function start(io) {
       .update(description || "")
       .digest("hex");
 
+    // Final storage-boundary guard: never persist a summary that still
+    // contains markdown/HTML or that sanitizes down to nothing.
+    const summary = sanitizeSummary(summaryResult.summary);
+    if (!summary) {
+      console.error(
+        "[summaryQueue] summary empty after sanitization; skipping store",
+        projectId,
+      );
+      return;
+    }
+
     const updated = await pool.query(
       `UPDATE projects
           SET ai_summary              = $1,
@@ -77,7 +89,7 @@ async function start(io) {
               updated_at              = NOW()
         WHERE id = $4
         RETURNING ai_summary, ai_summary_generated_at, ai_summary_model`,
-      [summaryResult.summary, summaryResult.model, sourceHash, projectId],
+      [summary, summaryResult.model, sourceHash, projectId],
     );
 
     const row = updated.rows[0];

@@ -4,6 +4,7 @@
  */
 import { useState } from "react";
 import clsx from "clsx";
+import { formatDate } from "@/utils/format";
 
 export interface Milestone {
   id: string;
@@ -159,13 +160,11 @@ export default function MilestoneTracker({
 
                   <div className="flex items-center gap-3 mt-2 text-xs text-[#64748B] dark:text-[#94A3B8] font-body">
                     <span>
-                      📅 Target:{" "}
-                      {new Date(milestone.targetDate).toLocaleDateString()}
+                      📅 Target: {formatDate(milestone.targetDate)}
                     </span>
                     {isCompleted && milestone.completedAt && (
                       <span className="text-[#4F46E5] dark:text-[#818CF8]">
-                        ✅ Completed:{" "}
-                        {new Date(milestone.completedAt).toLocaleDateString()}
+                        ✅ Completed: {formatDate(milestone.completedAt)}
                       </span>
                     )}
                   </div>
