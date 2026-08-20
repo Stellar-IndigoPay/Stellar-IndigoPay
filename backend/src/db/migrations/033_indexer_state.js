@@ -11,7 +11,7 @@
 "use strict";
 
 module.exports = {
-  name: "015_indexer_state",
+  name: "033_indexer_state",
 
   async up(client) {
     await client.query(`

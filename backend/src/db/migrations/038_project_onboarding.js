@@ -1,7 +1,7 @@
 "use strict";
 
 module.exports = {
-  name: "021_project_onboarding",
+  name: "038_project_onboarding",
 
   async up(client) {
     await client.query(`

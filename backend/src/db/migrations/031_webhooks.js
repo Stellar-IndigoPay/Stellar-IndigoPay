@@ -1,7 +1,7 @@
 "use strict";
 
 module.exports = {
-  name: "002_webhooks",
+  name: "031_webhooks",
 
   async up(client) {
     await client.query(

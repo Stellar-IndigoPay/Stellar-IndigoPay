@@ -27,7 +27,7 @@
  */
 
 module.exports = {
-  name: "018_retention_columns",
+  name: "035_retention_columns",
 
   async up(client) {
     await client.query(`

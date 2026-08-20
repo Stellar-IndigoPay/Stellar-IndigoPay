@@ -21,7 +21,7 @@
  *   the historical donation trail.
  */
 module.exports = {
-  name: "005_attestations",
+  name: "032_attestations",
 
   async up(client) {
     await client.query(`

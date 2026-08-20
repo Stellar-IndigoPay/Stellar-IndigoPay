@@ -1,7 +1,7 @@
 "use strict";
 
 module.exports = {
-  name: "016_analytics_views",
+  name: "034_analytics_views",
 
   async up(client) {
     // ── Daily donation aggregations ────────────────────────────────────────

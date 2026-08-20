@@ -29,7 +29,7 @@
  */
 
 module.exports = {
-  name: "027_digest_sends",
+  name: "039_digest_sends",
 
   async up(client) {
     await client.query(`

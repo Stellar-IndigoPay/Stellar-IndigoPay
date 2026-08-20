@@ -1,7 +1,7 @@
 "use strict";
 
 /**
- * 028_soroban_event_dedup
+ * 040_soroban_event_dedup
  *
  * Adds durable deduplication for Soroban event processing.
  *
@@ -23,7 +23,7 @@
  */
 
 module.exports = {
-  name: "028_soroban_event_dedup",
+  name: "040_soroban_event_dedup",
 
   async up(client) {
     // ── Processed events table for durable dedup ──────────────────────────────

@@ -1,7 +1,7 @@
 "use strict";
 
 module.exports = {
-  name: "002_add_performance_indexes",
+  name: "030_add_performance_indexes",
 
   async up(client) {
     await client.query(

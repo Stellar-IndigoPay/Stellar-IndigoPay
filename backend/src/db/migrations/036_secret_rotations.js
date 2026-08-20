@@ -12,7 +12,7 @@
  */
 
 module.exports = {
-  name: "018_secret_rotations",
+  name: "036_secret_rotations",
 
   async up(client) {
     await client.query(`
