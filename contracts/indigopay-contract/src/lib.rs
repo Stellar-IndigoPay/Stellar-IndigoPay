@@ -72,6 +72,21 @@ pub enum BadgeTier {
     EarthGuardian, // ≥ 2000 XLM
 }
 // ─── Data structures ──────────────────────────────────────────────────────────
+
+/// Rank-order of a badge tier. `None` is lowest, `EarthGuardian` highest.
+/// Used to decide which Impact NFTs a donor is eligible to mint: any tier
+/// at or below the donor's current badge may be minted (once each).
+#[cfg(feature = "impact")]
+fn badge_rank(badge: &BadgeTier) -> u32 {
+    match badge {
+        BadgeTier::None => 0,
+        BadgeTier::Seedling => 1,
+        BadgeTier::Tree => 2,
+        BadgeTier::Forest => 3,
+        BadgeTier::EarthGuardian => 4,
+    }
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Project {
@@ -939,6 +954,9 @@ pub enum ContractError {
     // ── Donation reversal finalization (132–133) ────────────────────────────
     DonationAlreadyReversed = 132,
     DonationAccountingUnderflow = 133,
+    // ── Donation challenge (134–135) ────────────────────────────────────────
+    ChallengeReasonTooLong = 134,
+    SelfChallengeNotAllowed = 135,
 }
 // 48 hours × 3600 s / 5 s per ledger = 34 560 ledgers. The minimum delay
 // between `propose_upgrade` and the earliest ledger at which
@@ -964,6 +982,12 @@ const REFUND_COOLDOWN_LEDGERS: u32 = 17_280;
 // for high-value donations.
 #[allow(dead_code)]
 const CHALLENGE_WINDOW_LEDGERS: u32 = 17_280;
+
+// Maximum byte length of the `reason` string a challenger may attach to a
+// donation challenge. Bounds the `chg_sub` event payload so a malicious
+// challenger cannot bloat ledger meta with an arbitrarily long string.
+#[cfg(feature = "donation")]
+const MAX_CHALLENGE_REASON_LEN: u32 = 200;
 
 // 72 hours × 3600 s / 5 s per ledger = 51 840 ledgers. The delay between
 // M-of-N initiation and permissionless force-refund execution.
@@ -5724,8 +5748,8 @@ impl IndigoPayContract {
         if stats.badge == BadgeTier::None {
             panic!("No badge tier reached yet");
         }
-        if stats.badge != tier {
-            panic!("Tier does not match donor's current badge");
+        if badge_rank(&tier) > badge_rank(&stats.badge) {
+            panic!("Tier exceeds donor's current badge");
         }
         let key = DataKey::ImpactNFT(donor.clone(), tier.clone());
         if env.storage().instance().has(&key) {
@@ -7568,6 +7592,10 @@ impl IndigoPayContract {
         challenger.require_auth();
         require_not_paused(&env);
 
+        if reason.len() > MAX_CHALLENGE_REASON_LEN {
+            panic_with_error!(env, ContractError::ChallengeReasonTooLong);
+        }
+
         let donor_stats: DonorStats = env
             .storage()
             .instance()
@@ -7587,6 +7615,10 @@ impl IndigoPayContract {
             .instance()
             .get(&DataKey::DonationRecord(donation_index))
             .expect("Donation record not found");
+
+        if challenger == donation.donor {
+            panic_with_error!(env, ContractError::SelfChallengeNotAllowed);
+        }
 
         #[cfg(feature = "refund")]
         if refund_approved(&env, donation_index) {
@@ -8505,6 +8537,64 @@ mod tests {
         assert_eq!(calculate_badge(2000 * STROOP), BadgeTier::EarthGuardian);
         assert_eq!(calculate_badge(100000 * STROOP), BadgeTier::EarthGuardian);
     }
+
+    /// Inject a specific badge tier directly into donor stats, bypassing the
+    /// donation path so `mint_impact_nft` tier progression can be tested in
+    /// isolation.
+    fn set_donor_badge(env: &Env, cid: &soroban_sdk::Address, donor: &Address, badge: BadgeTier) {
+        env.as_contract(cid, || {
+            env.storage().instance().set(
+                &DataKey::DonorStats(donor.clone()),
+                &DonorStats {
+                    total_donated: 0,
+                    donation_count: 0,
+                    badge,
+                    co2_offset_grams: 0,
+                },
+            );
+        });
+    }
+
+    /// A donor who has progressed to a higher badge must still be able to mint
+    /// every previously-earned lower tier, once each (closes #674).
+    #[test]
+    fn test_mint_impact_nft_allows_previously_earned_lower_tiers() {
+        let (env, cid, client, _admin, _pid) = setup();
+        let donor = Address::generate(&env);
+        set_donor_badge(&env, &cid, &donor, BadgeTier::Forest);
+
+        client.mint_impact_nft(&donor, &BadgeTier::Seedling);
+        client.mint_impact_nft(&donor, &BadgeTier::Tree);
+        client.mint_impact_nft(&donor, &BadgeTier::Forest);
+
+        assert!(client.has_nft(&donor, &BadgeTier::Seedling));
+        assert!(client.has_nft(&donor, &BadgeTier::Tree));
+        assert!(client.has_nft(&donor, &BadgeTier::Forest));
+        assert!(!client.has_nft(&donor, &BadgeTier::EarthGuardian));
+    }
+
+    /// Minting a tier above the donor's current badge must still be rejected.
+    #[test]
+    #[should_panic]
+    fn test_mint_impact_nft_rejects_tier_above_current_badge() {
+        let (env, cid, client, _admin, _pid) = setup();
+        let donor = Address::generate(&env);
+        set_donor_badge(&env, &cid, &donor, BadgeTier::Tree);
+
+        client.mint_impact_nft(&donor, &BadgeTier::Forest);
+    }
+
+    /// Each tier may be minted exactly once.
+    #[test]
+    #[should_panic]
+    fn test_mint_impact_nft_rejects_duplicate_tier() {
+        let (env, cid, client, _admin, _pid) = setup();
+        let donor = Address::generate(&env);
+        set_donor_badge(&env, &cid, &donor, BadgeTier::Forest);
+
+        client.mint_impact_nft(&donor, &BadgeTier::Tree);
+        client.mint_impact_nft(&donor, &BadgeTier::Tree);
+    }
     #[test]
     fn test_batch_register_projects() {
         let env = Env::default();
@@ -8703,6 +8793,13 @@ mod tests {
                 },
             );
         });
+    }
+
+    /// Generate an independent badge-holding challenger (Seedling) for tests.
+    fn challenger_with_badge(env: &Env, cid: &soroban_sdk::Address) -> Address {
+        let challenger = Address::generate(env);
+        grant_badge(env, cid, &challenger);
+        challenger
     }
     /// Extend instance TTL before a large ledger jump so storage isn't archived.
     fn extend_ttl(env: &Env, cid: &soroban_sdk::Address) {
@@ -13800,13 +13897,13 @@ mod tests {
 
     #[test]
     fn test_challenge_donation() {
-        let (env, _cid, client, admin, pid) = setup();
-        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+        let (env, cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
 
         let admins = soroban_sdk::vec![&env, admin.clone()];
         client.set_challenge_threshold(&admins, &(10 * STROOP));
 
-        let challenger = donor.clone();
+        let challenger = challenger_with_badge(&env, &cid);
         let reason = String::from_str(&env, "Suspicious activity");
         client.challenge_donation(&challenger, &donation_index, &reason);
 
@@ -13834,26 +13931,28 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_challenge_below_threshold_not_triggered() {
-        let (env, _cid, client, admin, pid) = setup();
-        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+        let (env, cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
 
         let admins = soroban_sdk::vec![&env, admin.clone()];
         client.set_challenge_threshold(&admins, &(500 * STROOP));
 
+        let challenger = challenger_with_badge(&env, &cid);
         let reason = String::from_str(&env, "Flagging low donation");
-        client.challenge_donation(&donor, &donation_index, &reason);
+        client.challenge_donation(&challenger, &donation_index, &reason);
     }
 
     #[test]
     fn test_resolve_challenge_approve() {
-        let (env, _cid, client, admin, pid) = setup();
-        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+        let (env, cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
 
         let admins = soroban_sdk::vec![&env, admin.clone()];
         client.set_challenge_threshold(&admins, &(10 * STROOP));
 
+        let challenger = challenger_with_badge(&env, &cid);
         let reason = String::from_str(&env, "Review requested");
-        client.challenge_donation(&donor, &donation_index, &reason);
+        client.challenge_donation(&challenger, &donation_index, &reason);
 
         client.resolve_challenge(&admin, &donation_index, &true);
 
@@ -13866,7 +13965,7 @@ mod tests {
 
     #[test]
     fn test_resolve_challenge_reject() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (env, cid, client, admin, pid) = setup();
         let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
 
         let project_before = client.get_project(&pid);
@@ -13876,8 +13975,9 @@ mod tests {
         let admins = soroban_sdk::vec![&env, admin.clone()];
         client.set_challenge_threshold(&admins, &(10 * STROOP));
 
+        let challenger = challenger_with_badge(&env, &cid);
         let reason = String::from_str(&env, "Illicit source");
-        client.challenge_donation(&donor, &donation_index, &reason);
+        client.challenge_donation(&challenger, &donation_index, &reason);
 
         client.resolve_challenge(&admin, &donation_index, &false);
 
@@ -13935,8 +14035,8 @@ mod tests {
 
     #[test]
     fn test_challenge_integration() {
-        let (env, _cid, client, admin, pid) = setup();
-        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+        let (env, cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
 
         let admins = soroban_sdk::vec![&env, admin.clone()];
         client.set_challenge_threshold(&admins, &(10 * STROOP));
@@ -13944,8 +14044,9 @@ mod tests {
         assert_eq!(client.get_challenge_threshold(), 10 * STROOP);
         assert!(!client.is_donation_finalized(&donation_index));
 
+        let challenger = challenger_with_badge(&env, &cid);
         let reason = String::from_str(&env, "Audit requested");
-        client.challenge_donation(&donor, &donation_index, &reason);
+        client.challenge_donation(&challenger, &donation_index, &reason);
 
         let challenge = client.get_donation_challenge(&donation_index).unwrap();
         assert!(challenge.challenged);
@@ -13960,12 +14061,13 @@ mod tests {
 
     #[test]
     fn test_challenge_reversal_blocks_refund_without_double_accounting() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (env, cid, client, admin, pid) = setup();
         let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
         let admins = soroban_sdk::vec![&env, admin.clone()];
         client.set_challenge_threshold(&admins, &(10 * STROOP));
+        let challenger = challenger_with_badge(&env, &cid);
         client.challenge_donation(
-            &donor,
+            &challenger,
             &donation_index,
             &String::from_str(&env, "Reverse donation"),
         );
@@ -13999,12 +14101,13 @@ mod tests {
 
     #[test]
     fn test_refund_reversal_blocks_challenge_resolution_without_double_accounting() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (env, cid, client, admin, pid) = setup();
         let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
         let admins = soroban_sdk::vec![&env, admin.clone()];
         client.set_challenge_threshold(&admins, &(10 * STROOP));
+        let challenger = challenger_with_badge(&env, &cid);
         client.challenge_donation(
-            &donor,
+            &challenger,
             &donation_index,
             &String::from_str(&env, "Review before refund"),
         );
@@ -14041,17 +14144,62 @@ mod tests {
 
     #[test]
     fn prop_challenge_only_badge_holders() {
+        let (env, cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        let challenger = challenger_with_badge(&env, &cid);
+        let reason = String::from_str(&env, "Valid challenger");
+        client.challenge_donation(&challenger, &donation_index, &reason);
+
+        let challenge = client.get_donation_challenge(&donation_index).unwrap();
+        assert!(challenge.challenged);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #134)")]
+    fn test_challenge_reason_too_long_panics() {
+        let (env, cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        let challenger = challenger_with_badge(&env, &cid);
+        let long_reason = "x".repeat((MAX_CHALLENGE_REASON_LEN + 1) as usize);
+        let reason = String::from_str(&env, &long_reason);
+        client.challenge_donation(&challenger, &donation_index, &reason);
+    }
+
+    #[test]
+    fn test_challenge_reason_at_max_length_succeeds() {
+        let (env, cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        let challenger = challenger_with_badge(&env, &cid);
+        let reason = String::from_str(&env, &"x".repeat(MAX_CHALLENGE_REASON_LEN as usize));
+        client.challenge_donation(&challenger, &donation_index, &reason);
+
+        let challenge = client.get_donation_challenge(&donation_index).unwrap();
+        assert!(challenge.challenged);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #135)")]
+    fn test_self_challenge_panics() {
         let (env, _cid, client, admin, pid) = setup();
         let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
 
         let admins = soroban_sdk::vec![&env, admin.clone()];
         client.set_challenge_threshold(&admins, &(10 * STROOP));
 
-        let reason = String::from_str(&env, "Valid challenger");
+        let reason = String::from_str(&env, "Self-challenge");
         client.challenge_donation(&donor, &donation_index, &reason);
-
-        let challenge = client.get_donation_challenge(&donation_index).unwrap();
-        assert!(challenge.challenged);
     }
 
     // ─── Stealth Address Donation Integration Tests (#458) ───────────────

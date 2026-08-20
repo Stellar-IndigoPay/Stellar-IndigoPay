@@ -8,13 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **backend:** Serialize migration runs across replicas with a Postgres advisory lock so concurrent boot (k8s HPA min 2) can never apply the same migrations twice (closes #640). Also fixes the migration chain so a fresh database can be bootstrapped end-to-end: `002` drops `CREATE INDEX CONCURRENTLY` (invalid inside the runner's transaction), a new `010_admin_audit_log` migration creates the audit table `011` depends on, `011`'s hash-chain backfill is repaired (uuid/json casts, missing CTE column, `pgcrypto` extension), `021` uses drop-then-add for its CHECK constraint, and `027` guards its example `credits` migration against a missing table. Adds a testcontainers concurrency test proving two concurrent `runMigrations()` calls apply each migration exactly once.
 - **backend:** Enforce match pool caps atomically at match-time using row-level locks, preventing pools from overspending under concurrent load.
 
 ### Added
-- **backend:** make projection rebuild atomic by replaying into staging tables and swapping within a transaction; concurrent reads now observe either the complete previous or complete new state, never empty/partial projections (closes #639)
+
+* **mobile:** add jailbreak/root detection via `expo-device` with a configurable `EXPO_PUBLIC_DEVICE_INTEGRITY_POLICY` (off/warn/block, default block) wired into biometric auth, secure storage, and session unlock so compromised devices trigger the policy (closes #693)
 - **backend/security:** Load guardian and recurring keeper signing seeds from managed secret files, add signer provider tests, and document signer rotation workflow.
 
 * **extension:** audit `chrome.storage` usage, confirm no plaintext wallet secrets are persisted (signing is delegated entirely to Freighter), and add CI secret-scan to enforce this going forward (closes #656)
+* **mobile:** audit auth client and confirm it uses a distinct nonce-based wallet session that is unaffected by the admin JWT `httpOnly` cookie rotation changes (closes #655)
 
 - **backend:** deduplicate push device tokens per user+device with a sliding expiry window (default 180 days) refreshed on register, soft-invalidate on unregister/expiry, and purge expired tokens from push sends (closes #717)
 - **frontend:** announce `DonateForm` validation errors to screen readers via `aria-live="assertive"` region (GrantFox GF-a11y-donate-form)
@@ -61,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **contracts:** prevent challenge and refund flows from reversing the same donation twice; invalid finalization attempts now return structured errors instead of underflowing accounting.
 - **frontend:** pin locale (`en-US`) and timezone (`UTC`) for date/number formatting helpers (`formatDate`, `formatDateTime`, `formatTime`, `formatMonthYear`, `formatNumber`) and replace raw `Intl.*`/`toLocaleString` calls in SSR-rendered components, making server/client output deterministic and eliminating hydration mismatches (closes #652)
 - **contracts/oracle:** align TWAP observation window with staleness threshold invariant — reduce `DEFAULT_STALENESS_THRESHOLD` from 720 to 120 ledger sequences to match `MAX_OBSERVATIONS` capacity; enforce constraint that staleness threshold ≥ MAX_OBSERVATIONS at config time to prevent misconfiguration where operators believe oracle has long-window averaging when actual TWAP coverage is limited to ~20 observations (~100 seconds) (GrantFox GF-oracle-twap-alignment)
+- **contracts:** allow `mint_impact_nft` to mint any previously-earned badge tier at or below the donor's current badge (rank-order comparison), so a donor who progressed to a higher tier can still mint lower-tier Impact NFTs once each (closes #674)
 - **gitops:** ArgoCD Application manifest for chart-driven reconciliation
 
 ### Fixed

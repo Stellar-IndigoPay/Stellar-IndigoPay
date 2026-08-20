@@ -607,9 +607,6 @@ impl EscrowContract {
         if job.client != client {
             panic_with_error!(&env, EscrowError::OnlyClientCanRelease);
         }
-        if job.disputed {
-            panic_with_error!(&env, EscrowError::JobDisputedAdminMustResolve);
-        }
         if milestone_index >= job.milestones.len() {
             panic_with_error!(&env, EscrowError::InvalidMilestoneIndex);
         }
@@ -769,6 +766,11 @@ impl EscrowContract {
     }
 
     /// M-of-N admin (deprecated): Mark a job as disputed, freezing remaining releases.
+    ///
+    /// Delegates to the milestone-level dispute representation for backward
+    /// compatibility: every unreleased milestone is flagged `disputed` so the
+    /// non-deprecated `resolve_milestone_dispute` can also unblock a job
+    /// disputed through this entrypoint (issue #613).
     #[deprecated]
     pub fn dispute_job(env: Env, signers: Vec<Address>, job_id: String) {
         require_admin(&env, &signers);
@@ -778,6 +780,24 @@ impl EscrowContract {
             .instance()
             .get(&DataKey::Job(job_id.clone()))
             .expect("Job not found");
+
+        // Mirror the dispute onto every unreleased milestone so the
+        // milestone-level resolution path can resolve it later.
+        let mut milestones = job.milestones.clone();
+        for i in 0..milestones.len() {
+            let mut milestone = milestones.get(i).unwrap().clone();
+            if !milestone.released {
+                milestone.disputed = true;
+                #[cfg(feature = "oracle-escrow")]
+                {
+                    milestone.verified = false;
+                    milestone.proof_hash = None;
+                }
+            }
+            milestones.set(i, milestone);
+        }
+        job.milestones = milestones;
+
         job.disputed = true;
         job.status = JobStatus::Disputed;
         reputation_job_disputed(&env, &job);
@@ -789,6 +809,9 @@ impl EscrowContract {
     }
 
     /// M-of-N admin (deprecated): Resolve a dispute and release remaining funds.
+    ///
+    /// Works for both dispute entrypoints now that `dispute_milestone` keeps
+    /// `job.disputed` in sync with the milestone-level flags (issue #613).
     #[deprecated]
     pub fn resolve_dispute(
         env: Env,
@@ -878,6 +901,7 @@ impl EscrowContract {
         }
         milestones.set(milestone_index, milestone);
         job.milestones = milestones;
+        job.disputed = true;
         job.status = JobStatus::Disputed;
         reputation_job_disputed(&env, &job);
 
@@ -932,6 +956,7 @@ impl EscrowContract {
 
         let all_released = job.milestones.iter().all(|m| m.released);
         let any_disputed = job.milestones.iter().any(|m| m.disputed);
+        job.disputed = any_disputed;
         job.status = if all_released {
             JobStatus::Completed
         } else if any_disputed {
@@ -1016,9 +1041,6 @@ impl EscrowContract {
 
         if job.freelancer != freelancer {
             panic_with_error!(&env, EscrowError::OnlyJobFreelancerCanClaim);
-        }
-        if job.disputed {
-            panic_with_error!(&env, EscrowError::JobDisputedCannotClaimMilestone);
         }
         if env.ledger().sequence() < job.release_after {
             panic_with_error!(&env, EscrowError::ReleasePeriodNotReached);

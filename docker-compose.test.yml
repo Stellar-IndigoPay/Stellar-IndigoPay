@@ -65,4 +65,4 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: npm test
+    command: sh -c "npm run db:migrate && npm test"

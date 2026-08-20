@@ -28,6 +28,8 @@ interface MockOverrides {
   state?: "hydrating" | "locked" | "unlocked" | "cleared";
   isAuthenticated?: boolean;
   isUnlocking?: boolean;
+  isDeviceCompromised?: boolean;
+  integrityPolicy?: "off" | "warn" | "block";
   unlock?: jest.Mock;
 }
 
@@ -37,6 +39,8 @@ function setAuth(overrides: MockOverrides = {}) {
     state: overrides.state ?? "locked",
     isAuthenticated: overrides.isAuthenticated ?? false,
     isUnlocking: overrides.isUnlocking ?? false,
+    isDeviceCompromised: overrides.isDeviceCompromised ?? false,
+    integrityPolicy: overrides.integrityPolicy ?? "block",
     session: null,
     unlock,
     lock: jest.fn(),
@@ -134,6 +138,58 @@ describe("AuthGate", () => {
     // a user with no stored session (state === 'cleared').
     fireEvent.press(cta);
     expect(unlock).not.toHaveBeenCalled();
+  });
+
+  test("shows a hard-stop message and no unlock button when compromised under block policy", () => {
+    const unlock = setAuth({
+      state: "locked",
+      isDeviceCompromised: true,
+      integrityPolicy: "block",
+    });
+    render(
+      <AuthGate>
+        <Text testID="children-marker">secret content</Text>
+      </AuthGate>,
+    );
+
+    expect(screen.queryByTestId("children-marker")).toBeNull();
+    expect(screen.getByText(/Device not trusted/i)).toBeTruthy();
+    expect(screen.getByText(/rooted or jailbroken/i)).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: /unlock indigopay/i }),
+    ).toBeNull();
+    expect(unlock).not.toHaveBeenCalled();
+  });
+
+  test("shows a caution banner but still allows unlock when compromised under warn policy", () => {
+    const unlock = setAuth({
+      state: "locked",
+      isDeviceCompromised: true,
+      integrityPolicy: "warn",
+    });
+    render(
+      <AuthGate>
+        <Text testID="children-marker">secret content</Text>
+      </AuthGate>,
+    );
+
+    expect(screen.getByText(/Proceed with caution/i)).toBeTruthy();
+    const btn = screen.getByRole("button", { name: /unlock indigopay/i });
+    expect(btn).toBeTruthy();
+    fireEvent.press(btn);
+    expect(unlock).toHaveBeenCalledTimes(1);
+  });
+
+  test("keeps the standard unlock UI when the device is clean under block policy", () => {
+    setAuth({ state: "locked", isDeviceCompromised: false, integrityPolicy: "block" });
+    render(
+      <AuthGate>
+        <Text testID="children-marker">secret content</Text>
+      </AuthGate>,
+    );
+
+    expect(screen.getByText(/Unlock to continue/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /unlock indigopay/i })).toBeTruthy();
   });
 
   test('renders spinner only (no Unlock/Connect button) when state="hydrating"', () => {
