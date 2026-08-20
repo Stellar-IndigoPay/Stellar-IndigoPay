@@ -33,6 +33,8 @@ interface ProjectMapProps {
 
 // ── Component ──────────────────────────────────────────────────────────────────
 
+import "leaflet/dist/leaflet.css";
+
 export default function ProjectMap({ projects }: ProjectMapProps) {
   const [tileError, setTileError] = useState(false);
   const [tileKey, setTileKey] = useState(0);

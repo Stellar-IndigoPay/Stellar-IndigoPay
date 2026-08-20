@@ -12,6 +12,30 @@ const { lintMigrations } = require("../../scripts/validate-migrations");
 
 const MIGRATIONS_DIR = path.join(__dirname, "migrations");
 
+// Names the advisory lock that serialises migration application across all
+// replicas (issue #640). k8s runs multiple backend replicas (HPA min 2), each
+// calling runMigrations() at boot; without the lock they could apply the same
+// migrations concurrently and corrupt the schema. Never change this string
+// once deployed — every replica must derive the same lock key.
+const MIGRATION_LOCK_KEY = "indigopay_schema_migrations";
+
+/**
+ * Deterministic 64-bit FNV-1a hash of MIGRATION_LOCK_KEY, masked to the
+ * signed int8 range `pg_advisory_lock` accepts. Same scheme as the
+ * projection-engine rebuild lock, so replicas coordinate without sharing a
+ * hard-coded magic number.
+ *
+ * @returns {bigint}
+ */
+function migrationLockKey() {
+  let hash = 0xcbf29ce484222325n;
+  for (let i = 0; i < MIGRATION_LOCK_KEY.length; i += 1) {
+    hash ^= BigInt(MIGRATION_LOCK_KEY.charCodeAt(i));
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return hash & 0x7fffffffffffffffn;
+}
+
 async function ensureMigrationsTable(client) {
   await client.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -53,43 +77,54 @@ async function runMigrations({ dryRun = false } = {}) {
 
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
-    await ensureMigrationsTable(client);
+    // Session-level advisory lock: only one replica applies migrations at a
+    // time; the others block here until it finishes (or skip once they see
+    // the versions already applied). Released in `finally` — and
+    // automatically by Postgres if this connection drops — so a crashed
+    // holder can never wedge the others.
+    await client.query("SELECT pg_advisory_lock($1)", [migrationLockKey()]);
+    try {
+      await client.query("BEGIN");
+      await ensureMigrationsTable(client);
 
-    const applied = await getAppliedVersions(client);
-    const files = loadMigrationFiles();
-    let ran = 0;
+      const applied = await getAppliedVersions(client);
+      const files = loadMigrationFiles();
+      let ran = 0;
 
-    for (const { version, file } of files) {
-      if (applied.includes(version)) continue;
-      const migration = require(file);
-      console.log(`[DB] Applying migration: ${version}`);
-      if (dryRun) {
-        console.log(`[DB] Dry-run: ${version} would be applied without committing`);
-      } else {
-        await migration.up(client);
-        await client.query(
-          "INSERT INTO schema_migrations (version, name) VALUES ($1, $2)",
-          [version, migration.name ?? version],
-        );
+      for (const { version, file } of files) {
+        if (applied.includes(version)) continue;
+        const migration = require(file);
+        console.log(`[DB] Applying migration: ${version}`);
+        if (dryRun) {
+          console.log(`[DB] Dry-run: ${version} would be applied without committing`);
+        } else {
+          await migration.up(client);
+          await client.query(
+            "INSERT INTO schema_migrations (version, name) VALUES ($1, $2)",
+            [version, migration.name ?? version],
+          );
+        }
+        ran++;
       }
-      ran++;
-    }
 
-    if (ran === 0) {
-      console.log("[DB] No pending migrations");
-    }
+      if (ran === 0) {
+        console.log("[DB] No pending migrations");
+      }
 
-    if (!dryRun) {
-      await client.query("COMMIT");
-    } else {
-      await client.query("ROLLBACK");
-      console.log("[DB] Dry-run completed; no changes were committed");
+      if (!dryRun) {
+        await client.query("COMMIT");
+      } else {
+        await client.query("ROLLBACK");
+        console.log("[DB] Dry-run completed; no changes were committed");
+      }
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
     }
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
   } finally {
+    await client
+      .query("SELECT pg_advisory_unlock($1)", [migrationLockKey()])
+      .catch(() => {});
     client.release();
   }
 
@@ -108,44 +143,52 @@ async function rollbackMigrations(steps = 1) {
 
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
-    await ensureMigrationsTable(client);
+    // Same advisory lock as runMigrations: a rollback must never race with a
+    // concurrent migration run on another replica.
+    await client.query("SELECT pg_advisory_lock($1)", [migrationLockKey()]);
+    try {
+      await client.query("BEGIN");
+      await ensureMigrationsTable(client);
 
-    const result = await client.query(
-      "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT $1",
-      [steps],
-    );
+      const result = await client.query(
+        "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT $1",
+        [steps],
+      );
 
-    if (result.rows.length === 0) {
-      console.log("[DB] Nothing to roll back");
+      if (result.rows.length === 0) {
+        console.log("[DB] Nothing to roll back");
+        await client.query("COMMIT");
+        return;
+      }
+
+      for (const row of result.rows) {
+        const file = path.join(MIGRATIONS_DIR, `${row.version}.js`);
+        if (!fs.existsSync(file)) {
+          throw new Error(`Migration file not found for rollback: ${file}`);
+        }
+        const migration = require(file);
+        if (typeof migration.down !== "function") {
+          throw new Error(
+            `Migration ${row.version} does not export a down() function`,
+          );
+        }
+        console.log(`[DB] Rolling back migration: ${row.version}`);
+        await migration.down(client);
+        await client.query("DELETE FROM schema_migrations WHERE version = $1", [
+          row.version,
+        ]);
+      }
+
       await client.query("COMMIT");
-      return;
+      console.log(`[DB] Rolled back ${result.rows.length} migration(s)`);
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
     }
-
-    for (const row of result.rows) {
-      const file = path.join(MIGRATIONS_DIR, `${row.version}.js`);
-      if (!fs.existsSync(file)) {
-        throw new Error(`Migration file not found for rollback: ${file}`);
-      }
-      const migration = require(file);
-      if (typeof migration.down !== "function") {
-        throw new Error(
-          `Migration ${row.version} does not export a down() function`,
-        );
-      }
-      console.log(`[DB] Rolling back migration: ${row.version}`);
-      await migration.down(client);
-      await client.query("DELETE FROM schema_migrations WHERE version = $1", [
-        row.version,
-      ]);
-    }
-
-    await client.query("COMMIT");
-    console.log(`[DB] Rolled back ${result.rows.length} migration(s)`);
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
   } finally {
+    await client
+      .query("SELECT pg_advisory_unlock($1)", [migrationLockKey()])
+      .catch(() => {});
     client.release();
   }
 }
@@ -261,4 +304,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { runMigrations, rollbackMigrations };
+module.exports = { runMigrations, rollbackMigrations, migrationLockKey };

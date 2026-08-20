@@ -14,10 +14,33 @@ jest.mock("../middleware/rateLimiter", () => ({
 // this fake keeps the rows instead of replaying a fixed response sequence.
 const mockDb = { refreshTokens: [], blacklist: [] };
 
-function mockQuery(sql, values = []) {
+// When set, the fake holds the next refresh-token INSERT until the gate is
+// resolved. That lets a test fire a second /refresh after the winner's
+// compare-and-swap claim but before its replacement token exists — the same
+// interleaving Postgres would surface under a real concurrent replay.
+let insertGate;
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+async function waitFor(predicate, tries = 100) {
+  for (let i = 0; i < tries; i++) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 1));
+  }
+  throw new Error("waitFor: condition never became true");
+}
+
+async function mockQuery(sql, values = []) {
   const text = String(sql).replace(/\s+/g, " ").trim();
 
   if (text.startsWith("INSERT INTO refresh_tokens")) {
+    if (insertGate) await insertGate.promise;
     const [id, adminId, tokenHash, family, expiresAt] = values;
     mockDb.refreshTokens.push({
       id,
@@ -146,6 +169,7 @@ async function login(app) {
 beforeEach(() => {
   mockDb.refreshTokens.length = 0;
   mockDb.blacklist.length = 0;
+  insertGate = null;
 });
 
 describe("POST /api/admin/login", () => {
@@ -314,6 +338,141 @@ describe("POST /api/admin/refresh", () => {
       .set("Cookie", `refresh_token=${token}`);
 
     expect(res.status).toBe(401);
+  });
+
+  it("does not hand out a new access token or cookie when reuse is detected", async () => {
+    const loginRes = await login(app);
+    const stolenToken = refreshCookieValue(loginRes);
+
+    await request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${stolenToken}`);
+
+    const res = await request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${stolenToken}`);
+
+    expect(res.status).toBe(401);
+    expect(res.body.data?.token).toBeUndefined();
+    // The attacker's cookie must not be quietly replaced with a live one.
+    expect(refreshCookieHeader(res)).toContain("refresh_token=;");
+  });
+
+  it("still detects reuse of a token that was revoked by logout", async () => {
+    const loginRes = await login(app);
+    const refreshToken = refreshCookieValue(loginRes);
+
+    await request(app)
+      .post("/api/admin/logout")
+      .set("Authorization", `Bearer ${loginRes.body.data.token}`)
+      .set("Cookie", `refresh_token=${refreshToken}`);
+
+    const res = await request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${refreshToken}`);
+
+    expect(res.status).toBe(401);
+    // The spent cookie must be classified as reuse, not as a plain
+    // invalid token: the response carries the family-revocation code.
+    expect(res.body.error.code).toBe("TOKEN_REVOKED");
+    expect(mockDb.refreshTokens.every((r) => r.revoked)).toBe(true);
+  });
+
+  it("does not revoke an unrelated family when one family sees reuse", async () => {
+    const firstLogin = await login(app);
+    const secondLogin = await login(app);
+    const firstFamily = mockDb.refreshTokens[0].family;
+
+    const stolenToken = refreshCookieValue(firstLogin);
+    await request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${stolenToken}`);
+    const res = await request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${stolenToken}`);
+
+    expect(res.status).toBe(401);
+    const affected = mockDb.refreshTokens.filter(
+      (r) => r.family === firstFamily,
+    );
+    const untouched = mockDb.refreshTokens.filter(
+      (r) => r.family !== firstFamily,
+    );
+    expect(affected.every((r) => r.revoked)).toBe(true);
+    expect(untouched).toHaveLength(1);
+    expect(untouched[0].revoked).toBe(false);
+    // The second admin keeps working with the token it just got.
+    const stillValid = await request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${refreshCookieValue(secondLogin)}`);
+    expect(stillValid.status).toBe(200);
+  });
+
+  it("kills the replacement token minted just before the old one is replayed", async () => {
+    const loginRes = await login(app);
+    const sharedToken = refreshCookieValue(loginRes);
+
+    // Attacker and victim both hold the same cookie. The victim rotates
+    // first, so the attacker's replay trips the reuse alarm — and the
+    // token the victim just minted must die with the family too.
+    const victimRes = await request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${sharedToken}`);
+    expect(victimRes.status).toBe(200);
+    const victimToken = refreshCookieValue(victimRes);
+
+    const attackerRes = await request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${sharedToken}`);
+    expect(attackerRes.status).toBe(401);
+
+    const afterRace = await request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${victimToken}`);
+    expect(afterRace.status).toBe(401);
+    expect(mockDb.refreshTokens.every((r) => r.revoked)).toBe(true);
+  });
+
+  it("keeps the compare-and-swap honest when two refreshes overlap", async () => {
+    const loginRes = await login(app);
+    const sharedToken = refreshCookieValue(loginRes);
+    const originalRow = () => mockDb.refreshTokens[0];
+
+    // The winner claims the shared token, then stalls before inserting
+    // its replacement; the loser arrives mid-rotation and replays a
+    // token the winner has already spent. Attaching the handlers starts
+    // the request immediately, so the claim lands while we hold the gate.
+    insertGate = deferred();
+    const winner = request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${sharedToken}`)
+      .then(
+        (r) => r,
+        (e) => {
+          throw e;
+        },
+      );
+    await waitFor(() => originalRow().revoked === true);
+
+    try {
+      const loser = await request(app)
+        .post("/api/admin/refresh")
+        .set("Cookie", `refresh_token=${sharedToken}`);
+      expect(loser.status).toBe(401);
+      expect(loser.body.error.code).toBe("TOKEN_REVOKED");
+    } finally {
+      insertGate.resolve();
+    }
+
+    const winnerRes = await winner;
+    expect(winnerRes.status).toBe(200);
+    expect(refreshCookieValue(winnerRes)).not.toBe(sharedToken);
+
+    // The spent token is dead and the family alarm fired; the
+    // replacement row lands only after the alarm, so the fake shows the
+    // documented ordering rather than a second family sweep.
+    expect(originalRow().revoked).toBe(true);
+    expect(mockDb.refreshTokens).toHaveLength(2);
   });
 });
 
