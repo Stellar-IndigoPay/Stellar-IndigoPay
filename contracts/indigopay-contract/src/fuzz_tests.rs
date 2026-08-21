@@ -347,8 +347,8 @@ mod fuzz {
         // ── Receipt commitment uniqueness (#455) ──────────────────────────────
 
         /// Two different donations by the same donor must produce different
-        /// receipt commitments (SHA-256 signatures). Verifies that receipt
-        /// hashes are unique per donation, not per donor.
+        /// receipt commitments (domain-separated SHA-256 commitments).
+        /// Verifies that receipt hashes are unique per donation, not per donor.
         #[test]
         fn prop_receipt_commitment_unique(
             amount_a in 100i128..=MAX_DONATION,
@@ -366,9 +366,9 @@ mod fuzz {
 
             // Different donation indices → different commitments
             prop_assert_ne!(
-                receipt_a.contract_signature,
-                receipt_b.contract_signature,
-                "Different donations must produce unique receipt signatures"
+                receipt_a.receipt_commitment,
+                receipt_b.receipt_commitment,
+                "Different donations must produce unique receipt commitments"
             );
 
             // Both donors should be the same.

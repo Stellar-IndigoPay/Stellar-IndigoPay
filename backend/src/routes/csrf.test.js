@@ -35,6 +35,10 @@ describe("CSRF protection", () => {
     const tokenResponse = await agent.get("/api/v1/csrf-token").expect(200);
     const token = tokenResponse.body.csrfToken;
 
+    // Use an out-of-range rating so the ratings route rejects the payload
+    // with a 400 (validation) instead of a 403 (CSRF). A 400 proves the
+    // valid token let the request through, without depending on a migrated
+    // `project_ratings` table in the test database.
     const res = await agent
       .post("/api/v1/ratings")
       .set("X-CSRF-Token", token)
@@ -42,9 +46,10 @@ describe("CSRF protection", () => {
         projectId: "project-1",
         donorAddress:
           "GA123456789012345678901234567890123456789012345678901234",
-        rating: 5,
+        rating: 9,
       });
 
-    expect(res.status).not.toBe(403);
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
   });
 });

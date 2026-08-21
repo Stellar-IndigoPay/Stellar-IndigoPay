@@ -3,6 +3,14 @@
 const crypto = require("crypto");
 const { Keypair } = require("@stellar/stellar-sdk");
 
+/**
+ * Domain separator shared with the on-chain receipt commitment
+ * (contracts/indigopay-contract/src/lib.rs). Prefixed to receipt content
+ * before hashing so the backend commitment cannot be confused with hashes
+ * of the same fields in other contexts.
+ */
+const RECEIPT_DOMAIN_SEPARATOR = "indigopay-receipt-v1";
+
 function escapePdf(value) {
   return String(value).replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
 }
@@ -26,9 +34,9 @@ function generateReceiptPdf({ donation, project, receiptId, issuedAt, receiptHas
     "Verify on Stellar Expert: https://stellar.expert/explorer/" +
       (process.env.STELLAR_NETWORK === "mainnet" ? "public" : "testnet") +
       "/tx/" + donation.transaction_hash,
-    `Receipt SHA-256: ${receiptHash}`,
+    `Receipt commitment (SHA-256): ${receiptHash}`,
     `Ed25519 signature: ${signature}`,
-    "The transaction proof and signature above allow independent verification.",
+    "The SHA-256 commitment above is a tamper-evident fingerprint of the receipt; the Ed25519 signature authenticates it.",
   ];
   const stream = lines.map((line, i) => `BT /F1 9 Tf 50 ${760 - i * 42} Td (${escapePdf(line)}) Tj ET`).join("\n");
   const objects = [
@@ -54,6 +62,11 @@ function signReceipt(receiptHash) {
     .sign(Buffer.from(receiptHash, "hex")).toString("hex");
 }
 
-function hashReceiptContent(content) { return crypto.createHash("sha256").update(content).digest("hex"); }
+function hashReceiptContent(content) {
+  return crypto
+    .createHash("sha256")
+    .update(RECEIPT_DOMAIN_SEPARATOR + content)
+    .digest("hex");
+}
 
-module.exports = { generateReceiptPdf, signReceipt, hashReceiptContent };
+module.exports = { generateReceiptPdf, signReceipt, hashReceiptContent, RECEIPT_DOMAIN_SEPARATOR };

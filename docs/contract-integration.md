@@ -26,7 +26,7 @@ The Stellar-IndigoPay contract is a **climate donation tracking system** on Stel
 - **Records donations** immutably on-chain with project, donor, and amount
 - **Calculates donor badges** based on cumulative lifetime donations
 - **Tracks CO₂ impact** per donation using project-specific offsets
-- **Generates cryptographically signed receipts** that donors can export for tax purposes
+- **Generates tamper-evident on-chain receipts** (SHA-256 commitment) that donors can export for tax purposes; downloadable PDF receipts are additionally signed by the backend with an Ed25519 key
 - **Enables cross-contract calls** so your contracts can integrate with Stellar-IndigoPay
 
 Your contract can:
@@ -89,11 +89,11 @@ pub struct DonationReceipt {
     pub co2_offset: i128,              // CO₂ offset in grams
     pub ledger: u32,                   // Ledger sequence when donation occurred
     pub currency: Symbol,              // "XLM" or "USDC"
-    pub contract_signature: BytesN<32>,// SHA-256 cryptographic commitment
+    pub receipt_commitment: BytesN<32>,// SHA-256 tamper-evident commitment
 }
 ```
 
-The `contract_signature` is a SHA-256 hash of the deterministic XDR encoding of all other fields. Anyone can verify a receipt by recomputing the hash and comparing it to this value — no full donation history query needed.
+The `receipt_commitment` is a SHA-256 **commitment** (not a signature) over the `indigopay-receipt-v1` domain-separated deterministic XDR encoding of all other fields. Anyone can verify a receipt by recomputing the hash and comparing it to this value — no full donation history query needed. Because every receipt field is public on-chain, the commitment proves the receipt matches the on-chain record but does not authenticate who issued it.
 
 #### **Project**
 
@@ -473,7 +473,7 @@ async function getGlobalStats(): Promise<any> {
 
 ### Overview
 
-Each donation on Stellar-IndigoPay can produce a **cryptographically signed receipt** that the donor can export and use for tax purposes. The receipt includes a SHA-256 commitment to the donation details (amount, project, timestamp, CO₂ offset), verifiable off-chain without querying the full donation history.
+Each donation on Stellar-IndigoPay can produce a **tamper-evident receipt** that the donor can export and use for tax purposes. The on-chain receipt includes a domain-separated SHA-256 **commitment** (`indigopay-receipt-v1` + XDR encoding) to the donation details (amount, project, timestamp, CO₂ offset), verifiable off-chain without querying the full donation history. Note that the commitment is not a cryptographic signature — all receipt fields are public on-chain, so it proves integrity against the on-chain record but not authenticity. Downloadable PDF receipts are separately signed by the backend with an off-chain Ed25519 key (`RECEIPT_SIGNING_KEY`).
 
 ### Receipt Generation
 
@@ -489,7 +489,7 @@ Anyone can verify a receipt against on-chain data. Returns `true` if:
 - The referenced donation index exists on-chain
 - All receipt fields (donor, project_id, amount, ledger, currency) match the on-chain record
 - The CO₂ offset matches the on-chain value
-- The `contract_signature` matches a recomputed SHA-256 hash of the receipt fields
+- The `receipt_commitment` matches a recomputed domain-separated SHA-256 commitment of the receipt fields
 
 Returns `false` for tampered receipts or non-existent donations.
 
@@ -574,7 +574,7 @@ async function verifyReceipt(receipt: any): Promise<boolean> {
 
 // Usage:
 // const receipt = await generateReceipt(donorPublicKey, 0);
-// console.log(`Receipt signature: ${receipt.contract_signature}`);
+// console.log(`Receipt commitment: ${receipt.receipt_commitment}`);
 //
 // const isValid = await verifyReceipt(receipt);
 // console.log(`Receipt valid: ${isValid}`);
@@ -582,7 +582,8 @@ async function verifyReceipt(receipt: any): Promise<boolean> {
 
 ### Off-Chain Verification
 
-The `contract_signature` is a SHA-256 hash of the deterministic **XDR encoding** of the receipt fields
+The `receipt_commitment` is a SHA-256 hash of the `indigopay-receipt-v1` domain separator followed by
+the deterministic **XDR encoding** of the receipt fields
 (`donation_index`, `donor`, `project_id`, `amount`, `co2_offset`, `ledger`, `currency`).
 Because the contract uses `soroban_sdk::xdr::ToXdr` to serialize the struct before hashing (see
 `ReceiptFields` in the contract source), the same hash can in principle be recomputed off-chain
@@ -599,8 +600,9 @@ If you do need true off-chain verification (e.g. in an air-gapped environment), 
    `soroban_sdk::xdr::ToXdr` — refer to the `ReceiptFields` struct in
    `contracts/indigopay-contract/src/lib.rs`. The encoding is **not** JSON; it is the
    binary XDR format used by the Stellar network.
-2. Compute SHA-256 of the resulting bytes.
-3. Compare with `receipt.contract_signature`.
+2. Prepend the `indigopay-receipt-v1` domain separator (ASCII bytes) to the serialized bytes.
+3. Compute SHA-256 of the resulting bytes.
+4. Compare with `receipt.receipt_commitment`.
 
 ### Receipt Event
 
@@ -1264,7 +1266,7 @@ test("Generate and verify donation receipt", async () => {
   const receipt = await generateReceipt(donorPublicKey, 0);
   expect(receipt.donation_index).toBe(0);
   expect(receipt.amount).toBeGreaterThan(0);
-  expect(receipt.contract_signature).toBeDefined();
+  expect(receipt.receipt_commitment).toBeDefined();
 
   // Verify the receipt
   const isValid = await verifyReceipt(receipt);
