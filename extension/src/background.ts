@@ -42,13 +42,13 @@ chrome.runtime.onInstalled.addListener(() => {
   runStorageIntegrityCheck();
 });
 
-// Also run on every service worker wake-up (not just install/update), so a
-// namespace corrupted mid-session gets caught and recovered promptly.
-if (chrome.runtime.onStartup) {
-  chrome.runtime.onStartup.addListener(() => {
-    runStorageIntegrityCheck();
-  });
-}
+// Run on every service worker wake-up, not just install/update, so a
+// namespace corrupted mid-session gets caught and recovered promptly. MV3
+// re-executes this module's top-level code each time a suspended worker is
+// revived, so a plain top-level call (rather than gating on
+// `chrome.runtime.onStartup`, which only fires once per browser profile
+// launch and would miss every other wake) is what actually achieves that.
+runStorageIntegrityCheck();
 
 /**
  * Validate/migrate/quarantine the versioned storage namespaces (see

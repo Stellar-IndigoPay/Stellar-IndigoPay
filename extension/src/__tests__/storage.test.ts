@@ -158,15 +158,28 @@ describe("runMigrations", () => {
 
 describe("quota enforcement", () => {
   test("settings write hard-fails when it would exceed the settings budget", async () => {
-    const huge = "x".repeat(NAMESPACE_QUOTA_BYTES.settings + 1);
+    // Seed an already-migrated baseline so this test exercises only quota
+    // enforcement, not the (separately covered) migrate-before-write path
+    // that `writeNamespace` runs for a namespace still behind
+    // CURRENT_SCHEMA_VERSION.
+    await writeNamespace("settings", (current) => ({
+      ...current,
+      backendUrl: "https://ok.example.com",
+    }));
 
+    const huge = "x".repeat(NAMESPACE_QUOTA_BYTES.settings + 1);
     await expect(
       writeNamespace("settings", (current) => ({ ...current, huge })),
     ).rejects.toThrow(StorageQuotaExceededError);
 
-    // Nothing was written — the namespace key should still be absent.
+    // The over-budget write was rejected — prior good data is untouched.
     const key = namespaceKey("settings");
-    expect(store[key]).toBeUndefined();
+    const record = store[key] as StorageRecord;
+    expect(record.data).toEqual({
+      backendUrl: "https://ok.example.com",
+      theme: "system",
+      notificationsEnabled: true,
+    });
   });
 
   test("StorageQuotaExceededError produces a user-facing message via describeStorageError", async () => {
@@ -346,10 +359,12 @@ describe("runStartupIntegrityCheck", () => {
     expect(backupKeys).toHaveLength(1);
     expect(store[backupKeys[0]]).toEqual({ garbage: true });
 
-    // The live namespace was reset to a known-good default.
+    // The live namespace was reset to a known-good default and run back
+    // through the migration chain, so it regains migrated defaults (v2's
+    // `theme`, v3's `notificationsEnabled`) instead of a bare `{}`.
     const resetRecord = store[settingsKey] as StorageRecord;
     expect(resetRecord.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
-    expect(resetRecord.data).toEqual({});
+    expect(resetRecord.data).toEqual({ theme: "system", notificationsEnabled: true });
   });
 
   test("quarantines a namespace whose checksum was tampered with", async () => {
@@ -366,7 +381,8 @@ describe("runStartupIntegrityCheck", () => {
     expect(settingsReport.detail).toMatch(/checksum/i);
 
     const recovered = await getStorageSettings();
-    expect(recovered).toEqual({}); // reset to defaults, tampered data discarded (but backed up)
+    // Reset to migrated defaults, tampered data discarded (but backed up).
+    expect(recovered).toEqual({ theme: "system", notificationsEnabled: true });
   });
 
   test("logs a warning to the console when quarantining", async () => {
@@ -382,12 +398,13 @@ describe("runStartupIntegrityCheck", () => {
   });
 
   test("migrates a namespace stuck at an old schema version instead of quarantining it", async () => {
-    store[namespaceKey("settings")] = {
-      schemaVersion: 1,
-      writeVersion: 0,
-      updatedAt: Date.now(),
-      data: { backendUrl: "https://existing.example.com" },
-    } as StorageRecord;
+    // Write real data first (which stamps a valid checksum for it — now
+    // required on `settings`, see the checksum-enforcement test below),
+    // then roll schemaVersion back down to simulate an old-but-not-corrupt
+    // record without also having to fake a matching checksum by hand.
+    await updateStorageSettings({ backendUrl: "https://existing.example.com" });
+    const written = store[namespaceKey("settings")] as StorageRecord;
+    store[namespaceKey("settings")] = { ...written, schemaVersion: 1 };
 
     const reports = await runStartupIntegrityCheck();
     const settingsReport = reports.find((r) => r.namespace === "settings")!;
@@ -433,5 +450,111 @@ describe("settings namespace helpers", () => {
     const record = await writeNamespace("settings", (c) => c); // read current via a no-op write
     expect(record.data).toMatchObject({ backendUrl: "https://a.example.com" });
     expect(record.checksum).toEqual(expect.any(String));
+  });
+});
+
+// ── CodeRabbit fixes (PR #977) regression tests ───────────────────────
+
+describe("writeNamespace runs pending migrations before stamping a schema version", () => {
+  test("a write against a namespace still behind CURRENT_SCHEMA_VERSION actually migrates the data, not just the version number", async () => {
+    // Seed a legitimate v1 settings record (valid checksum for its data) —
+    // simulating a namespace that was written before v2/v3 introduced new
+    // fields and never went through runStartupIntegrityCheck. Before this
+    // fix, writeNamespace stamped CURRENT_SCHEMA_VERSION directly onto
+    // whatever `updater` produced, permanently hiding the pending
+    // migrations from every future check.
+    await updateStorageSettings({ backendUrl: "https://existing.example.com" });
+    const written = store[namespaceKey("settings")] as StorageRecord;
+    store[namespaceKey("settings")] = { ...written, schemaVersion: 1 };
+
+    const result = await writeNamespace("settings", (current) => ({
+      ...current,
+      backendUrl: "https://updated.example.com",
+    }));
+
+    expect(result.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
+    // The migrated-in defaults (v2 theme, v3 notificationsEnabled) are
+    // present, proving the migration chain actually ran rather than the
+    // version number being forced.
+    expect(result.data).toMatchObject({
+      backendUrl: "https://updated.example.com",
+      theme: "system",
+      notificationsEnabled: true,
+    });
+  });
+});
+
+describe("runMigrations bumps writeVersion on every persisted step", () => {
+  test("writeVersion advances by the number of migration steps applied", async () => {
+    const migrations = [
+      { version: 1, migrate: (data: any) => ({ ...data, a: 1 }) },
+      { version: 2, migrate: (data: any) => ({ ...data, b: 2 }) },
+      { version: 3, migrate: (data: any) => ({ ...data, c: 3 }) },
+    ];
+    const record = await runMigrations("settings", migrations);
+    // Regression: runMigrations previously left writeVersion unchanged,
+    // so writeNamespace's concurrent-write guard (which compares
+    // writeVersion) couldn't detect that a migration had landed in the
+    // meantime and could overwrite migrated data with pre-migration data.
+    expect(record.writeVersion).toBe(3);
+  });
+});
+
+describe("getCacheEntry refreshes lastAccessed (true LRU, not FIFO, eviction)", () => {
+  test("reading an older entry protects it from eviction over a newer, unread one", async () => {
+    const entrySize = Math.floor(NAMESPACE_QUOTA_BYTES.cache / 3) + 1000; // 2 fit; adding a 3rd overflows
+
+    await writeNamespace("cache", () => ({
+      old: { value: "a", size: entrySize, lastAccessed: 1000 } as CacheEntry,
+    }));
+    await writeNamespace("cache", (current) => ({
+      ...current,
+      newer: { value: "b", size: entrySize, lastAccessed: 2000 } as CacheEntry,
+    }));
+
+    // Read "old" — without the fix, this has no effect on lastAccessed and
+    // eviction stays ordered by last *write*.
+    await getCacheEntry("old");
+    // Flush the fire-and-forget lastAccessed touch triggered by the read
+    // above (a background writeNamespace call) before the next write reads
+    // the cache namespace.
+    const cacheKey = namespaceKey("cache");
+    for (
+      let i = 0;
+      i < 50 && (store[cacheKey] as StorageRecord<any>).data.old.lastAccessed === 1000;
+      i++
+    ) {
+      await Promise.resolve();
+    }
+
+    const record = await writeNamespace("cache", (current) => ({
+      ...current,
+      third: { value: "c", size: entrySize, lastAccessed: 3000 } as CacheEntry,
+    }));
+
+    // "newer" was written more recently but never read — it should be
+    // evicted instead of "old", which was just accessed.
+    expect(record.data.old).toBeDefined();
+    expect(record.data.newer).toBeUndefined();
+  });
+});
+
+describe("checkAndRecoverNamespace requires a checksum on settings", () => {
+  test("a settings record with no checksum field at all is quarantined, not silently accepted", async () => {
+    // Unlike the "stuck at an old schema version" case (which has a valid
+    // checksum for its data), this record has no checksum field
+    // whatsoever — e.g. one written by code that bypassed writeNamespace.
+    // Before this fix, `typeof record.checksum === "string"` being false
+    // skipped verification entirely and reported this record "ok".
+    store[namespaceKey("settings")] = {
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      writeVersion: 0,
+      updatedAt: Date.now(),
+      data: { backendUrl: "https://existing.example.com" },
+    } as StorageRecord;
+
+    const reports = await runStartupIntegrityCheck();
+    const settingsReport = reports.find((r) => r.namespace === "settings")!;
+    expect(settingsReport.status).toBe("quarantined");
   });
 });

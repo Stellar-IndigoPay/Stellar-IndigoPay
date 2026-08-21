@@ -320,6 +320,7 @@ export async function runMigrations<K extends StorageNamespace>(
     record = {
       ...record,
       schemaVersion: step.version,
+      writeVersion: record.writeVersion + 1,
       data: migratedData,
       updatedAt: Date.now(),
       checksum: namespace === "settings" ? computeChecksum(migratedData) : undefined,
@@ -393,13 +394,21 @@ export async function writeNamespace<K extends StorageNamespace>(
   const maxRetries = options.maxRetries ?? 3;
 
   let baseline = await readRawRecord(namespace);
+  // A namespace whose data never passed through the migration chain must
+  // not have CURRENT_SCHEMA_VERSION stamped onto it here — that would
+  // report it as already migrated and permanently skip the pending steps
+  // (see `checkAndRecoverNamespace`). Run migrations first so `baseline`
+  // (and therefore the version this write stamps) is genuinely current.
+  if (baseline.schemaVersion < CURRENT_SCHEMA_VERSION) {
+    baseline = await runMigrations(namespace);
+  }
   let attempt = 0;
 
   for (;;) {
     const candidateData = enforceQuota(namespace, updater(baseline.data));
 
     const candidateRecord: StorageRecord<NamespaceDataMap[K]> = {
-      schemaVersion: Math.max(baseline.schemaVersion, CURRENT_SCHEMA_VERSION),
+      schemaVersion: baseline.schemaVersion,
       writeVersion: baseline.writeVersion + 1,
       updatedAt: Date.now(),
       checksum: namespace === "settings" ? computeChecksum(candidateData) : undefined,
@@ -414,7 +423,8 @@ export async function writeNamespace<K extends StorageNamespace>(
       if (attempt > maxRetries) {
         throw new StorageWriteConflictError(namespace, attempt - 1);
       }
-      baseline = latest;
+      baseline =
+        latest.schemaVersion < CURRENT_SCHEMA_VERSION ? await runMigrations(namespace) : latest;
       continue;
     }
 
@@ -461,7 +471,14 @@ export async function setCacheEntry(key: string, value: unknown): Promise<boolea
 
 export async function getCacheEntry(key: string): Promise<unknown | undefined> {
   const record = await readRawRecord("cache");
-  return record.data[key]?.value;
+  const entry = record.data[key];
+  if (!entry) return undefined;
+  // Best-effort LRU touch so evictLruUntilFits actually orders by last
+  // access rather than last write; a failed refresh must not fail the read.
+  void writeNamespace("cache", (current) =>
+    current[key] ? { ...current, [key]: { ...current[key], lastAccessed: Date.now() } } : current,
+  ).catch(() => {});
+  return entry.value;
 }
 
 export async function enqueuePendingOp(
@@ -511,14 +528,20 @@ async function quarantineNamespace(
 
   const key = namespaceKey(namespace);
   const data = defaultDataFor(namespace);
+  // Reset at schemaVersion 0 and run the reset data through the migration
+  // chain (rather than stamping CURRENT_SCHEMA_VERSION directly) so a
+  // quarantined `settings` namespace regains its migrated defaults (e.g.
+  // v2's `theme`, v3's `notificationsEnabled`) instead of resetting to a
+  // bare `{}`.
   const fresh: StorageRecord = {
-    schemaVersion: CURRENT_SCHEMA_VERSION,
+    schemaVersion: 0,
     writeVersion: 0,
     updatedAt: Date.now(),
-    checksum: namespace === "settings" ? computeChecksum(data) : undefined,
+    checksum: undefined,
     data,
   };
   await storageSet({ [key]: fresh });
+  await runMigrations(namespace);
 }
 
 function logIntegrityReport(report: IntegrityReport): void {
@@ -561,14 +584,23 @@ async function checkAndRecoverNamespace(
   }
 
   const record = raw as StorageRecord;
-  if (typeof record.checksum === "string") {
+  // `settings` is the namespace the design protects with a checksum (see
+  // the module doc comment), so a record missing that field there is
+  // itself an integrity failure, not just a mismatch to check for when
+  // present — otherwise dropping the field would silently defeat the
+  // stamp.
+  const requiresChecksum = namespace === "settings";
+  if (requiresChecksum || typeof record.checksum === "string") {
     const expected = computeChecksum(record.data);
     if (expected !== record.checksum) {
       await quarantineNamespace(namespace, raw);
       return {
         namespace,
         status: "quarantined",
-        detail: "Checksum mismatch — data was tampered with or partially written.",
+        detail:
+          typeof record.checksum === "string"
+            ? "Checksum mismatch — data was tampered with or partially written."
+            : "Checksum missing on a checksum-protected namespace.",
       };
     }
   }
