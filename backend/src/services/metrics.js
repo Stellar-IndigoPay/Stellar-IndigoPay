@@ -512,6 +512,29 @@ function updateSecretRotationMetrics(status) {
   }
 }
 
+// Bulk-operation ledger metrics (backend/src/services/bulkOps.js).
+const bulkOpRowOutcomesTotal = new client.Counter({
+  name: "bulk_op_row_outcomes_total",
+  help: "Count of per-row outcomes recorded by confirmed bulk operations, labelled by op type and outcome.",
+  labelNames: ["type", "outcome"],
+  registers: [registry],
+});
+
+const bulkOpsTotal = new client.Counter({
+  name: "bulk_ops_total",
+  help: "Count of bulk operations reaching a final status, labelled by op type and status.",
+  labelNames: ["type", "status"],
+  registers: [registry],
+});
+
+const bulkOpDurationSeconds = new client.Histogram({
+  name: "bulk_op_duration_seconds",
+  help: "Duration of a bulk operation from confirm to finish, labelled by op type.",
+  labelNames: ["type"],
+  buckets: [0.1, 0.5, 1, 5, 10, 30, 60, 300, 900],
+  registers: [registry],
+});
+
 const metrics = {
   httpRequestsTotal,
   httpRequestDurationSeconds,
@@ -554,6 +577,9 @@ const metrics = {
   projectionRebuildDurationSeconds,
   projectionRebuildLastEvents,
   projectionRebuildInProgress,
+  bulkOpRowOutcomesTotal,
+  bulkOpsTotal,
+  bulkOpDurationSeconds,
 };
 
 module.exports = {
@@ -566,4 +592,7 @@ module.exports = {
   refreshDbPoolMetrics,
   refreshQueueMetrics,
   updateSecretRotationMetrics,
+  bulkOpRowOutcomesTotal,
+  bulkOpsTotal,
+  bulkOpDurationSeconds,
 };
