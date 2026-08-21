@@ -46,7 +46,6 @@ const HORIZON_URL =
 
 const PRESET_AMOUNTS = ["5", "10", "25"];
 const MIN_AMOUNT_XLM = 1;
-const DONATE_PROMPT = "Authenticate to send your donation";
 
 interface ClimateProject {
   id: string;
@@ -284,7 +283,7 @@ export default function DonateScreen() {
           setStatusMessage(
             "Donation queued! It will be submitted when connectivity is restored.",
           );
-        } catch (queueErr) {
+        } catch {
           setStatusType("error");
           setStatusMessage(
             error?.response?.data?.message ||

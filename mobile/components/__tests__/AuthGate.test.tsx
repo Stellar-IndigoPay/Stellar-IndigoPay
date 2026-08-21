@@ -11,8 +11,8 @@
  *   - tapping Unlock calls useAuth().unlock()
  *   - custom prompt copy overrides the defaults
  */
-import React, { type ReactNode } from "react";
-import { Text, Pressable, View } from "react-native";
+import React from "react";
+import { Text } from "react-native";
 import { render, screen, fireEvent } from "@testing-library/react-native";
 
 jest.mock("../../providers/AuthProvider", () => ({

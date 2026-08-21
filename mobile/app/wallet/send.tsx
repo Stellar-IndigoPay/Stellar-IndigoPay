@@ -14,7 +14,6 @@ import {
   ActivityIndicator,
   ScrollView,
 } from "react-native";
-import { useRouter } from "expo-router";
 import { useAuth } from "../../providers/AuthProvider";
 import { useTheme } from "../theme";
 import { useBiometricAuth } from "../../hooks/useBiometricAuth";
@@ -22,7 +21,6 @@ import { loadSecretKey, buildPaymentTransaction, signTransaction, submitTransact
 
 export default function SendScreen() {
   const { colors } = useTheme();
-  const router = useRouter();
   const { session, isAuthenticated } = useAuth();
   const bio = useBiometricAuth();
 
@@ -83,7 +81,7 @@ export default function SendScreen() {
         memo: memo.trim() || undefined,
       });
 
-      const { signedXDR, transactionHash } = signTransaction(xdr, secretKey);
+      const { signedXDR } = signTransaction(xdr, secretKey);
       const result = await submitTransaction(signedXDR);
 
       setStatus({

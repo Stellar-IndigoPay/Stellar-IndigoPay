@@ -17,7 +17,6 @@
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { useConnectivity } from "../lib/connectivity";
-import { useTheme } from "../app/theme";
 
 export type SyncStatus = "synced" | "syncing" | "offline" | "stale" | "unknown";
 

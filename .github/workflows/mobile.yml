@@ -3,11 +3,136 @@ name: Mobile Preview Build
 on:
   push:
     branches: [main, develop]
+  pull_request:
+    paths:
+      - "mobile/**"
 
 jobs:
+  mobile-lint:
+    name: Mobile Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: mobile/package-lock.json
+      # --legacy-peer-deps: expo-router ~3.5 pulls @react-navigation/native-stack
+      # ^7.x, whose peer range wants @react-navigation/native ^7 while the app
+      # pins ^6.1.9. `npm ci` is still strict about package-lock.json matching
+      # package.json (that's the frozen-install/lockfile-drift guarantee this
+      # flag does NOT relax) — it only tolerates the peer conflict above.
+      - run: npm ci --legacy-peer-deps
+      - name: Lint (zero-warning policy)
+        run: npm run lint
+
+  mobile-typecheck:
+    name: Mobile TypeScript
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: mobile/package-lock.json
+      - run: npm ci --legacy-peer-deps
+      - name: tsc --noEmit
+        run: npm run typecheck
+
+  mobile-test:
+    name: Mobile Tests + Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: mobile/package-lock.json
+      - run: npm ci --legacy-peer-deps
+
+      # Self-test of the "no silent skip" guard (#926): jest without
+      # --passWithNoTests already exits non-zero when zero test files are
+      # collected — this proves that guard is actually wired up and hasn't
+      # regressed, rather than just trusting the flag stays absent.
+      - name: Verify zero-test-run guard fails closed
+        run: |
+          if npx jest --ci --testPathPattern="__zero_tests_guard_fixture__" > /tmp/zero-test.log 2>&1; then
+            echo "::error::jest exited 0 with zero tests collected — the no-silent-skip guard is broken"
+            cat /tmp/zero-test.log
+            exit 1
+          fi
+          echo "OK: jest fails closed when zero tests are collected."
+
+      # Self-test of the coverage-threshold guard: override the real
+      # thresholds with a deliberately unmeetable one and confirm jest still
+      # fails the build, so a regression in threshold enforcement itself
+      # (e.g. a jest/config upgrade that silently stops checking) is caught.
+      - name: Verify coverage-threshold guard fails closed
+        run: |
+          if npx jest --ci --runInBand --coverage \
+            --collectCoverageFrom="utils/coverage-helpers.ts" \
+            --testPathPattern="coverage-helpers" \
+            --coverageThreshold='{"global":{"statements":100.1,"branches":100,"functions":100,"lines":100}}' \
+            > /tmp/threshold.log 2>&1; then
+            echo "::error::jest exited 0 despite an unmeetable coverage threshold — the coverage gate is broken"
+            cat /tmp/threshold.log
+            exit 1
+          fi
+          echo "OK: jest fails closed when coverage drops below threshold."
+
+      # single jest run (--runInBand, no shards) — avoids the resource-
+      # contention flakiness that parallel workers can hit in CI.
+      - name: Run tests with coverage
+        run: npm test
+
+  mobile-audit:
+    name: Mobile Dependency Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: mobile/package-lock.json
+      - run: npm ci --legacy-peer-deps
+      # Hard gate: fail on critical advisories only. The Expo/Metro/
+      # react-native-cli toolchain currently carries ~30 pre-existing high
+      # advisories, all fixable only via `npm audit fix --force` (a breaking
+      # Expo SDK 53 / expo-sharing 14 bump) — out of scope for CI hardening
+      # (#926) and tracked separately. Blocking merges on that backlog today
+      # would make this gate something people route around, not respect.
+      - name: npm audit (critical)
+        run: npm audit --audit-level=critical
+      # Non-blocking: surface the high-severity backlog count in the log so
+      # it stays visible without failing the build.
+      - name: npm audit (high, informational)
+        if: always()
+        run: npm audit --audit-level=high || true
+
   ci-pass:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    needs: [mobile-lint, mobile-typecheck, mobile-test, mobile-audit]
     steps:
       - run: exit 0
 
@@ -27,7 +152,7 @@ jobs:
           node-version: "22"
           cache: "npm"
           cache-dependency-path: mobile/package-lock.json
-      - run: npm ci
+      - run: npm ci --legacy-peer-deps
       - uses: expo/expo-github-action@v8
         with:
           eas-version: latest

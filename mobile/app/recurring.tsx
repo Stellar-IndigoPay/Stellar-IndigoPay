@@ -13,7 +13,7 @@ import {
   Alert,
   ActivityIndicator,
 } from "react-native";
-import { useEffect, useState, useCallback } from "react";
+import { useState, useCallback } from "react";
 import { useFocusEffect } from "expo-router";
 import {
   loadRecurringDonations,

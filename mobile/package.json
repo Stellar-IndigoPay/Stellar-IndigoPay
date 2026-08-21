@@ -6,7 +6,9 @@
     "start": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",
-    "test": "jest --passWithNoTests"
+    "test": "jest --ci --runInBand --coverage",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint . --ext .ts,.tsx --max-warnings=0"
   },
   "dependencies": {
     "expo-clipboard": "~6.0.0",
@@ -44,8 +46,11 @@
     "typescript": "~5.3.3",
     "@testing-library/jest-native": "^5.4.3",
     "@testing-library/react-native": "^12.9.0",
+    "@typescript-eslint/eslint-plugin": "^8.64.0",
+    "@typescript-eslint/parser": "^8.64.0",
     "babel-plugin-jest-hoist": "^29.6.3",
     "babel-preset-expo": "~13.0.0",
+    "eslint": "^8.57.1",
     "jest": "^29.7.0",
     "jest-expo": "~57.0.0",
     "react-test-renderer": "^18.2.0"
@@ -56,14 +61,50 @@
       "@testing-library/jest-native/extend-expect"
     ],
     "collectCoverageFrom": [
-      "utils/coverage-helpers.ts"
+      "lib/**/*.{ts,tsx}",
+      "hooks/**/*.{ts,tsx}",
+      "components/**/*.{ts,tsx}",
+      "utils/**/*.{ts,tsx}",
+      "providers/**/*.{ts,tsx}",
+      "!**/__tests__/**",
+      "!**/__mocks__/**"
     ],
     "coverageThreshold": {
       "global": {
-        "statements": 99.5,
-        "branches": 99.5,
-        "functions": 99.5,
-        "lines": 99.5
+        "statements": 56,
+        "branches": 58,
+        "functions": 61,
+        "lines": 57
+      },
+      "./lib/": {
+        "statements": 26,
+        "branches": 33,
+        "functions": 30,
+        "lines": 27
+      },
+      "./hooks/": {
+        "statements": 83,
+        "branches": 69,
+        "functions": 99,
+        "lines": 86
+      },
+      "./components/": {
+        "statements": 67,
+        "branches": 61,
+        "functions": 78,
+        "lines": 67
+      },
+      "./utils/": {
+        "statements": 72,
+        "branches": 70,
+        "functions": 72,
+        "lines": 73
+      },
+      "./providers/": {
+        "statements": 80,
+        "branches": 63,
+        "functions": 77,
+        "lines": 89
       }
     },
     "transformIgnorePatterns": [

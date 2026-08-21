@@ -24,7 +24,7 @@ type Step = "intro" | "generating" | "show_mnemonic" | "confirming";
 export default function CreateWalletScreen() {
   const { colors } = useTheme();
   const router = useRouter();
-  const { storeSession, isAuthenticated } = useAuth();
+  const { storeSession } = useAuth();
 
   const [step, setStep] = useState<Step>("intro");
   const [wallet, setWallet] = useState<ReturnType<typeof generateWallet> | null>(null);

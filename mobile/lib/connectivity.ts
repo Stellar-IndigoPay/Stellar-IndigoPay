@@ -19,7 +19,7 @@
  *   const { isOnline } = await getConnectivity();
  *   const unsub = onConnectivityChange(({ isOnline }) => { ... });
  */
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import NetInfo, {
   NetInfoState,
   NetInfoSubscription,

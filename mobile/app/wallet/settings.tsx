@@ -58,7 +58,7 @@ export default function WalletSettingsScreen() {
               await deleteSecretKey();
               await clear();
               router.replace("/onboarding/create" as `${string}`);
-            } catch (err) {
+            } catch {
               Alert.alert("Error", "Failed to delete wallet. Please try again.");
             } finally {
               setDeleting(false);

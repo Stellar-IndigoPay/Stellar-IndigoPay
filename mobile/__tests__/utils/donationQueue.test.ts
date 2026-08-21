@@ -199,7 +199,6 @@ describe("markSubmitted", () => {
 describe("markFailed", () => {
   test("increments attempts and schedules next retry with backoff", async () => {
     const d = await enqueueDonation(mockDonation);
-    const before = d.nextRetryAt;
 
     await markFailed(d.id, "Network timeout");
 
@@ -271,7 +270,7 @@ describe("clearQueue", () => {
 
 describe("getQueueSummary", () => {
   test("returns correct counts for each status", async () => {
-    const d1 = await enqueueDonation(mockDonation);
+    await enqueueDonation(mockDonation);
     const d2 = await enqueueDonation({ ...mockDonation, projectName: "S" });
     const d3 = await enqueueDonation({ ...mockDonation, projectName: "T" });
     await markSubmitted(d2.id, "tx");

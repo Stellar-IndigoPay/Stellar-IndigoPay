@@ -121,7 +121,7 @@ export function useBiometricAuth() {
         cancelLabel: 'Cancel donation',
       });
       return { success: result.success, error: (result as any).error || undefined };
-    } catch (err) {
+    } catch {
       return { success: false, error: 'Biometric authentication failed' };
     } finally {
       setIsAuthenticating(false);
