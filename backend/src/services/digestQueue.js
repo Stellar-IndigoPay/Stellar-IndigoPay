@@ -5,6 +5,7 @@ const pool = require("../db/pool");
 const logger = require("../logger");
 const { buildDigests } = require("./digestBuilder");
 const { sendDigestEmail } = require("./email");
+const { contextFromJob, injectTraceMetadata, withSpan } = require("../telemetry");
 
 const APP_URL = process.env.APP_URL || "http://localhost:3000";
 const DEFAULT_CRONS = {
@@ -234,9 +235,9 @@ async function start() {
     await boss.work(
       queueName,
       { teamSize: 1, teamConcurrency: 1 },
-      async () => {
+      async ([job]) => {
         try {
-          await runDigest(type);
+          await withSpan("digest worker", { "worker.name": `digest-${type}`, "messaging.destination.name": queueName, "messaging.operation.type": "process" }, () => runDigest(type), contextFromJob(job && job.data));
         } catch (err) {
           logger.error(
             {
@@ -273,7 +274,8 @@ async function enqueueDigest(type) {
   }
 
   const queueName = getQueueName(type);
-  return boss.send(queueName, { type }, DIGEST_JOB_OPTIONS);
+  return withSpan("digest enqueue", { "messaging.destination.name": queueName, "messaging.operation.type": "publish" }, () =>
+    boss.send(queueName, injectTraceMetadata({ type }), DIGEST_JOB_OPTIONS));
 }
 
 async function stop() {

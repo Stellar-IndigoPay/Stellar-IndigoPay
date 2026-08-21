@@ -1,0 +1,56 @@
+{
+  "annotations": { "list": [] },
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "targets": [{ "expr": "histogram_quantile(0.95, sum by (le, route) (rate(http_request_duration_seconds_bucket{service=\"stellar-indigopay-api\"}[5m])))", "legendFormat": "{{route}}", "refId": "A" }],
+      "title": "Request p95 latency by route",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "targets": [{ "expr": "sum by (route) (rate(http_requests_total{service=\"stellar-indigopay-api\",status_code=~\"5..\"}[5m]))", "legendFormat": "{{route}}", "refId": "A" }],
+      "title": "Request errors by route",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "targets": [{ "expr": "sum by (queue) (queue_depth)", "legendFormat": "{{queue}}", "refId": "A" }],
+      "title": "Queue depth per worker",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "targets": [{ "expr": "max by (queue) (queue_latency)", "legendFormat": "{{queue}}", "refId": "A" }],
+      "title": "Queue processing latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 16 },
+      "id": 5,
+      "targets": [{ "queryType": "traceql", "query": "{ resource.service.name = \"stellar-indigopay-backend\" && (name = \"HTTP request\" || name = \"db.query\" || name =~ \".*worker\") }", "refId": "A" }],
+      "title": "Donation request → queue → worker → DB waterfalls",
+      "type": "traces"
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["indigopay", "telemetry", "workers"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "IndigoPay Request and Worker Telemetry",
+  "uid": "indigopay-telemetry",
+  "version": 1
+}

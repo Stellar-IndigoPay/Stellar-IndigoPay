@@ -6,6 +6,18 @@ on:
   pull_request:
 
 jobs:
+  telemetry-config:
+    name: Telemetry config and dashboards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node scripts/validate-dashboards.js
+      - name: Validate collector configuration
+        run: docker run --rm -e TEMPO_OTLP_ENDPOINT=tempo:4317 -e OTEL_EXPORTER_INSECURE=true -v "$PWD/monitoring/otel-collector.yml:/etc/otelcol/config.yml:ro" otel/opentelemetry-collector-contrib:0.136.0 validate --config=/etc/otelcol/config.yml
+
   backend:
     name: Backend (Node.js)
     runs-on: ubuntu-latest

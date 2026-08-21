@@ -28,6 +28,7 @@ const PgBoss = require("pg-boss");
 const pool = require("../db/pool");
 const logger = require("../logger");
 const { metrics } = require("./metrics");
+const { contextFromJob, injectTraceMetadata, withSpan } = require("../telemetry");
 const {
   computeEventId,
   sign,
@@ -77,7 +78,7 @@ async function start() {
         );
         return;
       }
-      await processDelivery(deliveryId);
+      await withSpan("webhook worker", { "worker.name": "webhook", "messaging.destination.name": QUEUE, "messaging.operation.type": "process" }, () => processDelivery(deliveryId), contextFromJob(job.data));
     },
   );
 }
@@ -152,7 +153,8 @@ async function enqueueWebhookDelivery({
   // (see processDelivery) so the worker doesn't auto-retry on throw —
   // instead, on failure we reschedule a new job with `startAfter` set to
   // the appropriate backoff.
-  await boss.send(QUEUE, { deliveryId, secret }, { retryLimit: 0 });
+  await withSpan("webhook enqueue", { "messaging.destination.name": QUEUE, "messaging.operation.type": "publish" }, () =>
+    boss.send(QUEUE, injectTraceMetadata({ deliveryId, secret }), { retryLimit: 0 }));
 
   if (!wasInserted) {
     logger.info(

@@ -19,6 +19,11 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",
     "@humanwhocodes/object-schema": "^2.0.3",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.200.0",
+    "@opentelemetry/resources": "^2.10.0",
+    "@opentelemetry/sdk-trace-base": "^2.10.0",
+    "@opentelemetry/sdk-trace-node": "^2.10.0",
     "@parse/node-apn": "^8.1.0",
     "@sentry/node": "^7.51.0",
     "@sentry/tracing": "^7.51.0",

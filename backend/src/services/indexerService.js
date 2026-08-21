@@ -27,6 +27,7 @@ const { enqueue: enqueueDLQ } = require("./indexerDLQWorker");
 const logger = require("../logger");
 const { metrics } = require("./metrics");
 const { runBackfill } = require("./indexerBackfill");
+const { withSpan } = require("../telemetry");
 const DonationBatcher = require("./donationBatcher");
 
 const {
@@ -183,7 +184,10 @@ async function openStream() {
     .operations()
     .cursor(cursorStr)
     .stream({
-      onmessage: async (op) => {
+      onmessage: async (op) => withSpan("indexer operation", {
+        "worker.name": "indexer",
+        "messaging.operation.type": "process",
+      }, async () => {
         try {
           lastProcessedLedger = Math.max(lastProcessedLedger, op.ledger_attr);
 
@@ -227,7 +231,7 @@ async function openStream() {
           logger.error({ event: "indexer_op_error", err: err.message }, "Operation processing error");
           enqueueDLQ(op.ledger_attr, op.transaction_hash, err.message).catch(() => {});
         }
-      },
+      }),
       onerror: (err) => {
         logger.error(
           { event: "indexer_horizon_stream_error", err: String(err) },

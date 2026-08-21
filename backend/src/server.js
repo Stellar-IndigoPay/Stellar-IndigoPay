@@ -24,6 +24,8 @@
 "use strict";
 
 require("dotenv").config();
+const { startTelemetry } = require("./telemetry-bootstrap");
+startTelemetry();
 
 // Validate the environment up-front so the process exits cleanly on misconfig
 // rather than failing on the first request that touches a missing var.
@@ -44,6 +46,7 @@ const { Server } = require("socket.io");
 const logger = require("./logger");
 const requestLogger = require("./middleware/requestLogger");
 const requestId = require("./middleware/requestId");
+const { httpTraceMiddleware } = require("./telemetry");
 const queryRouter = require("./middleware/queryRouter");
 const {
   apiVersionMiddleware,
@@ -110,6 +113,7 @@ app.use(Sentry.Handlers.tracingHandler());
 // metrics so they can both read req.id.
 app.use(requestLogger);
 app.use(requestId);
+app.use(httpTraceMiddleware);
 app.use(queryRouter);
 
 // /metrics: bearer-token auth in prod, unauth in dev. Mounted before
