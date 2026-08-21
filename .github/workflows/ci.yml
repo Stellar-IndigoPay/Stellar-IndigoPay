@@ -120,6 +120,37 @@ jobs:
       - name: Validate spec conventions + detect OpenAPI route drift
         run: node scripts/validate-openapi.js
 
+  alert-rules-validation:
+    name: Alert Rules Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Validate alert rules syntax and conventions
+        run: node scripts/validate-alert-rules.js monitoring/alert-rules.yml
+
+      - name: Verify SLO configuration is valid
+        run: |
+          if [ -f monitoring/slos.yml ]; then
+            node -e "const yaml = require('js-yaml'); const fs = require('fs'); yaml.load(fs.readFileSync('monitoring/slos.yml', 'utf-8'));"
+            echo "✅ SLO configuration is valid YAML"
+          fi
+
+      - name: Test SLO alert generation (dry-run)
+        run: node scripts/generate-slo-alerts.js --dry-run
+
+      - name: Run validator tests
+        run: node monitoring/tests/validate-alert-rules.test.js
+
+      - name: Run SLO generation tests
+        run: node monitoring/tests/generate-slo-alerts.test.js
+
   zap_scan:
     name: DAST Security Scan (OWASP ZAP)
     runs-on: ubuntu-latest
