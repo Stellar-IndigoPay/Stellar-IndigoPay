@@ -264,6 +264,18 @@ try {
   );
 }
 
+// Admin management of AI summary prompt template versions (issue #929).
+try {
+  const adminAiPromptVersionsRouter = require("./routes/admin/aiPromptVersions");
+  app.use("/api/admin/ai-prompt-versions", adminAiPromptVersionsRouter);
+  app.use("/api/v1/admin/ai-prompt-versions", adminAiPromptVersionsRouter);
+} catch (err) {
+  logger.error(
+    { event: "route_load_failed", route: "admin/aiPromptVersions", err: err.message },
+    "Failed to load admin AI prompt versions route module",
+  );
+}
+
 // ── Application routes ──────────────────────────────────────────────────────
 // Each route file is mounted under both /api and /api/v1 so that the v1
 // versioned path and the legacy unversioned path stay in lockstep.
