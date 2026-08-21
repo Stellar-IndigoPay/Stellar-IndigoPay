@@ -107,8 +107,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **contracts:** add regression tests covering on-time vs late milestone completion reputation tracking
 * **contracts:** add missing `VoteDelegation(Address)` and `DelegatedWeight(Address)` variants to `DataKey` enum
 * **contracts:** add missing `disputed: false` field to all `Milestone` initializers in escrow integration tests
-* **contracts:** repair `fuzz_tests.rs` compilation — add `extern crate alloc` + `Ledger` import, fix strategy cloning
 * **contracts:** fix `test_execute_recurring_badge_progression` token allowance (1503 XLM for keeper incentives)
+* **contracts:** fix escrow milestone dispute logic distinguishing refunds from releases (closes #TODO)
 * **backend:** invalidate impact endpoint caches on project status change (closes #016, grantfox GF-016)
 * **backend:** require admin authentication for pending project review endpoint (closes #516)
 * **backend:** surface geocoding failures as project creation warnings (closes #519)

@@ -147,6 +147,7 @@ fn test_claim_milestone_usdc() {
         oracle: None,
         verified: false,
         proof_hash: None,
+        refunded: false,
     });
     milestones.push_back(Milestone {
         name: SorobanString::from_str(&env, "Phase 2"),
@@ -156,6 +157,7 @@ fn test_claim_milestone_usdc() {
         oracle: None,
         verified: false,
         proof_hash: None,
+        refunded: false,
     });
 
     client.create_job(
@@ -218,6 +220,7 @@ fn test_refund_usdc_job() {
         oracle: None,
         verified: false,
         proof_hash: None,
+        refunded: false,
     });
 
     client.create_job(

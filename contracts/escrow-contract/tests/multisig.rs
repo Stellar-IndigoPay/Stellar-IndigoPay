@@ -53,6 +53,7 @@ fn test_3_of_5_dispute_and_release_with_per_job_period() {
         oracle: None,
         verified: false,
         proof_hash: None,
+        refunded: false,
     });
     milestones.push_back(Milestone {
         name: SorobanString::from_str(&env, "M2"),
@@ -62,6 +63,7 @@ fn test_3_of_5_dispute_and_release_with_per_job_period() {
         oracle: None,
         verified: false,
         proof_hash: None,
+        refunded: false,
     });
 
     // Custom per-job release period, longer than the contract-wide minimum.
