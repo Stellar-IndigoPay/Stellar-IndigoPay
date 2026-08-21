@@ -58,7 +58,10 @@ const createRateLimiter = (maxRequests, windowMinutes) => {
 // ── Redis sliding window helpers ────────────────────────────────────────────
 
 const redisService = require("../services/redis");
-const { getRateLimitConfig } = require("./rateLimitConfig");
+const { getRateLimitConfig, FALLBACK_POLICY, FALLBACK_REPLICAS } = require("./rateLimitConfig");
+
+// Simple in-memory map for the fallback conservative rate limiting.
+const _fallbackCache = new Map();
 
 // Prometheus metrics — registered on the shared registry so the /metrics
 // endpoint emits them automatically. Both strategies share the same metric
@@ -77,6 +80,13 @@ const rateLimitHitsTotal = new client.Counter({
   name: "indigopay_rate_limit_hits_total",
   help: "Total number of rate-limited (429) responses per endpoint, labelled by strategy.",
   labelNames: ["method", "endpoint", "strategy"],
+  registers: [registry],
+});
+
+const rateLimitDegradedTotal = new client.Counter({
+  name: "indigopay_rate_limit_degraded_total",
+  help: "Total number of rate-limit fallback events due to Redis unavailability.",
+  labelNames: ["endpoint", "strategy", "policy"],
   registers: [registry],
 });
 
@@ -302,8 +312,14 @@ async function redisRateLimiter(req, res, next) {
       next();
     }
   } catch (err) {
-    // Redis unavailable — fall back to in-memory pass-through so the API
-    // stays up during a cache outage or deployment transition.
+    const strategy = config.strategy || "sliding-window";
+
+    rateLimitDegradedTotal.inc({
+      endpoint: req.path,
+      strategy,
+      policy: FALLBACK_POLICY,
+    });
+
     logger.warn(
       {
         event: "rate_limit_redis_fallback",
@@ -311,16 +327,49 @@ async function redisRateLimiter(req, res, next) {
         ip: req.ip,
         path: req.path,
         method: req.method,
-        strategy: config.strategy || "sliding-window",
+        strategy,
+        policy: FALLBACK_POLICY,
       },
-      "Redis unavailable for rate limiting — skipping check",
+      "Redis unavailable for rate limiting — fallback engaged",
     );
 
-    // In degraded mode we still set the header so clients see the
-    // configured limit even though we can't enforce it.
+    if (FALLBACK_POLICY === "fail-closed") {
+      res.setHeader("Retry-After", "60");
+      return sendAppError(res, "RATE_LIMITED", { retryAfter: 60 });
+    }
+
+    // Conservative cap fallback policy
     const limit = config.strategy === "token-bucket" ? config.capacity : config.points;
-    res.setHeader("X-RateLimit-Limit", String(limit));
-    res.setHeader("X-RateLimit-Remaining", String(limit));
+    const duration = config.strategy === "token-bucket" ? Math.ceil(config.capacity / (config.refillRate || 1)) : config.duration;
+    
+    const conservativeLimit = Math.max(1, Math.floor(limit / FALLBACK_REPLICAS));
+    
+    const key = `fallback:${req.ip}:${req.method}:${req.path}`;
+    const now = Date.now();
+    let record = _fallbackCache.get(key);
+    
+    if (!record || record.resetTime < now) {
+      record = { count: 0, resetTime: now + (duration * 1000) };
+    }
+    
+    record.count++;
+    
+    // Prevent memory leaks by resetting the cache if it grows too large
+    if (_fallbackCache.size > 10000) {
+      _fallbackCache.clear();
+    }
+    _fallbackCache.set(key, record);
+    
+    if (record.count > conservativeLimit) {
+      const resetSeconds = Math.ceil((record.resetTime - now) / 1000);
+      res.setHeader("X-RateLimit-Limit", String(conservativeLimit));
+      res.setHeader("X-RateLimit-Remaining", "0");
+      res.setHeader("Retry-After", String(resetSeconds));
+      return sendAppError(res, "RATE_LIMITED", { retryAfter: resetSeconds });
+    }
+
+    res.setHeader("X-RateLimit-Limit", String(conservativeLimit));
+    res.setHeader("X-RateLimit-Remaining", String(Math.max(0, conservativeLimit - record.count)));
 
     next();
   }
