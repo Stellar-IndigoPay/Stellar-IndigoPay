@@ -161,6 +161,20 @@ pub enum EscrowError {
     AdminSetUpdateFailed = 62,
 }
 
+/// Returns the exact amount still held in escrow for `job`.
+///
+/// When all milestones are released the contract holds nothing; return 0
+/// directly to avoid deriving a residual from truncated percentage sums.
+/// Otherwise compute `job.amount – Σ(truncated proportions of released
+/// milestones)`, which matches what callers like `refund_expired_job`
+/// expect when no milestone has been released yet.
+fn compute_remaining_funds(job: &Job) -> i128 {
+    // Fast path: every milestone has been paid out — nothing remains.
+    if job.milestones.iter().all(|m| m.released) {
+        return 0;
+    }
+
+    let mut already_released: i128 = 0;
 /// Validate a milestone vector against the invariants that must hold at every
 /// mutation point (`create_job` and `amend_job_milestones`):
 ///
@@ -234,15 +248,20 @@ fn compute_proportional_payout(
 fn compute_remaining_funds(env: &Env, job: &Job, err: EscrowError) -> i128 {
     let mut remaining_amount: i128 = 0;
     for milestone in job.milestones.iter() {
-        if !milestone.released {
+        if milestone.released {
             let proportion = milestone.percentage as i128;
+            already_released = already_released
+                .checked_add((job.amount * proportion) / 100i128)
+                .expect("already_released overflow");
             let payout = compute_proportional_payout(env, job.amount, proportion, err);
             remaining_amount = remaining_amount
                 .checked_add(payout)
                 .unwrap_or_else(|| panic_with_error!(env, err));
         }
     }
-    remaining_amount
+    job.amount
+        .checked_sub(already_released)
+        .expect("remaining_funds underflow")
 }
 
 fn read_reputation(env: &Env, freelancer: &Address) -> FreelancerReputation {
@@ -625,6 +644,25 @@ impl EscrowContract {
         }
 
         let proportion = milestone.percentage as i128;
+        // Compute how much has already been paid for previously-released milestones.
+        let already_released: i128 = job.milestones.iter().fold(0i128, |acc, m| {
+            if m.released {
+                acc.checked_add((job.amount * m.percentage as i128) / 100i128)
+                    .expect("already_released overflow")
+            } else {
+                acc
+            }
+        });
+        // Count unreleased milestones (including the current one being released).
+        let unreleased_count = job.milestones.iter().filter(|m| !m.released).count();
+        let release_amount = if unreleased_count == 1 {
+            // Last milestone: pay the exact remainder so sum == job.amount.
+            job.amount
+                .checked_sub(already_released)
+                .expect("release_amount underflow")
+        } else {
+            (job.amount * proportion) / 100i128
+        };
         let release_amount = compute_proportional_payout(
             &env,
             job.amount,
@@ -942,6 +980,23 @@ impl EscrowContract {
         }
 
         let proportion = milestone.percentage as i128;
+        // Exact remainder for the last unreleased milestone; truncated otherwise.
+        let already_released: i128 = job.milestones.iter().fold(0i128, |acc, m| {
+            if m.released {
+                acc.checked_add((job.amount * m.percentage as i128) / 100i128)
+                    .expect("already_released overflow")
+            } else {
+                acc
+            }
+        });
+        let unreleased_count = job.milestones.iter().filter(|m| !m.released).count();
+        let release_amount = if unreleased_count == 1 {
+            job.amount
+                .checked_sub(already_released)
+                .expect("release_amount underflow")
+        } else {
+            (job.amount * proportion) / 100i128
+        };
         let release_amount = compute_proportional_payout(
             &env,
             job.amount,
@@ -1056,6 +1111,23 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::MilestoneAlreadyReleased);
         }
         let proportion = milestone.percentage as i128;
+        // Exact remainder for the last milestone; truncated proportion otherwise.
+        let already_released: i128 = job.milestones.iter().fold(0i128, |acc, m| {
+            if m.released {
+                acc.checked_add((job.amount * m.percentage as i128) / 100i128)
+                    .expect("already_released overflow")
+            } else {
+                acc
+            }
+        });
+        let unreleased_count = job.milestones.iter().filter(|m| !m.released).count();
+        let release_amount = if unreleased_count == 1 {
+            job.amount
+                .checked_sub(already_released)
+                .expect("release_amount underflow")
+        } else {
+            (job.amount * proportion) / 100i128
+        };
         let release_amount = compute_proportional_payout(
             &env,
             job.amount,
@@ -1196,6 +1268,14 @@ impl EscrowContract {
 
     pub fn get_job(env: Env, job_id: String) -> Option<Job> {
         env.storage().instance().get(&DataKey::Job(job_id))
+    }
+
+    /// Read-only helper: returns `job.amount – Σ already_released`, i.e. the
+    /// exact number of stroops the contract still holds for this job.
+    /// Returns `None` if the job does not exist.
+    pub fn get_remaining_funds(env: Env, job_id: String) -> Option<i128> {
+        let job: Job = env.storage().instance().get(&DataKey::Job(job_id))?;
+        Some(compute_remaining_funds(&job))
     }
 
     pub fn get_job_count(env: Env) -> u32 {
