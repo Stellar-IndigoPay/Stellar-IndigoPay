@@ -9,6 +9,20 @@ on:
   workflow_dispatch:
 
 jobs:
+  validate-deployment-registry:
+    name: Validate deployment registry
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Validate contracts/deployments.json schema
+        run: node backend/scripts/deploymentRegistry.js validate --registry contracts/deployments.json
+
   test:
     name: Build & Test
     runs-on: ubuntu-latest

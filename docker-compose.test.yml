@@ -60,6 +60,13 @@ services:
       STELLAR_NETWORK: testnet
       HORIZON_URL: https://horizon-testnet.stellar.org
       ALLOWED_ORIGINS: http://localhost:3000
+    volumes:
+      # scripts/deployContractScript.test.js spawns the real
+      # scripts/deploy-contract.sh via a `../../scripts` relative path from
+      # backend/scripts — that resolves to /scripts inside this container
+      # (WORKDIR /app == repo-root `backend/`), which the `./backend` build
+      # context never includes. Bind-mount it read-only so the path lines up.
+      - ./scripts:/scripts:ro
       # The OpenAPI drift test requires repo-root scripts/validate-openapi.js,
       # which resolves js-yaml from the backend image's node_modules. NODE_PATH
       # lets that mounted module find /app/node_modules (see volumes below).
