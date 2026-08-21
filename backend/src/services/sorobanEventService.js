@@ -918,6 +918,27 @@ async function handlePropRej(evt, _topics, value) {
 }
 
 /**
+ * Handle `prop_noq` — proposal rejected because the quorum floor was not met.
+ * Kept distinct from `prop_rej` so below-quorum outcomes are not conflated
+ * with majority rejections.
+ * Topics: [symbol("prop_noq")]
+ * Value: project_id
+ */
+async function handlePropNoq(evt, _topics, value) {
+  const projectId = typeof value === "string" ? value : String(value || "");
+
+  logger.info(
+    {
+      event: "soroban_events_prop_noq",
+      projectId,
+      ledger: evt.ledger,
+    },
+    "Governance proposal rejected — quorum not met",
+  );
+  return { action: "logged" };
+}
+
+/**
  * Handle `prop_veto` — proposal vetoed by admin.
  * Topics: [symbol("prop_veto"), admin_address]
  * Value: project_id
@@ -995,6 +1016,7 @@ const HANDLERS = {
   voted: handleVoted,
   proj_ver: handleProjVer,
   prop_rej: handlePropRej,
+  prop_noq: handlePropNoq,
   prop_veto: handlePropVeto,
   prop_new: handlePropNew,
   rec_cr: handleRecCr,
