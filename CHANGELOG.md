@@ -123,7 +123,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **k8s:** tighten backend egress NetworkPolicy — enumerate specific endpoints (Horizon, Soroban RPC, Anthropic, CoinGecko, Resend, Sentry, FCM/Expo/APNs, Nominatim, web3.storage/w3s.link) and remove the over-broad HTTPS rule; webhook egress moved to an opt-in policy (closes #701)
 * **helm:** fix `helm template` rendering with missing helpers
 * **scripts:** ensure `scripts/setup-dev.sh` installs `mobile` and `extension` dependencies (fix README mismatch)
-
+* **frontend:** add graceful error handling and retry mechanism for OpenStreetMap tile failures in ProjectMap
 ### Performance
 
 - **contracts:** move `DataKey::{Nullifier, ZkDonationRecord}` from instance to persistent storage so the ZK anonymous-donation path (`donate_anonymous_zk`/`donate_anonymous`) no longer grows the always-loaded contract instance entry with every donation; each entry gets its own footprint and TTL, extended to a documented ~1-year retention window on write (closes #706)
