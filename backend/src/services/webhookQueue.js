@@ -28,6 +28,7 @@ const PgBoss = require("pg-boss");
 const pool = require("../db/pool");
 const logger = require("../logger");
 const { metrics } = require("./metrics");
+const { createDrainController } = require("./workerLifecycle");
 const {
   computeEventId,
   sign,
@@ -38,8 +39,12 @@ const QUEUE = "webhook-deliveries";
 const RETRY_DELAYS_SECONDS = [30, 120, 600, 1800, 7200, 21600]; // 6 attempts
 const TIMEOUT_MS = 10_000;
 const USER_AGENT = "Stellar-IndigoPay-Webhook/1.0";
+const DRAIN_TIMEOUT_MS = 15_000;
 
 let boss = null;
+const drain = createDrainController("webhook_dispatcher", {
+  gracePeriodMs: DRAIN_TIMEOUT_MS,
+});
 
 /**
  * Start the worker. Idempotent — safe to call more than once.
@@ -67,18 +72,19 @@ async function start() {
       teamConcurrency: 1,
       retryLimit: RETRY_DELAYS_SECONDS.length,
     },
-    async ([job]) => {
-      const { deliveryId } = job.data || {};
-      if (!deliveryId) {
-        // Defensive: malformed job. Don't retry.
-        logger.error(
-          { event: "webhook_delivery_malformed", jobId: job.id },
-          "missing deliveryId",
-        );
-        return;
-      }
-      await processDelivery(deliveryId);
-    },
+    async ([job]) =>
+      drain.trackJob(async () => {
+        const { deliveryId } = job.data || {};
+        if (!deliveryId) {
+          // Defensive: malformed job. Don't retry.
+          logger.error(
+            { event: "webhook_delivery_malformed", jobId: job.id },
+            "missing deliveryId",
+          );
+          return;
+        }
+        await processDelivery(deliveryId);
+      }),
   );
 }
 
@@ -417,7 +423,12 @@ function postSigned(urlString, body, headers) {
 
 async function stop() {
   if (!boss) return;
-  await boss.stop({ graceful: true, timeout: 15_000 });
+  // pg-boss's own `graceful: true` stop already stops claiming new jobs
+  // and waits (up to `timeout`) for active handlers to finish; we mark
+  // the drain state around it so the `worker_draining` metric and
+  // `getWorkerDrainStates()` reflect reality for the same window.
+  const bossStop = boss.stop({ graceful: true, timeout: DRAIN_TIMEOUT_MS });
+  await Promise.all([bossStop, drain.beginDrain()]);
   boss = null;
 }
 
@@ -433,4 +444,6 @@ module.exports = {
   sign,
   computeEventId,
   DEFAULT_REPLAY_WINDOW_SECONDS,
+  // Test-only: introspect drain state without a real SIGTERM.
+  _drain: drain,
 };

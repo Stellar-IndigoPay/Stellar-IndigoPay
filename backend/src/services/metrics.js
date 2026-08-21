@@ -179,6 +179,15 @@ const indexerRunning = new client.Gauge({
   registers: [registry],
 });
 
+// ── Worker shutdown / drain lifecycle ───────────────────────────────────────
+
+const workerDraining = new client.Gauge({
+  name: "worker_draining",
+  help: "1 while a worker is draining (stopped claiming new work, finishing in-flight jobs before exit) after SIGTERM, 0 otherwise. Labelled by worker name.",
+  labelNames: ["worker"],
+  registers: [registry],
+});
+
 
 
 const secretRotationLastTimestamp = new client.Gauge({
@@ -531,6 +540,7 @@ const metrics = {
   queueJobsTotal,
   indexerLagSeconds,
   indexerRunning,
+  workerDraining,
   secretRotationLastTimestamp,
   readinessCheckFailedTotal,
   webhookDeliveriesTotal,
