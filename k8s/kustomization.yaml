@@ -25,3 +25,9 @@ resources:
   - postgres-failover-script.yaml
   - postgres-failover-job.yaml
   - postgres-failover-rbac.yaml
+  - worker-indexer.yaml
+  - worker-recurring-keeper.yaml
+  - worker-guardian.yaml
+  - worker-webhook-dispatcher.yaml
+  - worker-digest.yaml
+  - worker-outbox-dispatcher.yaml

@@ -42,3 +42,6 @@ jobs:
 
       - name: Validate NetworkPolicy manifests
         run: node scripts/validate-networkpolicies.js
+
+      - name: Validate Worker PDBs
+        run: node scripts/validate-worker-pdbs.js
