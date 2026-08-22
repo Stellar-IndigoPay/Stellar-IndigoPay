@@ -9,6 +9,9 @@ module.exports = {
   testPathIgnorePatterns: ["/node_modules/", "/dist/"],
   setupFiles: ["./jest.setup.js"],
   transformIgnorePatterns: ["/node_modules/(?!.*\\.ts$)"],
+  moduleNameMapper: {
+    "^@stellar-indigopay/fixtures$": "<rootDir>/../packages/fixtures/dist/index",
+  },
   collectCoverageFrom: [
     "src/overlay-helpers.ts",
   ],

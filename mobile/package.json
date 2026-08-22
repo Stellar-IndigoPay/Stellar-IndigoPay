@@ -67,9 +67,11 @@
       }
     },
     "transformIgnorePatterns": [
-      "node_modules/(?!((jest-)?react-native|@react-native(-community)?/|@react-native/)|expo(nent)?|@expo(nent)?/.*|@expo-google-fonts/.*|react-navigation|@react-navigation/.*|@unimodules/.*|unimodules|sentry-expo|native-base|react-native-svg|@stellar/.*)"
+      "node_modules/(?!((jest-)?react-native|@react-native(-community)?/|@react-native/)|expo(nent)?|@expo(nent)?/.*|@expo-google-fonts/.*|react-navigation|@react-navigation/.*|@unimodules/.*|unimodules|sentry-expo|native-base|react-native-svg|@stellar/.*)",
+      "packages/fixtures/dist"
     ],
     "moduleNameMapper": {
+      "^@stellar-indigopay/fixtures$": "<rootDir>/../packages/fixtures/dist/index",
       "^react-native/Libraries/BatchedBridge/NativeModules$": "<rootDir>/__mocks__/NativeModules.js",
       "^axios$": "<rootDir>/__mocks__/axios.js",
       "^expo-local-authentication$": "<rootDir>/__mocks__/expo-local-authentication.js",

@@ -16,6 +16,17 @@
  */
 
 import { mountDonateOverlay, type DonateOverlayOptions } from "../inject/donate-overlay";
+import { project } from "@stellar-indigopay/fixtures";
+
+// Default project fixture for overlay tests
+const DEFAULT_PROJECT = project({
+  id: "proj-123",
+  name: "Amazon Reforestation",
+  category: "Reforestation",
+  verified: true,
+  walletAddress: "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
+  location: "Brazil",
+});
 
 // Helper to create default options
 function createOptions(
@@ -50,15 +61,7 @@ afterEach(() => {
 describe("mountDonateOverlay", () => {
   test("mounts overlay with project info when project is provided", () => {
     const opts = createOptions({
-      project: {
-        id: "proj-123",
-        name: "Amazon Reforestation",
-        category: "Reforestation",
-        verified: true,
-        walletAddress:
-          "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
-        location: "Brazil",
-      },
+      project: DEFAULT_PROJECT,
     });
 
     const cleanup = mountDonateOverlay(opts);
@@ -77,14 +80,14 @@ describe("mountDonateOverlay", () => {
 
   test("mounts overlay with unverified badge when project is not verified", () => {
     const opts = createOptions({
-      project: {
+      project: project({
         id: "proj-456",
         name: "Unverified Project",
         category: "Solar Energy",
         verified: false,
         walletAddress:
           "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
-      },
+      }),
     });
 
     const cleanup = mountDonateOverlay(opts);
@@ -98,14 +101,14 @@ describe("mountDonateOverlay", () => {
 
   test("mounts project view with description", () => {
     const opts = createOptions({
-      project: {
+      project: project({
         id: "proj-789",
         name: "Project With Description",
         category: "Clean Water",
         verified: true,
         walletAddress: "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
         description: "This project provides clean water to communities in need across rural areas.",
-      },
+      }),
     });
 
     const cleanup = mountDonateOverlay(opts);
@@ -117,13 +120,14 @@ describe("mountDonateOverlay", () => {
 
   test("mounts project without location", () => {
     const opts = createOptions({
-      project: {
+      project: project({
         id: "proj-no-loc",
         name: "No Location Project",
         category: "Wind Energy",
         verified: false,
         walletAddress: "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
-      },
+        location: "",
+      }),
     });
 
     const cleanup = mountDonateOverlay(opts);
@@ -254,14 +258,14 @@ describe("mountDonateOverlay", () => {
 
   test("preset amount buttons set the amount input value", () => {
     const opts = createOptions({
-      project: {
+      project: project({
         id: "proj-1",
         name: "Test Project",
         category: "Reforestation",
         verified: true,
         walletAddress:
           "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
-      },
+      }),
     });
 
     const cleanup = mountDonateOverlay(opts);
@@ -285,14 +289,14 @@ describe("mountDonateOverlay", () => {
 
   test("preset button gets active class when clicked", () => {
     const opts = createOptions({
-      project: {
+      project: project({
         id: "proj-1",
         name: "Test Project",
         category: "Reforestation",
         verified: true,
         walletAddress:
           "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
-      },
+      }),
     });
 
     const cleanup = mountDonateOverlay(opts);
@@ -411,13 +415,13 @@ describe("mountDonateOverlay", () => {
 
   test("Freighter connected state with project view", () => {
     const opts = createOptions({
-      project: {
+      project: project({
         id: "proj-1",
         name: "Test Project",
         category: "Reforestation",
         verified: true,
         walletAddress: "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
-      },
+      }),
       freighterAvailable: true,
       freighterPublicKey: "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
     });
@@ -480,14 +484,14 @@ describe("mountDonateOverlay", () => {
 
   test("submit button is disabled when no amount is entered", () => {
     const opts = createOptions({
-      project: {
+      project: project({
         id: "proj-1",
         name: "Test",
         category: "Reforestation",
         verified: true,
         walletAddress:
           "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
-      },
+      }),
       freighterPublicKey:
         "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
     });
@@ -504,14 +508,14 @@ describe("mountDonateOverlay", () => {
 
   test("submit button is disabled when no wallet is connected", () => {
     const opts = createOptions({
-      project: {
+      project: project({
         id: "proj-1",
         name: "Test",
         category: "Reforestation",
         verified: true,
         walletAddress:
           "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
-      },
+      }),
       freighterPublicKey: "",
     });
 
@@ -530,14 +534,14 @@ describe("mountDonateOverlay", () => {
   test("onDonate is called with amount and memo when submitted", async () => {
     const onDonate = jest.fn().mockResolvedValue(undefined);
     const opts = createOptions({
-      project: {
+      project: project({
         id: "proj-1",
         name: "Test",
         category: "Reforestation",
         verified: true,
         walletAddress:
           "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
-      },
+      }),
       onDonate,
       freighterPublicKey:
         "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
@@ -572,14 +576,14 @@ describe("mountDonateOverlay", () => {
   test("shows minimum donation error when amount is too low", async () => {
     const onDonate = jest.fn().mockResolvedValue(undefined);
     const opts = createOptions({
-      project: {
+      project: project({
         id: "proj-1",
         name: "Test",
         category: "Reforestation",
         verified: true,
         walletAddress:
           "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
-      },
+      }),
       onDonate,
       freighterPublicKey:
         "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
@@ -616,14 +620,14 @@ describe("mountDonateOverlay", () => {
   test("shows error message when donation fails", async () => {
     const onDonate = jest.fn().mockRejectedValue(new Error("Insufficient funds"));
     const opts = createOptions({
-      project: {
+      project: project({
         id: "proj-1",
         name: "Test",
         category: "Reforestation",
         verified: true,
         walletAddress:
           "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
-      },
+      }),
       onDonate,
       freighterPublicKey:
         "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
@@ -655,14 +659,14 @@ describe("mountDonateOverlay", () => {
   test("shows generic error when donation throws without message", async () => {
     const onDonate = jest.fn().mockRejectedValue("unknown error");
     const opts = createOptions({
-      project: {
+      project: project({
         id: "proj-1",
         name: "Test",
         category: "Reforestation",
         verified: true,
         walletAddress:
           "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
-      },
+      }),
       onDonate,
       freighterPublicKey:
         "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
@@ -692,14 +696,14 @@ describe("mountDonateOverlay", () => {
   test("shows success message after donation", async () => {
     const onDonate = jest.fn().mockResolvedValue(undefined);
     const opts = createOptions({
-      project: {
+      project: project({
         id: "proj-1",
         name: "Test",
         category: "Reforestation",
         verified: true,
         walletAddress:
           "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
-      },
+      }),
       onDonate,
       freighterPublicKey:
         "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
@@ -731,14 +735,14 @@ describe("mountDonateOverlay", () => {
 
   test("custom amount input triggers preset deselection and button update", () => {
     const opts = createOptions({
-      project: {
+      project: project({
         id: "proj-1",
         name: "Test",
         category: "Reforestation",
         verified: true,
         walletAddress:
           "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
-      },
+      }),
       freighterPublicKey:
         "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
     });

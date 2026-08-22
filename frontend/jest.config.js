@@ -10,6 +10,7 @@ const customJestConfig = {
   testEnvironment: "jest-environment-jsdom",
   setupFilesAfterEnv: ["<rootDir>/jest.setup.ts"],
   moduleNameMapper: {
+    "^@stellar-indigopay/fixtures$": "<rootDir>/../packages/fixtures/dist/index",
     "^@/(.*)$": "<rootDir>/$1",
     "^zod$": "<rootDir>/node_modules/zod",
   },

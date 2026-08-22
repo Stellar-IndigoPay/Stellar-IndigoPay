@@ -1,7 +1,11 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "types": ["chrome", "jest"]
+    "types": ["chrome", "jest"],
+    "baseUrl": ".",
+    "paths": {
+      "@stellar-indigopay/fixtures": ["../packages/fixtures/src/index"]
+    }
   },
   "include": ["src/**/*"],
   "exclude": ["dist", "node_modules"]

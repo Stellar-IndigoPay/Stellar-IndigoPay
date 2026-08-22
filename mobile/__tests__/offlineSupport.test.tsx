@@ -6,6 +6,7 @@ import React from "react";
 import { render, waitFor } from "@testing-library/react-native";
 import axios from "axios";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { project } from "@stellar-indigopay/fixtures";
 
 jest.mock("expo-router", () => ({
   useRouter: () => ({ push: jest.fn() }),
@@ -17,7 +18,7 @@ import ProjectsScreen from "../app/projects/index";
 import { ThemeProvider } from "../app/theme";
 
 const MOCK_PROJECTS = [
-  {
+  project({
     id: "proj-1",
     name: "Amazon Reforestation",
     description: "Planting trees.",
@@ -26,7 +27,7 @@ const MOCK_PROJECTS = [
     raisedXLM: "18420",
     donorCount: 147,
     status: "active",
-  },
+  }),
 ];
 
 describe("ProjectsScreen — offline support", () => {

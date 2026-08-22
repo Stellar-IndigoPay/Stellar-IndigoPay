@@ -25,6 +25,7 @@ import React from "react";
 import { render, fireEvent, waitFor } from "@testing-library/react-native";
 import axios from "axios";
 import * as LocalAuthentication from "expo-local-authentication";
+import { project } from "@stellar-indigopay/fixtures";
 
 const LA = LocalAuthentication as unknown as {
   hasHardwareAsync: jest.Mock;
@@ -138,11 +139,11 @@ jest.mock("@stellar/stellar-sdk", () => ({
   Memo: { text: jest.fn() },
 }));
 
-const MOCK_PROJECT = {
+const MOCK_PROJECT = project({
   id: "proj-1",
   name: "Amazon Reforestation",
   walletAddress: "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN",
-};
+});
 
 import DonateScreen from "../app/donate/[id]";
 
