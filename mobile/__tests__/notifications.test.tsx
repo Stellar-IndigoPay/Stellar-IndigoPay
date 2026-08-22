@@ -1,6 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   navigateToNotification,
+  normalizeNotificationRoute,
   parseDeepLinkUrl,
   isNotificationHandled,
   getInboxNotifications,
@@ -45,15 +46,55 @@ describe("Notification Utilities", () => {
     });
 
     it("returns null for invalid/unknown paths", () => {
-      (Linking.parse as jest.Mock).mockReturnValueOnce({ path: "unknown/segment" });
+      (Linking.parse as jest.Mock).mockReturnValueOnce({
+        path: "unknown/segment",
+      });
       expect(parseDeepLinkUrl("indigopay://unknown/segment")).toBeNull();
     });
   });
 
+  describe("normalizeNotificationRoute", () => {
+    it("normalizes backend route payloads to expo-router paths", () => {
+      expect(normalizeNotificationRoute("/projects/proj-1")).toBe(
+        "/projects/proj-1",
+      );
+      expect(normalizeNotificationRoute("project/proj-2")).toBe(
+        "/projects/proj-2",
+      );
+      expect(normalizeNotificationRoute("indigopay://donate/proj-3")).toBe(
+        "/donate/proj-3",
+      );
+      expect(normalizeNotificationRoute("/unknown/proj-4")).toBeNull();
+    });
+  });
+
   describe("navigateToNotification", () => {
+    it("prefers explicit route and target fields from backend payloads", () => {
+      navigateToNotification(
+        {
+          type: "donation_receipt",
+          donorAddress: "0xABC",
+          route: "/projects/proj-1",
+        },
+        mockPush,
+      );
+      expect(mockPush).toHaveBeenCalledWith("/projects/proj-1");
+
+      mockPush.mockClear();
+      navigateToNotification(
+        { type: "project_update", target: "/donate/proj-2" },
+        mockPush,
+      );
+      expect(mockPush).toHaveBeenCalledWith("/donate/proj-2");
+    });
+
     it("routes donation_receipt with donorAddress to profile", () => {
       navigateToNotification(
-        { type: "donation_receipt", donorAddress: "0xABC", projectId: "proj-1" },
+        {
+          type: "donation_receipt",
+          donorAddress: "0xABC",
+          projectId: "proj-1",
+        },
         mockPush,
       );
       expect(mockPush).toHaveBeenCalledWith("/profile/0xABC");
@@ -81,12 +122,19 @@ describe("Notification Utilities", () => {
       expect(mockPush).toHaveBeenCalledWith("/projects/proj-2");
     });
 
-    it("routes subscription_due to donate screen", () => {
+    it("routes subscription_due and recurring_reminder to donate screen", () => {
       navigateToNotification(
         { type: "subscription_due", projectId: "proj-3" },
         mockPush,
       );
       expect(mockPush).toHaveBeenCalledWith("/donate/proj-3");
+
+      mockPush.mockClear();
+      navigateToNotification(
+        { type: "recurring_reminder", projectId: "proj-4" },
+        mockPush,
+      );
+      expect(mockPush).toHaveBeenCalledWith("/donate/proj-4");
     });
 
     it("falls back to home '/' for unknown/missing payloads", () => {

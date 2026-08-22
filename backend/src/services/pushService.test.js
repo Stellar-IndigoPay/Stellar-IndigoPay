@@ -87,7 +87,9 @@ describe("pushService", () => {
       ]);
 
       const insertCall = pool.query.mock.calls[3];
-      expect(insertCall[0]).toEqual(expect.stringContaining("INSERT INTO push_notifications"));
+      expect(insertCall[0]).toEqual(
+        expect.stringContaining("INSERT INTO push_notifications"),
+      );
       expect(insertCall[1]).toEqual([
         expect.any(String),
         "GDONOR",
@@ -252,13 +254,52 @@ describe("pushService", () => {
       // device token lookup happens for the same wallet
       expect(pool.query.mock.calls[1][1]).toEqual(["GDONOR"]);
     });
+
+    test("includes project deep-link route metadata in donation receipt payloads", async () => {
+      pool.query
+        .mockResolvedValueOnce({ rows: [] }) // preference check
+        .mockResolvedValueOnce({ rows: [] }) // DND check
+        .mockResolvedValueOnce({
+          rows: [{ token: "ExponentPushToken[receipt]", platform: "expo" }],
+        })
+        .mockResolvedValueOnce({ rows: [] }); // delivery insert
+
+      mockSendPushNotificationsAsync.mockResolvedValueOnce([
+        { status: "ok", id: "ticket-receipt" },
+      ]);
+
+      await pushService.sendDonationReceipt("GDONOR", {
+        amount: "10.0000000",
+        currency: "XLM",
+        projectId: "proj-1",
+        projectName: "Mangrove Restoration",
+        id: "donation-1",
+      });
+
+      expect(mockSendPushNotificationsAsync).toHaveBeenCalledWith([
+        expect.objectContaining({
+          data: expect.objectContaining({
+            type: "donation_receipt",
+            projectId: "proj-1",
+            donationId: "donation-1",
+            route: "/projects/proj-1",
+            target: "/projects/proj-1",
+            url: "indigopay://projects/proj-1",
+            walletAddress: "GDONOR",
+          }),
+        }),
+      ]);
+    });
   });
 
   describe("sendMilestoneReachedNotifications", () => {
     test("notifies every wallet-linked follower and skips anonymous ones", async () => {
       pool.query
         .mockResolvedValueOnce({
-          rows: [{ wallet_address: "GFOLLOWER1" }, { wallet_address: "GFOLLOWER2" }],
+          rows: [
+            { wallet_address: "GFOLLOWER1" },
+            { wallet_address: "GFOLLOWER2" },
+          ],
         }) // followers query (already filters wallet_address IS NOT NULL)
         .mockResolvedValueOnce({ rows: [] }) // pref check follower1
         .mockResolvedValueOnce({ rows: [] }) // DND check follower1
@@ -274,8 +315,14 @@ describe("pushService", () => {
       });
 
       expect(pool.query.mock.calls[0][1]).toEqual(["proj-1"]);
-      expect(pool.query.mock.calls[1][1]).toEqual(["GFOLLOWER1", "milestone_reached"]);
-      expect(pool.query.mock.calls[4][1]).toEqual(["GFOLLOWER2", "milestone_reached"]);
+      expect(pool.query.mock.calls[1][1]).toEqual([
+        "GFOLLOWER1",
+        "milestone_reached",
+      ]);
+      expect(pool.query.mock.calls[4][1]).toEqual([
+        "GFOLLOWER2",
+        "milestone_reached",
+      ]);
     });
   });
 
@@ -308,12 +355,26 @@ describe("pushService", () => {
       ]);
       // Only 2 queries total: followers + delivery record (no preference check for anon follows)
       expect(pool.query).toHaveBeenCalledTimes(2);
+      expect(mockSendPushNotificationsAsync).toHaveBeenCalledWith([
+        expect.objectContaining({
+          data: expect.objectContaining({
+            route: "/projects/proj-1",
+            target: "/projects/proj-1",
+            url: "indigopay://projects/proj-1",
+          }),
+        }),
+      ]);
     });
 
     test("skips wallet-linked followers who opted out", async () => {
       pool.query
         .mockResolvedValueOnce({
-          rows: [{ token: "ExponentPushToken[opted-out]", wallet_address: "GOPTOUT" }],
+          rows: [
+            {
+              token: "ExponentPushToken[opted-out]",
+              wallet_address: "GOPTOUT",
+            },
+          ],
         }) // followers
         .mockResolvedValueOnce({ rows: [{ enabled: false }] }); // preference check
 
@@ -348,7 +409,8 @@ describe("pushService", () => {
       const tickets = await pushService.sendGovernanceProposalNotifications({
         proposalId: "prop-42",
         title: "Increase Carbon Offset Goal",
-        description: "A proposal to increase the carbon offset goal for all projects.",
+        description:
+          "A proposal to increase the carbon offset goal for all projects.",
         endsAt: "2026-08-01T00:00:00Z",
       });
 
@@ -377,7 +439,10 @@ describe("pushService", () => {
       pool.query
         .mockResolvedValueOnce({
           rows: [
-            { token: "ExponentPushToken[opted-out]", wallet_address: "GOPTOUT" },
+            {
+              token: "ExponentPushToken[opted-out]",
+              wallet_address: "GOPTOUT",
+            },
           ],
         }) // followers JOIN query
         .mockResolvedValueOnce({ rows: [{ enabled: false }] }); // pref check: opted out
@@ -461,6 +526,9 @@ describe("pushService", () => {
         projectId: "proj-1",
         recurringId: "rec-99",
         nextPaymentDate: "2026-07-17T08:00:00.000Z",
+        route: "/donate/proj-1",
+        target: "/donate/proj-1",
+        url: "indigopay://donate/proj-1",
         walletAddress: "GDONOR",
       });
     });

@@ -13,8 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+
+
+
+- **backend,mobile:** add push notification route metadata and mobile tap handling so project, donation, and reminder pushes open the relevant screen (closes #740)
+
+
+- **backend:** make projection rebuild atomic by replaying into staging tables and swapping within a transaction; concurrent reads now observe either the complete previous or complete new state, never empty/partial projections (closes #639)
+
 * **mobile:** add jailbreak/root detection via `expo-device` with a configurable `EXPO_PUBLIC_DEVICE_INTEGRITY_POLICY` (off/warn/block, default block) wired into biometric auth, secure storage, and session unlock so compromised devices trigger the policy (closes #693)
+
 - **backend/security:** Load guardian and recurring keeper signing seeds from managed secret files, add signer provider tests, and document signer rotation workflow.
+
 
 * **extension:** audit `chrome.storage` usage, confirm no plaintext wallet secrets are persisted (signing is delegated entirely to Freighter), and add CI secret-scan to enforce this going forward (closes #656)
 * **mobile:** audit auth client and confirm it uses a distinct nonce-based wallet session that is unaffected by the admin JWT `httpOnly` cookie rotation changes (closes #655)
