@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Tests
+
+* **backend:** add 21 integration tests for `GET /api/map` covering response shape, category/status filters, coordinate coercion, caching headers, Redis miss/hit, and error propagation (closes #542)
+
 ### Bug Fixes
 
 * **backend:** surface geocoding failures as project creation warnings (closes #519)
