@@ -8,13 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **backend:** Serialize migration runs across replicas with a Postgres advisory lock so concurrent boot (k8s HPA min 2) can never apply the same migrations twice (closes #640). Also fixes the migration chain so a fresh database can be bootstrapped end-to-end: `002` drops `CREATE INDEX CONCURRENTLY` (invalid inside the runner's transaction), a new `010_admin_audit_log` migration creates the audit table `011` depends on, `011`'s hash-chain backfill is repaired (uuid/json casts, missing CTE column, `pgcrypto` extension), `021` uses drop-then-add for its CHECK constraint, and `027` guards its example `credits` migration against a missing table. Adds a testcontainers concurrency test proving two concurrent `runMigrations()` calls apply each migration exactly once.
 - **backend:** Enforce match pool caps atomically at match-time using row-level locks, preventing pools from overspending under concurrent load.
 
 ### Added
-- **backend:** make projection rebuild atomic by replaying into staging tables and swapping within a transaction; concurrent reads now observe either the complete previous or complete new state, never empty/partial projections (closes #639)
+
+* **mobile:** add jailbreak/root detection via `expo-device` with a configurable `EXPO_PUBLIC_DEVICE_INTEGRITY_POLICY` (off/warn/block, default block) wired into biometric auth, secure storage, and session unlock so compromised devices trigger the policy (closes #693)
 - **backend/security:** Load guardian and recurring keeper signing seeds from managed secret files, add signer provider tests, and document signer rotation workflow.
 
 * **extension:** audit `chrome.storage` usage, confirm no plaintext wallet secrets are persisted (signing is delegated entirely to Freighter), and add CI secret-scan to enforce this going forward (closes #656)
+* **mobile:** audit auth client and confirm it uses a distinct nonce-based wallet session that is unaffected by the admin JWT `httpOnly` cookie rotation changes (closes #655)
 
 - **backend:** deduplicate push device tokens per user+device with a sliding expiry window (default 180 days) refreshed on register, soft-invalidate on unregister/expiry, and purge expired tokens from push sends (closes #717)
 - **frontend:** announce `DonateForm` validation errors to screen readers via `aria-live="assertive"` region (GrantFox GF-a11y-donate-form)
@@ -56,60 +59,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ci:** SBOM generation with anchore/sbom-action, uploads to GitHub dependency graph
 - **ci:** Trivy image scan on CRITICAL/HIGH, cosign keyless signing on release tags
 
-* **ci:** add Helm/k8s drift detection — renders the Helm chart and diffs it against raw `k8s/` manifests (replicas, image, ports, resources, envFrom, config keys, ingress rules, HPA/PDB thresholds), failing CI on undocumented drift; allowlists the documented NetworkPolicy and postgres-exporter gaps (closes #708)
-* **backend:** deduplicate push device tokens per user+device with a sliding expiry window (default 180 days) refreshed on register, soft-invalidate on unregister/expiry, and purge expired tokens from push sends (closes #717)
-* **frontend:** announce `DonateForm` validation errors to screen readers via `aria-live="assertive"` region (GrantFox GF-a11y-donate-form)
-* **frontend:** add keyboard accessibility for Leaflet map markers on `ProjectMap` — focusable buttons with Enter/Space to open popups (closes #533, grantfox GF-031)
-* **frontend:** complete 100% i18n coverage across all locale dictionaries with pluralization and locale-aware formatting (closes #264, #262)
-* **frontend:** refactor admin verification queue table with `@tanstack/react-table`, sortable columns, status filter pills, responsive mobile expansion, and server-driven pagination
-* **frontend:** implement advanced keyboard navigation, global keyboard shortcuts (`Cmd+K`/`Ctrl+K`), route focus management, and skip links
-* **frontend:** implement Playwright end-to-end test suite covering donation, dashboard, and admin analytics journeys (GF-052, closes #110)
-* **frontend:** build admin audit log viewer with filtering, pagination, and CSV export (GF-028, closes #83)
-* **frontend:** build donor impact certificate with shareable OG social preview via `@vercel/og` (GF-022, closes #79)
-* **frontend:** admin login now shows the specific failure reason instead of the canonical per-code message (**BREAKING**: token refresh moved to httpOnly cookie)
-* **frontend,backend:** add Idempotency-Key support for donation recording — UUID v4 header, 24h replay window (closes #148)
-* **frontend,backend:** real-time transparency dashboard with SLO, business metrics, and donation geo-map (closes #253)
-* **backend:** standardize structured startup, shutdown, and shutdown-error logging for background workers with graceful queue draining
-* **backend:** Redis-backed response caching middleware with request coalescing (single-flight) to prevent cache stampede (GF-044, closes #149)
-* **backend:** implement Soroban RPC retry with exponential backoff and circuit breaker (GF-043, closes #100)
-* **backend,frontend:** JWT refresh token rotation and session management for admin auth (GF-032, closes #87)
-* **backend,monitoring:** Postgres connection pool observability dashboard with adaptive pool sizing (closes #244)
-* **backend:** webhook delivery queue with pg-boss — 6-attempt exponential backoff (30s → 6h), DLQ, GitHub-style HMAC-SHA256 signing, 5-min replay window
-* **backend:** webhook + AI summary Prometheus metrics
-* **backend:** new database tables: `webhook_deliveries`, `webhook_dlq`, `prompt_versions`, `ai_summary_calls`, `refresh_tokens`, `token_blacklist`, `idempotency_keys`
-* **monitoring:** multi-window SLO burn-rate alerting with error budget dashboard (closes #240)
-* **monitoring:** Alertmanager routing with PagerDuty + Slack + business hours + inhibition rules
-* **monitoring:** Prometheus + Grafana + Alertmanager stack with persistent volumes
-* **contracts:** enforce Rust formatting via pre-commit hook (closes #60)
-* **contracts:** emit `StealthScan` events with project wallet, donation count, and ledger timestamp (closes #514)
-* **contracts:** add multi-source TWAP price oracle with freshness protection (closes #281)
-* **contracts:** 48h upgrade timelock (`propose_upgrade` / `execute_upgrade` / `cancel`)
-* **contracts:** contract-level pause (`pause_contract` / `unpause_contract`)
-* **contracts:** two-step admin transfer (`transfer_admin` / `accept_admin` / `cancel`)
-* **contracts:** comprehensive Soroban fuzz testing harness with 7 property-based tests and action-sequence fuzzing (#239)
-* **contracts:** escrow fuzz target for milestone percentage edge cases (closes #508)
-* **contracts,backend:** add opt-in anonymous donations and signed, cached tax receipt PDFs with locked XLM/USD values
-* **contracts/backend:** SEP-0007 deep-link support for mobile donations via `web+stellar:pay` URIs
-* **docs:** add CONTRIBUTORS.md to credit community work (GF-015, closes #64)
-* **docs:** document key service exports with JSDoc for TypeDoc (closes #548)
-* **docs:** `docs/README.md` indexes every document by audience (users, developers, operators, contributors)
-* **ci:** monthly restore-drill workflow that pulls latest backup and asserts row counts
-* **ci:** SBOM generation with anchore/sbom-action, uploads to GitHub dependency graph
-* **ci:** Trivy image scan on CRITICAL/HIGH, cosign keyless signing on release tags
-* **gitops:** ArgoCD Application manifest for chart-driven reconciliation
-* **gitops:** Argo Rollouts canary strategy with Prometheus success-rate analysis
-* **k8s:** default-deny NetworkPolicy for the `indigopay` namespace with explicit allow rules
-* **k8s:** HPA (min 2, max 10) + PDB (`minAvailable: 1`) for backend and frontend
-* **k8s:** ExternalSecret + SecretStore templates for AWS Secrets Manager
-* **k8s:** `k8s/secret.example.yaml` template; real secrets gitignored; `secrets-lint.yml` CI check
-* **k8s:** NetworkPolicy lint gate — `scripts/validate-networkpolicies.js` fails CI on un-scoped egress rules and `0.0.0.0/0` CIDRs (closes #701)
-* **helm:** `_helpers.tpl` with `backendName`, `frontendName`, `commonLabels`; HPA and PDB wired to values
-* **ci:** queue-worker integration smoke test — `queueWorkers.integration.test.js` enqueues and consumes pg-boss jobs (profile + match queues) end-to-end against the compose Postgres (closes #702)
+- **contracts:** enforce a 15-weighted-vote quorum in `resolve_proposal` — proposals below the floor resolve as rejected with a dedicated `prop_noq` event (closes #714)
+
 ### Fixed
 
 - **contracts:** prevent challenge and refund flows from reversing the same donation twice; invalid finalization attempts now return structured errors instead of underflowing accounting.
 - **frontend:** pin locale (`en-US`) and timezone (`UTC`) for date/number formatting helpers (`formatDate`, `formatDateTime`, `formatTime`, `formatMonthYear`, `formatNumber`) and replace raw `Intl.*`/`toLocaleString` calls in SSR-rendered components, making server/client output deterministic and eliminating hydration mismatches (closes #652)
 - **contracts/oracle:** align TWAP observation window with staleness threshold invariant — reduce `DEFAULT_STALENESS_THRESHOLD` from 720 to 120 ledger sequences to match `MAX_OBSERVATIONS` capacity; enforce constraint that staleness threshold ≥ MAX_OBSERVATIONS at config time to prevent misconfiguration where operators believe oracle has long-window averaging when actual TWAP coverage is limited to ~20 observations (~100 seconds) (GrantFox GF-oracle-twap-alignment)
+- **contracts:** allow `mint_impact_nft` to mint any previously-earned badge tier at or below the donor's current badge (rank-order comparison), so a donor who progressed to a higher tier can still mint lower-tier Impact NFTs once each (closes #674)
 - **gitops:** ArgoCD Application manifest for chart-driven reconciliation
 
 ### Fixed
@@ -140,10 +97,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-* **contracts:** add a project-authorized `withdraw_stealth_donations` path to `DonationContract` (plus a `withdraw_stealth_integrated` forward wrapper on `IndigoPayContract`) with per-(project, token) withdrawable-balance accounting, CEI ordering, structured errors, and `StealthWithdrawal`/`stlth_wdr` events so stealth-donated funds are no longer permanently locked in the `DonationContract` (closes #621)
-* **frontend:** harden the production CSP — drop `'unsafe-inline'` from `script-src` (rely on nonce + `strict-dynamic`) and report violations via `report-to` alongside the deprecated `report-uri` (closes #688)
-* **backend:** reload the keeper account before each recurring submission so transaction sequence numbers are never stale — prevents `tx_bad_seq` when the account sequence advances externally or after a failed submission (closes #705)
-* **backend:** make Horizon donation indexing idempotent by operation ID, advance the cursor on replay, and allow multiple payment operations per transaction (closes #635)
+* **contracts:** `donate_vested` pays the integer-division remainder with the final installment and `cancel_vesting` refunds it exactly, so no dust is stranded in contract custody and the project is fully paid (closes #665)
+* **contracts:** `cancel_vesting` marks the schedule as fully consumed so repeated cancels and post-cancellation claims are rejected, preventing double payouts from custody
 * **contracts:** skip missing persistent stealth donation entries during scans (closes #506)
 * **contracts:** require admin-gated attestation for `donate_asset` path-payment donations — the recorded `xlm_amount` must be co-signed by an admin-appointed attester, so a caller can no longer claim an arbitrary amount (closes #712)
 * **contracts:** deduplicate the escrow `Milestone` struct across feature configurations (closes #511)
@@ -174,6 +129,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **contracts:** move `DataKey::{Nullifier, ZkDonationRecord}` from instance to persistent storage so the ZK anonymous-donation path (`donate_anonymous_zk`/`donate_anonymous`) no longer grows the always-loaded contract instance entry with every donation; each entry gets its own footprint and TTL, extended to a documented ~1-year retention window on write (closes #706)
 - **backend:** batch Horizon donation stream events to reduce Socket.IO fan-out complexity from O(clients × donations) to O(clients × batches) — configurable 500ms time window and 50-donation max batch size via `INDEXER_BATCH_WINDOW_MS` and `INDEXER_BATCH_MAX_SIZE` environment variables (closes #157)
 - **frontend:** optimize Core Web Vitals with `next/image`, `next/font`, and `next/dynamic` bundle splitting (closes #261)
+- **backend:** bound admin analytics aggregates with a per-query statement timeout, capped date windows, and row limits; add a `created_at` index on `donations` and EXPLAIN regression tests asserting the time-window queries stay index-backed (closes #718)
 
 ### Removed
 
