@@ -159,6 +159,9 @@ pub enum EscrowError {
     ThresholdExceedsAdminCount = 60,
     AdminTransferInProgress = 61,
     AdminSetUpdateFailed = 62,
+    // ── Job enumeration (63–64) ───────────────────────────────────────────
+    JobIdsPageSizeExceedsMaximum = 63,
+    JobCountExceedsMaximum = 64,
 }
 
 /// Validate a milestone vector against the invariants that must hold at every
@@ -485,6 +488,9 @@ impl EscrowContract {
             .instance()
             .get(&DataKey::JobCount)
             .unwrap_or(0);
+        if count >= MAX_JOBS {
+            panic_with_error!(&env, EscrowError::JobCountExceedsMaximum);
+        }
         let next_count = count.checked_add(1).expect("JobCount overflow");
         env.storage()
             .instance()
@@ -1205,11 +1211,29 @@ impl EscrowContract {
             .unwrap_or(0)
     }
 
-    pub fn get_job_ids(env: Env) -> Vec<String> {
-        env.storage()
+    /// Return a bounded window of job IDs in creation order.
+    pub fn get_job_ids(env: Env, from: u32, count: u32) -> Vec<String> {
+        if count > MAX_JOB_IDS_PAGE_SIZE {
+            panic_with_error!(&env, EscrowError::JobIdsPageSizeExceedsMaximum);
+        }
+
+        let ids: Vec<String> = env
+            .storage()
             .instance()
             .get(&DataKey::JobIds)
-            .unwrap_or_else(|| Vec::new(&env))
+            .unwrap_or_else(|| Vec::new(&env));
+        let end = from.saturating_add(count).min(ids.len());
+        let mut page = Vec::new(&env);
+        let mut index = from;
+
+        while index < end {
+            if let Some(job_id) = ids.get(index) {
+                page.push_back(job_id);
+            }
+            index += 1;
+        }
+
+        page
     }
 
     /// Return the immutable aggregate history for `freelancer`.
@@ -2121,7 +2145,7 @@ mod tests {
         let (_admin, client) = setup(&env);
 
         assert_eq!(client.get_job_count(), 0);
-        assert_eq!(client.get_job_ids().len(), 0);
+        assert_eq!(client.get_job_ids(&0, &MAX_JOB_IDS_PAGE_SIZE).len(), 0);
 
         let client_addr = Address::generate(&env);
         let freelancer = Address::generate(&env);
@@ -2165,10 +2189,70 @@ mod tests {
         );
 
         assert_eq!(client.get_job_count(), 2);
-        let ids = client.get_job_ids();
+        let ids = client.get_job_ids(&0, &MAX_JOB_IDS_PAGE_SIZE);
         assert_eq!(ids.len(), 2);
         assert_eq!(ids.get(0).unwrap(), job_1);
         assert_eq!(ids.get(1).unwrap(), job_2);
+
+        let first_page = client.get_job_ids(&0, &1);
+        assert_eq!(first_page.len(), 1);
+        assert_eq!(first_page.get(0).unwrap(), job_1);
+
+        let second_page = client.get_job_ids(&1, &1);
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page.get(0).unwrap(), job_2);
+
+        assert_eq!(client.get_job_ids(&2, &1).len(), 0);
+        assert_eq!(client.get_job_ids(&u32::MAX, &1).len(), 0);
+        assert!(client
+            .try_get_job_ids(&0, &(MAX_JOB_IDS_PAGE_SIZE + 1))
+            .is_err());
+    }
+
+    #[test]
+    fn test_create_job_rejects_when_job_count_cap_is_reached() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, EscrowContract);
+        let client = EscrowContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        env.as_contract(&cid, || {
+            env.storage().instance().set(&DataKey::JobCount, &MAX_JOBS);
+        });
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M1"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+
+        let job_id = String::from_str(&env, "job-over-cap");
+        assert!(client
+            .try_create_job(
+                &client_addr,
+                &freelancer,
+                &job_id,
+                &token,
+                &1000i128,
+                &milestones,
+                &RELEASE_AFTER_LEDGERS,
+            )
+            .is_err());
     }
 
     #[test]
