@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **frontend:** replace per-request CSP nonce with a SHA-256 hash of the FOUC theme script (the app's only inline executable script), making the policy deterministic across SSG / ISR / edge-cached pages and eliminating nonce-mismatch breakage on cached HTML (closes #689). Remove the `getServerSideProps` SSR-forcing stubs that were added as a nonce workaround, restoring Automatic Static Optimisation for index, dashboard, projects, and transparency pages.
 - **backend:** Serialize migration runs across replicas with a Postgres advisory lock so concurrent boot (k8s HPA min 2) can never apply the same migrations twice (closes #640). Also fixes the migration chain so a fresh database can be bootstrapped end-to-end: `002` drops `CREATE INDEX CONCURRENTLY` (invalid inside the runner's transaction), a new `010_admin_audit_log` migration creates the audit table `011` depends on, `011`'s hash-chain backfill is repaired (uuid/json casts, missing CTE column, `pgcrypto` extension), `021` uses drop-then-add for its CHECK constraint, and `027` guards its example `credits` migration against a missing table. Adds a testcontainers concurrency test proving two concurrent `runMigrations()` calls apply each migration exactly once.
 - **backend:** Enforce match pool caps atomically at match-time using row-level locks, preventing pools from overspending under concurrent load.
 
