@@ -7,10 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+
+### Added
+- AI project-summary generation is now rate-limited: a per-project cooldown
+  (default 5 minutes, `AI_SUMMARY_COOLDOWN_MS`) prevents repeated regeneration
+  from burning API cost, and the existing concurrency cap is now explicit and
+  tunable (`AI_SUMMARY_CONCURRENCY`, default 2) instead of a hardcoded number.
+  Token usage, estimated USD cost, latency, and outcome are now recorded via
+  Prometheus metrics that existed but were never wired up
+  (`ai_summary_tokens_total`, `ai_summary_cost_usd_total`,
+  `ai_summary_latency_seconds`, `ai_summary_outcomes_total`), plus new
+  cost-spike and error-rate alert rules.
+  (`backend/src/services/summaryQueue.js`, `claude.js`, `backend/src/lib/anthropicPricing.js`)
+
+  
+
 ### Fixed
 - **backend:** Serialize migration runs across replicas with a Postgres advisory lock so concurrent boot (k8s HPA min 2) can never apply the same migrations twice (closes #640). Also fixes the migration chain so a fresh database can be bootstrapped end-to-end: `002` drops `CREATE INDEX CONCURRENTLY` (invalid inside the runner's transaction), a new `010_admin_audit_log` migration creates the audit table `011` depends on, `011`'s hash-chain backfill is repaired (uuid/json casts, missing CTE column, `pgcrypto` extension), `021` uses drop-then-add for its CHECK constraint, and `027` guards its example `credits` migration against a missing table. Adds a testcontainers concurrency test proving two concurrent `runMigrations()` calls apply each migration exactly once.
 - **backend:** Enforce match pool caps atomically at match-time using row-level locks, preventing pools from overspending under concurrent load.
 
+n
 ### Added
 
 * **mobile:** add jailbreak/root detection via `expo-device` with a configurable `EXPO_PUBLIC_DEVICE_INTEGRITY_POLICY` (off/warn/block, default block) wired into biometric auth, secure storage, and session unlock so compromised devices trigger the policy (closes #693)
