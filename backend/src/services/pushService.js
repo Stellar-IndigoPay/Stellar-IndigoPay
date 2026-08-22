@@ -259,6 +259,23 @@ async function dispatchToDevices(devices, payload) {
  * Send a push notification to every device registered for a wallet
  * address, honoring that donor's push preferences for `data.type`.
  */
+function projectRoute(projectId) {
+  return projectId ? `/projects/${projectId}` : "/";
+}
+
+function donateRoute(projectId) {
+  return projectId ? `/donate/${projectId}` : "/";
+}
+
+function withRoute(data, route) {
+  return {
+    ...data,
+    route,
+    target: route,
+    url: `indigopay://${route.replace(/^\//, "")}`,
+  };
+}
+
 async function sendPushNotification({ walletAddress, title, body, data = {} }) {
   if (!(await shouldSendPush(walletAddress, data.type))) return null;
 
@@ -284,11 +301,14 @@ async function sendDonationReceipt(donorAddress, donation) {
     walletAddress: donorAddress,
     title: "Donation Received! \u{1F331}",
     body: `${donation.amount} ${donation.currency} donated to ${donation.projectName}`,
-    data: {
-      type: "donation_receipt",
-      projectId: donation.projectId,
-      donationId: donation.id,
-    },
+    data: withRoute(
+      {
+        type: "donation_receipt",
+        projectId: donation.projectId,
+        donationId: donation.id,
+      },
+      projectRoute(donation.projectId),
+    ),
   });
 }
 
@@ -319,11 +339,14 @@ async function sendGovernanceProposalNotifications({
       ? description.slice(0, 117) + "..."
       : description || "A new proposal is open for voting";
 
-  const data = {
-    type: "governance_proposal",
-    proposalId,
-    ...(endsAt ? { endsAt: new Date(endsAt).toISOString() } : {}),
-  };
+  const data = withRoute(
+    {
+      type: "governance_proposal",
+      proposalId,
+      ...(endsAt ? { endsAt: new Date(endsAt).toISOString() } : {}),
+    },
+    "/",
+  );
 
   const messages = [];
   for (const row of followers) {
@@ -369,14 +392,17 @@ async function sendRecurringReminder({
   nextPaymentDate,
   recurringId,
 }) {
-  const payloadData = {
-    type: "recurring_reminder",
-    projectId,
-    recurringId,
-    ...(nextPaymentDate
-      ? { nextPaymentDate: new Date(nextPaymentDate).toISOString() }
-      : {}),
-  };
+  const payloadData = withRoute(
+    {
+      type: "recurring_reminder",
+      projectId,
+      recurringId,
+      ...(nextPaymentDate
+        ? { nextPaymentDate: new Date(nextPaymentDate).toISOString() }
+        : {}),
+    },
+    donateRoute(projectId),
+  );
 
   return sendPushNotification({
     walletAddress: donorAddress,
@@ -412,7 +438,10 @@ async function sendMilestoneReachedNotifications({
         walletAddress: follower.wallet_address,
         title: "Milestone Reached! \u{1F389}",
         body: `${projectName} has reached its ${percentage}% funding milestone!`,
-        data: { type: "milestone_reached", projectId },
+        data: withRoute(
+          { type: "milestone_reached", projectId },
+          projectRoute(projectId),
+        ),
       }),
     );
   }
@@ -437,11 +466,14 @@ async function sendProjectUpdateNotifications({ project, update }) {
 
   const title = `Update: ${project.name}`;
   const body = update.title;
-  const data = {
-    type: "project_update",
-    projectId: project.id,
-    updateId: update.id,
-  };
+  const data = withRoute(
+    {
+      type: "project_update",
+      projectId: project.id,
+      updateId: update.id,
+    },
+    projectRoute(project.id),
+  );
 
   const messages = [];
   const walletAddresses = [];

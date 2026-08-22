@@ -291,16 +291,31 @@ export function parseDeepLinkUrl(url: string): string | null {
     const parsed = Linking.parse(url);
     const path = parsed.path;
     if (!path) return null;
-    const [segment, param] = path.replace(/^\//, "").split("/");
-    if (!param) return null;
-    if (segment === "project") {
-      return `/projects/${param}`;
-    } else if (segment === "donate") {
-      return `/donate/${param}`;
-    }
+    return normalizeNotificationRoute(path);
   } catch (e) {
     console.error("Failed to parse deep link url:", e);
   }
+  return null;
+}
+
+export function normalizeNotificationRoute(route: unknown): string | null {
+  if (typeof route !== "string") return null;
+
+  const cleanRoute = route.trim().replace(/^indigopay:\/\//, "");
+  const normalized = cleanRoute.startsWith("/") ? cleanRoute : `/${cleanRoute}`;
+  const [segment, param] = normalized.replace(/^\//, "").split("/");
+
+  if (segment === "projects" || segment === "project") {
+    return param ? `/projects/${encodeURIComponent(param)}` : null;
+  }
+  if (segment === "donate") {
+    return param ? `/donate/${encodeURIComponent(param)}` : null;
+  }
+  if (segment === "profile") {
+    return param ? `/profile/${encodeURIComponent(param)}` : null;
+  }
+  if (normalized === "/") return "/";
+
   return null;
 }
 
@@ -316,7 +331,13 @@ export function navigateToNotification(
     return;
   }
 
-  const { type, projectId, donorAddress, url } = data;
+  const { type, projectId, donorAddress, url, route, target } = data;
+
+  const payloadRoute = normalizeNotificationRoute(route || target);
+  if (payloadRoute) {
+    push(payloadRoute);
+    return;
+  }
 
   if (url && typeof url === "string") {
     if (url.startsWith("indigopay://")) {
@@ -352,6 +373,7 @@ export function navigateToNotification(
       }
       break;
     case "subscription_due":
+    case "recurring_reminder":
       if (projectId) {
         push(`/donate/${projectId}`);
       } else {
@@ -416,6 +438,7 @@ export interface InboxNotification {
   donationId?: string;
   donorAddress?: string;
   url?: string;
+  route?: string;
 }
 
 export async function getInboxNotifications(): Promise<InboxNotification[]> {
@@ -468,6 +491,7 @@ export async function saveNotificationFromExpo(
   const donationId = data?.donationId as string | undefined;
   const donorAddress = data?.donorAddress as string | undefined;
   const url = data?.url as string | undefined;
+  const route = (data?.route || data?.target) as string | undefined;
 
   await addInboxNotification({
     id,
@@ -480,6 +504,7 @@ export async function saveNotificationFromExpo(
     donationId,
     donorAddress,
     url,
+    route,
   });
 }
 

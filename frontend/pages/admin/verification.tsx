@@ -67,6 +67,34 @@ function computeMetrics(requests: VerificationRequestResponse[]): QueueMetrics {
   };
 }
 
+function csvEscape(value: unknown): string {
+  const raw = value == null ? "" : String(value);
+  return `"${raw.replace(/"/g, '""')}"`;
+}
+
+function buildVerificationCsv(requests: VerificationRequestResponse[]): string {
+  const headers = [
+    "Organization",
+    "Project",
+    "Category",
+    "CO2 per XLM",
+    "Status",
+    "Submitted",
+  ];
+  const rows = requests.map((request) => [
+    request.organizationName,
+    request.projectName,
+    request.projectCategory,
+    request.co2PerXLM,
+    request.status,
+    request.submittedAt,
+  ]);
+
+  return [headers, ...rows]
+    .map((row) => row.map(csvEscape).join(","))
+    .join("\n");
+}
+
 export default function AdminVerificationPage() {
   const router = useRouter();
   const [requests, setRequests] = useState<VerificationRequestResponse[]>([]);
@@ -80,6 +108,7 @@ export default function AdminVerificationPage() {
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [hasMore, setHasMore] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
 
   // Check auth
   useEffect(() => {
@@ -185,6 +214,45 @@ export default function AdminVerificationPage() {
     setPage(1);
   };
 
+  const handleExportCsv = async () => {
+    setExporting(true);
+    setError(null);
+    try {
+      const query = new URLSearchParams();
+      query.set("limit", "200");
+      if (statusFilter) query.set("status", statusFilter);
+
+      const res = await adminFetch(
+        `/api/v1/verification-requests?${query.toString()}`,
+      );
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(
+          body?.error || body?.message || `Export failed (${res.status})`,
+        );
+      }
+
+      const body = await res.json();
+      const csv = buildVerificationCsv(body.data || []);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `verification-queue-${statusFilter || "all"}-${Date.now()}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error ? err.message : "Failed to export verification queue";
+      setError(msg);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+
   // Count per status from the metrics fetch
   const statusCounts: Record<string, number> = {
     "": allRequests.length,
@@ -281,11 +349,20 @@ export default function AdminVerificationPage() {
         )}
 
         {/* Status filter pills */}
-        <div className="mb-6">
+        <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <VerificationFilters
             value={statusFilter}
             onChange={handleStatusFilter}
           />
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            disabled={exporting || requests.length === 0}
+            className="inline-flex items-center justify-center rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700 transition-colors hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-emerald-700/40 dark:bg-emerald-900/30 dark:text-emerald-300 dark:hover:bg-emerald-900/50"
+            aria-label="Export verification queue as CSV"
+          >
+            {exporting ? "Exporting…" : "Export CSV"}
+          </button>
         </div>
 
         {/* Table */}
