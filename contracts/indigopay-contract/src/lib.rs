@@ -655,6 +655,11 @@ pub enum DataKey {
     // Ledger sequence at which the pending upgrade becomes executable.
     // Set together with `PendingUpgrade` and cleared on execute/cancel.
     UpgradeEffectiveAt,
+    // Time-locked vesting donation schedules. `VestingSchedule(donor, id)`
+    // holds one schedule; `DonorVestingCount(donor)` allocates unique,
+    // monotonically increasing schedule ids per donor.
+    VestingSchedule(Address, u32),
+    DonorVestingCount(Address),
     // Hash of the last EXECUTED contract upgrade. Set by
     // `execute_upgrade` after `env.deployer().update_current_contract_wasm`
     // returns. Used by indexers to confirm which WASM is currently
@@ -700,9 +705,6 @@ pub enum DataKey {
     // protection.
     Nullifier(BytesN<32>),
     ZkDonationRecord(u32),
-    // Time-locked donation vesting (#386)
-    VestingSchedule(Address, u32),
-    DonorVestingCount(Address),
     // Platform fee configuration (#385)
     /// Fee in basis points (0–500, max 5%).
     PlatformFeeBps,
