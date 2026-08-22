@@ -72,6 +72,12 @@ pub enum DataKey {
     FreelancerReputation(Address),
     // Ensures multiple milestone disputes on one job count only once.
     ReputationDisputeCounted(String),
+    // Contract-level circuit breaker. When `true`, every fund-mutating
+    // entrypoint rejects with `ContractIsPaused`; read-only getters stay
+    // open so incident responders can still inspect job state. Toggled
+    // only via the M-of-N admin entrypoints `pause_contract` /
+    // `unpause_contract`. Defaults to `false` when unset.
+    Paused,
 }
 
 /// Minimum number of ledgers a job's release period may specify. Jobs
@@ -159,6 +165,8 @@ pub enum EscrowError {
     ThresholdExceedsAdminCount = 60,
     AdminTransferInProgress = 61,
     AdminSetUpdateFailed = 62,
+    // ── Contract-level pause (63) ────────────────────────────────────────
+    ContractIsPaused = 63,
 }
 
 /// Validate a milestone vector against the invariants that must hold at every
@@ -382,6 +390,23 @@ fn require_admin(env: &Env, signers: &Vec<Address>) {
     verify_m_of_n(env, signers, threshold);
 }
 
+/// Circuit-breaker guard: panics with a structured `ContractIsPaused`
+/// error when the contract-level pause is engaged. Called at the top of
+/// every fund-mutating entrypoint right after auth so a paused contract
+/// can neither lock nor move funds; read-only getters deliberately skip
+/// this so clients and indexers keep working during an incident. The
+/// pause flag itself defaults to `false` when unset.
+fn require_not_paused(env: &Env) {
+    let paused: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false);
+    if paused {
+        panic_with_error!(env, EscrowError::ContractIsPaused);
+    }
+}
+
 #[contract]
 pub struct EscrowContract;
 
@@ -427,6 +452,7 @@ impl EscrowContract {
         release_after: u32,
     ) {
         client.require_auth();
+        require_not_paused(&env);
         if amount <= 0 {
             panic_with_error!(&env, EscrowError::AmountMustBePositive);
         }
@@ -524,6 +550,7 @@ impl EscrowContract {
     ) {
         client.require_auth();
         freelancer.require_auth();
+        require_not_paused(&env);
 
         let mut job: Job = env
             .storage()
@@ -598,6 +625,7 @@ impl EscrowContract {
     /// Client releases a specific milestone. Pays proportional XLM to freelancer.
     pub fn release_milestone(env: Env, client: Address, job_id: String, milestone_index: u32) {
         client.require_auth();
+        require_not_paused(&env);
         let mut job: Job = env
             .storage()
             .instance()
@@ -687,6 +715,7 @@ impl EscrowContract {
         proof_hash: BytesN<32>,
     ) {
         freelancer.require_auth();
+        require_not_paused(&env);
 
         let mut job: Job = env
             .storage()
@@ -726,6 +755,7 @@ impl EscrowContract {
     #[cfg(feature = "oracle-escrow")]
     pub fn verify_milestone(env: Env, oracle: Address, job_id: String, milestone_index: u32) {
         oracle.require_auth();
+        require_not_paused(&env);
 
         let mut job: Job = env
             .storage()
@@ -774,6 +804,7 @@ impl EscrowContract {
     #[deprecated]
     pub fn dispute_job(env: Env, signers: Vec<Address>, job_id: String) {
         require_admin(&env, &signers);
+        require_not_paused(&env);
 
         let mut job: Job = env
             .storage()
@@ -820,6 +851,7 @@ impl EscrowContract {
         approve_remaining: bool,
     ) {
         require_admin(&env, &signers);
+        require_not_paused(&env);
 
         let mut job: Job = env
             .storage()
@@ -874,6 +906,7 @@ impl EscrowContract {
         milestone_index: u32,
     ) {
         require_admin(&env, &signers);
+        require_not_paused(&env);
 
         let mut job: Job = env
             .storage()
@@ -924,6 +957,7 @@ impl EscrowContract {
         approve: bool,
     ) {
         require_admin(&env, &signers);
+        require_not_paused(&env);
 
         let mut job: Job = env
             .storage()
@@ -992,6 +1026,7 @@ impl EscrowContract {
     /// Client can request full refund after job deadline passes if no milestone has been claimed.
     pub fn refund_expired_job(env: Env, client: Address, job_id: String) {
         client.require_auth();
+        require_not_paused(&env);
         let mut job: Job = env
             .storage()
             .instance()
@@ -1033,6 +1068,7 @@ impl EscrowContract {
     /// Freelancer can claim a milestone after release_after ledgers if not disputed.
     pub fn claim_milestone(env: Env, freelancer: Address, job_id: String, milestone_index: u32) {
         freelancer.require_auth();
+        require_not_paused(&env);
         let mut job: Job = env
             .storage()
             .instance()
@@ -1109,6 +1145,7 @@ impl EscrowContract {
         new_release_after: u32,
     ) {
         require_admin(&env, &signers);
+        require_not_paused(&env);
 
         let mut job: Job = env
             .storage()
@@ -1184,6 +1221,39 @@ impl EscrowContract {
             .publish((symbol_short!("thresh_up"),), new_threshold);
     }
 
+    // ─── Contract-level pause ───────────────────────────────────────────────
+
+    /// M-of-N admin: engage the contract-level circuit breaker. While
+    /// paused, every fund-mutating entrypoint (`create_job`,
+    /// `amend_job_milestones`, `release_milestone`, `claim_milestone`,
+    /// `refund_expired_job`, the dispute handlers, and release-window
+    /// updates) rejects with a structured `ContractIsPaused` error.
+    /// Read-only getters stay open so clients and indexers can keep
+    /// showing job state during an incident. Admin-set management and the
+    /// pause toggles themselves remain callable so a partially compromised
+    /// admin set can be rotated without lifting the pause.
+    pub fn pause_contract(env: Env, signers: Vec<Address>) {
+        require_admin(&env, &signers);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((symbol_short!("paused"),), ());
+    }
+
+    /// M-of-N admin: lift the contract-level circuit breaker and restore
+    /// normal operation.
+    pub fn unpause_contract(env: Env, signers: Vec<Address>) {
+        require_admin(&env, &signers);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((symbol_short!("unpause"),), ());
+    }
+
+    /// Read-only: returns the current contract-level pause state.
+    pub fn is_contract_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
     /// Returns the full admin set.
     pub fn get_admin_set(env: Env) -> Vec<Address> {
         read_admin_set(&env)
@@ -1226,7 +1296,7 @@ mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Ledger as _};
     use soroban_sdk::token::StellarAssetClient;
-    use soroban_sdk::{Address, Env, IntoVal, String, Vec};
+    use soroban_sdk::{Address, ConversionError, Env, Error, IntoVal, InvokeError, String, Vec};
 
     /// Build a single-element signer Vec for admin calls.
     fn signers1(env: &Env, a: &Address) -> Vec<Address> {
@@ -3050,6 +3120,322 @@ mod tests {
                 created_at: 0,
             }
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Contract-level pause (circuit breaker)
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Assert that a `try_*` client call failed with exactly the expected
+    /// structured [`EscrowError`].
+    fn assert_contract_error(
+        result: Result<Result<(), ConversionError>, Result<Error, InvokeError>>,
+        expected: EscrowError,
+        context: &str,
+    ) {
+        match result {
+            Err(Ok(error)) => match EscrowError::try_from(&error) {
+                Ok(err) => assert_eq!(err, expected, "unexpected contract error for {context}"),
+                Err(_) => panic!(
+                    "expected contract error {expected:?} for {context}, got non-contract error {error:?}"
+                ),
+            },
+            other => panic!("expected contract error {expected:?} for {context}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_pause_unpause_toggles_flag() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        assert!(!client.is_contract_paused());
+
+        client.pause_contract(&signers1(&env, &admin));
+        assert!(client.is_contract_paused());
+
+        client.unpause_contract(&signers1(&env, &admin));
+        assert!(!client.is_contract_paused());
+    }
+
+    #[test]
+    fn test_pause_blocks_create_job_and_unpause_restores() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-paused-create");
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 100));
+
+        client.pause_contract(&signers1(&env, &admin));
+        assert!(client.is_contract_paused());
+
+        // Fund-mutating create is blocked while paused...
+        let result = client.try_create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+        assert_contract_error(
+            result,
+            EscrowError::ContractIsPaused,
+            "create_job while paused",
+        );
+        // ...and no state was written.
+        assert_eq!(client.get_job_count(), 0);
+
+        // Unpause restores normal operation.
+        client.unpause_contract(&signers1(&env, &admin));
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+        assert_eq!(client.get_job_count(), 1);
+    }
+
+    #[test]
+    fn test_pause_blocks_release_milestone_and_unpause_restores() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = String::from_str(&env, "job-paused-release");
+        create_reputation_job(&env, &client, &client_addr, &freelancer, &job_id, 1_000);
+
+        client.pause_contract(&signers1(&env, &admin));
+
+        // Release is blocked with the structured pause error...
+        let result = client.try_release_milestone(&client_addr, &job_id, &0u32);
+        assert_contract_error(
+            result,
+            EscrowError::ContractIsPaused,
+            "release_milestone while paused",
+        );
+
+        // ...reads stay open and state is unchanged.
+        let job = client.get_job(&job_id).unwrap();
+        assert_eq!(job.status, JobStatus::Escrowed);
+        assert!(!job.milestones.get(0).unwrap().released);
+
+        // Unpause restores normal operation.
+        client.unpause_contract(&signers1(&env, &admin));
+        client.release_milestone(&client_addr, &job_id, &0u32);
+        let job = client.get_job(&job_id).unwrap();
+        assert_eq!(job.status, JobStatus::Completed);
+        assert!(job.milestones.get(0).unwrap().released);
+    }
+
+    #[test]
+    fn test_pause_blocks_claim_milestone_and_unpause_restores() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = String::from_str(&env, "job-paused-claim");
+        create_reputation_job(&env, &client, &client_addr, &freelancer, &job_id, 1_000);
+
+        // Advance past the job's release window so the claim would succeed
+        // if the contract were not paused.
+        env.ledger().set_sequence_number(RELEASE_AFTER_LEDGERS + 1);
+
+        client.pause_contract(&signers1(&env, &admin));
+
+        let result = client.try_claim_milestone(&freelancer, &job_id, &0u32);
+        assert_contract_error(
+            result,
+            EscrowError::ContractIsPaused,
+            "claim_milestone while paused",
+        );
+
+        client.unpause_contract(&signers1(&env, &admin));
+        client.claim_milestone(&freelancer, &job_id, &0u32);
+        let job = client.get_job(&job_id).unwrap();
+        assert_eq!(job.status, JobStatus::Completed);
+    }
+
+    #[test]
+    fn test_pause_blocks_refund_expired_job_and_unpause_restores() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = String::from_str(&env, "job-paused-refund");
+        create_reputation_job(&env, &client, &client_addr, &freelancer, &job_id, 1_000);
+
+        // Advance past the deadline so the refund would otherwise succeed.
+        env.ledger()
+            .set_sequence_number(DEFAULT_DEADLINE_LEDGERS + 10);
+
+        client.pause_contract(&signers1(&env, &admin));
+
+        let result = client.try_refund_expired_job(&client_addr, &job_id);
+        assert_contract_error(
+            result,
+            EscrowError::ContractIsPaused,
+            "refund_expired_job while paused",
+        );
+        // Job untouched by the blocked refund.
+        assert_eq!(client.get_job(&job_id).unwrap().status, JobStatus::Escrowed);
+
+        client.unpause_contract(&signers1(&env, &admin));
+        client.refund_expired_job(&client_addr, &job_id);
+        assert_eq!(
+            client.get_job(&job_id).unwrap().status,
+            JobStatus::Completed
+        );
+    }
+
+    #[test]
+    fn test_pause_blocks_dispute_entrypoints() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = String::from_str(&env, "job-paused-dispute");
+        create_reputation_job(&env, &client, &client_addr, &freelancer, &job_id, 1_000);
+
+        client.pause_contract(&signers1(&env, &admin));
+
+        // All dispute handlers are fund-mutating and must reject while paused.
+        let result = client.try_dispute_job(&signers1(&env, &admin), &job_id);
+        assert_contract_error(
+            result,
+            EscrowError::ContractIsPaused,
+            "dispute_job while paused",
+        );
+
+        let result = client.try_dispute_milestone(&signers1(&env, &admin), &job_id, &0u32);
+        assert_contract_error(
+            result,
+            EscrowError::ContractIsPaused,
+            "dispute_milestone while paused",
+        );
+
+        let result =
+            client.try_resolve_milestone_dispute(&signers1(&env, &admin), &job_id, &0u32, &true);
+        assert_contract_error(
+            result,
+            EscrowError::ContractIsPaused,
+            "resolve_milestone_dispute while paused",
+        );
+
+        let result = client.try_resolve_dispute(&signers1(&env, &admin), &job_id, &true);
+        assert_contract_error(
+            result,
+            EscrowError::ContractIsPaused,
+            "resolve_dispute while paused",
+        );
+
+        // Nothing was disputed while paused.
+        assert_eq!(client.get_job(&job_id).unwrap().status, JobStatus::Escrowed);
+
+        // Unpause restores the dispute flow.
+        client.unpause_contract(&signers1(&env, &admin));
+        client.dispute_milestone(&signers1(&env, &admin), &job_id, &0u32);
+        assert_eq!(client.get_job(&job_id).unwrap().status, JobStatus::Disputed);
+    }
+
+    #[test]
+    fn test_paused_reads_stay_open() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = String::from_str(&env, "job-paused-reads");
+        create_reputation_job(&env, &client, &client_addr, &freelancer, &job_id, 1_000);
+
+        client.pause_contract(&signers1(&env, &admin));
+
+        // Read-only getters keep working while the circuit breaker is engaged.
+        assert!(client.is_contract_paused());
+        assert!(client.get_job(&job_id).is_some());
+        assert_eq!(client.get_job_count(), 1);
+        assert_eq!(client.get_job_ids().len(), 1);
+        assert_eq!(client.get_job_amendment_count(&job_id), 0);
+        assert_eq!(client.get_freelancer_reputation(&freelancer).total_jobs, 1);
+        assert_eq!(client.get_admin_set().len(), 1);
+        assert_eq!(client.get_admin_threshold(), 1u32);
+
+        // Admin-set management stays available during an incident so a
+        // partially compromised admin set can be rotated without lifting
+        // the pause.
+        let new_admin = Address::generate(&env);
+        client.add_admin(&signers1(&env, &admin), &new_admin);
+        assert_eq!(client.get_admin_set().len(), 2);
+
+        client.unpause_contract(&signers1(&env, &admin));
+        assert!(!client.is_contract_paused());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_pause_toggle_by_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        // A stranger's signature never satisfies the M-of-N threshold.
+        let stranger = Address::generate(&env);
+        client.pause_contract(&signers1(&env, &stranger));
+    }
+
+    #[test]
+    fn test_unpause_toggle_by_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // 2-of-3 admin set.
+        let cid = env.register_contract(None, EscrowContract);
+        let client = EscrowContractClient::new(&env, &cid);
+        let admins = [
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ];
+        client.initialize(&build_signers(&env, &admins), &2u32);
+        client.pause_contract(&build_signers(&env, &admins[0..2]));
+        assert!(client.is_contract_paused());
+
+        // A single signer of a 2-of-3 set cannot lift the pause...
+        let result = client.try_unpause_contract(&signers1(&env, &admins[0]));
+        assert_contract_error(
+            result,
+            EscrowError::InsufficientAdminSignatures,
+            "unpause with 1-of-2 required signatures",
+        );
+        assert!(client.is_contract_paused());
+
+        // ...but the full M-of-N quorum can.
+        client.unpause_contract(&build_signers(&env, &admins[0..2]));
+        assert!(!client.is_contract_paused());
     }
 
     #[cfg(feature = "oracle-escrow")]

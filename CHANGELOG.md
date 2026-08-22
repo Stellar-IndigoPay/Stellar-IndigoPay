@@ -47,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **contracts:** add multi-source TWAP price oracle with freshness protection (closes #281)
 - **contracts:** 48h upgrade timelock (`propose_upgrade` / `execute_upgrade` / `cancel`)
 - **contracts:** contract-level pause (`pause_contract` / `unpause_contract`)
+- **contracts:** escrow contract-level circuit breaker for emergency response — M-of-N admin `pause_contract` / `unpause_contract` plus a structured `ContractIsPaused` error gating every fund-mutating entrypoint (`create_job`, `amend_job_milestones`, `release_milestone`, `claim_milestone`, `refund_expired_job`, dispute handlers, release-window updates) while reads stay open
 - **contracts:** two-step admin transfer (`transfer_admin` / `accept_admin` / `cancel`)
 - **contracts:** comprehensive Soroban fuzz testing harness with 7 property-based tests and action-sequence fuzzing (#239)
 - **contracts:** escrow fuzz target for milestone percentage edge cases (closes #508)
