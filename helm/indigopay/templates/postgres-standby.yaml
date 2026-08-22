@@ -32,6 +32,8 @@ data:
     primary_conninfo = 'host={{ .Values.postgres.standby.primaryHost }}.{{ .Values.namespace }}.svc.cluster.local port={{ .Values.postgres.standby.primaryPort }} user={{ .Values.secrets.postgresReplicationUser }} password={{ .Values.secrets.postgresReplicationPassword }} application_name=standby'
     primary_slot_name = 'standby_slot'
     recovery_target_timeline = 'latest'
+  primary-conninfo.txt: |
+    host={{ .Values.postgres.standby.primaryHost }}.{{ .Values.namespace }}.svc.cluster.local port={{ .Values.postgres.standby.primaryPort }} user={{ .Values.secrets.postgresReplicationUser }} password={{ .Values.secrets.postgresReplicationPassword }} application_name=standby
   restore-wal.sh: |
     #!/bin/sh
     set -e
@@ -119,6 +121,9 @@ spec:
             - name: postgres-standby-config
               mountPath: /etc/postgresql/postgresql.standby.conf
               subPath: postgresql.standby.conf
+            - name: postgres-standby-config
+              mountPath: /tmp/primary-conninfo.txt
+              subPath: primary-conninfo.txt
           args:
             - "-c"
             - "config_file=/etc/postgresql/postgresql.conf"
