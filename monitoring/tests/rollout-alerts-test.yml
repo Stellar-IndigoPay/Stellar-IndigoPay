@@ -1,0 +1,44 @@
+# monitoring/tests/rollout-alerts-test.yml
+#
+# promtool test rules for the `stellar-indigopay-rollout` group in
+# monitoring/alert-rules.yml (GrantFox OSS, area/ci: canary auto-abort).
+#
+# Run with:
+#   promtool test rules monitoring/tests/rollout-alerts-test.yml
+
+rule_files:
+  - ../alert-rules.yml
+
+evaluation_interval: 30s
+
+tests:
+  # FIRES: a RolloutAborted event was recorded for the backend Rollout.
+  - name: canary-rollout-aborted-fires
+    interval: 30s
+    input_series:
+      - series: 'rollout_events_total{namespace="stellar-indigopay", name="backend", reason="RolloutAborted"}'
+        values: '0 1 1 1 1 1 1 1 1 1 1'
+
+    alert_rule_test:
+      - alertname: CanaryRolloutAborted
+        eval_time: 5m
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              namespace: stellar-indigopay
+              name: backend
+              reason: RolloutAborted
+            exp_annotations:
+              summary: "backend canary rollout was auto-aborted"
+
+  # DOES NOT FIRE: no abort events, only unrelated rollout progress.
+  - name: canary-rollout-aborted-ok
+    interval: 30s
+    input_series:
+      - series: 'rollout_events_total{namespace="stellar-indigopay", name="backend", reason="RolloutStepCompleted"}'
+        values: '0 1 2 3 4 5 6 7 8 9 10'
+
+    alert_rule_test:
+      - alertname: CanaryRolloutAborted
+        eval_time: 5m
+        exp_alerts: []

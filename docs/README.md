@@ -101,6 +101,7 @@ for everything in this directory. Pick the section that matches what you need.
 | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | **[Disaster Recovery Plan](disaster-recovery.md)** | RTO / RPO table, failure modes, secret-compromise procedure, multi-region roadmap.                          |
 | **[Postgres Restore Runbook](restore-runbook.md)** | Pre-flight → provision → cutover → post-restore → dry run. Exercised monthly by the restore-drill workflow. |
+| **[Canary Auto-Abort Runbook](canary-abort-runbook.md)** | What `CanaryRolloutAborted` means, why the rollback already happened, and how to triage the failing revision. |
 | **[Performance & Load Testing](performance.md)**   | SLO table and k6 recipes for verifying them.                                                                |
 | **[Monitoring Stack](../monitoring/)               | Prometheus + Grafana + Alertmanager compose stack, alert rules, dashboards.                                 |
 | **[ZAP Triage Guide](zap-triage.md)**              | Weekly DAST scan handling.                                                                                  |
@@ -153,6 +154,7 @@ docs/
 ├── external-secrets.md        ← external-secrets-operator
 ├── disaster-recovery.md       ← DR plan + RTO / RPO
 ├── restore-runbook.md         ← Postgres restore procedure
+├── canary-abort-runbook.md    ← backend canary auto-abort triage
 ├── adr/                       ← architecture decision records
 │   ├── ADR-001-why-stellar-soroban-over-evm.md
 │   ├── ADR-002-why-direct-to-wallet-payments-over-platform-custody.md

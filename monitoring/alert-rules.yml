@@ -264,3 +264,23 @@ groups:
             The last successful secret rotation was {{ $value | humanizeTimestamp }}.
             Rotations are scheduled quarterly (every 91 days). Consider running
             the workflow manually if the automated schedule has been failing.
+
+  - name: stellar-indigopay-rollout
+    interval: 30s
+    rules:
+      # Fires when the backend Rollout auto-aborts (analysis failed).
+      # Traffic already reverted to stable — this pages on-call to
+      # review the failed release, not to hand-roll back.
+      - alert: CanaryRolloutAborted
+        expr: |
+          increase(rollout_events_total{namespace="stellar-indigopay", name="backend", reason="RolloutAborted"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: "backend canary rollout was auto-aborted"
+          description: |
+            Argo Rollouts aborted the backend Rollout after the
+            backend-success-rate AnalysisRun failed. Stable is already
+            serving 100% of traffic; investigate the failed revision
+            before re-rolling it out.

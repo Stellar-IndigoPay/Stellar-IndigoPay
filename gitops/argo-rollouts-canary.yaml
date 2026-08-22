@@ -20,6 +20,10 @@
 #      steps.
 #   4. On full rollout, scales down the old revision.
 #
+# Automated abort/rollback: `strategy.canary.analysis` runs as a
+# background AnalysisRun from step 0. A `Failed` result auto-aborts
+# the Rollout and fires `CanaryRolloutAborted` (alert-rules.yml).
+#
 # Prerequisite: install argo-rollouts in the cluster.
 #   kubectl create namespace argo-rollouts
 #   kubectl apply -n argo-rollouts -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
@@ -55,12 +59,17 @@ spec:
         - setWeight: 50
         - pause: { duration: 5m }
         - setWeight: 100
+      # Explicit abort SLA: scale the canary ReplicaSet down 30s after
+      # an abort. Kept explicit (matches the controller default) so
+      # it's documented and enforced by scripts/validate-gitops-rollout.js.
+      abortScaleDownDelaySeconds: 30
       analysis:
         templates:
           - templateName: backend-success-rate
-        startingStep: 1
-        # Re-run analysis on each weight step. If the template returns
-        # `Failed`, the rollout aborts and traffic reverts to stable.
+        # 0 (was 1): analysis now covers the first 20%-weight step
+        # too, instead of only starting once the canary already
+        # reached 50%.
+        startingStep: 0
         args:
           - name: service-name
             value: backend-svc
