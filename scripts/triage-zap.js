@@ -32,6 +32,7 @@ function runTriage() {
 
   const config = loadJson(CONFIG_PATH) || { ignored_alerts: [] };
   const ignoredRules = config.ignored_alerts || [];
+  const usedIgnores = new Set();
 
   // Parse sites
   let sites = report.site || [];
@@ -80,11 +81,15 @@ function runTriage() {
           const uri = inst.uri || "";
 
           // Check if this instance is ignored/whitelisted
-          const isIgnored = ignoredRules.some((rule) => {
+          let isIgnored = false;
+          ignoredRules.forEach((rule, idx) => {
             const pluginMatch = String(rule.pluginId) === String(pluginId);
             const urlMatch =
               !rule.url || uri.toLowerCase().includes(rule.url.toLowerCase());
-            return pluginMatch && urlMatch;
+            if (pluginMatch && urlMatch) {
+              isIgnored = true;
+              usedIgnores.add(idx);
+            }
           });
 
           const findingDetails = {
@@ -147,8 +152,24 @@ function runTriage() {
     process.exit(1);
   }
 
+  const staleIgnores = ignoredRules.filter((_, idx) => !usedIgnores.has(idx));
+  if (staleIgnores.length > 0) {
+    console.error(
+      `\n🔴 FAILED CI: Detected ${staleIgnores.length} stale ZAP suppressions in zap-false-positives.json!`,
+    );
+    for (const rule of staleIgnores) {
+      console.error(`\n- Stale suppression: Plugin ID ${rule.pluginId}`);
+      if (rule.url) console.error(`  URL match: ${rule.url}`);
+    }
+    console.error("\nTo resolve this:");
+    console.error(
+      "Remove the stale entries from zap-false-positives.json since they no longer match any active findings.",
+    );
+    process.exit(1);
+  }
+
   console.log(
-    "\n✅ CI SUCCESS: No unhandled High or Critical findings detected.",
+    "\n✅ CI SUCCESS: No unhandled High or Critical findings detected, and no stale suppressions found.",
   );
   process.exit(0);
 }

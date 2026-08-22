@@ -64,3 +64,38 @@ jobs:
         with:
           sarif_file: trivy-${{ matrix.service }}.sarif
           category: trivy-${{ matrix.service }}
+
+      - name: Run raw Trivy scan for staleness check
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: stellar-indigopay-${{ matrix.service }}:scan
+          format: "json"
+          output: "trivy-raw-${{ matrix.service }}.json"
+          severity: "CRITICAL,HIGH"
+          exit-code: "0"
+          ignore-unfixed: true
+          vuln-type: "os,library"
+
+      - name: Upload raw Trivy scan report
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-raw-${{ matrix.service }}
+          path: trivy-raw-${{ matrix.service }}.json
+          retention-days: 1
+
+  trivy-staleness:
+    name: Trivy Staleness Check
+    needs: scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download all raw Trivy reports
+        uses: actions/download-artifact@v4
+        with:
+          path: .
+          pattern: trivy-raw-*
+          merge-multiple: true
+
+      - name: Check for stale suppressions
+        run: node scripts/check-stale-trivy.js
