@@ -39,8 +39,13 @@ const HORIZON_URL =
 const RPC_URL =
   process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
 
-const NETWORK_PASSPHRASE =
-  NETWORK === "mainnet" ? Networks.PUBLIC : Networks.TESTNET;
+const NETWORK_PASSPHRASES = Object.freeze({
+  testnet: Networks.TESTNET,
+  mainnet: Networks.PUBLIC,
+});
+// NETWORK is validated before services load in server.js.
+// eslint-disable-next-line security/detect-object-injection
+const NETWORK_PASSPHRASE = NETWORK_PASSPHRASES[NETWORK];
 
 const server = new Horizon.Server(HORIZON_URL);
 const rpcServer = new rpc.Server(RPC_URL);

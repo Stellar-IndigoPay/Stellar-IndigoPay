@@ -142,6 +142,14 @@ describe("store utility functions", () => {
     });
   });
 
+  test("mapProjectRow sanitizes the AI summary on read", () => {
+    const row = {
+      id: "project-1",
+      ai_summary: "<script>alert(1)</script> **bold**",
+    };
+    expect(mapProjectRow(row).aiSummary).toBe("alert(1) bold");
+  });
+
   test("mapDonationRow includes formatted amountXLM when present", () => {
     const row = {
       id: "donation-1",

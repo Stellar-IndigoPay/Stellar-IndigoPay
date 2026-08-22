@@ -4,7 +4,7 @@
  */
 import { useEffect, useState } from "react";
 import { server } from "@/lib/stellar";
-import { shortenAddress, formatXLM } from "@/utils/format";
+import { shortenAddress, formatXLM, formatTime } from "@/utils/format";
 
 interface TickerItem {
   id: string;
@@ -30,7 +30,7 @@ export default function DonationTicker() {
           from: r.from || r.funder || r.account,
           amount: r.amount || "0",
           asset: r.asset_code || "XLM",
-          time: new Date(r.created_at).toLocaleTimeString(),
+          time: formatTime(r.created_at),
         }));
         setItems(initial);
       });
@@ -46,7 +46,7 @@ export default function DonationTicker() {
             from: payment.from || payment.funder || payment.account,
             amount: payment.amount || "0",
             asset: payment.asset_code || "XLM",
-            time: new Date(payment.created_at).toLocaleTimeString(),
+            time: formatTime(payment.created_at),
           };
           setItems((prev) => [newItem, ...prev.slice(0, 9)]);
         },

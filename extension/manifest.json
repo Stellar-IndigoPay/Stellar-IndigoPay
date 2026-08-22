@@ -9,19 +9,13 @@
   },
   "permissions": [
     "storage",
-    "activeTab",
-    "scripting",
     "contextMenus"
   ],
   "background": {
     "service_worker": "dist/background.js"
   },
   "host_permissions": [
-    "https://api.stellar-indigopay.app/*",
-    "https://stellar-indigopay.app/*",
-    "https://*.stellar-indigopay.app/*",
-    "https://app.indigopay.io/*",
-    "https://testnet.indigopay.io/*"
+    "https://api.stellar-indigopay.app/*"
   ],
   "content_scripts": [
     {

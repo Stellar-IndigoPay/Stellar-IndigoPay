@@ -5,7 +5,8 @@
     "build": "webpack --config webpack.config.js",
     "dev": "webpack --watch --config webpack.config.js",
     "test": "jest",
-    "lint": "tsc --noEmit --project tsconfig.json"
+    "lint": "tsc --noEmit --project tsconfig.json",
+    "check:permissions": "node scripts/validate-permissions.js"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^16.0.1"

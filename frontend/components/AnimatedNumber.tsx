@@ -3,6 +3,7 @@
  * Animates a number from 0 to the target value on mount.
  */
 import { useEffect, useState, useRef } from "react";
+import { formatNumber } from "@/utils/format";
 
 interface AnimatedNumberProps {
   value: number | string;
@@ -43,7 +44,7 @@ export default function AnimatedNumber({
     <>
       {formatter
         ? formatter(displayValue)
-        : Math.floor(displayValue).toLocaleString()}
+        : formatNumber(Math.floor(displayValue))}
     </>
   );
 }

@@ -5,6 +5,7 @@
  * Renders a sleek vertical timeline with subtle hover animations.
  */
 import React from "react";
+import { formatDateTime } from "@/utils/format";
 
 interface Event {
   label: string;
@@ -37,10 +38,7 @@ export default function VerificationTimeline({ events }: Props) {
                 className="text-sm text-gray-500 dark:text-gray-400"
                 dateTime={event.date}
               >
-                {new Date(event.date).toLocaleString(undefined, {
-                  dateStyle: "medium",
-                  timeStyle: "short",
-                })}
+                {formatDateTime(event.date)}
               </time>
             </div>
           </li>

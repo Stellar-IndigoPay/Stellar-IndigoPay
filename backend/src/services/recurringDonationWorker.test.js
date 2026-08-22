@@ -2,6 +2,7 @@
 
 const mockOn = jest.fn();
 const mockStart = jest.fn().mockResolvedValue(undefined);
+const mockCreateQueue = jest.fn().mockResolvedValue(undefined);
 const mockSchedule = jest.fn().mockResolvedValue(undefined);
 const mockWork = jest.fn().mockResolvedValue(undefined);
 const mockStop = jest.fn().mockResolvedValue(undefined);
@@ -10,6 +11,7 @@ jest.mock("pg-boss", () =>
   jest.fn().mockImplementation(() => ({
     on: mockOn,
     start: mockStart,
+    createQueue: mockCreateQueue,
     schedule: mockSchedule,
     work: mockWork,
     stop: mockStop,
@@ -257,6 +259,7 @@ describe("recurringDonationWorker", () => {
     await worker.start({ emit: jest.fn() });
 
     expect(mockStart).toHaveBeenCalledTimes(1);
+    expect(mockCreateQueue).toHaveBeenCalledWith(worker.QUEUE);
     expect(mockSchedule).toHaveBeenCalledWith(
       worker.QUEUE,
       "*/5 * * * *",

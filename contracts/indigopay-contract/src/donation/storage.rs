@@ -45,3 +45,40 @@ pub fn get_project_donations(env: &Env, project: &Address) -> Vec<u64> {
         .get(&DataKey::ProjectDonations(project.clone()))
         .unwrap_or(Vec::new(env))
 }
+
+pub fn get_stealth_withdrawable_balance(env: &Env, project: &Address, token: &Address) -> i128 {
+    env.storage()
+        .instance()
+        .get(&DataKey::StealthWithdrawableBalance(
+            project.clone(),
+            token.clone(),
+        ))
+        .unwrap_or(0i128)
+}
+
+pub fn add_stealth_withdrawable_balance(
+    env: &Env,
+    project: &Address,
+    token: &Address,
+    amount: i128,
+) {
+    let balance = get_stealth_withdrawable_balance(env, project, token);
+    set_stealth_withdrawable_balance(
+        env,
+        project,
+        token,
+        balance.checked_add(amount).expect("overflow"),
+    );
+}
+
+pub fn set_stealth_withdrawable_balance(
+    env: &Env,
+    project: &Address,
+    token: &Address,
+    balance: i128,
+) {
+    env.storage().instance().set(
+        &DataKey::StealthWithdrawableBalance(project.clone(), token.clone()),
+        &balance,
+    );
+}

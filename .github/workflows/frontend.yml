@@ -133,10 +133,10 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         working-directory: frontend
         run: npx playwright install --with-deps chromium
-      - name: Install Playwright system dependencies (if cached)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        working-directory: frontend
-        run: npx playwright install-deps chromium
+      # No separate install-deps step on cache hits: ubuntu-latest already
+      # ships the Chromium system libraries, and `npx playwright install-deps`
+      # invokes apt-get which intermittently deadlocks on the runner's dpkg
+      # lock and hangs the job until the 15m timeout.
       - name: Build frontend for E2E
         working-directory: frontend
         run: npm run build
@@ -292,12 +292,16 @@ jobs:
       - name: Install Playwright browsers (with dependencies)
         if: steps.playwright-cache-e2e.outputs.cache-hit != 'true'
         working-directory: frontend
-        run: npx playwright install --with-deps chromium firefox webkit
+        # Every project in playwright.config.ts runs Chromium, so firefox and
+        # webkit are never used. Installing their system deps (apt-get) is what
+        # hung on ubuntu-latest and blew the 15m job timeout, so install only
+        # the browser the suite actually launches.
+        run: npx playwright install --with-deps chromium
 
       - name: Install Playwright system dependencies (if cached)
         if: steps.playwright-cache-e2e.outputs.cache-hit == 'true'
         working-directory: frontend
-        run: npx playwright install-deps chromium firefox webkit
+        run: npx playwright install-deps chromium
 
       - name: Build frontend for E2E
         working-directory: frontend

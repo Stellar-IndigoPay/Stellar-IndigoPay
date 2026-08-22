@@ -22,6 +22,8 @@ const QUEUE = "donation-match";
 let boss = null;
 
 async function start() {
+  if (boss) return;
+
   const connectionString =
     process.env.DATABASE_URL ||
     "postgres://postgres:postgres@localhost:5432/indigopay";
@@ -35,8 +37,9 @@ async function start() {
   );
 
   await boss.start();
+  await boss.createQueue(QUEUE);
 
-  await boss.work(QUEUE, { teamSize: 2, teamConcurrency: 1 }, async (job) => {
+  await boss.work(QUEUE, { teamSize: 2, teamConcurrency: 1 }, async ([job]) => {
     const { projectId, donorAddress, parsedAmount, transactionHash } =
       job.data;
 
@@ -44,11 +47,13 @@ async function start() {
     try {
       await client.query("BEGIN");
 
-      // Check for active matching offers
+      // Check for active matching offers with a row-level lock (FOR UPDATE)
+      // to ensure concurrent matching jobs do not over-allocate beyond the cap.
       const matchesResult = await client.query(
         `SELECT id, matcher_address, cap_xlm, matched_xlm, multiplier
          FROM donation_matches
-         WHERE project_id = $1 AND expires_at > NOW()`,
+         WHERE project_id = $1 AND expires_at > NOW()
+         FOR UPDATE`,
         [projectId],
       );
 
@@ -102,10 +107,23 @@ async function start() {
 }
 
 async function stop() {
-  if (boss) {
-    await boss.stop({ timeout: 5000 });
-    boss = null;
-  }
+  const currentBoss = boss;
+  if (!currentBoss) return;
+  boss = null;
+
+  // pg-boss 10 schedules worker removal from `offWork()` but does not await
+  // that removal from `stop()`. Keep its client pool open while the polling
+  // loops observe the stop signal, then close the pg-boss-owned pool only
+  // after those loops have had a chance to exit. Otherwise a late poll calls
+  // Node's timers/promises module after Jest has torn the environment down.
+  await currentBoss.stop({
+    graceful: true,
+    close: false,
+    timeout: 5_000,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  const db = currentBoss.getDb?.();
+  if (db?.opened) await db.close();
 }
 
 /**

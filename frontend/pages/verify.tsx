@@ -22,7 +22,7 @@ import {
   type AttestationStats,
   type CrossChainAttestation,
 } from "@/lib/api";
-import { shortenAddress } from "@/utils/format";
+import { shortenAddress, formatDateTime } from "@/utils/format";
 
 type LookupKey = "source" | "on-chain";
 
@@ -273,13 +273,13 @@ export default function VerifyAttestationPage() {
                 />
                 <Stat
                   label="Created"
-                  value={new Date(result.createdAt).toLocaleString()}
+                  value={formatDateTime(result.createdAt)}
                 />
                 <Stat
                   label="Verified"
                   value={
                     result.verifiedAt
-                      ? new Date(result.verifiedAt).toLocaleString()
+                      ? formatDateTime(result.verifiedAt)
                       : "—"
                   }
                 />

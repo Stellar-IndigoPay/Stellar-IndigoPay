@@ -6,10 +6,16 @@ use soroban_sdk::{
     Address, Env, InvokeError, String, Symbol, Vec,
 };
 
+/// Maximum number of price observations retained in the circular buffer.
+/// At ~5 seconds per ledger, this covers approximately 100 seconds of history.
 const MAX_OBSERVATIONS: u32 = 20;
 const MAX_SOURCE_ORACLES: u32 = 7;
+/// Default TWAP window (in observations). Must not exceed MAX_OBSERVATIONS.
 const DEFAULT_TWAP_WINDOW: u32 = 10;
-const DEFAULT_STALENESS_THRESHOLD: u32 = 720;
+/// Default staleness threshold (in ledger sequences). Aligned with MAX_OBSERVATIONS
+/// to ensure the staleness check does not accept data older than the maximum TWAP
+/// window could cover. At ~5s/ledger, 120 ledgers ≈ 600 seconds.
+const DEFAULT_STALENESS_THRESHOLD: u32 = 120;
 const PRICE_SCALE: i128 = 10_000_000;
 pub const DEFAULT_UNSTAKE_COOLDOWN: u32 = 120_960;
 
@@ -776,6 +782,12 @@ impl SimpleOracle {
         if threshold < read_twap_window(&env) {
             panic_with_error!(&env, OracleError::StalenessThresholdMustBeAtLeastTwapWindow);
         }
+        // Enforce the invariant that staleness threshold must be at least MAX_OBSERVATIONS
+        // (the maximum possible TWAP window). This ensures operators cannot misconfigure
+        // a staleness threshold that is shorter than the maximum smoothing window.
+        if threshold < MAX_OBSERVATIONS {
+            panic_with_error!(&env, OracleError::InvalidConfiguration);
+        }
         env.storage()
             .instance()
             .set(&DataKey::StalenessThreshold, &threshold);
@@ -1177,13 +1189,13 @@ mod tests {
         add_reporter(&env, &contract_id, &admin, &reporter);
         client.add_source_oracle(&admin, &Address::generate(&env));
         client.set_fallback_price(&admin, &6);
-        client.set_staleness_threshold(&admin, &DEFAULT_TWAP_WINDOW);
+        client.set_staleness_threshold(&admin, &MAX_OBSERVATIONS);
 
         env.ledger().set_sequence_number(100);
         client.report_price(&reporter, &80_000_000);
         env.ledger().set_sequence_number(110);
         assert_eq!(client.get_aggregated_price(), 8);
-        env.ledger().set_sequence_number(111);
+        env.ledger().set_sequence_number(100 + MAX_OBSERVATIONS + 1);
         assert_eq!(client.get_aggregated_price(), 6);
         assert_eq!(client.get_price(), 6);
     }
@@ -1235,6 +1247,27 @@ mod tests {
     }
 
     #[test]
+    fn default_staleness_threshold_respects_max_observations_invariant() {
+        let (env, contract_id, _, _) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+
+        // Verify that DEFAULT_STALENESS_THRESHOLD >= MAX_OBSERVATIONS to ensure
+        // the staleness check does not accept data older than the maximum TWAP window.
+        assert!(
+            client.get_staleness_threshold() >= MAX_OBSERVATIONS,
+            "DEFAULT_STALENESS_THRESHOLD must be >= MAX_OBSERVATIONS (invariant)"
+        );
+        assert!(
+            client.get_twap_window() <= MAX_OBSERVATIONS,
+            "DEFAULT_TWAP_WINDOW must be <= MAX_OBSERVATIONS"
+        );
+        assert!(
+            client.get_staleness_threshold() >= client.get_twap_window(),
+            "Staleness threshold must be >= TWAP window"
+        );
+    }
+
+    #[test]
     fn admin_can_set_configuration() {
         let (env, contract_id, admin, _) = setup();
         let client = SimpleOracleClient::new(&env, &contract_id);
@@ -1266,11 +1299,14 @@ mod tests {
         let (env, contract_id, admin, _) = setup();
         let client = SimpleOracleClient::new(&env, &contract_id);
 
+        // Staleness threshold must be at least MAX_OBSERVATIONS (invariant enforcement).
         assert!(client
-            .try_set_staleness_threshold(&admin, &(DEFAULT_TWAP_WINDOW - 1))
+            .try_set_staleness_threshold(&admin, &(MAX_OBSERVATIONS - 1))
             .is_err());
-        client.set_staleness_threshold(&admin, &DEFAULT_TWAP_WINDOW);
-        assert_eq!(client.get_staleness_threshold(), DEFAULT_TWAP_WINDOW);
+        // At minimum, staleness threshold must equal MAX_OBSERVATIONS.
+        client.set_staleness_threshold(&admin, &MAX_OBSERVATIONS);
+        assert_eq!(client.get_staleness_threshold(), MAX_OBSERVATIONS);
+        // Can be set higher than MAX_OBSERVATIONS.
         client.set_staleness_threshold(&admin, &u32::MAX);
         assert_eq!(client.get_staleness_threshold(), u32::MAX);
     }
@@ -1353,7 +1389,11 @@ mod tests {
         env.ledger().set_sequence_number(111);
         assert_eq!(client.get_price(), 8);
 
-        client.set_staleness_threshold(&admin, &DEFAULT_TWAP_WINDOW);
+        // Set staleness threshold to 5 to make the price stale (price at ledger 100, now at 111).
+        // Note: staleness threshold must be >= MAX_OBSERVATIONS, so we use MAX_OBSERVATIONS
+        // and change the ledger advance to make it stale relative to that.
+        client.set_staleness_threshold(&admin, &MAX_OBSERVATIONS);
+        env.ledger().set_sequence_number(100 + MAX_OBSERVATIONS + 1);
         assert_eq!(client.get_price(), 5);
     }
 
@@ -1393,9 +1433,9 @@ mod tests {
         let (env, contract_id, admin, _) = setup();
         let client = SimpleOracleClient::new(&env, &contract_id);
 
-        client.set_staleness_threshold(&admin, &DEFAULT_TWAP_WINDOW);
+        client.set_staleness_threshold(&admin, &MAX_OBSERVATIONS);
         assert!(client
-            .try_set_twap_window(&admin, &(DEFAULT_TWAP_WINDOW + 1))
+            .try_set_twap_window(&admin, &(MAX_OBSERVATIONS + 1))
             .is_err());
         assert_eq!(client.get_twap_window(), DEFAULT_TWAP_WINDOW);
     }
@@ -1895,9 +1935,10 @@ mod tests {
         env.ledger().set_sequence_number(100);
         client.report_price(&reporter, &100);
         client.report_price(&reporter, &100);
-        client.set_staleness_threshold(&admin, &10);
+        // Set staleness threshold to exactly MAX_OBSERVATIONS so it becomes stale at 100+20+1.
+        client.set_staleness_threshold(&admin, &MAX_OBSERVATIONS);
         client.set_max_price_deviation(&admin, &500);
-        env.ledger().set_sequence_number(111);
+        env.ledger().set_sequence_number(100 + MAX_OBSERVATIONS + 1);
         client.report_price(&reporter, &1_000);
 
         assert_eq!(
@@ -1907,7 +1948,7 @@ mod tests {
                 (
                     contract_id.clone(),
                     (symbol_short!("price_upd"), reporter).into_val(&env),
-                    (1_000_i128, 111_u32).into_val(&env),
+                    (1_000_i128, (100 + MAX_OBSERVATIONS + 1)).into_val(&env),
                 )
             ]
         );
