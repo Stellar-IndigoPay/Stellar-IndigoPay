@@ -19,6 +19,8 @@
  *   "/api/admin/*"       — any-method wildcard (lower priority than method-specific)
  *   "default"            — catch-all when no other pattern matches
  */
+
+
 "use strict";
 
 const RATE_LIMIT_TIERS = {
@@ -119,4 +121,20 @@ function getRateLimitConfig(method, path) {
   return RATE_LIMIT_TIERS.default;
 }
 
-module.exports = { RATE_LIMIT_TIERS, getRateLimitConfig };
+// ── Receipt generation (per-donor, applied directly — not path-matched) ────
+//
+// GET /api/donations/:id/receipt can't be expressed as a getRateLimitConfig
+// pattern: that matcher only supports a trailing wildcard ("METHOD
+// /fixed/prefix/*"), but this route's variable segment (:id) sits in the
+// MIDDLE of the path, with a fixed "/receipt" suffix after it. Any prefix
+// wildcard broad enough to match "/api/donations/<id>/receipt" would also
+// match sibling routes like GET /api/donations/:id, /project/:id,
+// /donor/:publicKey, and /recurring/:donorAddress — which need very
+// different (much more generous) limits.
+//
+// Keyed by donor address rather than IP in routes/donations.js (via
+// slidingWindowRateLimit directly) — the resource being protected is "how
+// often can THIS DONOR trigger receipt work", not "how often can this
+// client hit this URL".
+const RECEIPT_RATE_LIMIT = { points: 5, duration: 3600 }; // 5 receipt requests / hour / donor
+module.exports = { RATE_LIMIT_TIERS, getRateLimitConfig, RECEIPT_RATE_LIMIT };

@@ -25,9 +25,12 @@ const { enqueueImpactRecalc } = require("../services/impactQueue");
 const { enqueuePushNotification } = require("../services/pushQueue");
 const { server } = require("../services/stellar");
 const oracleService = require("../services/oracleService");
-const { generateReceiptPdf, hashReceiptContent, signReceipt } = require("../services/receiptGenerator");
 const { invalidateProjectRelatedCache } = require("../services/cacheManager");
 const donationLimiter = createRateLimiter(10, 1); // 10 requests per minute
+const { generateReceiptPdf, hashReceiptContent, signReceipt, getOrGenerateReceiptPdf } = require("../services/receiptGenerator");
+const { slidingWindowRateLimit } = require("../middleware/rateLimiter");
+const { RECEIPT_RATE_LIMIT } = require("../middleware/rateLimitConfig");
+const { sendAppError } = require("../errors");
 
 router.param("id", validateRouteParam(uuidValidator, "id"));
 router.param("projectId", validateRouteParam(uuidValidator, "projectId"));
@@ -374,19 +377,27 @@ router.get("/stream", (req, res) => {
   });
 });
 
+
+
+
+
 // GET /api/donations/:id/receipt - return the immutable, signed tax receipt.
+//
+// Throttling/caching (see services/receiptGenerator.js for the cache +
+// coalescing implementation):
+//   1. Per-donor rate limit (RECEIPT_RATE_LIMIT) — protects the expensive
+//      generation path, and DB round-trips on repeat requests, from being
+//      hammered for a single donor's receipts.
+//   2. Content-hash Redis cache (keyed on donationId+transactionHash) sits
+//      in front of the durable Postgres cache (donation_receipts table,
+//      unchanged) for a faster repeat-request path.
+//   3. In-process request coalescing ensures a burst of concurrent
+//      first-time requests for the same donation only generates once.
 router.get("/:id/receipt", async (req, res, next) => {
   try {
     const { id } = req.params;
     if (!uuidValidator.safeParse(id).success) throw new AppError("VALIDATION_ERROR", { field: "id" });
-    const existing = await pool.query(
-      "SELECT pdf FROM donation_receipts WHERE donation_id = $1", [id],
-    );
-    if (existing.rows[0]) {
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `attachment; filename="indigopay-receipt-${id}.pdf"`);
-      return res.send(existing.rows[0].pdf);
-    }
+
     const result = await pool.query(
       `SELECT d.*, p.name AS project_name, p.wallet_address, p.co2_offset_kg,
         CASE WHEN p.raised_xlm > 0 THEN d.amount_xlm * (p.co2_offset_kg::numeric / p.raised_xlm) ELSE 0 END AS co2_offset_kg
@@ -395,43 +406,53 @@ router.get("/:id/receipt", async (req, res, next) => {
     const donation = result.rows[0];
     if (!donation) throw new AppError("DONATION_NOT_FOUND");
     if (donation.anonymous) throw new AppError("NOT_FOUND");
-    const receiptId = uuid();
-    const issuedAt = new Date().toISOString();
-    const proof = JSON.stringify({ receiptId, donationId: id, transactionHash: donation.transaction_hash, issuedAt });
-    const receiptHash = hashReceiptContent(proof);
-    const signature = signReceipt(receiptHash);
-    const pdf = generateReceiptPdf({ donation, project: { name: donation.project_name, wallet_address: donation.wallet_address }, receiptId, issuedAt, receiptHash, signature });
-    await pool.query(
-      `INSERT INTO donation_receipts (id, donation_id, receipt_hash, signature, pdf)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (donation_id) DO NOTHING`, [receiptId, id, receiptHash, signature, pdf],
+
+    const limiterKey = `ratelimit:sw:receipt:${donation.donor_address}`;
+    const limiterResult = await slidingWindowRateLimit(
+      limiterKey,
+      RECEIPT_RATE_LIMIT.points,
+      RECEIPT_RATE_LIMIT.duration * 1000,
     );
-    await pool.query("UPDATE donations SET receipt_generated_at = NOW() WHERE id = $1", [id]);
+    if (!limiterResult.allowed) {
+      res.setHeader("Retry-After", String(limiterResult.reset));
+      return sendAppError(res, "RATE_LIMITED", { retryAfter: limiterResult.reset });
+    }
+
+    const { pdf } = await getOrGenerateReceiptPdf(id, donation.transaction_hash, async () => {
+      const existing = await pool.query(
+        "SELECT pdf FROM donation_receipts WHERE donation_id = $1", [id],
+      );
+      if (existing.rows[0]) return existing.rows[0].pdf;
+
+      const receiptId = uuid();
+      const issuedAt = new Date().toISOString();
+      const proof = JSON.stringify({ receiptId, donationId: id, transactionHash: donation.transaction_hash, issuedAt });
+      const receiptHash = hashReceiptContent(proof);
+      const signature = signReceipt(receiptHash);
+      const generatedPdf = generateReceiptPdf({ donation, project: { name: donation.project_name, wallet_address: donation.wallet_address }, receiptId, issuedAt, receiptHash, signature });
+
+      await pool.query(
+        `INSERT INTO donation_receipts (id, donation_id, receipt_hash, signature, pdf)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (donation_id) DO NOTHING`, [receiptId, id, receiptHash, signature, generatedPdf],
+      );
+      await pool.query("UPDATE donations SET receipt_generated_at = NOW() WHERE id = $1", [id]);
+
+      // Re-read what was actually persisted, in case a concurrent request
+      // on ANOTHER process instance won the INSERT race first — every
+      // caller (even the "losing" one here) then returns the exact bytes
+      // now durably stored, not its own locally-generated, now-orphaned
+      // copy with a different receiptId/signature baked in.
+      const persisted = await pool.query(
+        "SELECT pdf FROM donation_receipts WHERE donation_id = $1", [id],
+      );
+      return persisted.rows[0]?.pdf || generatedPdf;
+    });
+
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="indigopay-receipt-${id}.pdf"`);
     return res.send(pdf);
   } catch (e) { return next(e); }
-});
-
-// GET /api/donations/project/:id
-router.get("/project/:projectId/messages", async (req, res, next) => {
-  try {
-    const limit = Math.min(parseInt(req.query.limit, 10) || 10, 50);
-    // Read from the donor_history projection (materialised donation stream).
-    const result = await pool.query(
-      `SELECT *
-        FROM projection_donor_history
-        WHERE project_id = $1
-          AND message IS NOT NULL
-          AND length(trim(message)) > 0
-        ORDER BY amount_xlm DESC, created_at DESC
-        LIMIT $2`,
-      [req.params.projectId, limit],
-    );
-    res.json({ success: true, data: result.rows.map(mapDonationRow) });
-  } catch (e) {
-    next(e);
-  }
 });
 
 /**

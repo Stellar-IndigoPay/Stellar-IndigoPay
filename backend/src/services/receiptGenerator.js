@@ -2,6 +2,8 @@
 
 const crypto = require("crypto");
 const { Keypair } = require("@stellar/stellar-sdk");
+const redis = require("./redis");
+const logger = require("../logger");
 
 function escapePdf(value) {
   return String(value).replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
@@ -56,4 +58,105 @@ function signReceipt(receiptHash) {
 
 function hashReceiptContent(content) { return crypto.createHash("sha256").update(content).digest("hex"); }
 
-module.exports = { generateReceiptPdf, signReceipt, hashReceiptContent };
+// ── Content-hash caching + request coalescing ───────────────────────────────
+//
+// A donation row is immutable once inserted (no updated_at column — see
+// schema.sql), so a receipt's content never changes for a given donation.
+// That makes (donationId, transactionHash) a valid, permanent cache key.
+//
+// This sits IN FRONT OF the durable Postgres cache (the `donation_receipts`
+// table, unchanged by this file) as a faster path that also avoids a DB
+// round-trip on repeat requests, and coalesces concurrent first-time
+// requests for the same donation so a burst of simultaneous requests
+// results in at most one generate() call per process, not one per request.
+
+const RECEIPT_CACHE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days — receipts are immutable once issued
+// Bump this if the PDF template/content shape ever changes, to naturally
+// invalidate old cached bytes without an explicit cache-clear step.
+const RECEIPT_CACHE_VERSION = "v1";
+
+// In-process map of in-flight generation promises, keyed by content hash.
+// Process-local only: in a multi-instance deployment, two DIFFERENT
+// instances can each still generate once on a cold cache — the durable
+// Postgres cache (and the re-read-after-insert in getOrGenerateReceiptPdf)
+// is what keeps that consistent; this map is what prevents duplicate work
+// within a single instance's request burst.
+const inFlightGenerations = new Map();
+
+function computeReceiptCacheKey(donationId, transactionHash) {
+  const hash = crypto
+    .createHash("sha256")
+    .update(`${RECEIPT_CACHE_VERSION}:${donationId}:${transactionHash}`)
+    .digest("hex");
+  return `cache:v1:receipt:${hash}`;
+}
+
+async function getCachedReceiptPdf(cacheKey) {
+  const cached = await redis.get(cacheKey);
+  if (!cached || typeof cached !== "string") return null;
+  try {
+    return Buffer.from(cached, "base64");
+  } catch {
+    return null;
+  }
+}
+
+async function cacheReceiptPdf(cacheKey, pdfBuffer) {
+  await redis.set(cacheKey, pdfBuffer.toString("base64"), RECEIPT_CACHE_TTL_SECONDS);
+}
+
+/**
+ * Return a donation's receipt PDF, generating it only if necessary.
+ * Checks the Redis content-hash cache first, then coalesces with any
+ * in-flight generation for the same key, and only calls `generate()` if
+ * neither applies.
+ *
+ * @param {string} donationId
+ * @param {string} transactionHash
+ * @param {() => Promise<Buffer>} generate - called at most once per content
+ *   hash per process (per cache-cold period). Expected to itself check the
+ *   durable Postgres cache before doing real generation work, and to
+ *   return the PDF as a Buffer either way.
+ * @returns {Promise<{ pdf: Buffer, source: "redis" | "coalesced" | "generated" }>}
+ */
+async function getOrGenerateReceiptPdf(donationId, transactionHash, generate) {
+  const cacheKey = computeReceiptCacheKey(donationId, transactionHash);
+
+  const cached = await getCachedReceiptPdf(cacheKey);
+  if (cached) {
+    return { pdf: cached, source: "redis" };
+  }
+
+  const existingGeneration = inFlightGenerations.get(cacheKey);
+  if (existingGeneration) {
+    const pdf = await existingGeneration;
+    return { pdf, source: "coalesced" };
+  }
+
+  const generationPromise = (async () => {
+    try {
+      const pdf = await generate();
+      cacheReceiptPdf(cacheKey, pdf).catch((err) => {
+        logger.warn(
+          { event: "receipt_cache_write_failed", donationId, err: err.message },
+          "Failed to cache generated receipt PDF",
+        );
+      });
+      return pdf;
+    } finally {
+      inFlightGenerations.delete(cacheKey);
+    }
+  })();
+
+  inFlightGenerations.set(cacheKey, generationPromise);
+  const pdf = await generationPromise;
+  return { pdf, source: "generated" };
+}
+
+module.exports = {
+  generateReceiptPdf,
+  signReceipt,
+  hashReceiptContent,
+  computeReceiptCacheKey,
+  getOrGenerateReceiptPdf,
+};
