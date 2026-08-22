@@ -188,6 +188,25 @@ const secretRotationLastTimestamp = new client.Gauge({
   registers: [registry],
 });
 
+const turretLastHeartbeatTimestamp = new client.Gauge({
+  name: "turret_health_last_heartbeat_timestamp",
+  help: "Unix timestamp of the last heartbeat received from a turret, labelled by turret_id",
+  labelNames: ["turret_id"],
+  registers: [registry],
+});
+
+const turretAuthFailuresTotal = new client.Counter({
+  name: "turret_auth_failures_total",
+  help: "Count of authentication failures for turret endpoints",
+  registers: [registry],
+});
+
+const turretRotationTotal = new client.Counter({
+  name: "turret_rotation_total",
+  help: "Count of successful turret credential rotations",
+  registers: [registry],
+});
+
 const readinessCheckFailedTotal = new client.Counter({
   name: "readiness_check_failed_total",
   help: "Count of /api/readyz responses with HTTP 503 (readiness probe failed).",
@@ -498,6 +517,20 @@ async function refreshQueueMetrics() {
   }
 }
 
+async function refreshTurretMetrics() {
+  try {
+    const pool = require("../db/pool");
+    const result = await pool.query(
+      "SELECT id, EXTRACT(EPOCH FROM last_heartbeat) AS ts FROM turrets WHERE last_heartbeat IS NOT NULL"
+    );
+    for (const row of result.rows) {
+      turretLastHeartbeatTimestamp.set({ turret_id: row.id }, row.ts);
+    }
+  } catch (err) {
+    // Suppress error so scrape doesn't fail on transient issues
+  }
+}
+
 /**
  * Update the secret-rotation Prometheus gauge after a rotation is recorded.
  * Called from the admin secretRotations route once the DB insert succeeds.
@@ -554,6 +587,9 @@ const metrics = {
   projectionRebuildDurationSeconds,
   projectionRebuildLastEvents,
   projectionRebuildInProgress,
+  turretLastHeartbeatTimestamp,
+  turretAuthFailuresTotal,
+  turretRotationTotal,
 };
 
 module.exports = {
@@ -565,5 +601,6 @@ module.exports = {
   normaliseRoute,
   refreshDbPoolMetrics,
   refreshQueueMetrics,
+  refreshTurretMetrics,
   updateSecretRotationMetrics,
 };

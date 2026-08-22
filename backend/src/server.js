@@ -285,6 +285,7 @@ const routeMounts = [
   "oracle",
   "map",
   "matches",
+  "turrets",
 ];
 
 for (const name of routeMounts) {

@@ -19,7 +19,7 @@
 const crypto = require("crypto");
 const express = require("express");
 const logger = require("../logger");
-const { registry, refreshDbPoolMetrics, refreshQueueMetrics } = require("../services/metrics");
+const { registry, refreshDbPoolMetrics, refreshQueueMetrics, refreshTurretMetrics } = require("../services/metrics");
 const pool = require("../db/pool");
 
 const router = express.Router();
@@ -56,6 +56,7 @@ router.get("/", metricsAuth, async (_req, res, next) => {
     // interval.
     refreshDbPoolMetrics(pool);
     await refreshQueueMetrics();
+    await refreshTurretMetrics();
     const body = await registry.metrics();
     res.set("Content-Type", registry.contentType);
     res.send(body);

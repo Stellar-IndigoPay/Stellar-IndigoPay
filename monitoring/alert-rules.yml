@@ -264,3 +264,31 @@ groups:
             The last successful secret rotation was {{ $value | humanizeTimestamp }}.
             Rotations are scheduled quarterly (every 91 days). Consider running
             the workflow manually if the automated schedule has been failing.
+
+  - name: stellar-indigopay-turrets
+    interval: 30s
+    rules:
+      - alert: TurretHeartbeatStale
+        expr: |
+          time() - turret_health_last_heartbeat_timestamp > 300
+        for: 5m
+        labels:
+          severity: page
+          routing: pagerduty
+        annotations:
+          summary: "Turret {{ $labels.turret_id }} heartbeat is stale (>5m)"
+          description: |
+            The turret {{ $labels.turret_id }} hasn't sent a heartbeat for over 5 minutes.
+            This could indicate a crashed or disconnected turret.
+
+      - alert: TurretAuthFailureSpike
+        expr: |
+          rate(turret_auth_failures_total[5m]) > 2
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Spike in turret auth failures"
+          description: |
+            More than 2 authentication failures per second over the last 5 minutes on the turret endpoints.
+            This could indicate a compromised or misconfigured turret API key.

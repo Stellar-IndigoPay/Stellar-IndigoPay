@@ -396,3 +396,20 @@ CREATE TABLE IF NOT EXISTS digest_sends (
     UNIQUE (digest_type, donor_address, period_start)
 );
 CREATE INDEX IF NOT EXISTS idx_digest_sends_status ON digest_sends (digest_type, period_start, status);
+
+-- turrets: registry of authorized turrets with API key hashes for heartbeat auth.
+CREATE TABLE IF NOT EXISTS turrets (
+  id UUID PRIMARY KEY,
+  name TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  api_key_hash TEXT NOT NULL,
+  prev_api_key_hash TEXT,
+  prev_api_key_expires_at TIMESTAMPTZ,
+  status TEXT NOT NULL DEFAULT 'active',
+  key_version INTEGER NOT NULL DEFAULT 1,
+  last_heartbeat TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_turrets_api_key_hash ON turrets (api_key_hash);
+CREATE INDEX IF NOT EXISTS idx_turrets_prev_api_key_hash ON turrets (prev_api_key_hash) WHERE prev_api_key_hash IS NOT NULL;

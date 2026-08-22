@@ -361,8 +361,43 @@ function startTurretsServer(port = 3001) {
       res.status(500).json({ error: error.message });
     }
   });
+  const server = app.listen(port);
 
-  return app.listen(port);
+  const apiKey = process.env.TURRET_API_KEY;
+  if (apiKey) {
+    const mainPort = process.env.PORT || 4000;
+    const http = require("http");
+    
+    const sendHeartbeat = () => {
+      const req = http.request(
+        {
+          hostname: "127.0.0.1",
+          port: mainPort,
+          path: "/api/turrets/heartbeat",
+          method: "POST",
+          headers: {
+            "X-Turret-Key": apiKey,
+          },
+        },
+        (res) => {
+          res.on("data", () => {}); // Consume response data
+          if (res.statusCode !== 200) {
+            console.error(`[Turret] Heartbeat failed with status: ${res.statusCode}`);
+          }
+        }
+      );
+      req.on("error", (err) => console.error("[Turret] Heartbeat request error:", err.message));
+      req.end();
+    };
+
+    const interval = setInterval(sendHeartbeat, 60000);
+    server.on("close", () => clearInterval(interval));
+    
+    // Initial heartbeat
+    setTimeout(sendHeartbeat, 1000);
+  }
+
+  return server;
 }
 
 /**

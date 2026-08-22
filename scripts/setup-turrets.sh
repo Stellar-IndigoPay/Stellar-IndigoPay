@@ -4,40 +4,106 @@
 
 set -e
 
-echo "🚀 Setting up Stellar Turrets for donation matching..."
+BACKEND_ENV="backend/.env"
+API_URL="http://localhost:4000/api"
 
-# Check if required environment variables are set
-if [ -z "$MATCHER_SECRET_KEY" ]; then
-  echo "⚠️  WARNING: MATCHER_SECRET_KEY not set"
-  echo "   Set this in your .env file to enable automatic matching"
-  echo "   Generate a testnet keypair at: https://laboratory.stellar.org/"
+# Load environment to get API credentials if available
+if [ -f "$BACKEND_ENV" ]; then
+  export $(grep -v '^#' "$BACKEND_ENV" | xargs)
 fi
 
-# Enable Turrets in backend .env
-BACKEND_ENV="backend/.env"
-if [ -f "$BACKEND_ENV" ]; then
-  if ! grep -q "ENABLE_TURRETS" "$BACKEND_ENV"; then
-    echo "ENABLE_TURRETS=true" >> "$BACKEND_ENV"
-    echo "TURRETS_PORT=3001" >> "$BACKEND_ENV"
-    echo "✅ Added Turrets configuration to backend/.env"
+COMMAND=$1
+shift || true
+
+if [ -z "$COMMAND" ] || [ "$COMMAND" = "help" ]; then
+  echo "Usage: $0 [issue|rotate|revoke] [args]"
+  echo "  issue [name] [scope] - Issue a new turret credential"
+  echo "  rotate <turret_id>   - Rotate an existing turret credential"
+  echo "  revoke <turret_id>   - Revoke a turret credential"
+  exit 1
+fi
+
+if [ -z "$ADMIN_API_KEY" ]; then
+  # Assuming local setup, you might need an access token, but since we have basic auth
+  # fallback in local dev, this might be tricky. Let's warn the user.
+  echo "⚠️  ADMIN_API_KEY not found in $BACKEND_ENV"
+  echo "   You need an admin bearer token to manage turrets."
+  exit 1
+fi
+
+if [ "$COMMAND" = "issue" ]; then
+  echo "🚀 Issuing new Turret credential..."
+  NAME=${1:-"Local Turret"}
+  SCOPE=${2:-"matching"}
+  
+  RESPONSE=$(curl -s -X POST "$API_URL/admin/turrets" \
+    -H "Authorization: Bearer $ADMIN_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{\"name\": \"$NAME\", \"scope\": \"$SCOPE\"}")
+    
+  if echo "$RESPONSE" | grep -q '"success":true'; then
+    TURRET_ID=$(echo "$RESPONSE" | grep -o '"id":"[^"]*' | grep -o '[^"]*$')
+    TURRET_API_KEY=$(echo "$RESPONSE" | grep -o '"apiKey":"[^"]*' | grep -o '[^"]*$')
+    
+    echo "✅ Turret issued successfully!"
+    echo "Turret ID: $TURRET_ID"
+    
+    if ! grep -q "TURRET_API_KEY" "$BACKEND_ENV"; then
+      echo "TURRET_API_KEY=$TURRET_API_KEY" >> "$BACKEND_ENV"
+    else
+      sed -i.bak "s/^TURRET_API_KEY=.*/TURRET_API_KEY=$TURRET_API_KEY/" "$BACKEND_ENV" && rm -f "$BACKEND_ENV.bak"
+    fi
+    if ! grep -q "ENABLE_TURRETS=true" "$BACKEND_ENV"; then
+      echo "ENABLE_TURRETS=true" >> "$BACKEND_ENV"
+      echo "TURRETS_PORT=3001" >> "$BACKEND_ENV"
+    fi
+    echo "✅ Updated $BACKEND_ENV"
   else
-    echo "ℹ️  Turrets already configured in backend/.env"
+    echo "❌ Failed to issue turret: $RESPONSE"
+  fi
+
+elif [ "$COMMAND" = "rotate" ]; then
+  TURRET_ID=$1
+  if [ -z "$TURRET_ID" ]; then
+    echo "Usage: $0 rotate <turret_id>"
+    exit 1
+  fi
+  
+  echo "🔄 Rotating Turret credential for $TURRET_ID..."
+  RESPONSE=$(curl -s -X POST "$API_URL/admin/turrets/$TURRET_ID/rotate" \
+    -H "Authorization: Bearer $ADMIN_API_KEY")
+    
+  if echo "$RESPONSE" | grep -q '"success":true'; then
+    TURRET_API_KEY=$(echo "$RESPONSE" | grep -o '"apiKey":"[^"]*' | grep -o '[^"]*$')
+    echo "✅ Turret rotated successfully! Dual-key window is active for 24h."
+    
+    if grep -q "TURRET_API_KEY" "$BACKEND_ENV"; then
+      sed -i.bak "s/^TURRET_API_KEY=.*/TURRET_API_KEY=$TURRET_API_KEY/" "$BACKEND_ENV" && rm -f "$BACKEND_ENV.bak"
+      echo "✅ Updated $BACKEND_ENV with new key"
+    else
+      echo "TURRET_API_KEY=$TURRET_API_KEY" >> "$BACKEND_ENV"
+    fi
+  else
+    echo "❌ Failed to rotate turret: $RESPONSE"
+  fi
+
+elif [ "$COMMAND" = "revoke" ]; then
+  TURRET_ID=$1
+  if [ -z "$TURRET_ID" ]; then
+    echo "Usage: $0 revoke <turret_id>"
+    exit 1
+  fi
+  
+  echo "🚫 Revoking Turret credential for $TURRET_ID..."
+  RESPONSE=$(curl -s -X POST "$API_URL/admin/turrets/$TURRET_ID/revoke" \
+    -H "Authorization: Bearer $ADMIN_API_KEY")
+    
+  if echo "$RESPONSE" | grep -q '"success":true'; then
+    echo "✅ Turret revoked successfully!"
+  else
+    echo "❌ Failed to revoke turret: $RESPONSE"
   fi
 else
-  echo "⚠️  backend/.env not found. Creating..."
-  cat > "$BACKEND_ENV" << EOF
-ENABLE_TURRETS=true
-TURRETS_PORT=3001
-MATCHER_SECRET_KEY=
-EOF
-  echo "✅ Created backend/.env with Turrets configuration"
+  echo "Unknown command: $COMMAND"
+  exit 1
 fi
-
-echo ""
-echo "📋 Next steps:"
-echo "1. Set MATCHER_SECRET_KEY in backend/.env with your matcher account's secret key"
-echo "2. Fund the matcher account with XLM on testnet/mainnet"
-echo "3. Create matching offers in the database using the API"
-echo "4. Restart the backend server to start the Turrets service"
-echo ""
-echo "✨ Turrets setup complete!"
