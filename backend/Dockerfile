@@ -4,15 +4,25 @@
 #   docker buildx imagetools inspect node:22.14.0-alpine
 # and append `@sha256:<digest>` to each `FROM` below. Do NOT fabricate
 # a digest — a fake SHA breaks `docker build` immediately.
+#
+# Build context is the REPO ROOT (not backend/), because
+# src/validators/schemas.js requires ../../../shared/validation.js
+# (Issue #90-follow-up: shared validation module). Root package.json's
+# only dependency is `zod`, installed at / so shared/validation.js's
+# own require("zod") resolves the same way it does in Dockerfile.test.
 FROM node:22-alpine AS test
 
 WORKDIR /app
 
-COPY package*.json ./
+COPY package*.json /
+RUN cd / && npm ci --omit=dev
 
+COPY shared/ /shared/
+
+COPY backend/package*.json ./
 RUN npm ci
 
-COPY . .
+COPY backend/ ./
 
 CMD ["npm", "test"]
 
@@ -22,7 +32,7 @@ FROM node:22-alpine AS builder
 
 WORKDIR /app
 
-COPY package*.json ./
+COPY backend/package*.json ./
 
 RUN npm ci --omit=dev
 
@@ -33,12 +43,17 @@ WORKDIR /app
 
 ENV NODE_ENV production
 
+COPY package*.json /
+RUN cd / && npm ci --omit=dev
+
+COPY shared/ /shared/
+
 # Copy package files and production dependencies
-COPY package*.json ./
+COPY backend/package*.json ./
 COPY --from=builder /app/node_modules ./node_modules
 
 # Copy source code
-COPY . .
+COPY backend/ ./
 
 EXPOSE 4000
 

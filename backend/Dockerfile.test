@@ -5,6 +5,7 @@ WORKDIR /app
 
 COPY package*.json /
 RUN cd / && npm ci --ignore-scripts
+COPY shared/ /shared/
 
 COPY backend/package*.json ./
 RUN npm ci
