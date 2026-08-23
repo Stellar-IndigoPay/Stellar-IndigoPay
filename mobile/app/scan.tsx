@@ -33,7 +33,7 @@ import {
 } from "react-native";
 import { useRouter } from "expo-router";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import axios from "axios";
+import { apiClient } from "../lib/apiClient";
 import { parseQRData, ParsedQR } from "../utils/qrParser";
 import {
   resolveProjectByAddress,

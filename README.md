@@ -8,7 +8,7 @@
 [![CI](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/actions/workflows/ci.yml/badge.svg)](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/actions/workflows/ci.yml)
 [![Contributors](https://img.shields.io/badge/Contributors-89-6366F1)](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/graphs/contributors)
 [![Tests](https://img.shields.io/badge/Tests-2%2C400%2B-10B981)](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/actions/workflows/ci.yml)
-[![Errors](https://img.shields.io/badge/Contract%20Errors-308-7C3AED)](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/tree/main/contracts)
+[![Errors](https://img.shields.io/badge/Contract%20Errors-310-7C3AED)](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/tree/main/contracts)
 [![Coverage](https://img.shields.io/badge/Coverage-99.5%25-10B981)](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/actions/workflows/ci.yml)
 
 [![Stellar](https://img.shields.io/badge/Stellar-Powered-6366F1?logo=stellar)](https://stellar.org)
@@ -44,7 +44,7 @@ The same platform ships as:
 | 🌐 **Web app**           | Donor dashboard, project browse, leaderboard, AI impact summaries, multi-wallet | Next.js 14 · React · TypeScript · Tailwind |
 | 📱 **Mobile app**        | QR-scan-to-give, biometric auth, secure wallet storage, push receipts           | React Native · Expo · expo-router          |
 | 🧩 **Browser extension** | Detect Stellar addresses on any page, donate in one click                       | Manifest V3 · Webpack (Chrome + Firefox)   |
-| ⛓️ **4 Soroban contracts** | Donation ledger (136 codes), escrow (62), attestation (60), oracle (50) — **308 structured error codes** | Rust · WASM `wasm32v1-none`                |
+| ⛓️ **4 Soroban contracts** | Donation ledger (138 codes), escrow (62), attestation (60), oracle (50) — **310 structured error codes** | Rust · WASM `wasm32v1-none`                |
 | 🛠 **Backend API**        | Metadata, leaderboard, webhooks, AI summaries, admin, event streaming           | Node.js 22 · Express · Postgres · pg-boss  |
 
 ---
@@ -200,7 +200,7 @@ That's it. No account creation, no email verification, no KYC.
 - **Direct-to-project payments** — funds flow donor → project wallet. The contract records the event; it never custodies funds.
 - **Backend is optional** — if the API is down, donations still succeed; you just can't see the leaderboard.
 - **Soroban is the source of truth** — the contract exposes 20+ read functions; the backend is a queryable cache.
-- **Structured errors** — all 4 contracts use `#[contracterror]` enums (308 numeric codes total); no string-parsing needed for error handling.
+- **Structured errors** — all 4 contracts use `#[contracterror]` enums (310 numeric codes total); no string-parsing needed for error handling.
 - **Wallet-as-identity** — auth is `require_auth()` on the Stellar keypair. No password reset, no email enumeration.
 - **Defense in depth** — NetworkPolicies (default-deny), `PodDisruptionBudget`, `HorizontalPodAutoscaler`, External Secrets, SBOM + Trivy + cosign, monthly restore drills.
 
@@ -274,10 +274,10 @@ All four contracts use `#[contracterror]` enums with unique numeric codes — no
 | Contract | Error Enum | Codes | Categories |
 |----------|-----------|-------|------------|
 | **IndigoPay** | `ContractError` + `VerificationError` | 136 | Init/admin, project, donation, campaign, token, attestation, escrow, governance, ZK, NFT, upgrade, emergency, refund, impact |
-| **Escrow** | `EscrowError` | 62 | Init, job creation, amendment, release, oracle, disputes, refunds, claims, admin |
+| **Escrow** | `EscrowError` | 64 | Init, job creation, amendment, release, oracle, disputes, refunds, claims, admin, job enumeration |
 | **Attestation** | `AttestationError` | 60 | Init/admin, relayer, pause, validation, attestation lifecycle, upgrade, aggregation |
 | **Oracle** | `OracleError` | 50 | Init/admin, staking, price reporting, config, source oracles, aggregation |
-| **Total** | | **308** | |
+| **Total** | | **310** | |
 
 Full details: [`contracts/indigopay-contract/README.md`](contracts/indigopay-contract/README.md) · [`contracts/indigopay-contract/SECURITY.md`](contracts/indigopay-contract/SECURITY.md) · [`contracts/indigopay-contract/UPGRADE.md`](contracts/indigopay-contract/UPGRADE.md)
 
@@ -527,7 +527,7 @@ If you find a vulnerability, **please do not open a public issue.** Use [GitHub 
 | **v2.0** | Multi-currency: USDC alongside XLM with on-chain price oracle | ✅ Shipped |
 | **v2.1** | DAO governance: badge-weighted voting on project verification, escrow contracts | ✅ Shipped |
 | **v2.2** | Cross-chain attestation bridge, DEX integration, campaign-escrow integration, storage garbage collection | ✅ Shipped |
-| **v2.2.1** | Structured error codes (308 across all contracts), 95% coverage targets, backend test expansion (99 suites / 1,069 tests) | ✅ Shipped |
+| **v2.2.1** | Structured error codes (310 across all contracts), 95% coverage targets, backend test expansion (99 suites / 1,069 tests) | ✅ Shipped |
 | **v2.3** | (Planned) Mainnet launch, mobile push notifications, advanced analytics, grant applications | 🚧 Planned |
 
 Full backlog: [**`ROADMAP.md`**](ROADMAP.md).

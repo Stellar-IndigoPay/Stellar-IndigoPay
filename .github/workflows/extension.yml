@@ -68,8 +68,30 @@ jobs:
       - name: Verify build output
         run: test -f dist/content-script.js
 
+      - name: Package extension ZIP
+        run: npm run package
+
+      - name: Verify packaged extension
+        run: test -f greenpay-extension.zip && zipinfo -1 greenpay-extension.zip | grep -E '^(manifest\.json|popup\.html|popup\.css|settings\.html|dist/|inject/)' >/dev/null
+
+      - name: Verify reproducible package
+        run: |
+          sha256sum greenpay-extension.zip | awk '{print $1}' > /tmp/greenpay-extension-hash-1
+          rm -f greenpay-extension.zip
+          npm run package
+          sha256sum greenpay-extension.zip | awk '{print $1}' > /tmp/greenpay-extension-hash-2
+          diff -u /tmp/greenpay-extension-hash-1 /tmp/greenpay-extension-hash-2
+
       - uses: actions/upload-artifact@v4
         with:
           name: extension-dist
           path: extension/dist/
           retention-days: 7
+
+      - name: Upload extension ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: greenpay-extension-${{ steps.version.outputs.version }}
+          path: extension/greenpay-extension.zip
+          if-no-files-found: error
+          retention-days: 30

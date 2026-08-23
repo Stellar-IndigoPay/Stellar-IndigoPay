@@ -96,6 +96,11 @@ ingress:
   host: stellar-indigopay.local
   className: nginx
 
+# Passed to the prometheus-community/prometheus-adapter chart when installing
+# it with this values file. The ConfigMap is managed by k8s manifests.
+rules:
+  existing: prometheus-adapter-config
+
 # ── Autoscaling (HPA) ──────────────────────────────────────────────
 # Mirrors k8s/hpa-backend.yaml. Set enabled: true in values-prod.yaml
 # to opt in. The HPA template only renders when enabled.
@@ -104,6 +109,20 @@ autoscaling:
   minReplicas: 2
   maxReplicas: 10
   metrics:
+    - type: External
+      external:
+        metric:
+          name: queue_depth
+        target:
+          type: AverageValue
+          averageValue: "20"
+    - type: External
+      external:
+        metric:
+          name: indexer_lag_seconds
+        target:
+          type: Value
+          value: "10"
     - type: Resource
       resource:
         name: cpu

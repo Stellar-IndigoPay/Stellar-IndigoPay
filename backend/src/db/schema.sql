@@ -116,6 +116,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_donations_tx_without_operation_id
   ON donations (transaction_hash)
   WHERE indexer_operation_id IS NULL;
 
+-- Time-range index backing admin analytics aggregates (closes #718): category
+-- breakdown and platform-growth 30-day windows filter donations by created_at
+-- without a project_id predicate, so a standalone index keeps those queries
+-- index-backed instead of sequentially scanning the donations ledger.
+CREATE INDEX IF NOT EXISTS idx_donations_created_at
+  ON donations (created_at DESC);
+
 -- profiles: aggregated donor stats and public profile for a Stellar wallet.
 -- total_donated_xlm and projects_supported are computed counters kept in
 -- sync by triggers on donations. badges is a JSONB array of earned badge IDs.
