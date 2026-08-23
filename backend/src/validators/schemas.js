@@ -1,74 +1,67 @@
 /**
  * src/validators/schemas.js
  *
- * Shared Zod-based validation schemas and reusable validators.
+ * Zod-based validation schemas and reusable validators for the backend.
+ *
+ * As of Issue #90-follow-up ("single source of truth for input
+ * validation"), the primitives that used to drift from the frontend
+ * (address/hash/amount formats, decimal precision, message length,
+ * donation/profile/project-registration bounds) now come from
+ * `shared/validation.js`, the same module `frontend/lib/validation/
+ * schemas.ts` builds on. shared/validation.js's `sanitize` hook is fed
+ * this file's `sanitize()` (HTML/bidi-char stripping, NFC normalization —
+ * see ./sanitize.js) so the sanitization added alongside Issue #90 stays
+ * server-only, in one place, while bounds/format rules stay shared with
+ * the frontend. Only backend-only schemas (verification requests,
+ * campaigns, leaderboard query, documents) still live entirely here.
  *
  * Reusable validators:
  *   - stellarAddress  — Stellar public key (G…, base-32)
  *   - transactionHash — 64-char hex string
  *   - uuid            — standard UUID v4
- *   - xlmAmount       — positive numeric string
+ *   - xlmAmount       — bounded donation-amount string (shared RULES)
  *   - positiveNumberString    — generic positive number string
  *   - nonNegativeNumberString — generic non-negative number string
  *
  * Schemas:
- *   - donationSchema         — POST /api/donations  body
- *   - verificationSchema     — POST /api/verification-requests body
- *   - leaderboardQuerySchema — GET  /api/leaderboard query
+ *   - donationSchema          — POST /api/donations  body
+ *   - profileSchema           — PATCH /api/profiles/:publicKey body
+ *   - projectSubmissionSchema — POST /api/projects (registration) body
+ *   - verificationSchema      — POST /api/verification-requests body
+ *   - leaderboardQuerySchema  — GET  /api/leaderboard query
  */
 "use strict";
 
 const { z } = require("zod");
-const { sanitizedString } = require("./sanitize");
+const shared = require("../../../shared/validation");
+const { sanitizedString, sanitize } = require("./sanitize");
 
-// ── Regex constants ──────────────────────────────────────────────────────────
-const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
-const TX_HASH_RE = /^[a-fA-F0-9]{64}$/;
+const {
+  stellarAddress,
+  transactionHash,
+  uuid,
+  UUID_RE,
+  amountString,
+  nonNegativeAmountString,
+  createDonationSchema,
+  createProfileSchema,
+  createProjectSubmissionSchema,
+} = shared;
 
-// ── Reusable validators ──────────────────────────────────────────────────────
+// The current deployment targets testnet; wiring this to
+// process.env.STELLAR_NETWORK keeps mainnet-only asset lists from
+// silently taking effect until the env var is actually set.
+const NETWORK = process.env.STELLAR_NETWORK === "mainnet" ? "mainnet" : "testnet";
 
-const stellarAddress = z
-  .string()
-  .regex(STELLAR_ADDRESS_RE, "Invalid Stellar address");
+// `xlmAmount` is kept as the historical export name for a bare positive
+// amount string (no field name in its message, for callers that don't
+// go through a full schema, e.g. ad-hoc route checks).
+const xlmAmount = amountString({ field: "Amount" });
 
-const transactionHash = z
-  .string()
-  .regex(TX_HASH_RE, "Invalid transaction hash");
+const positiveNumberString = amountString({ field: "Value" });
+const nonNegativeNumberString = nonNegativeAmountString({ field: "Value" });
 
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-const uuid = z
-  .string()
-  .regex(UUID_RE, "Invalid UUID");
-
-const xlmAmount = z.string().refine(
-  (val) => {
-    const n = Number.parseFloat(val);
-    return Number.isFinite(n) && n > 0;
-  },
-  { message: "Amount must be a positive number" },
-);
-
-const positiveNumberString = z.string().refine(
-  (val) => {
-    if (val === "" || val == null) return false;
-    const n = Number.parseFloat(val);
-    return Number.isFinite(n) && n > 0;
-  },
-  { message: "Must be a positive number" },
-);
-
-const nonNegativeNumberString = z.string().refine(
-  (val) => {
-    if (val === "" || val == null) return false;
-    const n = Number.parseFloat(val);
-    return Number.isFinite(n) && n >= 0;
-  },
-  { message: "Must be a non-negative number" },
-);
-
-// ── Shared enums ─────────────────────────────────────────────────────────────
+// ── Shared enums ─────────────────────────────────────────────────────────
 
 const PROJECT_CATEGORIES = [
   "Reforestation",
@@ -84,7 +77,7 @@ const PROJECT_CATEGORIES = [
 
 const DONATION_CURRENCIES = ["XLM", "USDC", "EURT"];
 
-// ── Document schema (used inside verification) ───────────────────────────────
+// ── Document schema (used inside verification) ─────────────────────────
 
 const documentSchema = z.object({
   url: z
@@ -103,98 +96,21 @@ const documentSchema = z.object({
   backend: z.string().optional(),
 });
 
-// ── Profile schema ─────────────────────────────────────────────────────────
+// ── Profile schema ───────────────────────────────────────────────────────
+// Sourced from shared/validation.js so the 2–30 char / regex rules can
+// never drift from EditProfileForm's client-side copy again (Issue #90).
+// `sanitize` wires in this file's HTML/bidi-char stripping server-side.
 
-const profileSchema = z.object({
-  displayName: sanitizedString(30, {
-    minLength: 2,
-    minMessage: "Display name must be between 2 and 30 characters",
-    maxMessage: "Display name must be between 2 and 30 characters",
-    regex: /^[a-zA-Z0-9_ ]+$/,
-    regexMessage: "Only letters, numbers, underscores, and spaces allowed",
-    rejectHtml: true,
-  })
-    .optional()
-    .or(z.literal("")),
-  bio: sanitizedString(300, {
-    maxMessage: "Bio must be at most 300 characters",
-  })
-    .optional()
-    .or(z.literal("")),
-});
+const profileSchema = createProfileSchema({ sanitize });
 
-// ── Project submission schema ───────────────────────────────────────────────
+// ── Project submission ("registration") schema ─────────────────────────
+// Sourced from shared/validation.js; category list, network, and
+// sanitize stay backend-specific inputs; bounds/formats are shared.
 
-const projectSubmissionSchema = z.object({
-  name: sanitizedString(120, {
-    minLength: 3,
-    minMessage: "name must be between 3 and 120 characters",
-    maxMessage: "name must be between 3 and 120 characters",
-  }),
-  category: z.enum(PROJECT_CATEGORIES, {
-    errorMap: () => ({
-      message: `category must be one of: ${PROJECT_CATEGORIES.join(", ")}`,
-    }),
-  }),
-  description: sanitizedString(5000, {
-    minLength: 10,
-    minMessage: "description must be between 10 and 5000 characters",
-    maxMessage: "description must be between 10 and 5000 characters",
-  }),
-  location: sanitizedString(200, {
-    minLength: 2,
-    minMessage: "location must be between 2 and 200 characters",
-    maxMessage: "location must be between 2 and 200 characters",
-  }),
-  goalXLM: positiveNumberString,
-  walletAddress: stellarAddress,
-  organization: z.object({
-    name: sanitizedString(200, {
-      minLength: 1,
-      minMessage: "Organization name is required",
-    }),
-    website: z
-      .string()
-      .url("Organization website must be a valid URL")
-      .optional()
-      .or(z.literal("")),
-    country: sanitizedString(80).optional(),
-    contactEmail: z.string().email("Contact email must be a valid email"),
-  }),
-  co2Methodology: z.object({
-    name: sanitizedString(200, {
-      minLength: 1,
-      minMessage: "Methodology name is required",
-    }),
-    verificationBody: sanitizedString(200).optional(),
-    annualTonnesCO2: positiveNumberString,
-    documentUrl: z
-      .string()
-      .url("Document URL must be a valid URL")
-      .optional()
-      .or(z.literal("")),
-  }),
-  impactMetrics: z
-    .array(sanitizedString(200))
-    .optional()
-    .default([]),
-  // Tags are stored as a Postgres TEXT[] and feed full-text search, so both
-  // the array length and each entry's length are bounded to prevent database
-  // and search-index bloat. `.trim()` runs before the length checks, so
-  // whitespace-only tags are rejected as empty.
-  tags: z
-    .array(
-      sanitizedString(50, {
-        minLength: 1,
-        trim: true,
-        truncate: false,
-        minMessage: "each tag must be a non-empty string",
-        maxMessage: "each tag must be at most 50 characters",
-      }),
-    )
-    .max(10, "tags must contain at most 10 entries")
-    .optional()
-    .default([]),
+const projectSubmissionSchema = createProjectSubmissionSchema({
+  network: NETWORK,
+  categories: PROJECT_CATEGORIES,
+  sanitize,
 });
 
 const campaignSchema = z.object({
@@ -223,21 +139,14 @@ const campaignSchema = z.object({
     .or(z.literal("")),
 });
 
-// ── Donation request schema ─────────────────────────────────────────────────
+// ── Donation request schema ─────────────────────────────────────────────
+// Sourced from shared/validation.js — this is the schema that used to
+// diverge from DonateForm's frontend copy (min amount, decimal places).
+// `sanitize` applies to `message` only, matching main's prior behavior.
 
-const donationSchema = z.object({
-  projectId: z.string().min(1, "Project ID is required"),
-  donorAddress: stellarAddress,
-  transactionHash,
-  amountXLM: xlmAmount,
-  currency: z.enum(DONATION_CURRENCIES).optional().default("XLM"),
-  message: sanitizedString(100, {
-    maxMessage: "Message must be at most 100 characters",
-  }).optional(),
-  anonymous: z.boolean().optional().default(false),
-});
+const donationSchema = createDonationSchema({ network: NETWORK, sanitize });
 
-// ── Verification request schema ──────────────────────────────────────────────
+// ── Verification request schema ──────────────────────────────────────────
 
 const verificationSchema = z.object({
   organizationName: sanitizedString(200, {
@@ -294,7 +203,7 @@ const verificationSchema = z.object({
     .or(z.literal("")),
 });
 
-// ── Leaderboard query schema ─────────────────────────────────────────────────
+// ── Leaderboard query schema ─────────────────────────────────────────────
 
 const leaderboardQuerySchema = z.object({
   limit: z.coerce.number().int().positive().optional().default(20),

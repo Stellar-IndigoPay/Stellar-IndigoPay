@@ -67,16 +67,13 @@ export function boundedText(opts: {
   field?: string;
   min?: number;
   max: number;
-  required: true;
+  required?: boolean;
   trim?: boolean;
-}): z.ZodType<string>;
-export function boundedText(opts: {
-  field?: string;
-  min?: number;
-  max: number;
-  required?: false;
-  trim?: boolean;
-}): z.ZodType<string | undefined>;
+  sanitize?: (value: string, maxLength?: number) => string;
+  truncate?: boolean;
+  regex?: RegExp;
+  rejectHtml?: boolean;
+}): z.ZodType<string | undefined>
 
 export function emailField(field?: string): z.ZodType<string>;
 export function urlField(field?: string): z.ZodType<string>;

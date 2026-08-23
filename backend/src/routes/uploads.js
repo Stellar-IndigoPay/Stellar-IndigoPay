@@ -24,6 +24,7 @@ const router = express.Router();
 const { uploadFile, backendName, UPLOAD_DIR } = require("../services/storage");
 const { createRateLimiter } = require("../middleware/rateLimiter");
 const { AppError } = require("../errors");
+const { validateUploadMeta } = require("../../../shared/validation");
 
 const uploadRateLimiter = createRateLimiter(20, 15); // 20 uploads per 15 min
 
@@ -31,21 +32,6 @@ const MAX_BYTES = parseInt(
   process.env.UPLOAD_MAX_BYTES || String(10 * 1024 * 1024),
   10,
 );
-
-const ALLOWED_MIME = new Set([
-  "application/pdf",
-  "image/png",
-  "image/jpeg",
-  "image/webp",
-  "image/gif",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.ms-excel",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "text/plain",
-  "text/csv",
-  "application/zip",
-]);
 
 const memory = multer({
   storage: multer.memoryStorage(),
@@ -73,12 +59,13 @@ router.post("/", uploadRateLimiter, (req, res, next) => {
         }),
       );
     }
-    if (req.file.mimetype && !ALLOWED_MIME.has(req.file.mimetype)) {
-      return next(
-        new AppError("UNSUPPORTED_FILE_TYPE", {
-          detail: `Unsupported file type: ${req.file.mimetype}. Allowed: PDF, images, Office docs, CSV, plain text, ZIP.`,
-        }),
-      );
+    const meta = validateUploadMeta(
+      { size: req.file.size, mimetype: req.file.mimetype },
+      { maxBytes: MAX_BYTES },
+    );
+    if (!meta.valid) {
+      const code = meta.key === "upload.tooLarge" ? "FILE_TOO_LARGE" : "UNSUPPORTED_FILE_TYPE";
+      return next(new AppError(code, { detail: meta.message }));
     }
 
     try {

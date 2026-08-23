@@ -134,6 +134,8 @@ const MESSAGES = {
   "length.between": (p) =>
     `${p.field} must be between ${p.min} and ${p.max} characters`,
   "length.max": (p) => `${p.field} must be at most ${p.max} characters`,
+  "format.html": (p) => `${p.field} cannot contain HTML tags`,
+  "format.pattern": (p) => `${p.field} format is invalid`,
   "list.max": (p) => `${p.field} must contain at most ${p.max} entries`,
   "format.invalid": (p) => p.detail,
   "number.positive": (p) => `${p.field} must be a positive number`,
@@ -230,19 +232,43 @@ function boundedText({
   max,
   required = false,
   trim = false,
+  sanitize,     // optional (value, maxLength?) => string, e.g. backend's sanitize.js
+  truncate = true,  // when `sanitize` is given: truncate at max vs reject over-max
+  regex,
+  rejectHtml = false,
 } = {}) {
   let base = z.string().max(MAX_RAW_INPUT_LENGTH);
-  if (trim) base = base.trim();
-  let schema = base.superRefine((val, ctx) => {
-      const len = codePointLength(val);
-      if (len > max) return addIssue(ctx, "length.max", { field, max });
-      if (min > 0 && len < min) {
-        addIssue(ctx, "length.between", { field, min, max });
-      }
+
+  if (rejectHtml) {
+    base = base.superRefine((val, ctx) => {
+      if (/<[^>]*>/.test(val)) addIssue(ctx, "format.html", { field });
     });
+  }
+
+  const lengthCheck = (val, ctx) => {
+    const len = codePointLength(val);
+    if (len > max) return addIssue(ctx, "length.max", { field, max });
+    if (min > 0 && len < min) addIssue(ctx, "length.between", { field, min, max });
+    if (regex && !regex.test(val)) addIssue(ctx, "format.pattern", { field });
+  };
+
+  let schema;
+  if (sanitize) {
+    // Zod v4's .transform() returns a ZodPipe, which doesn't expose
+    // .trim()/.min()/.max(), so length/trim checks run on the sanitized
+    // output via a piped inner schema (mirrors backend/sanitize.js).
+    let inner = z.string();
+    if (trim) inner = inner.trim();
+    inner = inner.superRefine(lengthCheck);
+    const maxLenArg = truncate ? max : undefined;
+    schema = base.transform((val) => sanitize(val, maxLenArg)).pipe(inner);
+  } else {
+    schema = trim ? base.trim() : base;
+    schema = schema.superRefine(lengthCheck);
+  }
+
   return required ? schema : schema.optional().or(z.literal(""));
 }
-
 function emailField(field = "Email") {
   return z
     .string()
@@ -288,7 +314,7 @@ function validateUploadMeta({ size, mimetype }, { maxBytes = RULES.UPLOAD_MAX_BY
 
 // ── Schema factories (parameterized by network) ──────────────────────────
 
-function createDonationSchema({ network = "testnet" } = {}) {
+function createDonationSchema({ network = "testnet", sanitize } = {}) {
   const currencies = getAssetCodesForNetwork(network);
   return z.object({
     projectId: boundedText({ field: "Project ID", max: 200, required: true }),
@@ -296,78 +322,63 @@ function createDonationSchema({ network = "testnet" } = {}) {
     transactionHash,
     amountXLM: amountString({ field: "Amount" }),
     currency: enumField(currencies, "Currency").optional().default("XLM"),
-    message: boundedText({ field: "Message", max: RULES.MESSAGE_MAX_LEN }),
+    message: boundedText({ field: "Message", max: RULES.MESSAGE_MAX_LEN, sanitize }),
     anonymous: z.boolean().optional().default(false),
   });
 }
 
-function createProfileSchema() {
+function createProfileSchema({ sanitize } = {}) {
   return z.object({
-    displayName: z
-      .string()
-      .max(MAX_RAW_INPUT_LENGTH)
-      .superRefine((val, ctx) => {
-        if (val === "") return;
-        const len = codePointLength(val);
-        if (len < RULES.DISPLAY_NAME_MIN || len > RULES.DISPLAY_NAME_MAX) {
-          addIssue(ctx, "length.between", {
-            field: "Display name",
-            min: RULES.DISPLAY_NAME_MIN,
-            max: RULES.DISPLAY_NAME_MAX,
-          });
-        } else if (!/^[a-zA-Z0-9_ ]+$/.test(val)) {
-          addIssue(ctx, "format.invalid", {
-            detail: "Only letters, numbers, underscores, and spaces allowed",
-          });
-        }
-      })
-      .optional()
-      .or(z.literal("")),
-    bio: boundedText({ field: "Bio", max: RULES.BIO_MAX }),
+    displayName: boundedText({
+      field: "Display name",
+      min: RULES.DISPLAY_NAME_MIN,
+      max: RULES.DISPLAY_NAME_MAX,
+      regex: /^[a-zA-Z0-9_ ]+$/,
+      rejectHtml: true,
+      sanitize,
+    }),
+    bio: boundedText({ field: "Bio", max: RULES.BIO_MAX, sanitize }),
   });
 }
 
-function createProjectSubmissionSchema({ network = "testnet", categories } = {}) {
+function createProjectSubmissionSchema({ network = "testnet", categories, sanitize } = {}) {
   return z.object({
     name: boundedText({
-      field: "Name",
-      min: RULES.PROJECT_NAME_MIN,
-      max: RULES.PROJECT_NAME_MAX,
-      required: true,
+      field: "Name", min: RULES.PROJECT_NAME_MIN, max: RULES.PROJECT_NAME_MAX,
+      required: true, sanitize,
     }),
     category: enumField(categories, "Category"),
     description: boundedText({
-      field: "Description",
-      min: RULES.DESCRIPTION_MIN,
-      max: RULES.DESCRIPTION_MAX,
-      required: true,
+      field: "Description", min: RULES.DESCRIPTION_MIN, max: RULES.DESCRIPTION_MAX,
+      required: true, sanitize,
     }),
     location: boundedText({
-      field: "Location",
-      min: RULES.LOCATION_MIN,
-      max: RULES.LOCATION_MAX,
-      required: true,
+      field: "Location", min: RULES.LOCATION_MIN, max: RULES.LOCATION_MAX,
+      required: true, sanitize,
     }),
     goalXLM: amountString({ field: "Goal", max: RULES.AMOUNT_MAX }),
     walletAddress: stellarAddress,
     organization: z.object({
-      name: boundedText({ field: "Organization name", min: 1, max: 200, required: true }),
+      name: boundedText({ field: "Organization name", min: 1, max: 200, required: true, sanitize }),
       website: urlField("Organization website").optional().or(z.literal("")),
       country: z.string().max(MAX_RAW_INPUT_LENGTH).optional(),
       contactEmail: emailField("Contact email"),
     }),
     co2Methodology: z.object({
-      name: boundedText({ field: "Methodology name", min: 1, max: 200, required: true }),
+      name: boundedText({ field: "Methodology name", min: 1, max: 200, required: true, sanitize }),
       verificationBody: z.string().max(MAX_RAW_INPUT_LENGTH).optional(),
       annualTonnesCO2: amountString({ field: "Annual tonnes CO2" }),
       documentUrl: urlField("Document URL").optional().or(z.literal("")),
     }),
-    impactMetrics: z.array(z.string().max(MAX_RAW_INPUT_LENGTH)).optional().default([]),
-    // Tags feed a Postgres TEXT[] full-text index, so both array length
-    // and each entry's length are bounded; `trim: true` rejects
-    // whitespace-only tags the same way the pre-migration code did.
+    impactMetrics: z
+      .array(boundedText({ field: "Impact metric", max: 200, required: true, sanitize }))
+      .optional()
+      .default([]),
     tags: z
-      .array(boundedText({ field: "Tag", min: 1, max: 50, required: true, trim: true }))
+      .array(boundedText({
+        field: "Tag", min: 1, max: 50, required: true, trim: true,
+        sanitize, truncate: false,
+      }))
       .max(10, interpolate("list.max", { field: "Tags", max: 10 }))
       .optional()
       .default([]),
