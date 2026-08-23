@@ -2,7 +2,6 @@
  * pages/dashboard.tsx — Donor impact dashboard
  */
 import { useState, useEffect } from "react";
-import type { GetServerSideProps } from "next";
 import Link from "next/link";
 import WalletConnect from "@/components/WalletConnect";
 import EditProfileForm from "@/components/EditProfileForm";
@@ -656,8 +655,3 @@ export default function Dashboard() {
   );
 }
 
-// Forces per-request SSR so the CSP nonce set in middleware.ts reaches
-// _document.tsx — see the matching comment in pages/index.tsx.
-export const getServerSideProps: GetServerSideProps = async () => {
-  return { props: {} };
-};

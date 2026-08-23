@@ -23,6 +23,7 @@ import {
   Account,
   xdr,
 } from "@stellar/stellar-sdk";
+import { formatNumber, PINNED_LOCALE } from "@/utils/format";
 
 export const NETWORK = (process.env.NEXT_PUBLIC_STELLAR_NETWORK ||
   "testnet") as "testnet" | "mainnet";
@@ -801,10 +802,9 @@ export async function getGlobalImpactStats() {
 
     // totalRaised is in stroops (i128), totalCO2 is in grams (i128)
     return {
-      totalRaisedXLM: (Number(totalRaised) / 10_000_000).toLocaleString(
-        undefined,
-        { minimumFractionDigits: 2 },
-      ),
+      totalRaisedXLM: formatNumber(Number(totalRaised) / 10_000_000, PINNED_LOCALE, {
+        minimumFractionDigits: 2,
+      }),
       totalCO2OffsetGrams: totalCO2.toString(),
       donationCount: Number(donationCount),
     };

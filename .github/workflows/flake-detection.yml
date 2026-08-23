@@ -1,0 +1,53 @@
+name: Flake Detection
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # Run nightly at 2 AM
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: 'Number of times to run the tests'
+        required: true
+        default: '5'
+        type: string
+
+jobs:
+  detect-flakes-backend:
+    name: Backend Flake Detection
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        run_id: [1, 2, 3, 4, 5]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-node-cached
+        with:
+          node-version: "22"
+          working-directory: backend
+      - name: Run Backend Tests
+        working-directory: backend
+        run: npm test
+        continue-on-error: true
+
+  detect-flakes-frontend:
+    name: Frontend Flake Detection
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        run_id: [1, 2, 3, 4, 5]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-node-cached
+        with:
+          node-version: "22"
+          working-directory: frontend
+          legacy-peer-deps: 'true'
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+      - name: Run Frontend Tests
+        working-directory: frontend
+        run: npm test
+        continue-on-error: true

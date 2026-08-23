@@ -18,6 +18,8 @@ jobs:
       run:
         working-directory: extension
     steps:
+      - name: Start Timer
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -46,13 +48,10 @@ jobs:
           manifest_path.write_text(json.dumps(data, indent=2) + "\n")
           PY
 
-      - uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup-node-cached
         with:
           node-version: "22"
-          cache: "npm"
-          cache-dependency-path: extension/package-lock.json
-
-      - run: npm ci
+          working-directory: extension
 
       - name: Lint
         run: npm run lint
@@ -68,8 +67,30 @@ jobs:
       - name: Verify build output
         run: test -f dist/content-script.js
 
+      - name: Package extension ZIP
+        run: npm run package
+
+      - name: Verify packaged extension
+        run: test -f greenpay-extension.zip && zipinfo -1 greenpay-extension.zip | grep -E '^(manifest\.json|popup\.html|popup\.css|settings\.html|dist/|inject/)' >/dev/null
+
+      - name: Verify reproducible package
+        run: |
+          sha256sum greenpay-extension.zip | awk '{print $1}' > /tmp/greenpay-extension-hash-1
+          rm -f greenpay-extension.zip
+          npm run package
+          sha256sum greenpay-extension.zip | awk '{print $1}' > /tmp/greenpay-extension-hash-2
+          diff -u /tmp/greenpay-extension-hash-1 /tmp/greenpay-extension-hash-2
+
       - uses: actions/upload-artifact@v4
         with:
           name: extension-dist
           path: extension/dist/
           retention-days: 7
+
+      - name: Upload extension ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: greenpay-extension-${{ steps.version.outputs.version }}
+          path: extension/greenpay-extension.zip
+          if-no-files-found: error
+          retention-days: 30

@@ -6,6 +6,7 @@ import * as Notifications from "expo-notifications";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Platform, Linking as RNLinking } from "react-native";
 import * as Linking from "expo-linking";
+import { pinnedFetch } from "../lib/apiClient";
 
 // Configure notification behavior
 Notifications.setNotificationHandler({
@@ -68,7 +69,7 @@ export async function registerDeviceToken(
     const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
     const platform = Platform.OS;
 
-    await fetch(`${API_URL}/api/notifications/register`, {
+    await pinnedFetch(`${API_URL}/api/notifications/register`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -108,7 +109,7 @@ export async function followProject(
     const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
 
     const calls: Promise<Response>[] = [
-      fetch(`${API_URL}/api/notifications/follow`, {
+      pinnedFetch(`${API_URL}/api/notifications/follow`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ projectId, token, walletAddress }),
@@ -118,7 +119,7 @@ export async function followProject(
     // Wire up the REST follows endpoint when we have a wallet address.
     if (walletAddress) {
       calls.push(
-        fetch(
+        pinnedFetch(
           `${API_URL}/api/projects/${encodeURIComponent(projectId)}/follows`,
           {
             method: "POST",
@@ -152,7 +153,7 @@ export async function unfollowProject(
     const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
 
     const calls: Promise<Response>[] = [
-      fetch(`${API_URL}/api/notifications/unfollow`, {
+      pinnedFetch(`${API_URL}/api/notifications/unfollow`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ projectId, token }),
@@ -161,7 +162,7 @@ export async function unfollowProject(
 
     if (walletAddress) {
       calls.push(
-        fetch(
+        pinnedFetch(
           `${API_URL}/api/projects/${encodeURIComponent(projectId)}/follows`,
           {
             method: "DELETE",
@@ -188,7 +189,7 @@ export async function getFollowedProjects(token: string): Promise<any[]> {
   try {
     const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
 
-    const response = await fetch(
+    const response = await pinnedFetch(
       `${API_URL}/api/notifications/follows?token=${encodeURIComponent(token)}`,
     );
     const data = await response.json();
@@ -228,7 +229,7 @@ export async function getUnreadNotificationCount(
     const params = new URLSearchParams({ token });
     if (lastSeen) params.set("lastSeen", lastSeen);
 
-    const response = await fetch(
+    const response = await pinnedFetch(
       `${API_URL}/api/notifications/unread-count?${params.toString()}`,
     );
     if (!response.ok) return 0;

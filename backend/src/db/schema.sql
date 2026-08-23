@@ -116,6 +116,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_donations_tx_without_operation_id
   ON donations (transaction_hash)
   WHERE indexer_operation_id IS NULL;
 
+-- Time-range index backing admin analytics aggregates (closes #718): category
+-- breakdown and platform-growth 30-day windows filter donations by created_at
+-- without a project_id predicate, so a standalone index keeps those queries
+-- index-backed instead of sequentially scanning the donations ledger.
+CREATE INDEX IF NOT EXISTS idx_donations_created_at
+  ON donations (created_at DESC);
+
 -- profiles: aggregated donor stats and public profile for a Stellar wallet.
 -- total_donated_xlm and projects_supported are computed counters kept in
 -- sync by triggers on donations. badges is a JSONB array of earned badge IDs.
@@ -368,3 +375,31 @@ CREATE TABLE IF NOT EXISTS projection_global_stats (
 INSERT INTO projection_global_stats (id, total_xlm_raised, total_co2_offset_kg, total_donations, total_donors, total_projects, updated_at)
 VALUES (1, 0, 0, 0, 0, 0, NOW())
 ON CONFLICT (id) DO NOTHING;
+
+-- digest_sends: per-recipient, per-period idempotency guard for the
+-- impact-digest email pipeline (services/digestQueue.js). Mirrors
+-- backend/src/db/migrations/028_digest_sends.js so the testcontainers
+-- integration suite has the same schema as production.
+--
+-- Before sending a digest, the queue claims a row here via
+-- INSERT ... ON CONFLICT (digest_type, donor_address, period_start)
+-- DO NOTHING — whichever invocation wins the race sends; every other
+-- invocation for the same recipient+period skips instead of duplicating
+-- the email. status: 'sending' -> 'sent' | 'failed'.
+CREATE TABLE IF NOT EXISTS digest_sends (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  digest_type    TEXT NOT NULL,
+  donor_address  TEXT NOT NULL,
+  period_start   TIMESTAMPTZ NOT NULL,
+  period_end     TIMESTAMPTZ,
+  status         TEXT NOT NULL DEFAULT 'sending',
+  attempts       INTEGER NOT NULL DEFAULT 1,
+  last_error     TEXT,
+  claimed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  sent_at        TIMESTAMPTZ,
+  CONSTRAINT digest_sends_status_check
+    CHECK (status IN ('sending', 'sent', 'failed')),
+  CONSTRAINT digest_sends_unique_recipient_period
+    UNIQUE (digest_type, donor_address, period_start)
+);
+CREATE INDEX IF NOT EXISTS idx_digest_sends_status ON digest_sends (digest_type, period_start, status);
