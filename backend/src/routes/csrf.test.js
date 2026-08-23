@@ -1,6 +1,10 @@
 "use strict";
 
 const request = require("supertest");
+jest.mock("../db/pool", () => ({
+  query: jest.fn().mockResolvedValue({ rows: [] }),
+  runWithQueryRole: jest.fn((method, cb) => cb())
+}));
 const app = require("../server");
 
 describe("CSRF protection", () => {

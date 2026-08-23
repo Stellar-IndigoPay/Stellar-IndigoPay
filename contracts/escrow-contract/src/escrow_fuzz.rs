@@ -220,10 +220,14 @@ mod fuzz {
         }
 
         /// Try to resolve a dispute.
+        ///
+        /// Mirrors the contract: every milestone is marked released on
+        /// resolution regardless of `approve_remaining` (which only decides
+        /// the payout recipient), so the flag is intentionally unused here.
         fn resolve_dispute(
             &mut self,
             job_idx: usize,
-            approve_remaining: bool,
+            _approve_remaining: bool,
         ) -> Result<(), &'static str> {
             let job = self.jobs.get_mut(job_idx).ok_or("job not found")?;
             if !job.disputed {
@@ -232,17 +236,18 @@ mod fuzz {
             if job.resolved {
                 return Err("dispute already resolved");
             }
-            // If approving remaining, release all unreleased milestones
-            if approve_remaining {
-                for m in &mut job.milestones {
-                    if !m.released {
-                        m.released = true;
-                        let proportion = m.percentage as i128;
-                        job.total_released = job
-                            .total_released
-                            .checked_add((job.amount * proportion) / 100i128)
-                            .expect("total_released overflow in model");
-                    }
+            // The contract marks EVERY milestone released on resolution —
+            // `approve_remaining` only selects who receives the remaining
+            // funds (freelancer when approved, client refund otherwise).
+            // Mirror that unconditionally so the model stays in sync.
+            for m in &mut job.milestones {
+                if !m.released {
+                    m.released = true;
+                    let proportion = m.percentage as i128;
+                    job.total_released = job
+                        .total_released
+                        .checked_add((job.amount * proportion) / 100i128)
+                        .expect("total_released overflow in model");
                 }
             }
             job.disputed = false;
