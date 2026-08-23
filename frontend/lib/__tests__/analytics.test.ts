@@ -60,6 +60,7 @@ describe("analytics module", () => {
   describe("PII stripping via sanitize_properties", () => {
     it("strips donorAddress, transactionHash, and email from properties", () => {
       (process.env as Record<string, string>).NODE_ENV = "production";
+      (process.env as Record<string, string>).NEXT_PUBLIC_POSTHOG_KEY = "test-key";
       const { initAnalytics } = require("../analytics");
       initAnalytics();
 
@@ -82,6 +83,7 @@ describe("analytics module", () => {
 
     it("buckets amountXLM into ranges", () => {
       (process.env as Record<string, string>).NODE_ENV = "production";
+      (process.env as Record<string, string>).NEXT_PUBLIC_POSTHOG_KEY = "test-key";
       const { initAnalytics } = require("../analytics");
       initAnalytics();
 

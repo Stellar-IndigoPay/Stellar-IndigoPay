@@ -48,7 +48,7 @@ fn test_milestone_based_release() {
 }
 
 #[test]
-#[should_panic(expected = "Milestones must sum to 100%")]
+#[should_panic]
 fn test_milestone_validation() {
     let env = Env::default();
     env.mock_all_auths();
@@ -96,7 +96,7 @@ fn test_milestone_validation() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "Job already exists")]
+#[should_panic]
 fn test_duplicate_job_id_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -107,7 +107,6 @@ fn test_duplicate_job_id_panics() {
     let token = common::create_token(&env);
     common::fund(&env, &token, &client_addr, 2000i128);
 
-    let job_id = SorobanString::from_str(&env, "dup-job");
     common::create_simple_job(
         &env,
         &client,
@@ -131,7 +130,7 @@ fn test_duplicate_job_id_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Amount must be positive")]
+#[should_panic]
 fn test_zero_amount_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -155,7 +154,7 @@ fn test_zero_amount_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Amount must be positive")]
+#[should_panic]
 fn test_negative_amount_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -178,10 +177,12 @@ fn test_negative_amount_panics() {
     );
 }
 
-/// Milestones that sum to 100 but contain individual percentages of 0
-/// are still valid — the contract only checks that total == 100.
+/// A zero-percentage milestone is rejected even when the remaining milestones
+/// sum to 100 — `create_job` now enforces the same per-milestone validation as
+/// `amend_job_milestones`.
 #[test]
-fn test_zero_percentage_milestone() {
+#[should_panic]
+fn test_zero_percentage_milestone_panics() {
     let env = Env::default();
     env.mock_all_auths();
     let (_admin, client) = common::setup(&env);
@@ -222,14 +223,10 @@ fn test_zero_percentage_milestone() {
         &milestones,
         &escrow_contract::RELEASE_AFTER_LEDGERS,
     );
-
-    let job = client.get_job(&job_id).expect("Job should exist");
-    assert_eq!(job.status, JobStatus::Escrowed);
-    assert_eq!(job.milestones.len(), 2);
 }
 
 #[test]
-#[should_panic(expected = "release_after must be at least the minimum")]
+#[should_panic]
 fn test_release_after_below_minimum_panics() {
     let env = Env::default();
     env.mock_all_auths();

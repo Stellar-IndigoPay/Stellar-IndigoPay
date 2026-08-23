@@ -173,6 +173,11 @@ async function buildDigests(type, now = new Date()) {
 
   const window = getDigestWindow(type, now);
   const { start, end, label } = window;
+  // Exposed so callers (digestQueue.js) have a stable, deterministic key to
+  // dedup sends against — the human-readable `label` alone isn't reliable
+  // for that (it's for the email subject/heading, not for identity).
+  const periodStart = start.toISOString();
+  const periodEnd = end.toISOString();
 
   const summaryResult = await pool.query(
     `WITH donor_emails AS (
@@ -239,7 +244,7 @@ async function buildDigests(type, now = new Date()) {
       { event: "digest_builder_no_results", digestType: type, label },
       "No digest recipients found for period",
     );
-    return { type, label, digests };
+    return { type, label, periodStart, periodEnd, digests };
   }
 
   const donorAddresses = digests.map((digest) => digest.donorAddress);
@@ -292,7 +297,7 @@ async function buildDigests(type, now = new Date()) {
     "Built digest payloads",
   );
 
-  return { type, label, digests };
+  return { type, label, periodStart, periodEnd, digests };
 }
 
 module.exports = {

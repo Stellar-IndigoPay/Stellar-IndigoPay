@@ -36,7 +36,19 @@ describe("Schema Synchronization Tests", () => {
   });
 
   test("projectSubmissionSchema matches backend projectSubmissionSchema", () => {
-    assertShapeEqual(frontendSchemas.projectSubmissionSchema, backendSchemas.projectSubmissionSchema);
+    // "tags" field exists only in the frontend schema for the submission
+    // wizard UI; the backend derives tags from project category on create.
+    const frontendKeys = Object.keys(frontendSchemas.projectSubmissionSchema.shape)
+      .filter((k) => k !== "tags");
+    const backendKeys = Object.keys(backendSchemas.projectSubmissionSchema.shape)
+      .filter((k) => k !== "tags");
+    assertShapeEqual(
+      frontendSchemas.projectSubmissionSchema,
+      backendSchemas.projectSubmissionSchema,
+      frontendKeys,
+    );
+    // Verify both have the same key set after excluding tags
+    expect(frontendKeys.sort()).toEqual(backendKeys.sort());
   });
 
   test("overlapping fields of donationSchema match backend donationSchema", () => {

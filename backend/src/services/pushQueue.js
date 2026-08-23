@@ -93,8 +93,9 @@ async function start() {
     logger.error({ event: "push_queue_error", err: err.message }, "pg-boss error"),
   );
   await boss.start();
+  await boss.createQueue(QUEUE);
 
-  await boss.work(QUEUE, { teamSize: 2, teamConcurrency: 1 }, async (job) => {
+  await boss.work(QUEUE, { teamSize: 2, teamConcurrency: 1 }, async ([job]) => {
     const { type, payload } = job.data || {};
     const handler = HANDLERS[type];
     if (!handler) {

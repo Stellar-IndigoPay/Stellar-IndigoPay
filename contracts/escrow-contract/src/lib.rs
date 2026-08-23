@@ -4,10 +4,9 @@
 //! Escrow contract with milestone-based fund release.
 //! Client locks funds with `create_job`, then releases them per milestone.
 
-#[cfg(feature = "oracle-escrow")]
-use soroban_sdk::BytesN;
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, String, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
+    Address, BytesN, Env, String, Vec,
 };
 
 #[contracttype]
@@ -19,20 +18,6 @@ pub enum JobStatus {
     Disputed,
 }
 
-#[cfg(not(feature = "oracle-escrow"))]
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct Milestone {
-    pub name: String,
-    pub percentage: u32, // 0-100
-    pub released: bool,
-    pub disputed: bool,
-    pub oracle: Option<Address>,
-    pub verified: bool,
-    pub proof_hash: Option<BytesN<32>>,
-}
-
-#[cfg(feature = "oracle-escrow")]
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Milestone {
@@ -95,15 +80,191 @@ pub enum DataKey {
 /// to `create_job`.
 pub const RELEASE_AFTER_LEDGERS: u32 = 10;
 pub const DEFAULT_DEADLINE_LEDGERS: u32 = 1_555_200; // 90 days @ 5s/ledger
+pub const MAX_MILESTONE_NAME_LEN: u32 = 64; // bytes; enforced at create + amend
 
-fn compute_remaining_funds(job: &Job) -> i128 {
+/// Hard cap on the number of jobs kept in instance storage. `create_job`
+/// rejects new jobs once the stored count reaches this limit
+/// (`JobCountExceedsMaximum`).
+pub const MAX_JOBS: u32 = 256;
+
+/// Maximum page size accepted by `get_job_ids(from, count)`. Larger `count`
+/// values are rejected with `JobIdsPageSizeExceedsMaximum`.
+pub const MAX_JOB_IDS_PAGE_SIZE: u32 = 100;
+
+// ─── Contract error codes ───────────────────────────────────────────────────
+//
+// Every error returned by the escrow contract carries a unique numeric code.
+// Clients and indexers can match on the code without parsing panic strings.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum EscrowError {
+    // ── Initialization (1–5) ─────────────────────────────────────────────
+    AlreadyInitialized = 1,
+    AdminSetMustNotBeEmpty = 2,
+    ThresholdMustBeBetweenOneAndAdminCount = 3,
+    NotInitialized = 4,
+    JobCountAlreadyInitialized = 5,
+    // ── Job creation (6–15) ──────────────────────────────────────────────
+    AmountMustBePositive = 6,
+    ReleaseAfterBelowMinimum = 7,
+    JobAlreadyExists = 8,
+    MilestonesMustSumTo100 = 9,
+    ReleaseAfterExceedsDeadline = 10,
+    MilestonePercentageZero = 11,
+    MilestoneNameTooLong = 12,
+    JobIdTooLong = 13,
+    MilestoneVectorEmpty = 14,
+    DuplicateMilestoneName = 15,
+    // ── Job amendment (16–22) ────────────────────────────────────────────
+    OnlyJobClientCanAmend = 16,
+    OnlyJobFreelancerCanAmend = 17,
+    AmendmentOnlyBeforeRelease = 18,
+    NewMilestonesMustNotBeReleasedOrDisputed = 19,
+    AmendmentCountOverflow = 20,
+    ClientAddressMismatch = 21,
+    FreelancerAddressMismatch = 22,
+    // ── Milestone release (23–30) ────────────────────────────────────────
+    OnlyClientCanRelease = 23,
+    JobDisputedAdminMustResolve = 24,
+    InvalidMilestoneIndex = 25,
+    MilestoneIsDisputed = 26,
+    MilestoneAlreadyReleased = 27,
+    MilestoneNotVerifiedByOracle = 28,
+    ReleasedCountOverflow = 29,
+    ReleaseAmountCalculationFailed = 30,
+    // ── Oracle proof submission / verification (31–38) ───────────────────
+    OnlyAssignedFreelancerCanSubmitProof = 31,
+    MilestoneAlreadyCompleted = 32,
+    MilestoneHasNoOracleConfigured = 33,
+    OnlyConfiguredOracleCanVerify = 34,
+    NoProofSubmittedYet = 35,
+    OracleAddressInvalid = 36,
+    ProofHashInvalid = 37,
+    ProofVerificationFailed = 38,
+    // ── Dispute resolution (39–46) ───────────────────────────────────────
+    JobIsNotDisputed = 39,
+    MilestoneAlreadyDisputed = 40,
+    MilestoneIsNotDisputed = 41,
+    InsufficientAdminSignatures = 42,
+    DisputeResolutionFailed = 43,
+    MilestoneDisputedCannotClaimMilestone = 44,
+    JobDisputedCannotClaimMilestone = 45,
+    DisputeJobAlreadyDisputed = 46,
+    // ── Refund & claims (47–55) ──────────────────────────────────────────
+    OnlyClientCanRequestRefund = 47,
+    JobDeadlineHasNotPassed = 48,
+    CannotRefundMilestonesClaimed = 49,
+    OnlyJobFreelancerCanClaim = 50,
+    ReleasePeriodNotReached = 51,
+    RefundTransferFailed = 52,
+    ClaimTransferFailed = 53,
+    RefundAmountCalculationFailed = 54,
+    ClaimAmountCalculationFailed = 55,
+    // ── Admin management (56–62) ─────────────────────────────────────────
+    NewReleaseAfterMustExtendCurrent = 56,
+    AddressAlreadyAdmin = 57,
+    AddressNotAdmin = 58,
+    CannotRemoveLastAdmin = 59,
+    ThresholdExceedsAdminCount = 60,
+    AdminTransferInProgress = 61,
+    AdminSetUpdateFailed = 62,
+    // ── Job enumeration (63–64) ───────────────────────────────────────────
+    JobIdsPageSizeExceedsMaximum = 63,
+    JobCountExceedsMaximum = 64,
+}
+
+/// Validate a milestone vector against the invariants that must hold at every
+/// mutation point (`create_job` and `amend_job_milestones`):
+///
+/// 1. Non-empty (`MilestoneVectorEmpty`)
+/// 2. Every milestone has a non-zero percentage (`MilestonePercentageZero`)
+/// 3. Every milestone name fits within `MAX_MILESTONE_NAME_LEN` bytes
+///    (`MilestoneNameTooLong`)
+/// 4. No two milestones share a name (`DuplicateMilestoneName`)
+///
+/// The sum-to-100 invariant is computed by the callers and intentionally not
+/// duplicated here.
+fn validate_milestones(env: &Env, milestones: &Vec<Milestone>) {
+    if milestones.is_empty() {
+        panic_with_error!(env, EscrowError::MilestoneVectorEmpty);
+    }
+
+    for milestone in milestones.iter() {
+        if milestone.percentage == 0 {
+            panic_with_error!(env, EscrowError::MilestonePercentageZero);
+        }
+        if milestone.name.len() > MAX_MILESTONE_NAME_LEN {
+            panic_with_error!(env, EscrowError::MilestoneNameTooLong);
+        }
+    }
+
+    // Duplicate-name detection. Milestone vectors are small (the fuzz harness
+    // caps them at 10 entries), so an O(n²) scan avoids allocating a second
+    // Vec and keeps the comparison independent of storage.
+    for i in 0..milestones.len() {
+        for j in (i + 1)..milestones.len() {
+            let a = milestones.get(i).unwrap();
+            let b = milestones.get(j).unwrap();
+            if a.name == b.name {
+                panic_with_error!(env, EscrowError::DuplicateMilestoneName);
+            }
+        }
+    }
+}
+
+/// Compute `amount * proportion / 100` with checked arithmetic, panicking
+/// with the given structured `EscrowError` on overflow.
+///
+/// `amount` is fully client-controlled at `create_job` (any positive `i128`),
+/// so a value near `i128::MAX` would silently wrap in an unchecked release
+/// build and produce an incorrect (small) payout while the full amount stays
+/// locked. `checked_mul` / `checked_div` guarantee the payout math panics
+/// with a structured error instead of wrapping.
+///
+/// A `proportion` of `100` is returned as `amount` directly: the intermediate
+/// `amount * 100` would otherwise overflow for large amounts even though the
+/// mathematically exact result (`amount`) is itself a valid `i128`.
+fn compute_proportional_payout(
+    env: &Env,
+    amount: i128,
+    proportion: i128,
+    err: EscrowError,
+) -> i128 {
+    if proportion == 100 {
+        return amount;
+    }
+    // Split `amount` into quotient and remainder *before* multiplying so the
+    // intermediate value cannot overflow for large amounts: an
+    // `amount * proportion` product can exceed `i128::MAX` even when the final
+    // payout fits (e.g. `i128::MAX / 2` with two 50% milestones). The
+    // quotient/remainder decomposition preserves floor division exactly.
+    let quotient = amount.checked_div(100i128);
+    let remainder = amount.checked_rem(100i128);
+    quotient
+        .and_then(|whole| whole.checked_mul(proportion))
+        .and_then(|whole| {
+            remainder
+                .and_then(|fraction| fraction.checked_mul(proportion))
+                // `fraction < 100`, so `fraction * proportion / 100` fits for
+                // any valid `proportion <= 100`.
+                .and_then(|fraction| whole.checked_add(fraction / 100i128))
+        })
+        .unwrap_or_else(|| panic_with_error!(env, err))
+}
+
+/// Sum the payout of every unreleased milestone using checked arithmetic.
+///
+/// `err` is the structured error surfaced on overflow, so the dispute and
+/// refund paths can report distinct codes.
+fn compute_remaining_funds(env: &Env, job: &Job, err: EscrowError) -> i128 {
     let mut remaining_amount: i128 = 0;
     for milestone in job.milestones.iter() {
         if !milestone.released {
             let proportion = milestone.percentage as i128;
+            let payout = compute_proportional_payout(env, job.amount, proportion, err);
             remaining_amount = remaining_amount
-                .checked_add((job.amount * proportion) / 100i128)
-                .expect("remaining_amount overflow");
+                .checked_add(payout)
+                .unwrap_or_else(|| panic_with_error!(env, err));
         }
     }
     remaining_amount
@@ -236,10 +397,7 @@ fn verify_m_of_n(env: &Env, signers: &Vec<Address>, required_threshold: u32) {
     let valid_count = count_distinct_admins(&admin_set, signers);
 
     if valid_count < required_threshold {
-        panic!(
-            "Insufficient admin signatures: {}/{} required",
-            valid_count, required_threshold
-        );
+        panic_with_error!(env, EscrowError::InsufficientAdminSignatures);
     }
 }
 
@@ -258,13 +416,13 @@ impl EscrowContract {
     /// Single-admin deployments call this with `vec![admin]` and threshold `1`.
     pub fn initialize(env: Env, admins: Vec<Address>, threshold: u32) {
         if env.storage().instance().has(&DataKey::AdminSet) {
-            panic!("Already initialized");
+            panic_with_error!(&env, EscrowError::AlreadyInitialized);
         }
         if admins.is_empty() {
-            panic!("Admin set must not be empty");
+            panic_with_error!(&env, EscrowError::AdminSetMustNotBeEmpty);
         }
         if threshold == 0 || threshold > admins.len() {
-            panic!("Threshold must be between 1 and the number of admins");
+            panic_with_error!(&env, EscrowError::ThresholdMustBeBetweenOneAndAdminCount);
         }
         env.storage().instance().set(&DataKey::AdminSet, &admins);
         env.storage()
@@ -295,17 +453,16 @@ impl EscrowContract {
     ) {
         client.require_auth();
         if amount <= 0 {
-            panic!("Amount must be positive");
+            panic_with_error!(&env, EscrowError::AmountMustBePositive);
         }
         if release_after < RELEASE_AFTER_LEDGERS {
-            panic!(
-                "release_after must be at least the minimum of {} ledgers",
-                RELEASE_AFTER_LEDGERS
-            );
+            panic_with_error!(&env, EscrowError::ReleaseAfterBelowMinimum);
         }
         if env.storage().instance().has(&DataKey::Job(job_id.clone())) {
-            panic!("Job already exists");
+            panic_with_error!(&env, EscrowError::JobAlreadyExists);
         }
+
+        validate_milestones(&env, &milestones);
 
         // Validate milestones sum to 100%
         let mut total_percentage: u32 = 0;
@@ -315,10 +472,17 @@ impl EscrowContract {
                 .expect("Milestone percentage overflow");
         }
         if total_percentage != 100 {
-            panic!("Milestones must sum to 100%");
+            panic_with_error!(&env, EscrowError::MilestonesMustSumTo100);
         }
 
         let deadline = env.ledger().sequence() + DEFAULT_DEADLINE_LEDGERS;
+
+        // release_after is stored as an absolute ledger sequence; compute it
+        // now so we can validate it against the deadline before persisting.
+        let release_after_abs = env.ledger().sequence() + release_after;
+        if release_after_abs > deadline {
+            panic_with_error!(&env, EscrowError::ReleaseAfterExceedsDeadline);
+        }
 
         // ── Effects: persist the Job struct BEFORE the external token
         //    transfer so a malicious token contract cannot exploit a
@@ -333,7 +497,7 @@ impl EscrowContract {
             status: JobStatus::Escrowed,
             milestones,
             disputed: false,
-            release_after: env.ledger().sequence() + release_after,
+            release_after: release_after_abs,
             deadline,
         };
         env.storage()
@@ -346,6 +510,9 @@ impl EscrowContract {
             .instance()
             .get(&DataKey::JobCount)
             .unwrap_or(0);
+        if count >= MAX_JOBS {
+            panic_with_error!(&env, EscrowError::JobCountExceedsMaximum);
+        }
         let next_count = count.checked_add(1).expect("JobCount overflow");
         env.storage()
             .instance()
@@ -393,26 +560,28 @@ impl EscrowContract {
             .expect("Job not found");
 
         if job.client != client {
-            panic!("Only the job's client can amend");
+            panic_with_error!(&env, EscrowError::OnlyJobClientCanAmend);
         }
         if job.freelancer != freelancer {
-            panic!("Only the job's freelancer can amend");
+            panic_with_error!(&env, EscrowError::OnlyJobFreelancerCanAmend);
         }
         if job.status != JobStatus::Escrowed {
-            panic!("Amendment only allowed before any milestone is released");
+            panic_with_error!(&env, EscrowError::AmendmentOnlyBeforeRelease);
         }
+
+        validate_milestones(&env, &new_milestones);
 
         let mut total_percentage: u32 = 0;
         for milestone in new_milestones.iter() {
             if milestone.released || milestone.disputed {
-                panic!("New milestones must not be released or disputed");
+                panic_with_error!(&env, EscrowError::NewMilestonesMustNotBeReleasedOrDisputed);
             }
             total_percentage = total_percentage
                 .checked_add(milestone.percentage)
                 .expect("Milestone percentage overflow");
         }
         if total_percentage != 100 {
-            panic!("Milestones must sum to 100%");
+            panic_with_error!(&env, EscrowError::MilestonesMustSumTo100);
         }
 
         let old_milestone_count = job.milestones.len();
@@ -464,30 +633,32 @@ impl EscrowContract {
             .expect("Job not found");
 
         if job.client != client {
-            panic!("Only the client can release");
-        }
-        if job.disputed {
-            panic!("Job is disputed; admin must resolve");
+            panic_with_error!(&env, EscrowError::OnlyClientCanRelease);
         }
         if milestone_index >= job.milestones.len() {
-            panic!("Invalid milestone index");
+            panic_with_error!(&env, EscrowError::InvalidMilestoneIndex);
         }
 
         let milestone = &job.milestones.get(milestone_index).unwrap();
         if milestone.disputed {
-            panic!("Milestone is disputed");
+            panic_with_error!(&env, EscrowError::MilestoneIsDisputed);
         }
         if milestone.released {
-            panic!("Milestone already released");
+            panic_with_error!(&env, EscrowError::MilestoneAlreadyReleased);
         }
 
         #[cfg(feature = "oracle-escrow")]
         if milestone.oracle.is_some() && !milestone.verified {
-            panic!("Milestone not verified by oracle");
+            panic_with_error!(&env, EscrowError::MilestoneNotVerifiedByOracle);
         }
 
         let proportion = milestone.percentage as i128;
-        let release_amount = (job.amount * proportion) / 100i128;
+        let release_amount = compute_proportional_payout(
+            &env,
+            job.amount,
+            proportion,
+            EscrowError::ReleaseAmountCalculationFailed,
+        );
 
         // ── Effects: rebuild the milestone vector, recompute status,
         //    and persist state BEFORE the external token movement (CEI ordering).
@@ -552,16 +723,16 @@ impl EscrowContract {
             .expect("Job not found");
 
         if job.freelancer != freelancer {
-            panic!("Only the assigned freelancer can submit proof");
+            panic_with_error!(&env, EscrowError::OnlyAssignedFreelancerCanSubmitProof);
         }
         if milestone_index >= job.milestones.len() {
-            panic!("Invalid milestone index");
+            panic_with_error!(&env, EscrowError::InvalidMilestoneIndex);
         }
 
         let mut milestones = job.milestones.clone();
         let mut milestone = milestones.get(milestone_index).unwrap().clone();
         if milestone.released {
-            panic!("Milestone already completed");
+            panic_with_error!(&env, EscrowError::MilestoneAlreadyCompleted);
         }
 
         milestone.proof_hash = Some(proof_hash);
@@ -591,22 +762,22 @@ impl EscrowContract {
             .expect("Job not found");
 
         if milestone_index >= job.milestones.len() {
-            panic!("Invalid milestone index");
+            panic_with_error!(&env, EscrowError::InvalidMilestoneIndex);
         }
 
         let mut milestones = job.milestones.clone();
         let mut milestone = milestones.get(milestone_index).unwrap().clone();
         if milestone.oracle.is_none() {
-            panic!("Milestone has no oracle configured");
+            panic_with_error!(&env, EscrowError::MilestoneHasNoOracleConfigured);
         }
         if milestone.oracle.as_ref().unwrap() != &oracle {
-            panic!("Only the configured oracle can verify");
+            panic_with_error!(&env, EscrowError::OnlyConfiguredOracleCanVerify);
         }
         if milestone.proof_hash.is_none() {
-            panic!("No proof submitted yet");
+            panic_with_error!(&env, EscrowError::NoProofSubmittedYet);
         }
         if milestone.released {
-            panic!("Milestone already completed");
+            panic_with_error!(&env, EscrowError::MilestoneAlreadyCompleted);
         }
 
         milestone.verified = true;
@@ -623,6 +794,11 @@ impl EscrowContract {
     }
 
     /// M-of-N admin (deprecated): Mark a job as disputed, freezing remaining releases.
+    ///
+    /// Delegates to the milestone-level dispute representation for backward
+    /// compatibility: every unreleased milestone is flagged `disputed` so the
+    /// non-deprecated `resolve_milestone_dispute` can also unblock a job
+    /// disputed through this entrypoint (issue #613).
     #[deprecated]
     pub fn dispute_job(env: Env, signers: Vec<Address>, job_id: String) {
         require_admin(&env, &signers);
@@ -632,6 +808,24 @@ impl EscrowContract {
             .instance()
             .get(&DataKey::Job(job_id.clone()))
             .expect("Job not found");
+
+        // Mirror the dispute onto every unreleased milestone so the
+        // milestone-level resolution path can resolve it later.
+        let mut milestones = job.milestones.clone();
+        for i in 0..milestones.len() {
+            let mut milestone = milestones.get(i).unwrap().clone();
+            if !milestone.released {
+                milestone.disputed = true;
+                #[cfg(feature = "oracle-escrow")]
+                {
+                    milestone.verified = false;
+                    milestone.proof_hash = None;
+                }
+            }
+            milestones.set(i, milestone);
+        }
+        job.milestones = milestones;
+
         job.disputed = true;
         job.status = JobStatus::Disputed;
         reputation_job_disputed(&env, &job);
@@ -643,6 +837,9 @@ impl EscrowContract {
     }
 
     /// M-of-N admin (deprecated): Resolve a dispute and release remaining funds.
+    ///
+    /// Works for both dispute entrypoints now that `dispute_milestone` keeps
+    /// `job.disputed` in sync with the milestone-level flags (issue #613).
     #[deprecated]
     pub fn resolve_dispute(
         env: Env,
@@ -659,10 +856,11 @@ impl EscrowContract {
             .expect("Job not found");
 
         if !job.disputed {
-            panic!("Job is not disputed");
+            panic_with_error!(&env, EscrowError::JobIsNotDisputed);
         }
 
-        let remaining_amount = compute_remaining_funds(&job);
+        let remaining_amount =
+            compute_remaining_funds(&env, &job, EscrowError::ReleaseAmountCalculationFailed);
 
         let mut updated_milestones = job.milestones.clone();
         for i in 0..updated_milestones.len() {
@@ -712,16 +910,16 @@ impl EscrowContract {
             .expect("Job not found");
 
         if milestone_index >= job.milestones.len() {
-            panic!("Invalid milestone index");
+            panic_with_error!(&env, EscrowError::InvalidMilestoneIndex);
         }
 
         let mut milestones = job.milestones.clone();
         let mut milestone = milestones.get(milestone_index).unwrap().clone();
         if milestone.released {
-            panic!("Milestone already released");
+            panic_with_error!(&env, EscrowError::MilestoneAlreadyReleased);
         }
         if milestone.disputed {
-            panic!("Milestone already disputed");
+            panic_with_error!(&env, EscrowError::MilestoneAlreadyDisputed);
         }
         milestone.disputed = true;
         #[cfg(feature = "oracle-escrow")]
@@ -731,6 +929,7 @@ impl EscrowContract {
         }
         milestones.set(milestone_index, milestone);
         job.milestones = milestones;
+        job.disputed = true;
         job.status = JobStatus::Disputed;
         reputation_job_disputed(&env, &job);
 
@@ -761,17 +960,22 @@ impl EscrowContract {
             .expect("Job not found");
 
         if milestone_index >= job.milestones.len() {
-            panic!("Invalid milestone index");
+            panic_with_error!(&env, EscrowError::InvalidMilestoneIndex);
         }
 
         let mut milestones = job.milestones.clone();
         let mut milestone = milestones.get(milestone_index).unwrap().clone();
         if !milestone.disputed {
-            panic!("Milestone is not disputed");
+            panic_with_error!(&env, EscrowError::MilestoneIsNotDisputed);
         }
 
         let proportion = milestone.percentage as i128;
-        let release_amount = (job.amount * proportion) / 100i128;
+        let release_amount = compute_proportional_payout(
+            &env,
+            job.amount,
+            proportion,
+            EscrowError::ReleaseAmountCalculationFailed,
+        );
 
         milestone.disputed = false;
         milestone.released = true;
@@ -780,6 +984,7 @@ impl EscrowContract {
 
         let all_released = job.milestones.iter().all(|m| m.released);
         let any_disputed = job.milestones.iter().any(|m| m.disputed);
+        job.disputed = any_disputed;
         job.status = if all_released {
             JobStatus::Completed
         } else if any_disputed {
@@ -822,18 +1027,19 @@ impl EscrowContract {
             .expect("Job not found");
 
         if job.client != client {
-            panic!("Only the client can request refund");
+            panic_with_error!(&env, EscrowError::OnlyClientCanRequestRefund);
         }
         if env.ledger().sequence() < job.deadline {
-            panic!("Job deadline has not passed");
+            panic_with_error!(&env, EscrowError::JobDeadlineHasNotPassed);
         }
 
         let any_claimed = job.milestones.iter().any(|m| m.released);
         if any_claimed {
-            panic!("Cannot refund - milestones have been claimed");
+            panic_with_error!(&env, EscrowError::CannotRefundMilestonesClaimed);
         }
 
-        let remaining = compute_remaining_funds(&job);
+        let remaining =
+            compute_remaining_funds(&env, &job, EscrowError::RefundAmountCalculationFailed);
 
         job.status = JobStatus::Completed;
         env.storage()
@@ -861,24 +1067,29 @@ impl EscrowContract {
             .get(&DataKey::Job(job_id.clone()))
             .expect("Job not found");
 
-        if job.disputed {
-            panic!("Job is disputed; cannot claim milestone");
+        if job.freelancer != freelancer {
+            panic_with_error!(&env, EscrowError::OnlyJobFreelancerCanClaim);
         }
         if env.ledger().sequence() < job.release_after {
-            panic!("Release period not reached");
+            panic_with_error!(&env, EscrowError::ReleasePeriodNotReached);
         }
         if milestone_index >= job.milestones.len() {
-            panic!("Invalid milestone index");
+            panic_with_error!(&env, EscrowError::InvalidMilestoneIndex);
         }
         let milestone = &job.milestones.get(milestone_index).unwrap();
         if milestone.disputed {
-            panic!("Milestone is disputed; cannot claim milestone");
+            panic_with_error!(&env, EscrowError::MilestoneDisputedCannotClaimMilestone);
         }
         if milestone.released {
-            panic!("Milestone already released");
+            panic_with_error!(&env, EscrowError::MilestoneAlreadyReleased);
         }
         let proportion = milestone.percentage as i128;
-        let release_amount = (job.amount * proportion) / 100i128;
+        let release_amount = compute_proportional_payout(
+            &env,
+            job.amount,
+            proportion,
+            EscrowError::ClaimAmountCalculationFailed,
+        );
 
         // ── Effects: mark milestone released and update status BEFORE
         //    the external token transfer (CEI ordering).
@@ -918,7 +1129,7 @@ impl EscrowContract {
     /// M-of-N admin: extend a job's release period. `new_release_after` is the
     /// new absolute ledger sequence at which the freelancer may auto-claim
     /// unclaimed milestones; it must be later than the job's current
-    /// `release_after` (extension only — the period can never be shortened).
+    /// `release_after` and cannot exceed the job deadline.
     pub fn update_release_after(
         env: Env,
         signers: Vec<Address>,
@@ -934,7 +1145,10 @@ impl EscrowContract {
             .expect("Job not found");
 
         if new_release_after <= job.release_after {
-            panic!("New release_after must extend the current release period");
+            panic_with_error!(&env, EscrowError::NewReleaseAfterMustExtendCurrent);
+        }
+        if new_release_after > job.deadline {
+            panic_with_error!(&env, EscrowError::ReleaseAfterExceedsDeadline);
         }
 
         job.release_after = new_release_after;
@@ -951,7 +1165,7 @@ impl EscrowContract {
         require_admin(&env, &signers);
         let mut admin_set: Vec<Address> = read_admin_set(&env);
         if admin_set.contains(&new_admin) {
-            panic!("Address is already an admin");
+            panic_with_error!(&env, EscrowError::AddressAlreadyAdmin);
         }
         admin_set.push_back(new_admin.clone());
         env.storage().instance().set(&DataKey::AdminSet, &admin_set);
@@ -966,10 +1180,10 @@ impl EscrowContract {
         require_admin(&env, &signers);
         let admin_set: Vec<Address> = read_admin_set(&env);
         if !admin_set.contains(&admin_to_remove) {
-            panic!("Address is not an admin");
+            panic_with_error!(&env, EscrowError::AddressNotAdmin);
         }
         if admin_set.len() <= 1 {
-            panic!("Cannot remove last admin");
+            panic_with_error!(&env, EscrowError::CannotRemoveLastAdmin);
         }
         let mut new_set: Vec<Address> = Vec::new(&env);
         for addr in admin_set.iter() {
@@ -979,11 +1193,7 @@ impl EscrowContract {
         }
         let threshold: u32 = read_admin_threshold(&env);
         if threshold > new_set.len() {
-            panic!(
-                "Threshold {} exceeds admin count {}; call update_threshold first",
-                threshold,
-                new_set.len()
-            );
+            panic_with_error!(&env, EscrowError::ThresholdExceedsAdminCount);
         }
         env.storage().instance().set(&DataKey::AdminSet, &new_set);
         env.events()
@@ -996,7 +1206,7 @@ impl EscrowContract {
         require_admin(&env, &signers);
         let admin_set: Vec<Address> = read_admin_set(&env);
         if new_threshold == 0 || new_threshold > admin_set.len() {
-            panic!("Threshold must be between 1 and the number of admins");
+            panic_with_error!(&env, EscrowError::ThresholdMustBeBetweenOneAndAdminCount);
         }
         env.storage()
             .instance()
@@ -1026,11 +1236,29 @@ impl EscrowContract {
             .unwrap_or(0)
     }
 
-    pub fn get_job_ids(env: Env) -> Vec<String> {
-        env.storage()
+    /// Return a bounded window of job IDs in creation order.
+    pub fn get_job_ids(env: Env, from: u32, count: u32) -> Vec<String> {
+        if count > MAX_JOB_IDS_PAGE_SIZE {
+            panic_with_error!(&env, EscrowError::JobIdsPageSizeExceedsMaximum);
+        }
+
+        let ids: Vec<String> = env
+            .storage()
             .instance()
             .get(&DataKey::JobIds)
-            .unwrap_or_else(|| Vec::new(&env))
+            .unwrap_or_else(|| Vec::new(&env));
+        let end = from.saturating_add(count).min(ids.len());
+        let mut page = Vec::new(&env);
+        let mut index = from;
+
+        while index < end {
+            if let Some(job_id) = ids.get(index) {
+                page.push_back(job_id);
+            }
+            index += 1;
+        }
+
+        page
     }
 
     /// Return the immutable aggregate history for `freelancer`.
@@ -1219,7 +1447,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Milestone already released")]
+    #[should_panic(expected = "Error")]
     fn test_release_already_released_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1259,7 +1487,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Milestones must sum to 100%")]
+    #[should_panic(expected = "Error")]
     fn test_milestone_validation() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1302,7 +1530,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Job not found")]
+    #[should_panic(expected = "Error")]
     fn release_missing_job_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1507,7 +1735,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Milestone already disputed")]
+    #[should_panic]
     fn test_dispute_milestone_already_disputed_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1547,7 +1775,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Milestone already released")]
+    #[should_panic]
     fn test_dispute_released_milestone_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1587,7 +1815,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Milestone is not disputed")]
+    #[should_panic]
     fn test_resolve_not_disputed_milestone_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1672,7 +1900,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Release period not reached")]
+    #[should_panic]
     fn test_claim_milestone_before_release_period_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1708,6 +1936,51 @@ mod tests {
             &RELEASE_AFTER_LEDGERS,
         );
         client.claim_milestone(&freelancer, &job_id, &0u32);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_claim_milestone_wrong_freelancer_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let wrong_freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-wrong-freelancer");
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M1"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+
+        // Advance sequence past release_after
+        env.ledger().set_sequence_number(RELEASE_AFTER_LEDGERS + 1);
+
+        // Wrong freelancer tries to claim - should panic
+        client.claim_milestone(&wrong_freelancer, &job_id, &0u32);
     }
 
     #[test]
@@ -1757,7 +2030,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Job deadline has not passed")]
+    #[should_panic]
     fn test_refund_expired_job_before_deadline_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1796,7 +2069,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Only the client can request refund")]
+    #[should_panic]
     fn test_refund_expired_job_not_client_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1839,7 +2112,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "milestones have been claimed")]
+    #[should_panic]
     fn test_refund_expired_job_milestones_claimed_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1897,7 +2170,7 @@ mod tests {
         let (_admin, client) = setup(&env);
 
         assert_eq!(client.get_job_count(), 0);
-        assert_eq!(client.get_job_ids().len(), 0);
+        assert_eq!(client.get_job_ids(&0, &MAX_JOB_IDS_PAGE_SIZE).len(), 0);
 
         let client_addr = Address::generate(&env);
         let freelancer = Address::generate(&env);
@@ -1941,10 +2214,70 @@ mod tests {
         );
 
         assert_eq!(client.get_job_count(), 2);
-        let ids = client.get_job_ids();
+        let ids = client.get_job_ids(&0, &MAX_JOB_IDS_PAGE_SIZE);
         assert_eq!(ids.len(), 2);
         assert_eq!(ids.get(0).unwrap(), job_1);
         assert_eq!(ids.get(1).unwrap(), job_2);
+
+        let first_page = client.get_job_ids(&0, &1);
+        assert_eq!(first_page.len(), 1);
+        assert_eq!(first_page.get(0).unwrap(), job_1);
+
+        let second_page = client.get_job_ids(&1, &1);
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page.get(0).unwrap(), job_2);
+
+        assert_eq!(client.get_job_ids(&2, &1).len(), 0);
+        assert_eq!(client.get_job_ids(&u32::MAX, &1).len(), 0);
+        assert!(client
+            .try_get_job_ids(&0, &(MAX_JOB_IDS_PAGE_SIZE + 1))
+            .is_err());
+    }
+
+    #[test]
+    fn test_create_job_rejects_when_job_count_cap_is_reached() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, EscrowContract);
+        let client = EscrowContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        env.as_contract(&cid, || {
+            env.storage().instance().set(&DataKey::JobCount, &MAX_JOBS);
+        });
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M1"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+
+        let job_id = String::from_str(&env, "job-over-cap");
+        assert!(client
+            .try_create_job(
+                &client_addr,
+                &freelancer,
+                &job_id,
+                &token,
+                &1000i128,
+                &milestones,
+                &RELEASE_AFTER_LEDGERS,
+            )
+            .is_err());
     }
 
     #[test]
@@ -2087,7 +2420,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Amendment only allowed before any milestone is released")]
+    #[should_panic]
     fn test_amend_released_job_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2123,7 +2456,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Milestones must sum to 100%")]
+    #[should_panic]
     fn test_amend_wrong_sum_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2378,7 +2711,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Insufficient admin signatures")]
+    #[should_panic]
     fn test_single_admin_threshold_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2412,7 +2745,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Insufficient admin signatures: 1/2 required")]
+    #[should_panic]
     fn test_insufficient_signatures_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2501,7 +2834,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Release period not reached")]
+    #[should_panic]
     fn test_per_job_release_after_longer_than_minimum_still_enforced() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2538,7 +2871,38 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "release_after must be at least the minimum")]
+    #[should_panic]
+    fn test_release_after_exceeds_deadline_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-release-after-exceeds-deadline");
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 100));
+
+        // DEFAULT_DEADLINE_LEDGERS is 1_555_200; passing 2_000_000 makes the
+        // absolute release_after exceed the absolute deadline.
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &2_000_000u32,
+        );
+    }
+
+    #[test]
+    #[should_panic]
     fn test_release_after_below_minimum_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2601,7 +2965,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "New release_after must extend the current release period")]
+    #[should_panic]
     fn test_update_release_after_cannot_shorten_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2630,6 +2994,38 @@ mod tests {
 
         let current = client.get_job(&job_id).unwrap().release_after;
         client.update_release_after(&signers1(&env, &admin), &job_id, &(current - 1));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_update_release_after_cannot_exceed_deadline_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-release-after-past-deadline");
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 100));
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+
+        let deadline = client.get_job(&job_id).unwrap().deadline;
+        client.update_release_after(&signers1(&env, &admin), &job_id, &(deadline + 1));
     }
 
     #[test]
@@ -2673,7 +3069,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Cannot remove last admin")]
+    #[should_panic]
     fn test_remove_last_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2700,6 +3096,41 @@ mod tests {
         assert_eq!(completed.completed_jobs, 1);
         assert_eq!(completed.total_value_completed, 1_000);
         assert_eq!(completed.on_time_completions, 1);
+    }
+
+    #[test]
+    fn test_reputation_on_time_completion() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, contract) = setup(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = String::from_str(&env, "rep-on-time");
+        create_reputation_job(&env, &contract, &client, &freelancer, &job_id, 1_000);
+
+        contract.release_milestone(&client, &job_id, &0);
+        let reputation = contract.get_freelancer_reputation(&freelancer);
+        assert_eq!(reputation.completed_jobs, 1);
+        assert_eq!(reputation.on_time_completions, 1);
+    }
+
+    #[test]
+    fn test_reputation_late_completion() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, contract) = setup(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let job_id = String::from_str(&env, "rep-late");
+        create_reputation_job(&env, &contract, &client, &freelancer, &job_id, 1_000);
+
+        let deadline = contract.get_job(&job_id).unwrap().deadline;
+        env.ledger().set_sequence_number(deadline + 1);
+
+        contract.release_milestone(&client, &job_id, &0);
+        let reputation = contract.get_freelancer_reputation(&freelancer);
+        assert_eq!(reputation.completed_jobs, 1);
+        assert_eq!(reputation.on_time_completions, 0);
     }
 
     #[test]
@@ -2834,7 +3265,7 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "Milestone not verified by oracle")]
+        #[should_panic]
         fn test_release_unverified_oracle_milestone_fails() {
             let env = Env::default();
             env.mock_all_auths();

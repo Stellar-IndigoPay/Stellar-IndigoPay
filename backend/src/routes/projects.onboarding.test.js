@@ -5,11 +5,31 @@ jest.mock("../db/pool", () => ({
   connect: jest.fn(),
 }));
 
+jest.mock("../services/redis", () => ({
+  get: jest.fn().mockResolvedValue(null),
+  set: jest.fn().mockResolvedValue("OK"),
+  deletePattern: jest.fn().mockResolvedValue(0),
+}));
+
+jest.mock("../services/stellar", () => ({
+  getOnChainProject: jest.fn().mockResolvedValue(null),
+  getProjectDonationEvents: jest.fn().mockResolvedValue([]),
+  CONTRACT_ID: "test-contract-id",
+  server: { loadAccount: jest.fn(), getTransaction: jest.fn() },
+  NETWORK_PASSPHRASE: "Test SDF Network ; September 2015",
+}));
+
+jest.mock("../services/summaryQueue", () => ({
+  enqueueAISummary: jest.fn().mockResolvedValue(undefined),
+}));
+
 const express = require("express");
 const request = require("supertest");
 const pool = require("../db/pool");
 const projects = require("./projects");
 const { AppError } = require("../errors");
+
+const PROJECT_ID = "11111111-2222-3333-8888-555555555555";
 
 function buildApp() {
   const app = express();
@@ -28,8 +48,8 @@ describe("Project onboarding checklist API", () => {
   let app;
 
   beforeEach(() => {
-    app = buildApp();
     jest.clearAllMocks();
+    app = buildApp();
   });
 
   test("GET /api/projects/:id/onboarding returns checklist items", async () => {
@@ -43,7 +63,7 @@ describe("Project onboarding checklist API", () => {
       ],
     });
 
-    const res = await request(app).get("/api/projects/123/onboarding");
+    const res = await request(app).get(`/api/projects/${PROJECT_ID}/onboarding`);
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.data).toHaveLength(1);
@@ -65,7 +85,7 @@ describe("Project onboarding checklist API", () => {
       .mockResolvedValueOnce({ rows: [] });
 
     const res = await request(app).patch(
-      "/api/projects/123/onboarding/verify_wallet",
+      `/api/projects/${PROJECT_ID}/onboarding/verify_wallet`,
     );
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
@@ -76,7 +96,7 @@ describe("Project onboarding checklist API", () => {
   test("PATCH returns PROJECT_NOT_FOUND when no onboarding data exists", async () => {
     pool.query.mockResolvedValueOnce({ rows: [] });
     const res = await request(app).patch(
-      "/api/projects/123/onboarding/verify_wallet",
+      `/api/projects/${PROJECT_ID}/onboarding/verify_wallet`,
     );
     expect(res.status).toBe(404);
     expect(res.body.error.code).toBe("PROJECT_NOT_FOUND");

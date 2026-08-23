@@ -21,7 +21,7 @@ export const Default: Story = {
     docs: {
       description: {
         story:
-          "Default wallet connection card prompting users to connect with Freighter. Shows the Freighter install link and a brief explanation.",
+          "Wallet connection card with multi-wallet support. Auto-detects installed Stellar wallets (Freighter, Albedo, xBull, Rabet) and shows a picker when multiple are available. Falls back to an install prompt when none are detected.",
       },
     },
   },

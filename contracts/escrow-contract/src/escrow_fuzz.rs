@@ -26,6 +26,7 @@
 /// formal state machine API while being compatible with Soroban's test
 /// environment.
 #[cfg(all(test, feature = "testutils"))]
+#[allow(deprecated)]
 mod fuzz {
     extern crate std;
 
@@ -203,23 +204,30 @@ mod fuzz {
         }
 
         /// Try to dispute a job.
+        ///
+        /// Mirrors the deprecated contract `dispute_job`, which flips a job
+        /// back to `Disputed` unconditionally (including an already-resolved
+        /// job). Re-disputing clears the `resolved` marker so the reference
+        /// model stays in sync with the contract.
         fn dispute_job(&mut self, job_idx: usize) -> Result<(), &'static str> {
             let job = self.jobs.get_mut(job_idx).ok_or("job not found")?;
             if job.disputed {
                 return Err("job already disputed");
             }
-            if job.resolved {
-                return Err("job already resolved");
-            }
             job.disputed = true;
+            job.resolved = false;
             Ok(())
         }
 
         /// Try to resolve a dispute.
+        ///
+        /// Mirrors the contract: every milestone is marked released on
+        /// resolution regardless of `approve_remaining` (which only decides
+        /// the payout recipient), so the flag is intentionally unused here.
         fn resolve_dispute(
             &mut self,
             job_idx: usize,
-            approve_remaining: bool,
+            _approve_remaining: bool,
         ) -> Result<(), &'static str> {
             let job = self.jobs.get_mut(job_idx).ok_or("job not found")?;
             if !job.disputed {
@@ -228,17 +236,18 @@ mod fuzz {
             if job.resolved {
                 return Err("dispute already resolved");
             }
-            // If approving remaining, release all unreleased milestones
-            if approve_remaining {
-                for m in &mut job.milestones {
-                    if !m.released {
-                        m.released = true;
-                        let proportion = m.percentage as i128;
-                        job.total_released = job
-                            .total_released
-                            .checked_add((job.amount * proportion) / 100i128)
-                            .expect("total_released overflow in model");
-                    }
+            // The contract marks EVERY milestone released on resolution —
+            // `approve_remaining` only selects who receives the remaining
+            // funds (freelancer when approved, client refund otherwise).
+            // Mirror that unconditionally so the model stays in sync.
+            for m in &mut job.milestones {
+                if !m.released {
+                    m.released = true;
+                    let proportion = m.percentage as i128;
+                    job.total_released = job
+                        .total_released
+                        .checked_add((job.amount * proportion) / 100i128)
+                        .expect("total_released overflow in model");
                 }
             }
             job.disputed = false;
@@ -248,17 +257,20 @@ mod fuzz {
 
         // ── Invariant checks ─────────────────────────────────────────────────
 
+        #[allow(dead_code)]
         /// **Invariant 1**: Sum of released amounts per job ≤ total funded amount.
         fn invariant_no_over_release(&self, job: &JobModel) -> bool {
             job.total_released <= job.amount
         }
 
+        #[allow(dead_code)]
         /// **Invariant 2**: Remaining (unreleased) balance ≥ 0.
         fn invariant_remaining_non_negative(&self, job: &JobModel) -> bool {
             let remaining = job.amount - job.total_released;
             remaining >= 0
         }
 
+        #[allow(dead_code)]
         /// **Invariant 3**: If job is not disputed and not resolved, it's either
         /// in Escrowed, PartiallyReleased, or Completed state — which is
         /// consistent with how many milestones are released.
@@ -286,6 +298,7 @@ mod fuzz {
             true // Completed
         }
 
+        #[allow(dead_code)]
         /// **Invariant 4**: Refund amount (amount that could be returned to client)
         /// ≤ remaining balance after all releases.
         fn invariant_refund_within_balance(&self, job: &JobModel) -> bool {
@@ -294,6 +307,7 @@ mod fuzz {
             remaining >= 0 && remaining <= job.amount
         }
 
+        #[allow(dead_code)]
         /// **Invariant 5**: A claimed milestone must first be released in the
         /// reference model (claim == release in our model, but the contract
         /// separates them). This is checked operationally — we verify that
@@ -836,5 +850,262 @@ mod fuzz {
             prop_assert!(bounded_completed <= total_jobs);
             prop_assert!(bounded_disputed <= total_jobs);
         }
+    }
+
+    // ─── Dedicated fuzz target for milestone percentage edge cases ────────────
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1000))]
+
+        /// Fuzz test specifically for milestone percentage validation in `create_job`.
+        /// Generates random percentage distributions (0-100, 1-10 milestones) and verifies:
+        /// - If every percentage is positive and they sum to 100, `create_job` succeeds
+        /// - If any percentage is 0 (or the sum != 100), `create_job` panics
+        #[test]
+        fn fuzz_milestone_percentage_validation(
+            percentages in prop::collection::vec(0..=100u32, 1..=10),
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let contract_id = env.register_contract(None, EscrowContract);
+            let client = EscrowContractClient::new(&env, &contract_id);
+
+            let admin = Address::generate(&env);
+            client.initialize(&signers1(&env, &admin), &1u32);
+
+            let client_addr = Address::generate(&env);
+            let freelancer_addr = Address::generate(&env);
+            let token_admin = Address::generate(&env);
+            let token = env
+                .register_stellar_asset_contract_v2(token_admin)
+                .address();
+            StellarAssetClient::new(&env, &token).mint(&client_addr, &(MAX_AMOUNT * 10));
+
+            let total_sum: u32 = percentages.iter().sum();
+            let job_id = SorobanString::from_str(&env, "fuzz-percentage-test");
+
+            // Build milestones from percentages
+            let mut milestones: SorobanVec<Milestone> = SorobanVec::new(&env);
+            for (i, &pct) in percentages.iter().enumerate() {
+                milestones.push_back(Milestone {
+                    name: SorobanString::from_str(&env, &std::format!("M{}", i)),
+                    percentage: pct,
+                    released: false,
+                    disputed: false,
+                    oracle: None,
+                    verified: false,
+                    proof_hash: None,
+                });
+            }
+
+            // Try to create the job and catch any panic
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.create_job(
+                    &client_addr,
+                    &freelancer_addr,
+                    &job_id,
+                    &token,
+                    &100_000_000i128,  // 100 XLM in stroops
+                    &milestones,
+                    &RELEASE_AFTER,
+                );
+            }));
+
+            // Assert the expected behavior: a job is only valid when every
+            // milestone is positive and the percentages sum to exactly 100.
+            let all_positive = percentages.iter().all(|&p| p > 0);
+            if total_sum == 100 && all_positive {
+                assert!(
+                    result.is_ok(),
+                    "create_job panicked unexpectedly when percentages summed to {} (all positive)",
+                    total_sum
+                );
+                // Verify the job was actually created
+                let job = client.get_job(&job_id).unwrap();
+                assert_eq!(job.milestones.len(), percentages.len() as u32);
+            } else {
+                assert!(
+                    result.is_err(),
+                    "create_job did NOT panic when percentages summed to {} (invalid sum or zero percentage)",
+                    total_sum
+                );
+            }
+        }
+    }
+
+    /// Explicit edge-case tests for zero percentages and overflow scenarios
+    #[test]
+    fn test_milestone_percentage_edge_cases() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, EscrowContract);
+        let client = EscrowContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        let client_addr = Address::generate(&env);
+        let freelancer_addr = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &(MAX_AMOUNT * 10));
+
+        // Test case 1: A zero-percentage milestone is rejected even when the
+        // remaining milestones sum to 100 (e.g., [0, 100]).
+        let job_id_1 = SorobanString::from_str(&env, "zero-pct-test");
+        let mut milestones_1: SorobanVec<Milestone> = SorobanVec::new(&env);
+        milestones_1.push_back(Milestone {
+            name: SorobanString::from_str(&env, "M0"),
+            percentage: 0,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+        milestones_1.push_back(Milestone {
+            name: SorobanString::from_str(&env, "M1"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+
+        let result_1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.create_job(
+                &client_addr,
+                &freelancer_addr,
+                &job_id_1,
+                &token,
+                &100_000_000i128,
+                &milestones_1,
+                &RELEASE_AFTER,
+            );
+        }));
+        assert!(
+            result_1.is_err(),
+            "Job with a zero-percentage milestone [0, 100] should be rejected"
+        );
+
+        // Test case 2: Multiple zero-percentage milestones are rejected
+        // (e.g., [0, 0, 100]).
+        let job_id_2 = SorobanString::from_str(&env, "multiple-zeros-test");
+        let mut milestones_2: SorobanVec<Milestone> = SorobanVec::new(&env);
+        milestones_2.push_back(Milestone {
+            name: SorobanString::from_str(&env, "M0"),
+            percentage: 0,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+        milestones_2.push_back(Milestone {
+            name: SorobanString::from_str(&env, "M1"),
+            percentage: 0,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+        milestones_2.push_back(Milestone {
+            name: SorobanString::from_str(&env, "M2"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+
+        let result_2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.create_job(
+                &client_addr,
+                &freelancer_addr,
+                &job_id_2,
+                &token,
+                &100_000_000i128,
+                &milestones_2,
+                &RELEASE_AFTER,
+            );
+        }));
+        assert!(
+            result_2.is_err(),
+            "Job with zero-percentage milestones [0, 0, 100] should be rejected"
+        );
+
+        // Test case 3: Invalid sum with overflow (percentages > 100 each)
+        let job_id_3 = SorobanString::from_str(&env, "overflow-test");
+        let mut milestones_3: SorobanVec<Milestone> = SorobanVec::new(&env);
+        milestones_3.push_back(Milestone {
+            name: SorobanString::from_str(&env, "M0"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+        milestones_3.push_back(Milestone {
+            name: SorobanString::from_str(&env, "M1"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+
+        let result_3 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.create_job(
+                &client_addr,
+                &freelancer_addr,
+                &job_id_3,
+                &token,
+                &100_000_000i128,
+                &milestones_3,
+                &RELEASE_AFTER,
+            );
+        }));
+        assert!(
+            result_3.is_err(),
+            "Job with invalid sum (overflow) should panic"
+        );
+
+        // Test case 4: Only one milestone with 100% (valid)
+        let job_id_4 = SorobanString::from_str(&env, "single-milestone-test");
+        let mut milestones_4: SorobanVec<Milestone> = SorobanVec::new(&env);
+        milestones_4.push_back(Milestone {
+            name: SorobanString::from_str(&env, "M0"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+
+        let result_4 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.create_job(
+                &client_addr,
+                &freelancer_addr,
+                &job_id_4,
+                &token,
+                &100_000_000i128,
+                &milestones_4,
+                &RELEASE_AFTER,
+            );
+        }));
+        assert!(
+            result_4.is_ok(),
+            "Single milestone with 100% should succeed"
+        );
     }
 }

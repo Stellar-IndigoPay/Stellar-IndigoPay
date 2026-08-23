@@ -131,21 +131,27 @@ export default function ApplyPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   type FormData = any;
-  const [form, setForm] = useState<any>({});
+  const [form, setForm] = useState<any>({
+    projectCategory: PROJECT_CATEGORIES[0],
+    organizationWebsite: "",
+    organizationCountry: "",
+    projectDescription: "",
+    expectedAnnualTonnesCO2: "",
+    notes: "",
+  });
 
-  const { register, handleSubmit, getValues } =
-    useForm<VerificationRequestFormData>({
-      resolver: zodResolver(verificationRequestSchema) as any,
-      defaultValues: {
-        projectCategory: PROJECT_CATEGORIES[0],
-        organizationWebsite: "",
-        organizationCountry: "",
-        projectDescription: "",
-        expectedAnnualTonnesCO2: "",
-        notes: "",
-      },
-      mode: "onTouched",
-    });
+  const { register } = useForm<VerificationRequestFormData>({
+    resolver: zodResolver(verificationRequestSchema) as any,
+    defaultValues: {
+      projectCategory: PROJECT_CATEGORIES[0],
+      organizationWebsite: "",
+      organizationCountry: "",
+      projectDescription: "",
+      expectedAnnualTonnesCO2: "",
+      notes: "",
+    },
+    mode: "onTouched",
+  });
 
   const set =
     (field: keyof FormData) =>
@@ -234,26 +240,37 @@ export default function ApplyPage() {
     setDocuments((prev) => prev.filter((_, i) => i !== index));
   }
 
-  async function onSubmit(data: VerificationRequestFormData) {
+  async function handleFinalSubmit(e: React.FormEvent) {
+    e.preventDefault();
     setSubmitting(true);
     setServerError("");
+
+    const payload = {
+      organizationName: (form.organizationName || "").trim(),
+      organizationWebsite: (form.organizationWebsite || "").trim() || undefined,
+      organizationCountry: (form.organizationCountry || "").trim() || undefined,
+      contactEmail: (form.contactEmail || "").trim(),
+      walletAddress: (form.walletAddress || "").trim(),
+      projectName: (form.projectName || "").trim(),
+      projectCategory: form.projectCategory || PROJECT_CATEGORIES[0],
+      projectLocation: (form.projectLocation || "").trim(),
+      projectDescription: (form.projectDescription || "").trim() || undefined,
+      co2PerXLM: (form.co2PerXLM || "").trim(),
+      expectedAnnualTonnesCO2:
+        (form.expectedAnnualTonnesCO2 || "").trim() || undefined,
+      supportingDocuments: documents,
+      notes: (form.notes || "").trim() || undefined,
+    };
+
+    // Validate against the full schema before submitting
+    const validation = verificationRequestSchema.safeParse(payload);
+    if (!validation.success) {
+      setServerError("Please check your entries and try again.");
+      setSubmitting(false);
+      return;
+    }
+
     try {
-      const payload = {
-        organizationName: data.organizationName.trim(),
-        organizationWebsite: data.organizationWebsite?.trim() || undefined,
-        organizationCountry: data.organizationCountry?.trim() || undefined,
-        contactEmail: data.contactEmail.trim(),
-        walletAddress: data.walletAddress.trim(),
-        projectName: data.projectName.trim(),
-        projectCategory: data.projectCategory,
-        projectLocation: data.projectLocation.trim(),
-        projectDescription: data.projectDescription?.trim() || undefined,
-        co2PerXLM: data.co2PerXLM.trim(),
-        expectedAnnualTonnesCO2:
-          data.expectedAnnualTonnesCO2?.trim() || undefined,
-        supportingDocuments: documents,
-        notes: data.notes?.trim() || undefined,
-      };
       const result = await submitVerificationRequest(payload);
       setReviewTimeline(result?.reviewTimeline ?? "5–10 business days");
       setStep("done");
@@ -281,7 +298,7 @@ export default function ApplyPage() {
         <p className="text-[#5a7a5a] font-body mb-8">
           {T("subCopy")
             .replace("{timeline}", reviewTimeline)
-            .replace("{email}", getValues("contactEmail") ?? "")}
+            .replace("{email}", form.contactEmail ?? "")}
         </p>
         <button className="btn-primary" onClick={() => router.push("/")}>
           {T("backToHome")}
@@ -334,7 +351,7 @@ export default function ApplyPage() {
         ))}
       </div>
       <form
-        onSubmit={handleSubmit(onSubmit as any)}
+        onSubmit={handleFinalSubmit}
         className="card p-6 space-y-5"
       >
         {/* Step: org */}
@@ -408,6 +425,8 @@ export default function ApplyPage() {
                 type="email"
                 placeholder="hello@acme.org"
                 {...register("contactEmail")}
+                value={form.contactEmail}
+                onChange={set("contactEmail")}
               />
             </FormField>
             <FormField
@@ -537,6 +556,8 @@ export default function ApplyPage() {
                 step="any"
                 placeholder="0.05"
                 {...register("co2PerXLM")}
+                value={form.co2PerXLM}
+                onChange={set("co2PerXLM")}
               />
             </FormField>
             <FormField
@@ -556,6 +577,8 @@ export default function ApplyPage() {
                 step="any"
                 placeholder="1200"
                 {...register("expectedAnnualTonnesCO2")}
+                value={form.expectedAnnualTonnesCO2}
+                onChange={set("expectedAnnualTonnesCO2")}
               />
             </FormField>
             <FormField
@@ -651,7 +674,7 @@ export default function ApplyPage() {
         {/* Step: review */}
         {step === "review" &&
           (() => {
-            const reviewData = getValues();
+            const reviewData = form;
             return (
               <>
                 <h2 className="font-display text-xl font-bold text-[#0F172A] dark:text-[#E2E8F0]">
@@ -767,7 +790,8 @@ export default function ApplyPage() {
           </button>
         ) : step === "review" ? (
           <button
-            type="submit"
+            type="button"
+            onClick={handleFinalSubmit}
             disabled={submitting}
             className="btn-primary disabled:opacity-60 disabled:cursor-not-allowed"
           >

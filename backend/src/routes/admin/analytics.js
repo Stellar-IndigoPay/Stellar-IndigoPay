@@ -25,15 +25,31 @@ const {
   getCategoryBreakdown,
   getPlatformGrowth,
 } = require("../../services/analyticsService");
-const logger = require("../../logger");
+const { AppError, sendAppError } = require("../../errors");
 
 router.use(adminRequired);
 
+/**
+ * Parse and validate an optional ?from=YYYY-MM-DD&to=YYYY-MM-DD range.
+ * Bounds stay optional; invalid dates are rejected up front (400) instead of
+ * being handed to Postgres as garbage, and Date objects let the service clamp
+ * the window to a bounded number of days.
+ */
 function parseDateRange(req) {
-  return {
+  const range = {
     from: req.query.from || null,
     to: req.query.to || null,
   };
+  for (const [field, value] of Object.entries(range)) {
+    if (!value) continue;
+    if (Number.isNaN(Date.parse(value))) {
+      throw new AppError("VALIDATION_ERROR", {
+        field,
+        detail: `Invalid ${field} date: ${value}`,
+      });
+    }
+  }
+  return range;
 }
 
 // ── GET /trends ────────────────────────────────────────────────────
@@ -130,7 +146,10 @@ router.get("/export", async (req, res, next) => {
       filename = "category-breakdown";
       break;
     default:
-      return res.status(400).json({ error: `Unknown view: ${view}` });
+      return sendAppError(res, "VALIDATION_ERROR", {
+        field: "view",
+        detail: `Unknown view: ${view}`,
+      });
     }
 
     if (format === "csv") {

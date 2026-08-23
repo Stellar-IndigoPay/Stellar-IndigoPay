@@ -270,7 +270,9 @@ describe("ApplyPage", () => {
     await userEvent.type(contactEmailInput, "bad-email");
     fireEvent.blur(contactEmailInput);
 
-    // With mode: "onTouched", errors appear after blur
+    // Click Next to trigger validation via the custom validation hook
+    fireEvent.click(screen.getByRole("button", { name: NEXT_BTN }));
+
     await waitFor(() => {
       const alerts = screen.getAllByRole("alert");
       const messages = alerts.map((a) => a.textContent).join(" ");

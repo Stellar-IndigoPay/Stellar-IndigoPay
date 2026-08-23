@@ -1,5 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { FOUC_THEME_SCRIPT_HASH } from "@/lib/csp";
+
 const STELLAR_CONNECT = [
   "https://horizon-testnet.stellar.org",
   "https://horizon.stellar.org",
@@ -16,39 +18,40 @@ const LEAFLET_TILE_SOURCES = [
   "https://c.tile.openstreetmap.org",
 ].join(" ");
 
-// unpkg.com serves the Leaflet CSS loaded dynamically in ProjectMap.tsx.
-const UNPKG = "https://unpkg.com";
-
-function buildCsp(nonce: string, isWidget: boolean): string {
-  // API origin: 'self' covers same-origin deploys; localhost:4000 covers local dev.
+export function buildCsp(isWidget: boolean): string {
+  // API origin: 'self' covers same-origin deploys; NEXT_PUBLIC_API_URL covers
+  // deployed backends and CI/E2E environments (e.g. http://localhost:4000).
+  // Falls back to localhost:4000 in local dev when the env var is not set.
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL
+    || (process.env.NODE_ENV === "development" ? "http://localhost:4000" : null);
   const connectSrc = [
     "'self'",
     STELLAR_CONNECT,
-    "https://api.coingecko.com",
-    ...(process.env.NODE_ENV === "development"
-      ? ["http://localhost:4000"]
-      : []),
+    ...(apiUrl ? [apiUrl] : []),
   ].join(" ");
 
+  // The only inline executable script is the pre-hydration FOUC theme script,
+  // which has fixed content and is therefore allowed via its SHA-256 hash.
+  // A hash is deterministic and cache-safe: SSG / ISR / edge-cached HTML has
+  // no per-request nonce, so a nonce-stamped CSP would block every script on
+  // those pages. External Next.js bundles load from 'self'. No 'strict-dynamic'
+  // is used because it would ignore 'self' and require the nonce we removed.
+  //
   // next dev's Fast Refresh runtime (react-refresh-utils) bootstraps modules
-  // via eval() for HMR; production bundles never eval(). Without this, the
-  // dev server's own client runtime throws a CSP EvalError before React can
-  // hydrate anything, breaking every page in local development.
+  // via eval() and injects inline scripts; production bundles never do. Keep
+  // 'unsafe-inline'/'unsafe-eval' strictly dev-only.
   const scriptSrc = [
     "'self'",
-    `'nonce-${nonce}'`,
-    "'strict-dynamic'",
-    "'unsafe-inline'",
-    ...(process.env.NODE_ENV === "development" ? ["'unsafe-eval'"] : []),
+    FOUC_THEME_SCRIPT_HASH,
+    ...(process.env.NODE_ENV === "development"
+      ? ["'unsafe-inline'", "'unsafe-eval'"]
+      : []),
   ].join(" ");
 
   const directives = [
     "default-src 'self'",
-    // nonce tags the Next.js script injection; strict-dynamic propagates trust to bundles
-    // it loads; unsafe-inline is a no-op in CSP3 but keeps CSP2 browsers working.
     `script-src ${scriptSrc}`,
-    // unpkg serves the Leaflet CSS stylesheet.
-    `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com ${UNPKG}`,
+    `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com`,
     "font-src 'self' https://fonts.gstatic.com",
     // OSM tile images are loaded as <img> elements by Leaflet TileLayer.
     // Leaflet marker icons use data: URIs (our inline SVG divIcon).
@@ -58,8 +61,10 @@ function buildCsp(nonce: string, isWidget: boolean): string {
     "base-uri 'self'",
     "form-action 'self'",
     isWidget ? "frame-ancestors *" : "frame-ancestors 'none'",
-    // Reporting endpoint for CSP violations
+    // Reporting endpoint for CSP violations. `report-to` (Reporting API) is the
+    // modern directive; `report-uri` is kept for browsers that predate it.
     "report-uri /api/csp-report",
+    "report-to csp-endpoint",
     // Meaningless (and actively harmful) against a plain-HTTP local dev
     // server: it forces every subresource request to upgrade to HTTPS, and
     // WebKit (unlike Chromium/Firefox, which special-case localhost as
@@ -67,7 +72,7 @@ function buildCsp(nonce: string, isWidget: boolean): string {
     // script request gets rewritten to https://localhost:PORT, which has no
     // TLS listener, so the whole bundle fails a TLS handshake and the app
     // never hydrates.
-    ...(process.env.NODE_ENV === "development"
+    ...(process.env.NODE_ENV === "development" || process.env.E2E_TESTING === "true"
       ? []
       : ["upgrade-insecure-requests"]),
   ];
@@ -76,16 +81,13 @@ function buildCsp(nonce: string, isWidget: boolean): string {
 }
 
 export function middleware(request: NextRequest) {
-  const nonce = btoa(crypto.randomUUID());
   const isWidget = request.nextUrl.pathname.startsWith("/widget/");
-  const csp = buildCsp(nonce, isWidget);
+  const csp = buildCsp(isWidget);
 
-  const requestHeaders = new Headers(request.headers);
-  // x-nonce is read in pages/_document.tsx to stamp <Head> and <NextScript>
-  requestHeaders.set("x-nonce", nonce);
-
-  const response = NextResponse.next({ request: { headers: requestHeaders } });
+  const response = NextResponse.next();
   response.headers.set("Content-Security-Policy", csp);
+  // Define the named endpoint referenced by the CSP `report-to` directive.
+  response.headers.set("Reporting-Endpoints", 'csp-endpoint="/api/csp-report"');
 
   return response;
 }

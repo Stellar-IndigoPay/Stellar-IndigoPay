@@ -77,7 +77,7 @@ function rawSubscription(overrides: Record<string, unknown> = {}) {
   return {
     donor: DONOR,
     project_id: PROJECT_ID,
-    amount: 250_000_000n,
+    amount: BigInt(250_000_000),
     interval_ledgers: MIN_SUBSCRIPTION_INTERVAL_LEDGERS,
     next_execution: 100,
     active: true,
@@ -92,7 +92,7 @@ beforeEach(() => {
 
 describe("getMonthlySubscription", () => {
   it("returns the decoded subscription on success", async () => {
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(true);
+    (rpc.Api.isSimulationSuccess as unknown as jest.Mock).mockReturnValue(true);
     mockSimulateTransaction.mockResolvedValue({
       result: { retval: rawSubscription() },
     });
@@ -107,7 +107,7 @@ describe("getMonthlySubscription", () => {
   });
 
   it("returns null when the subscription doesn't exist", async () => {
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(false);
+    (rpc.Api.isSimulationSuccess as unknown as jest.Mock).mockReturnValue(false);
     mockSimulateTransaction.mockResolvedValue({
       error: "HostError: Subscription not found",
     });
@@ -119,7 +119,7 @@ describe("getMonthlySubscription", () => {
 
 describe("getDueMonthlySubscriptionsForDonor", () => {
   it("returns only this donor's active, due subscriptions", async () => {
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(true);
+    (rpc.Api.isSimulationSuccess as unknown as jest.Mock).mockReturnValue(true);
     mockGetLatestLedger.mockResolvedValue({ sequence: 150 });
     mockSimulateTransaction
       // get_subscription_count -> 3
@@ -149,7 +149,7 @@ describe("getDueMonthlySubscriptionsForDonor", () => {
   });
 
   it("skips an index whose read fails and keeps checking the rest", async () => {
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(true);
+    (rpc.Api.isSimulationSuccess as unknown as jest.Mock).mockReturnValue(true);
     mockGetLatestLedger.mockResolvedValue({ sequence: 150 });
     mockSimulateTransaction
       .mockResolvedValueOnce({ result: { retval: 2 } })
@@ -164,8 +164,8 @@ describe("getDueMonthlySubscriptionsForDonor", () => {
 describe("createMonthlySubscription", () => {
   it("signs, submits, and returns the created subscription", async () => {
     mockLoadAccount.mockResolvedValue({ accountId: () => DONOR });
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(true);
-    (rpc.assembleTransaction as jest.Mock).mockReturnValue({
+    (rpc.Api.isSimulationSuccess as unknown as jest.Mock).mockReturnValue(true);
+    (rpc.assembleTransaction as unknown as jest.Mock).mockReturnValue({
       build: () => ({ toXDR: () => "PREPARED_XDR" }),
     });
     mockSimulateTransaction
@@ -196,8 +196,8 @@ describe("createMonthlySubscription", () => {
 
   it("returns a friendly error and never submits when the wallet rejects signing", async () => {
     mockLoadAccount.mockResolvedValue({ accountId: () => DONOR });
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(true);
-    (rpc.assembleTransaction as jest.Mock).mockReturnValue({
+    (rpc.Api.isSimulationSuccess as unknown as jest.Mock).mockReturnValue(true);
+    (rpc.assembleTransaction as unknown as jest.Mock).mockReturnValue({
       build: () => ({ toXDR: () => "PREPARED_XDR" }),
     });
     mockSimulateTransaction.mockResolvedValueOnce({
@@ -221,7 +221,7 @@ describe("createMonthlySubscription", () => {
 
   it("maps a duplicate-subscription simulation failure to friendly text", async () => {
     mockLoadAccount.mockResolvedValue({ accountId: () => DONOR });
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(false);
+    (rpc.Api.isSimulationSuccess as unknown as jest.Mock).mockReturnValue(false);
     mockSimulateTransaction.mockResolvedValueOnce({
       error: "HostError: Subscription already exists",
     });
@@ -238,8 +238,8 @@ describe("createMonthlySubscription", () => {
 
   it("defaults intervalLedgers to MIN_SUBSCRIPTION_INTERVAL_LEDGERS when omitted", async () => {
     mockLoadAccount.mockResolvedValue({ accountId: () => DONOR });
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(true);
-    (rpc.assembleTransaction as jest.Mock).mockReturnValue({
+    (rpc.Api.isSimulationSuccess as unknown as jest.Mock).mockReturnValue(true);
+    (rpc.assembleTransaction as unknown as jest.Mock).mockReturnValue({
       build: () => ({ toXDR: () => "PREPARED_XDR" }),
     });
     mockSimulateTransaction
@@ -260,7 +260,7 @@ describe("createMonthlySubscription", () => {
       amountXLM: "25",
     });
 
-    const contractInstance = (Contract as jest.Mock).mock.results[0].value;
+    const contractInstance = (Contract as unknown as jest.Mock).mock.results[0].value;
     const callArgs = contractInstance.call.mock.calls[0];
     // ["create_subscription", donorScVal, projectIdScVal, amountScVal, intervalScVal]
     expect(callArgs[0]).toBe("create_subscription");
@@ -271,8 +271,8 @@ describe("createMonthlySubscription", () => {
 describe("cancelMonthlySubscription", () => {
   it("signs and submits the cancel transaction", async () => {
     mockLoadAccount.mockResolvedValue({ accountId: () => DONOR });
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(true);
-    (rpc.assembleTransaction as jest.Mock).mockReturnValue({
+    (rpc.Api.isSimulationSuccess as unknown as jest.Mock).mockReturnValue(true);
+    (rpc.assembleTransaction as unknown as jest.Mock).mockReturnValue({
       build: () => ({ toXDR: () => "PREPARED_XDR" }),
     });
     mockSimulateTransaction.mockResolvedValueOnce({
@@ -296,7 +296,7 @@ describe("cancelMonthlySubscription", () => {
 
   it("maps a not-found simulation failure to friendly text", async () => {
     mockLoadAccount.mockResolvedValue({ accountId: () => DONOR });
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(false);
+    (rpc.Api.isSimulationSuccess as unknown as jest.Mock).mockReturnValue(false);
     mockSimulateTransaction.mockResolvedValueOnce({
       error: "HostError: Subscription not found",
     });
@@ -309,8 +309,8 @@ describe("cancelMonthlySubscription", () => {
 
   it("never submits when the wallet rejects signing", async () => {
     mockLoadAccount.mockResolvedValue({ accountId: () => DONOR });
-    (rpc.Api.isSimulationSuccess as jest.Mock).mockReturnValue(true);
-    (rpc.assembleTransaction as jest.Mock).mockReturnValue({
+    (rpc.Api.isSimulationSuccess as unknown as jest.Mock).mockReturnValue(true);
+    (rpc.assembleTransaction as unknown as jest.Mock).mockReturnValue({
       build: () => ({ toXDR: () => "PREPARED_XDR" }),
     });
     mockSimulateTransaction.mockResolvedValueOnce({

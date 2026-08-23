@@ -17,6 +17,7 @@ module.exports = {
   name: "011_audit_chain",
 
   async up(client) {
+    await client.query("CREATE EXTENSION IF NOT EXISTS pgcrypto");
     await client.query(
       "ALTER TABLE admin_audit_log ADD COLUMN IF NOT EXISTS prev_hash TEXT",
     );
@@ -40,6 +41,7 @@ module.exports = {
           metadata,
           ip_address,
           created_at,
+          row_hash,
           LAG(row_hash) OVER (ORDER BY created_at ASC, id ASC) AS computed_prev_hash
         FROM (
           SELECT
@@ -53,12 +55,12 @@ module.exports = {
             created_at,
             encode(
               digest(
-                COALESCE(id, '') || '|' ||
+                COALESCE(id::text, '') || '|' ||
                 COALESCE(actor, '') || '|' ||
                 COALESCE(action, '') || '|' ||
                 COALESCE(target_type, '') || '|' ||
                 COALESCE(target_id, '') || '|' ||
-                COALESCE(metadata, '') || '|' ||
+                COALESCE(metadata::text, '') || '|' ||
                 COALESCE(ip_address, '') || '|' ||
                 COALESCE(created_at::text, '') || '|' ||
                 COALESCE(LAG(row_hash) OVER (ORDER BY created_at ASC, id ASC), '0'),

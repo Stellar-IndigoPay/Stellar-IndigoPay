@@ -26,20 +26,21 @@ const {
 } = require("../../services/projectionEngine");
 const { metrics } = require("../../services/metrics");
 const logger = require("../../logger");
+const { sendAppError } = require("../../errors");
 
 router.post("/rebuild", adminRequired, async (req, res) => {
   try {
     if (isRebuilding()) {
-      return res.status(409).json({
-        success: false,
-        error: "A projection rebuild is already in progress",
+      return sendAppError(res, "CONFLICT", {
+        detail: "A projection rebuild is already in progress",
       });
     }
 
-    // Kick off synchronously so the response reflects completion. The
-    // rebuild is idempotent and trims the event store first, so re-running
-    // is safe. (For very large stores an async job would be preferable, but
-    // the spec requires a single admin trigger that returns when done.)
+    // Kick off synchronously so the response reflects completion. The rebuild
+    // is atomic (staging + swap, see rebuildAllProjections) and idempotent,
+    // so re-running is safe. (For very large stores an async job would be
+    // preferable, but the spec requires a single admin trigger that returns
+    // when done.)
     const result = await rebuildAllProjections();
 
     try {
@@ -72,7 +73,7 @@ router.post("/rebuild", adminRequired, async (req, res) => {
       { event: "admin_projection_rebuild_error", err: err.message },
       "Admin projection rebuild failed",
     );
-    res.status(500).json({ success: false, error: err.message });
+    return sendAppError(res, "INTERNAL_ERROR");
   }
 });
 
@@ -80,9 +81,13 @@ router.post("/rebuild/:name", adminRequired, async (req, res) => {
   try {
     const { name } = req.params;
     if (!PROJECTION_NAMES.includes(name)) {
-      return res.status(404).json({
-        success: false,
-        error: `Unknown projection "${name}". Valid: ${PROJECTION_NAMES.join(", ")}`,
+      return sendAppError(res, "NOT_FOUND", {
+        detail: `Unknown projection "${name}". Valid: ${PROJECTION_NAMES.join(", ")}`,
+      });
+    }
+    if (isRebuilding()) {
+      return sendAppError(res, "CONFLICT", {
+        detail: "A projection rebuild is already in progress",
       });
     }
 
@@ -103,7 +108,7 @@ router.post("/rebuild/:name", adminRequired, async (req, res) => {
       data: { projection: name, eventsReplayed: result.events },
     });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    return sendAppError(res, "INTERNAL_ERROR");
   }
 });
 
@@ -120,7 +125,7 @@ router.get("/status", adminRequired, async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    return sendAppError(res, "INTERNAL_ERROR");
   }
 });
 

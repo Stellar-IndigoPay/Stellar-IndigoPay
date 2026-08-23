@@ -263,6 +263,45 @@ Badge tiers and minted NFTs are **never** downgraded or burned on refund. The re
 
 All counter decrements on refund use `checked_sub(...).expect("...underflow on refund")`, consistent with the `checked_add` convention used for donations. If a refund would drive any counter negative, the transaction panics and reverts.
 
+## Stealth Address Donation Integration (#458)
+
+### Privacy model
+
+`donate_stealth_integrated` integrates the standalone stealth address infrastructure (`DonationContract`) into `IndigoPayContract` while preserving donor privacy guarantees:
+
+1. **Unlinkable stealth addresses**: Stealth address generation uses diffie-hellman ephemeral keys (`generate_stealth_address`), ensuring on-chain indexers cannot correlate stealth donations to a single donor wallet address.
+2. **Donor stats decoupling**: `donate_stealth_integrated` updates project `total_raised`, `GlobalTotalRaised`, and `GlobalCO2OffsetGrams`, but explicitly **bypasses** `DonorStats`, `DonorProjectTotal`, `HasDonated`, and `project.donor_count` updates. No cumulative donor record or badge progress is assigned to the sender address.
+3. **Zero-address record indexing**: The `DonationRecord` on `IndigoPayContract` records `donor` as a dedicated zero-address (`0x00...00`), and emits `stlth_don` event topic with the zero-address as donor.
+4. **Cross-contract authorization**: The `sender.require_auth()` authorization gates the invocation at the `IndigoPayContract` boundary and propagates to `DonationContract.donate_stealth` for atomic token transfer from sender to stealth escrow contract.
+
+### Custody model and withdrawal path (#621)
+
+Stealth-donated tokens are held by the `DonationContract` (the stealth escrow
+contract) until the project wallet withdraws them — they are **never** held by
+`IndigoPayContract` and are **not** part of `ProjectContractBalance`.
+
+- **Per-(project_wallet, token) accounting**: `donate_stealth` credits the
+  project's withdrawable balance in the `DonationContract` for every successful
+  donation, so no stealth donation is ever stranded.
+- **Project-wallet-gated withdrawal**: `withdraw_stealth_donations` moves the
+  balance to the project wallet itself. Only the `project_wallet` address can
+  withdraw; neither the main-contract admin nor any third party can drain a
+  project's stealth funds. The main contract exposes
+  `withdraw_stealth_integrated(project_id, token, amount)` which resolves the
+  project's wallet, requires its root-level auth, and forwards the call.
+- **CEI ordering**: the withdrawable balance is decremented *before* the
+  external token transfer, so a reentrant/malicious token cannot double-drain.
+  Structured errors (`DonationError`) reject zero-amount and over-balance
+  withdrawals.
+- **Reconciliation**: both `withdraw_stealth_donations` and
+  `withdraw_stealth_integrated` emit withdrawal events (see `contracts/EVENTS.md`)
+  carrying the withdrawn amount and the remaining balance, so indexers can
+  reconcile on-chain `total_raised` with funds actually received.
+- **No strandability**: the withdrawal path is intentionally not gated on the
+  contract pause flag or the project's active state, so funds can always be
+  recovered by the project wallet (mirrors the permissionless
+  `execute_emergency_withdrawal` precedent).
+
 ## Off-Chain Oracle Attestation for Project Impact Verification (#459)
 
 Gated behind the `impact_verification` Cargo feature (on by default; excluded from the size-checked `--no-default-features` CI build). Lets admin-authorised verifiers submit independent measurements of a project's actual CO₂ impact, which the contract compares against the project's self-reported (claimed) rate.
@@ -320,6 +359,15 @@ also mean the donation amount is recoverable from the public commitment.
 
 - **Token registration is admin-gated.** `register_token` and `remove_token` require `require_admin_for_routine` and are paused-gated by `require_not_paused`. Only authorized admins can add or deactivate tokens in the registry.
 - **Oracle rate safety.** Oracle conversion uses checked multiplication (`checked_mul`) when computing `xlm_equivalent` from token amounts and oracle price feeds. Oracles returning price <= 0 panic immediately to prevent invalid state.
-- **Per-token rate limit isolation.** `donate_token` keys rate limits on `DataKey::DonorRateLimitPerToken(donor, project_id, token_address)`. This guarantees that rate limit windows for distinct assets (e.g. XLM vs USDC vs custom tokens) operate independently.
+- **Per-token rate limit isolation.** `donate_token` keys rate limits on `DataKey::DonorRateLimit(donor, project_id, token_address)`. Each asset can use its own `TokenRateLimitMax` and `TokenRateLimitWindow` policy; missing overrides fall back to the global policy. This guarantees that rate limit windows and policies for distinct assets (e.g. XLM vs USDC vs custom tokens) operate independently.
 - **Backward compatibility.** Legacy `donate` and `donate_usdc` entrypoints seamlessly delegate to `donate_token_with_privacy`, ensuring existing integrations continue to function without state corruption or breakage.
+
+## Multi-Recipient Platform Fee Distribution (#434)
+
+### Security & Invariant Guarantees
+
+- **Share Sum Validation.** `set_platform_fee_recipients` requires M-of-N critical admin authorization (`require_admin_for_critical`) and validates that the sum of `share_bps` across all recipients equals exactly 10,000 basis points (100.00%). Setting an empty recipient list or shares that do not sum to 10,000 panics immediately.
+- **Exact Fee Preservation.** Fee distribution (`split_fee_recipients`) allocates any remainder from integer division to the final recipient, ensuring `sum(recipient_shares) == total_fee_amount` exactly with zero stroop loss.
+- **CEI & Transfer Ordering.** Per-recipient fee transfers execute within the Checks-Effects-Interactions pattern during donation processing before remaining funds are transferred to the project.
+- **Backward Compatibility.** Deployments with legacy single-treasury configuration (`DataKey::PlatformTreasury`) lazily fall back to a single 100% recipient share until `set_platform_fee_recipients` is invoked.
 

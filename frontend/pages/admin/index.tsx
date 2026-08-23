@@ -23,7 +23,8 @@ import type { ClimateProject } from "@/utils/types";
 import { SkeletonBox } from "@/components/Skeleton";
 
 export default function AdminIndex() {
-  const { publicKey, connect: onConnect } = useWallet();
+  const { publicKey, connect } = useWallet();
+  const onConnect = () => { void connect(); };
   const [projects, setProjects] = useState<ClimateProject[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

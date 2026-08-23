@@ -40,6 +40,33 @@ stealth donations, including scans that find no donations.
 
 ---
 
+## `StealthWithdrawal`
+
+**Description**: Emitted by the `DonationContract` when a project wallet
+withdraws stealth-donated funds to its own wallet. `remaining_balance` lets
+indexers reconcile on-chain `total_raised` with funds actually received by
+the project, so stealth donations are never left stranded in the
+`DonationContract` (closes #621).
+
+| Event Name          | Topics                                  | Data                                                          | When Emitted |
+| ------------------- | --------------------------------------- | ------------------------------------------------------------- | ------------ |
+| `StealthWithdrawal` | `["StealthWithdrawal", project_wallet]` | `(token: Address, amount: i128, remaining_balance: i128, timestamp: u64)` | After `withdraw_stealth_donations` transfers the tokens |
+
+---
+
+## `stlth_wdr`
+
+**Description**: Emitted by `IndigoPayContract.withdraw_stealth_integrated`
+after forwarding a stealth withdrawal to the `DonationContract`. Keyed by
+`project_id` so main-contract indexers can reconcile `total_raised` with
+funds actually received (closes #621).
+
+| Event Name   | Topics                       | Data                                       | When Emitted |
+| ------------ | ---------------------------- | ------------------------------------------ | ------------ |
+| `stlth_wdr`  | `["stlth_wdr", project_id]` | `(token: Address, amount: i128, remaining_balance: i128)` | After `withdraw_stealth_integrated` completes |
+
+---
+
 ## 1. `donated`
 
 **Description**: Emitted after a successful XLM donation to a project.
@@ -53,6 +80,11 @@ zero-address placeholder (`GAAAAAAAA…WHF`). Amounts and project/global impact
 metrics remain public; public donor-profile and leaderboard projections exclude it.
 The contract exposes `get_anonymous_donation_count(env, project_id)` for
 project-scoped anonymous donation totals.
+
+> **Privacy guarantee (#707):** For anonymous donations, `DonationRecord.donor`
+> is also stored as the zero-address placeholder — not the real donor — so the
+> on-chain record is unlinkable. The real donor retains provable ownership via a
+> per-donation SHA-256 commitment stored under `DataKey::AnonymousCommitment(index)`.
 
 ---
 
@@ -136,6 +168,16 @@ project-scoped anonymous donation totals.
 
 ---
 
+## 9a. `tok_rate`
+
+**Description**: Emitted when the admin updates the donation rate limit for one token.
+
+| Event Name | Topics                       | Data                                                   | When Emitted                           |
+| ---------- | ---------------------------- | ------------------------------------------------------ | -------------------------------------- |
+| `tok_rate` | `["tok_rate", token_address]` | `{ "max_donations": u32, "window_ledgers": u32 }`      | When admin calls `set_token_rate_limit` |
+
+---
+
 ## 10. `admin_add`
 
 **Description**: Emitted when a new admin address is added to the multi-sig set.
@@ -192,7 +234,17 @@ project-scoped anonymous donation totals.
 
 | Event Name | Topics                              | Data | When Emitted                                |
 | ---------- | ----------------------------------- | ---- | ------------------------------------------- |
-| `ew_cncl`  | `["ew_cncl", admin, project_id]`   | `()` | When admin calls `cancel_emergency_withdrawal` |
+| `ew_cncl`  | `["ew_cncl", admin, project_id]`   | `token: Address` | When admin calls `cancel_emergency_withdrawal` or `cancel_all_emergency_withdrawals` |
+
+---
+
+## 15b. `ew_batch`
+
+**Description**: Emitted when batch emergency withdrawals are executed for a project.
+
+| Event Name | Topics                            | Data                | When Emitted                                     |
+| ---------- | --------------------------------- | ------------------- | ------------------------------------------------ |
+| `ew_batch` | `["ew_batch", project_id]`       | `executed_count: u32` | When calling `exec_all_emergency_withdrawals` |
 
 ---
 
@@ -516,6 +568,27 @@ model.
 
 ---
 
+## 51. `rcpt_gen` (Donation Receipt Generated)
+
+**Description**: Emitted when a donor generates a cryptographic receipt for one
+of their donations. For **anonymous** donations the `donor` topic is the
+zero-address placeholder (`GAAAAAAAA…WHF`) — not the real caller — so the
+event log does not reveal who generated the receipt.
+
+| Event Name | Topics                              | Data                                                          | When Emitted                               |
+| ---------- | ----------------------------------- | ------------------------------------------------------------- | ------------------------------------------ |
+| `rcpt_gen` | `["rcpt_gen", donor_or_zero_addr]`  | `(donation_index: u32, amount: i128, project_id: String, co2_offset: i128)` | When donor calls `generate_receipt` |
+
+- `donor_or_zero_addr` is the real donor address for public donations and
+  `GAAAAAAAA…WHF` for anonymous donations (fixes #707).
+- The receipt carries a `contract_signature` field: `SHA-256` over the XDR
+  encoding of all other receipt fields. Anyone can recompute it to verify
+  authenticity without trusting the caller.
+- For anonymous donations, ownership is proved via `DataKey::AnonymousCommitment(index)`
+  at generation time; the emitted event and returned receipt expose no linkable identity.
+
+---
+
 ## Usage Notes
 
 - All events follow Soroban’s standard event format: `topics: Vec<Val>`, `data: Val`.
@@ -523,10 +596,187 @@ model.
 - Events can be queried via Horizon or Soroban RPC tools.
 - Frontend / backend should listen to these for real-time updates, notifications, and leaderboard.
 
-**Last Updated**: July 26, 2026
+**Last Updated**: August 16, 2026
+
+---
+
+## 30. `slash_ev` (Oracle Slash Event)
+
+**Description**: Emitted when an admin slashes a reporter in the oracle contract. Each event records the timestamp, admin who performed the slash, and a reason symbol.
+
+| Event Name  | Topics                        | Data                                                                             | When Emitted                                        |
+| ----------- | ----------------------------- | -------------------------------------------------------------------------------- | --------------------------------------------------- |
+| `slash_ev`  | `["slash_ev", reporter]`      | `{ "at": u32, "slashed_by": Address, "reason": Symbol }`                        | When admin calls `slash_reporter` on SimpleOracle    |
+
+**Note**: Slash history is bounded to the 20 most recent events per reporter. Older entries are evicted in ring-buffer order to prevent unbounded storage growth. Off-chain observers should capture `slash_ev` events in real time for complete history.
 
 ---
 
 ## Coordination Note for #277 (Matching Pool)
 
-`DataKey::ProjectContractBalance(String, Address)` is the **canonical per-project per-token balance ledger** for all contract-held funds. Any deposit/matching-pool logic (including #277) **must** increment this key on deposit and decrement it on withdrawal. Do not introduce a parallel balance concept — the compound key already supports multi-token per project. See `SECURITY.md` for the full rationale.
+**Description**: Emitted when an admin appends a new period's Merkle root to a
+project's Merkle Mountain Range for cumulative impact certificate verification.
+
+| Event Name | Topics                                          | Data             | When Emitted                               |
+| ---------- | ----------------------------------------------- | ---------------- | ------------------------------------------ |
+| `mmr_app`  | `["mmr_app", admin, project_id, new_leaf_count]` | `new_root: BytesN<32>` | When admin calls `append_impact_root` |
+
+---
+
+## 43. `prop_cln` (Proposal Cleanup)
+
+**Description**: Emitted when a resolved governance proposal and all associated
+vote data are cleaned up after the 30-day grace period. Permissionless — anyone
+may call `cleanup_proposal` once the grace period has elapsed.
+
+| Event Name   | Topics                         | Data | When Emitted                             |
+| ------------ | ------------------------------ | ---- | ---------------------------------------- |
+| `prop_cln` | `["prop_cln", project_id]`   | `()` | After `cleanup_proposal` completes |
+
+---
+
+## 44. `vest_cln` (Vesting Schedule Cleanup)
+
+**Description**: Emitted when a completed or cancelled vesting schedule is
+removed from storage after the 30-day grace period. Permissionless — anyone may
+call `cleanup_vesting_schedule` once the grace period has elapsed.
+
+| Event Name   | Topics                                | Data | When Emitted                                  |
+| ------------ | ------------------------------------- | ---- | --------------------------------------------- |
+| `vest_cln` | `["vest_cln", donor, schedule_id]`  | `()` | After `cleanup_vesting_schedule` completes |
+
+---
+
+## 45. `recip_set` (Platform Fee Recipients Set)
+
+**Description**: Emitted when M-of-N admins configure or update multi-recipient platform fee splits.
+
+| Event Name  | Topics                 | Data                   | When Emitted                              |
+| ----------- | ---------------------- | ---------------------- | ----------------------------------------- |
+| `recip_set` | `["recip_set", admin]` | `recipient_count: u32` | When admin calls `set_platform_fee_recipients` |
+
+---
+
+# Campaign-to-Escrow Integration Events (#426)
+
+Gated behind the `escrow` Cargo feature (opt-in). Bridges the indigopay-contract
+campaign system with the escrow-contract to enable milestone-based fund release
+for climate projects.
+
+## 43. `esc_set` (Escrow Contract Address Set)
+
+**Description**: Emitted when M-of-N admins configure the escrow contract address
+for campaign escrow integration.
+
+| Event Name | Topics          | Data                   | When Emitted                                     |
+| ---------- | --------------- | ---------------------- | ------------------------------------------------ |
+| `esc_set`  | `["esc_set"]`   | `escrow_contract: Address` | When admins call `set_escrow_contract_address` |
+
+---
+
+## 44. `camp_es` (Campaign with Escrow Created)
+
+**Description**: Emitted when an admin creates a campaign with milestone-based
+escrow for a project. The escrow job is not created yet — it is funded later
+via `fund_campaign_escrow_job` once donations accumulate.
+
+| Event Name | Topics                                 | Data                          | When Emitted                               |
+| ---------- | -------------------------------------- | ----------------------------- | ------------------------------------------ |
+| `camp_es`  | `["camp_es", admin, project_id]`       | `(goal: i128, deadline_ledger: u32)` | When admin calls `create_campaign_with_escrow` |
+
+---
+
+## 45. `esc_fnd` (Campaign Escrow Job Funded)
+
+**Description**: Emitted when an admin funds the escrow job for a campaign.
+The accumulated contract-held donations are transferred to the escrow contract
+and the escrow job is created with the project wallet as the freelancer.
+
+| Event Name | Topics                              | Data                                        | When Emitted                            |
+| ---------- | ----------------------------------- | ------------------------------------------- | --------------------------------------- |
+| `esc_fnd`  | `["esc_fnd", admin, project_id]`    | `(job_id: String, total_raised: i128)`      | When admin calls `fund_campaign_escrow_job` |
+
+---
+
+## 46. `esc_rel` (Campaign Milestone Released)
+
+**Description**: Emitted when an admin releases a milestone for an escrow campaign.
+Proxies through to the escrow contract's `release_milestone`.
+
+| Event Name | Topics                               | Data                       | When Emitted                                |
+| ---------- | ------------------------------------ | -------------------------- | ------------------------------------------- |
+| `esc_rel`  | `["esc_rel", admin, project_id]`     | `milestone_index: u32`     | When admin calls `release_campaign_milestone` |
+
+---
+
+## 47. `esc_clm` (Campaign Milestone Claimed)
+
+**Description**: Emitted when a project wallet claims a released milestone for
+an escrow campaign. Proxies through to the escrow contract's `claim_milestone`.
+
+| Event Name | Topics                                | Data                       | When Emitted                               |
+| ---------- | ------------------------------------- | -------------------------- | ------------------------------------------ |
+| `esc_clm`  | `["esc_clm", project_wallet, project_id]` | `milestone_index: u32` | When project wallet calls `claim_campaign_milestone` |
+
+---
+
+## 48. `esc_dsp` (Campaign Milestone Disputed)
+
+**Description**: Emitted when M-of-N admins dispute a milestone on an escrow
+campaign. Proxies through to the escrow contract's `dispute_milestone`.
+
+| Event Name | Topics                         | Data                       | When Emitted                                |
+| ---------- | ------------------------------ | -------------------------- | ------------------------------------------- |
+| `esc_dsp`  | `["esc_dsp", project_id]`      | `milestone_index: u32`     | When admins call `dispute_campaign_milestone` |
+
+---
+
+## 49. `esc_rsv` (Campaign Milestone Dispute Resolved)
+
+**Description**: Emitted when M-of-N admins resolve a milestone dispute on an
+escrow campaign. Proxies through to the escrow contract's
+`resolve_milestone_dispute`.
+
+| Event Name | Topics                         | Data                                    | When Emitted                                          |
+| ---------- | ------------------------------ | --------------------------------------- | ----------------------------------------------------- |
+| `esc_rsv`  | `["esc_rsv", project_id]`      | `(milestone_index: u32, approve: bool)` | When admins call `resolve_campaign_ms_dispute` |
+
+---
+
+## 50. `att_settle` (Cross-Chain Attestation Settled)
+
+**Description**: Emitted when a verified cross-chain donation attestation is
+settled into the main contract's donation stats via `settle_attestation`. One
+event per attestation id — a second settlement of the same id panics with
+`"Attestation already settled"`, so this event never repeats.
+
+| Event Name   | Topics                                    | Data                                                                    | When Emitted                                     |
+| ------------ | ----------------------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------ |
+| `att_settle` | `["att_settle", donor, project_id]`       | `(attestation_id: u64, amount_xlm: i128, co2_grams: i128, donation_index: u32)` | When anyone calls `settle_attestation` on a `Verified` attestation |
+
+- `donor` and `project_id` come from the attestation record, not the caller —
+  `settle_attestation` is permissionless.
+- `amount_xlm` is the attested XLM value in stroops. It is credited to the
+  project's `total_raised`, the donor's `total_donated`, and
+  `GlobalTotalRaised`.
+- `co2_grams` is `amount_xlm / STROOP * project.co2_per_xlm`, the same formula
+  the native donation path uses.
+- `donation_index` is the index of the `DonationRecord` the settlement created.
+  That record carries the `XCHAIN` currency symbol, so indexers can separate
+  bridged donations from Stellar-native ones.
+
+A settlement also emits the events the shared donation path emits: `nft_mint`
+when the donor crosses into a new badge tier, and `camp_goal` when the
+credited amount takes a campaign over its goal. It emits **no** `donated`
+event — no tokens moved on Stellar.
+
+---
+
+## Usage Notes
+
+- All events follow Soroban's standard event format: `topics: Vec<Val>`, `data: Val`.
+- `donor` and `project_id` are usually `Address` or `String` depending on implementation.
+- Events can be queried via Horizon or Soroban RPC tools.
+- Frontend / backend should listen to these for real-time updates, notifications, and leaderboard.
+
+**Last Updated**: August 16, 2026

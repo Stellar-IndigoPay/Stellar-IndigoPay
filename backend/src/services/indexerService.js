@@ -27,6 +27,7 @@ const { enqueue: enqueueDLQ } = require("./indexerDLQWorker");
 const logger = require("../logger");
 const { metrics } = require("./metrics");
 const { runBackfill } = require("./indexerBackfill");
+const DonationBatcher = require("./donationBatcher");
 
 const {
   indigopayIndexerStreamReconnectsTotal: indexerStreamReconnects,
@@ -43,6 +44,7 @@ const BACKOFF_FACTOR = 2;
 // ─── Internal state ─────────────────────────────────────────────────────────
 let isRunning = false;
 let io = null;
+let donationBatcher = null; // accumulates donations for batched emission
 let projectWallets = new Map(); // wallet_address -> project_id
 let projectWalletsInterval = null;
 let horizonStream = null;
@@ -204,9 +206,11 @@ async function openStream() {
             const result = await handleDonation(projectId, op, { isNative, isUSDC, isBackfill: false }, {
               onCursorUpdate: updateCursor,
             });
-            // Emit WebSocket event only for stream-processed donations (not backfill/DLQ)
-            if (io && result) {
-              io.emit("newDonation", {
+            // Batch donations for emission (not backfill/DLQ)
+            // Instead of emitting one event per donation, accumulate them
+            // and emit a single batch event after a time window (500ms by default).
+            if (donationBatcher && result) {
+              donationBatcher.addDonation({
                 projectId,
                 donorAddress: op.from,
                 amountXLM: isNative ? parseFloat(op.amount) : null,
@@ -412,6 +416,16 @@ async function startIndexer(socketIo) {
   isRunning = true;
   io = socketIo;
 
+  // Initialize the donation batcher with configurable window
+  // INDEXER_BATCH_WINDOW_MS defaults to 500ms for reasonable latency
+  // INDEXER_BATCH_MAX_SIZE defaults to 50 donations per batch
+  const batchWindowMs = Number(process.env.INDEXER_BATCH_WINDOW_MS || 500);
+  const batchMaxSize = Number(process.env.INDEXER_BATCH_MAX_SIZE || 50);
+  donationBatcher = new DonationBatcher(io, {
+    batchWindowMs,
+    maxBatchSize: batchMaxSize,
+  });
+
   await updateProjectWallets();
   projectWalletsInterval = setInterval(updateProjectWallets, 10 * 60 * 1000);
   if (typeof projectWalletsInterval.unref === "function")
@@ -464,6 +478,12 @@ async function stop() {
   if (projectWalletsInterval) {
     clearInterval(projectWalletsInterval);
     projectWalletsInterval = null;
+  }
+
+  // Flush any pending donations before stopping
+  if (donationBatcher) {
+    donationBatcher.stop();
+    donationBatcher = null;
   }
 
   stopLagMonitor();

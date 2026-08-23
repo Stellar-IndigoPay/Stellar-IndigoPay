@@ -12,6 +12,7 @@ use soroban_sdk::{Address, Env, String as SorobanString, Vec};
 use escrow_contract::{EscrowContract, EscrowContractClient, Milestone};
 
 /// Build a single-element signer Vec for admin calls.
+#[allow(dead_code)]
 pub fn signers1(env: &Env, a: &Address) -> Vec<Address> {
     let mut v = Vec::new(env);
     v.push_back(a.clone());
@@ -20,6 +21,7 @@ pub fn signers1(env: &Env, a: &Address) -> Vec<Address> {
 
 /// Create an escrow contract instance with a freshly-generated single-admin
 /// (1-of-1) admin set, and return the admin address + contract client.
+#[allow(dead_code)]
 pub fn setup<'a>(env: &'a Env) -> (Address, EscrowContractClient<'a>) {
     let cid = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(env, &cid);

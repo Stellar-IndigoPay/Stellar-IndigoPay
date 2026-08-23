@@ -15,7 +15,7 @@ import {
   csrfFetch,
 } from "@/lib/api";
 import { buildMilestoneTransaction, submitTransaction } from "@/lib/stellar";
-import { formatCO2, formatXLM, shortenAddress, timeAgo } from "@/utils/format";
+import { formatCO2, formatXLM, shortenAddress, timeAgo, formatDate } from "@/utils/format";
 import type { ClimateProject, Donation } from "@/utils/types";
 import { SkeletonBox, SkeletonStatCard } from "@/components/Skeleton";
 
@@ -41,7 +41,8 @@ function weekKey(dateStr: string): string {
 }
 
 export default function ProjectAdmin() {
-  const { publicKey, connect: onConnect } = useWallet();
+  const { publicKey, connect } = useWallet();
+  const onConnect = () => { void connect(); };
   const router = useRouter();
   const { projectId } = router.query;
 
@@ -902,7 +903,7 @@ export default function ProjectAdmin() {
                   </div>
                 </div>
                 <p className="text-xs text-[#8aaa8a] dark:text-forest-300 font-body mt-2">
-                  Expires: {new Date(m.expiresAt).toLocaleDateString()}
+                  Expires: {formatDate(m.expiresAt)}
                 </p>
               </div>
             ))}

@@ -9,6 +9,11 @@
  */
 
 import { mountDonateOverlay, type ProjectInfo } from "./inject/donate-overlay";
+import { escapeHtml, truncateAddress, truncateText } from "./overlay-helpers";
+
+// Re-export for backwards compatibility
+export { escapeHtml, truncateAddress };
+export const truncateStr = truncateText;
 
 // ── constants ────────────────────────────────────────────────────────
 
@@ -653,16 +658,6 @@ export function updateSubmitBtn(
     : "💚 Connect Wallet to Donate";
 }
 
-export function truncateAddress(addr: string): string {
-  if (addr.length <= 12) return addr;
-  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
-}
-
-export function truncateStr(text: string, maxLen: number): string {
-  if (text.length <= maxLen) return text;
-  return text.slice(0, maxLen) + "…";
-}
-
 export function getCategoryEmoji(category: string): string {
   const map: Record<string, string> = {
     Reforestation: "🌳",
@@ -677,11 +672,3 @@ export function getCategoryEmoji(category: string): string {
   return map[category] ?? "🌿";
 }
 
-export function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}

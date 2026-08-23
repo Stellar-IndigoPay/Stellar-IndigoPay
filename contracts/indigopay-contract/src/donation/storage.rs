@@ -21,11 +21,10 @@ pub fn set_stealth_donation(env: &Env, id: u64, donation: &StealthDonation) {
         .set(&DataKey::StealthDonation(id), donation);
 }
 
-pub fn get_stealth_donation(env: &Env, id: u64) -> StealthDonation {
+pub fn get_stealth_donation(env: &Env, id: u64) -> Option<StealthDonation> {
     env.storage()
         .persistent()
         .get(&DataKey::StealthDonation(id))
-        .expect("stealth donation not found")
 }
 
 pub fn add_project_donation(env: &Env, project: &Address, donation_id: u64) {
@@ -45,4 +44,41 @@ pub fn get_project_donations(env: &Env, project: &Address) -> Vec<u64> {
         .persistent()
         .get(&DataKey::ProjectDonations(project.clone()))
         .unwrap_or(Vec::new(env))
+}
+
+pub fn get_stealth_withdrawable_balance(env: &Env, project: &Address, token: &Address) -> i128 {
+    env.storage()
+        .instance()
+        .get(&DataKey::StealthWithdrawableBalance(
+            project.clone(),
+            token.clone(),
+        ))
+        .unwrap_or(0i128)
+}
+
+pub fn add_stealth_withdrawable_balance(
+    env: &Env,
+    project: &Address,
+    token: &Address,
+    amount: i128,
+) {
+    let balance = get_stealth_withdrawable_balance(env, project, token);
+    set_stealth_withdrawable_balance(
+        env,
+        project,
+        token,
+        balance.checked_add(amount).expect("overflow"),
+    );
+}
+
+pub fn set_stealth_withdrawable_balance(
+    env: &Env,
+    project: &Address,
+    token: &Address,
+    balance: i128,
+) {
+    env.storage().instance().set(
+        &DataKey::StealthWithdrawableBalance(project.clone(), token.clone()),
+        &balance,
+    );
 }

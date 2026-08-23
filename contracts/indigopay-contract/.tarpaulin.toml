@@ -1,36 +1,4 @@
-# .tarpaulin.toml — Coverage configuration for the IndigoPay contract.
-#
-# Run:
-#   cargo tarpaulin --config .tarpaulin.toml
-#
-# Install tarpaulin:
-#   cargo install cargo-tarpaulin
-
-[tarpaulin]
-# Target the contract crate specifically
-manifest-path = "Cargo.toml"
-
-# Include only the contract source (exclude test helpers)
-files = ["src/lib.rs"]
-
-# Exclude test modules from coverage measurement
-exclude-files = ["src/fuzz_tests.rs", "src/fuzz_template.rs"]
-
-# Coverage threshold — PRs that drop coverage below this fail CI
+[coverage]
 fail-under = 70
-
-# Output formats
-out = ["Html", "Lcov"]
-
-# Report types
-report-types = ["Html", "Lcov"]
-
-# Output directory
-output-dir = "coverage/"
-
-# Run tests with the testutils feature (passed via CLI --features flag)
-
-# Fuzz tests are skipped via the CI command's `-- --skip fuzz` flag
-# because tarpaulin's `test-filters` config entry only affects which
-# tests are counted for coverage, not which tests are actually
-# executed, and the fuzz tests cause tarpaulin's internal timeout.
+exclude-files = ["**/fuzz_tests.rs", "**/escrow_fuzz.rs"]
+output-dir = "coverage"

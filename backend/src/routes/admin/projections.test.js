@@ -41,6 +41,7 @@ describe("Admin projections router", () => {
   let app;
   beforeEach(() => {
     jest.clearAllMocks();
+    isRebuilding.mockReturnValue(false);
     app = buildApp();
   });
 
@@ -66,7 +67,10 @@ describe("Admin projections router", () => {
       .set("X-Admin-Key", "test-admin-key")
       .expect(409);
     expect(rebuildAllProjections).not.toHaveBeenCalled();
-    expect(res.body.success).toBe(false);
+    expect(res.body.error).toMatchObject({
+      code: "CONFLICT",
+      detail: "A projection rebuild is already in progress",
+    });
   });
 
   test("POST /rebuild/:name rebuilds a single projection", async () => {
@@ -78,12 +82,25 @@ describe("Admin projections router", () => {
     expect(res.body.data.projection).toBe("donor_leaderboard");
   });
 
+  test("POST /rebuild/:name returns 409 if a rebuild is already in progress", async () => {
+    isRebuilding.mockReturnValue(true);
+    const res = await request(app)
+      .post("/api/admin/projections/rebuild/donor_leaderboard")
+      .set("X-Admin-Key", "test-admin-key")
+      .expect(409);
+    expect(rebuildProjection).not.toHaveBeenCalled();
+    expect(res.body.error).toMatchObject({
+      code: "CONFLICT",
+      detail: "A projection rebuild is already in progress",
+    });
+  });
+
   test("POST /rebuild/:name returns 404 for an unknown projection", async () => {
     const res = await request(app)
       .post("/api/admin/projections/rebuild/nope")
       .set("X-Admin-Key", "test-admin-key")
       .expect(404);
-    expect(res.body.success).toBe(false);
+    expect(res.body.error.code).toBe("NOT_FOUND");
     expect(rebuildProjection).not.toHaveBeenCalled();
   });
 

@@ -9,4 +9,15 @@ module.exports = {
   testPathIgnorePatterns: ["/node_modules/", "/dist/"],
   setupFiles: ["./jest.setup.js"],
   transformIgnorePatterns: ["/node_modules/(?!.*\\.ts$)"],
+  collectCoverageFrom: [
+    "src/overlay-helpers.ts",
+  ],
+  coverageThreshold: {
+    global: {
+      statements: 99.5,
+      branches: 99.5,
+      functions: 99.5,
+      lines: 99.5,
+    },
+  },
 };

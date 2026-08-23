@@ -21,6 +21,7 @@ const pool = require("../../db/pool");
 const { adminRequired } = require("../../middleware/auth");
 const { logAdminAction } = require("../../services/audit");
 const { updateSecretRotationMetrics } = require("../../services/metrics");
+const { sendAppError } = require("../../errors");
 
 router.use(adminRequired);
 
@@ -130,9 +131,8 @@ router.get("/:id", async (req, res, next) => {
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: { code: "NOT_FOUND", message: "Secret rotation not found" },
+      return sendAppError(res, "NOT_FOUND", {
+        detail: "Secret rotation not found",
       });
     }
 
@@ -174,22 +174,16 @@ router.post("/", async (req, res, next) => {
     } = req.body || {};
 
     if (!Array.isArray(secretsRotated) || secretsRotated.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: {
-          code: "VALIDATION_ERROR",
-          message: "secretsRotated must be a non-empty array of secret names",
-        },
+      return sendAppError(res, "VALIDATION_ERROR", {
+        field: "secretsRotated",
+        detail: "secretsRotated must be a non-empty array of secret names",
       });
     }
 
     if (!VALID_STATUSES.includes(overallStatus)) {
-      return res.status(400).json({
-        success: false,
-        error: {
-          code: "VALIDATION_ERROR",
-          message: `overallStatus must be one of: ${VALID_STATUSES.join(", ")}`,
-        },
+      return sendAppError(res, "VALIDATION_ERROR", {
+        field: "overallStatus",
+        detail: `overallStatus must be one of: ${VALID_STATUSES.join(", ")}`,
       });
     }
 

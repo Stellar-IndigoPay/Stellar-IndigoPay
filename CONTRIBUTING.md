@@ -18,7 +18,7 @@ Install the following before cloning:
 
 | Tool             | Version | Install                                                           |
 | ---------------- | ------- | ----------------------------------------------------------------- |
-| Node.js          | ≥ 20.x  | [nodejs.org](https://nodejs.org) or `nvm install 20`              |
+| Node.js          | 22 LTS  | [nodejs.org](https://nodejs.org) or `nvm install 22`              |
 | npm              | latest  | bundled with Node                                                 |
 | Docker           | latest  | [docs.docker.com/get-docker](https://docs.docker.com/get-docker/) |
 | Rust + Cargo     | ≥ 1.91  | `curl https://sh.rustup.rs -sSf \| sh`                            |

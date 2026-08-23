@@ -11,7 +11,6 @@
 const pool = require("../db/pool");
 const logger = require("../logger");
 const {
-  CONTRACT_ID,
   server: stellarServer,
   NETWORK_PASSPHRASE,
   submitTransaction,
@@ -26,6 +25,8 @@ const {
   rpc,
 } = require("@stellar/stellar-sdk");
 const { metrics } = require("./metrics");
+const { getSigningSecret } = require("./signingSecretProvider");
+const { withAdvisoryLock, LOCK_KEYS } = require("./advisoryLock");
 
 let intervalId = null;
 let isExecuting = false;
@@ -37,7 +38,7 @@ async function start() {
   if (intervalId) return;
 
   // Run initial cycle
-  runKeeperCycle().catch((err) => {
+  runKeeperCycleWithLock().catch((err) => {
     logger.error({ event: "recurring_keeper_initial_error", err: err.message }, "Error in initial keeper cycle");
   });
 
@@ -49,7 +50,7 @@ async function start() {
     }
     isExecuting = true;
     try {
-      await runKeeperCycle();
+      await runKeeperCycleWithLock();
     } catch (err) {
       logger.error({ event: "recurring_keeper_cycle_error", err: err.message }, "Error during keeper cycle");
     } finally {
@@ -69,12 +70,22 @@ async function stop() {
 }
 
 /**
+ * Main keeper cycle, guarded by a per-worker Postgres advisory lock so only
+ * one replica executes a given cycle at a time (issue #677).
+ */
+async function runKeeperCycleWithLock() {
+  return withAdvisoryLock(LOCK_KEYS.recurringKeeper, runKeeperCycle);
+}
+
+/**
  * Main keeper cycle logic.
  */
 async function runKeeperCycle() {
-  const keeperSecret = process.env.KEEPER_SECRET;
-  if (!keeperSecret) {
-    logger.warn({ event: "recurring_keeper_no_secret" }, "KEEPER_SECRET not configured, skipping recurring donation keeper cycle");
+  let keeperSecret;
+  try {
+    keeperSecret = await getSigningSecret("recurringKeeper");
+  } catch (err) {
+    logger.warn({ event: "recurring_keeper_no_secret", err: err.message }, "Recurring keeper managed signing secret not configured, skipping recurring donation keeper cycle");
     return;
   }
   const contractId = process.env.CONTRACT_ID;
@@ -112,9 +123,14 @@ async function runKeeperCycle() {
     return;
   }
 
-  // Process each schedule sequentially to prevent transaction sequence conflicts
+  // Process each schedule sequentially to prevent transaction sequence conflicts.
+  // The keeper account is re-fetched before every submission: a single loaded
+  // account can go stale if its sequence advances between submissions (e.g. an
+  // external transaction or a failed attempt), causing later submissions to fail
+  // with tx_bad_seq.
   for (const schedule of dueSchedules) {
     try {
+      account = await stellarServer.loadAccount(keeperPublicKey);
       await executeSchedule(schedule, account, keypair);
       if (metrics.recurringExecutionsTotal) {
         metrics.recurringExecutionsTotal.inc({ status: "success" });
@@ -183,8 +199,6 @@ async function executeSchedule(schedule, account, keypair) {
   const xdrString = preparedTx.toXDR();
   
   const submitResult = await submitTransaction(xdrString);
-  
-  account.incrementSequenceNumber();
 
   logger.info(
     {
@@ -201,4 +215,5 @@ module.exports = {
   start,
   stop,
   runKeeperCycle,
+  runKeeperCycleWithLock,
 };

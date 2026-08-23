@@ -21,6 +21,7 @@ const pool = require("../../db/pool");
 const { adminRequired } = require("../../middleware/auth");
 const { logAdminAction } = require("../../services/audit");
 const { replayDelivery } = require("../../services/webhookQueue");
+const { sendAppError } = require("../../errors");
 
 router.use(adminRequired);
 
@@ -105,9 +106,9 @@ router.post("/dead-letter/:deliveryId/replay", async (req, res, next) => {
     const { deliveryId } = req.params;
     const replayed = await replayDelivery(deliveryId);
     if (!replayed) {
-      return res
-        .status(404)
-        .json({ error: "No dead-lettered delivery found with that id" });
+      return sendAppError(res, "NOT_FOUND", {
+        detail: "No dead-lettered delivery found with that id",
+      });
     }
 
     const result = await pool.query(
@@ -141,7 +142,10 @@ router.post("/dead-letter/replay-all", async (req, res, next) => {
   try {
     const { projectId } = req.body || {};
     if (!projectId || typeof projectId !== "string") {
-      return res.status(400).json({ error: "projectId is required" });
+      return sendAppError(res, "VALIDATION_ERROR", {
+        field: "projectId",
+        detail: "projectId is required",
+      });
     }
 
     const result = await pool.query(

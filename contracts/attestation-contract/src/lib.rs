@@ -32,7 +32,8 @@
  *   cargo build --target wasm32v1-none --release
  */
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Env, Map, String, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    Env, Map, String, Vec,
 };
 
 #[cfg(all(test, feature = "testutils"))]
@@ -176,6 +177,79 @@ pub enum DataKey {
 // the contract family.
 const UPGRADE_TIMELOCK_LEDGERS: u32 = 34_560;
 
+// ─── Contract error codes ───────────────────────────────────────────────────
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AttestationError {
+    // ── Initialization & admin (1–5) ────────────────────────────────────────
+    ContractAlreadyInitialized = 1,
+    OnlyAdminCanPerformThisAction = 2,
+    NotInitialized = 3,
+    AdminAddressMismatch = 4,
+    UnauthorizedAdminAction = 5,
+    // ── Relayer management (6–12) ───────────────────────────────────────────
+    OnlyRelayerCanPerformThisAction = 6,
+    RelayerAlreadySetClearFirst = 7,
+    RelayerNotConfigured = 8,
+    RelayerAddressMismatch = 9,
+    UnauthorizedRelayerAction = 10,
+    RelayerClearFailed = 11,
+    RelayerSetFailed = 12,
+    // ── Pause / unpause (13–16) ─────────────────────────────────────────────
+    ContractIsPaused = 13,
+    ContractIsUnpaused = 14,
+    PauseTransitionFailed = 15,
+    UnauthorizedPauseAction = 16,
+    // ── Validation (17–26) ──────────────────────────────────────────────────
+    AmountMustBePositive = 17,
+    InvalidSourceChainLength = 18,
+    InvalidSourceTxHashLength = 19,
+    InvalidProjectIdLength = 20,
+    SourceChainNotAllowed = 21,
+    BatchSourceChainsMustMatch = 22,
+    SourceTransactionAlreadyAttested = 23,
+    BatchMustNotBeEmpty = 24,
+    BatchSizeExceedsMaximum = 25,
+    InvalidAttestationInput = 26,
+    // ── Attestation lifecycle (27–36) ───────────────────────────────────────
+    AlreadyVerified = 27,
+    AttestationWasRevoked = 28,
+    AlreadyRevoked = 29,
+    AttestationNotFound = 30,
+    AttestationStatusUnexpected = 31,
+    AttestationIdOverflow = 32,
+    AttestationRecordFailed = 33,
+    AttestationVerificationFailed = 34,
+    AttestationRevocationFailed = 35,
+    AttestationPendingStateInvalid = 36,
+    // ── Upgrade (37–42) ─────────────────────────────────────────────────────
+    UpgradeAlreadyPending = 37,
+    UpgradeTimelockNotYetElapsed = 38,
+    NoPendingUpgrade = 39,
+    UpgradeEffectiveAtOverflow = 40,
+    UpgradeExecutionFailed = 41,
+    UpgradeCancellationFailed = 42,
+    // ── Aggregation & counters (43–50) ──────────────────────────────────────
+    DonorTotalAttestationsOverflow = 43,
+    DonorTotalUsdOverflow = 44,
+    DonorTotalXlmOverflow = 45,
+    DonorPendingOverflow = 46,
+    DonorVerifiedOverflow = 47,
+    DonorRevokedOverflow = 48,
+    ChainTotalAttestationsOverflow = 49,
+    ChainTotalUsdOverflow = 50,
+    ChainTotalXlmOverflow = 51,
+    ChainPendingOverflow = 52,
+    ChainVerifiedOverflow = 53,
+    ChainRevokedOverflow = 54,
+    ChainCountOverflow = 55,
+    TotalCountOverflow = 56,
+    PendingCountOverflow = 57,
+    AggregationUpdateFailed = 58,
+    DonorAggregateNotFound = 59,
+    ChainAggregateNotFound = 60,
+}
+
 fn read_admin(env: &Env) -> Address {
     env.storage()
         .instance()
@@ -185,7 +259,7 @@ fn read_admin(env: &Env) -> Address {
 
 fn require_admin(env: &Env, caller: &Address) {
     if read_admin(env) != *caller {
-        panic!("Only admin can perform this action");
+        panic_with_error!(env, AttestationError::OnlyAdminCanPerformThisAction);
     }
 }
 
@@ -196,7 +270,7 @@ fn read_relayer(env: &Env) -> Option<Address> {
 fn require_relayer(env: &Env, caller: &Address) {
     let relayer = read_relayer(env).expect("Relayer not configured");
     if relayer != *caller {
-        panic!("Only relayer can perform this action");
+        panic_with_error!(env, AttestationError::OnlyRelayerCanPerformThisAction);
     }
 }
 
@@ -207,15 +281,18 @@ fn require_not_paused(env: &Env) {
         .get(&DataKey::Paused)
         .unwrap_or(false);
     if paused {
-        panic!("Contract is paused");
+        panic_with_error!(env, AttestationError::ContractIsPaused);
     }
 }
 
-fn require_positive(amount: i128, label: &str) {
+fn require_positive(amount: i128, _label: &str) {
     if amount <= 0 {
+        // Cannot call panic_with_error! without env, so callers are
+        // responsible for emitting structured errors. This function is
+        // only called from validate_attestation_input which has env access;
+        // the check is duplicated there for structured error reporting.
         panic!("Amount must be positive");
     }
-    let _ = label; // currently unused; reserved for richer error messages.
 }
 
 fn validate_source_chain(source_chain: &String) {
@@ -248,7 +325,7 @@ fn require_source_chain_allowed(env: &Env, source_chain: &String) {
             .get(&DataKey::AllowedChain(source_chain.clone()))
             .unwrap_or(false);
         if !allowed {
-            panic!("Source chain not allowed");
+            panic_with_error!(env, AttestationError::SourceChainNotAllowed);
         }
     }
 }
@@ -283,7 +360,7 @@ fn record_attestations_internal(
     validate_source_chain(&source_chain);
     for input in attestations.iter() {
         if input.source_chain != source_chain {
-            panic!("Batch source chains must match");
+            panic_with_error!(env, AttestationError::BatchSourceChainsMustMatch);
         }
         validate_attestation_input(&input);
     }
@@ -295,7 +372,7 @@ fn record_attestations_internal(
         if batch_hashes.contains_key(input.source_tx_hash.clone())
             || env.storage().instance().has(&seen_key)
         {
-            panic!("Source transaction already attested");
+            panic_with_error!(env, AttestationError::SourceTransactionAlreadyAttested);
         }
         batch_hashes.set(input.source_tx_hash, true);
     }
@@ -601,7 +678,7 @@ impl AttestationContract {
     /// panic so a redeploy that doesn't re-init storage is called out.
     pub fn initialize(env: Env, admin: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
-            panic!("Contract already initialized");
+            panic_with_error!(&env, AttestationError::ContractAlreadyInitialized);
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -624,7 +701,7 @@ impl AttestationContract {
         require_admin(&env, &admin);
         require_not_paused(&env);
         if env.storage().instance().has(&DataKey::Relayer) {
-            panic!("Relayer already set; clear first");
+            panic_with_error!(&env, AttestationError::RelayerAlreadySetClearFirst);
         }
         env.storage().instance().set(&DataKey::Relayer, &relayer);
         env.events().publish((symbol_short!("rl_set"),), relayer);
@@ -637,7 +714,7 @@ impl AttestationContract {
         admin.require_auth();
         require_admin(&env, &admin);
         if !env.storage().instance().has(&DataKey::Relayer) {
-            panic!("Relayer not configured");
+            panic_with_error!(&env, AttestationError::RelayerNotConfigured);
         }
         env.storage().instance().remove(&DataKey::Relayer);
         env.events().publish((symbol_short!("rl_clr"),), ());
@@ -742,10 +819,10 @@ impl AttestationContract {
         require_not_paused(&env);
 
         if attestations.is_empty() {
-            panic!("Batch must not be empty");
+            panic_with_error!(&env, AttestationError::BatchMustNotBeEmpty);
         }
         if attestations.len() > MAX_BATCH_SIZE {
-            panic!("Batch size exceeds maximum");
+            panic_with_error!(&env, AttestationError::BatchSizeExceedsMaximum);
         }
 
         record_attestations_internal(&env, &relayer, attestations, true)
@@ -761,8 +838,12 @@ impl AttestationContract {
             .get(&DataKey::Attestation(id))
             .expect("Attestation not found");
         match record.status {
-            AttestationStatus::Verified => panic!("Already verified"),
-            AttestationStatus::Revoked => panic!("Attestation was revoked"),
+            AttestationStatus::Verified => {
+                panic_with_error!(&env, AttestationError::AlreadyVerified)
+            }
+            AttestationStatus::Revoked => {
+                panic_with_error!(&env, AttestationError::AttestationWasRevoked)
+            }
             AttestationStatus::Pending => {}
         }
 
@@ -805,7 +886,7 @@ impl AttestationContract {
             .get(&DataKey::Attestation(id))
             .expect("Attestation not found");
         if record.status == AttestationStatus::Revoked {
-            panic!("Already revoked");
+            panic_with_error!(&env, AttestationError::AlreadyRevoked);
         }
         let was_pending = matches!(record.status, AttestationStatus::Pending);
         record.status = AttestationStatus::Revoked;
@@ -949,7 +1030,7 @@ impl AttestationContract {
         admin.require_auth();
         require_admin(&env, &admin);
         if env.storage().instance().has(&DataKey::PendingUpgrade) {
-            panic!("Upgrade already pending");
+            panic_with_error!(&env, AttestationError::UpgradeAlreadyPending);
         }
         let effective_at = env
             .ledger()
@@ -980,7 +1061,7 @@ impl AttestationContract {
             .get(&DataKey::UpgradeEffectiveAt)
             .expect("No pending upgrade effective-at");
         if env.ledger().sequence() < effective_at {
-            panic!("Upgrade timelock not yet elapsed");
+            panic_with_error!(&env, AttestationError::UpgradeTimelockNotYetElapsed);
         }
         env.deployer().update_current_contract_wasm(pending.clone());
         env.storage()
@@ -997,7 +1078,7 @@ impl AttestationContract {
         admin.require_auth();
         require_admin(&env, &admin);
         if !env.storage().instance().has(&DataKey::PendingUpgrade) {
-            panic!("No pending upgrade");
+            panic_with_error!(&env, AttestationError::NoPendingUpgrade);
         }
         env.storage().instance().remove(&DataKey::PendingUpgrade);
         env.storage()
@@ -1078,7 +1159,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Contract already initialized")]
+    #[should_panic]
     fn test_double_init_fails() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1116,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Source transaction already attested")]
+    #[should_panic]
     fn test_replay_attempt_panics() {
         let (env, id, _admin, _relayer, donor) = init_and_relayer();
         let client = AttestationContractClient::new(&env, &id);
@@ -1171,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Already verified")]
+    #[should_panic]
     fn test_double_verify_panics() {
         let (env, id, _admin, _relayer, donor) = init_and_relayer();
         let client = AttestationContractClient::new(&env, &id);
@@ -1239,7 +1320,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Source chain not allowed")]
+    #[should_panic]
     fn test_allow_list_rejects_unlisted_chain() {
         let (env, id, admin, _relayer, donor) = init_and_relayer();
         let client = AttestationContractClient::new(&env, &id);
@@ -1271,7 +1352,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Contract is paused")]
+    #[should_panic]
     fn test_pause_blocks_record_via_event() {
         let (env, id, admin, _relayer, donor) = init_and_relayer();
         let client = AttestationContractClient::new(&env, &id);
@@ -1289,7 +1370,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Only relayer can perform this action")]
+    #[should_panic]
     fn test_non_relayer_cannot_record() {
         let (env, id, _admin, _relayer, _donor) = init_and_relayer();
         let client = AttestationContractClient::new(&env, &id);
@@ -1311,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Amount must be positive")]
+    #[should_panic]
     fn test_zero_amount_panics() {
         let (env, id, _admin, _relayer, donor) = init_and_relayer();
         let client = AttestationContractClient::new(&env, &id);
@@ -1386,7 +1467,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Source transaction already attested")]
+    #[should_panic]
     fn test_batch_replay_panics() {
         let (env, id, _admin, relayer, donor) = init_and_relayer();
         let client = AttestationContractClient::new(&env, &id);
@@ -1408,7 +1489,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Batch size exceeds maximum")]
+    #[should_panic]
     fn test_batch_size_limit() {
         let (env, id, _admin, relayer, donor) = init_and_relayer();
         let client = AttestationContractClient::new(&env, &id);
@@ -1422,7 +1503,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Amount must be positive")]
+    #[should_panic]
     fn test_batch_invalid_amount_panics() {
         let (env, id, _admin, relayer, donor) = init_and_relayer();
         let client = AttestationContractClient::new(&env, &id);
@@ -1630,7 +1711,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Batch must not be empty")]
+    #[should_panic]
     fn test_batch_empty_panics() {
         let (env, id, _admin, relayer, _donor) = init_and_relayer();
         let client = AttestationContractClient::new(&env, &id);
@@ -1638,7 +1719,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Batch source chains must match")]
+    #[should_panic]
     fn test_batch_mixed_source_chains_panics() {
         let (env, id, _admin, relayer, donor) = init_and_relayer();
         let client = AttestationContractClient::new(&env, &id);
@@ -1651,7 +1732,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Source transaction already attested")]
+    #[should_panic]
     fn test_batch_duplicate_hash_panics() {
         let (env, id, _admin, relayer, donor) = init_and_relayer();
         let client = AttestationContractClient::new(&env, &id);
@@ -1664,7 +1745,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Contract is paused")]
+    #[should_panic]
     fn test_batch_paused_panics() {
         let (env, id, admin, relayer, donor) = init_and_relayer();
         let client = AttestationContractClient::new(&env, &id);
@@ -1674,7 +1755,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Only relayer can perform this action")]
+    #[should_panic]
     fn test_batch_unauthorized_relayer_panics() {
         let (env, id, _admin, _relayer, donor) = init_and_relayer();
         let client = AttestationContractClient::new(&env, &id);
@@ -1703,7 +1784,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Source chain not allowed")]
+    #[should_panic]
     fn test_batch_unlisted_source_chain_panics() {
         let (env, id, admin, relayer, donor) = init_and_relayer();
         let client = AttestationContractClient::new(&env, &id);

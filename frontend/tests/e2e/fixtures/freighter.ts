@@ -9,6 +9,9 @@ export const MOCK_PUBLIC_KEY = "GCEZWKW744OREGLTR6Q6ZYITK5GSBVC3XRONSIJSBTRSCGNF
  */
 export async function mockFreighter(page: Page, publicKey = MOCK_PUBLIC_KEY) {
   await page.addInitScript((pk) => {
+    // Pre-accept cookies so the consent banner doesn't block clicks
+    localStorage.setItem("cookie-consent", "true");
+
     (window as any).__test_publicKey__ = pk;
     (window as any).freighter = {
       isConnected: () => Promise.resolve({ isConnected: true }),

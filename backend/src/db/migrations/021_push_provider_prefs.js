@@ -44,10 +44,15 @@ module.exports = {
         ADD COLUMN IF NOT EXISTS provider_preference VARCHAR(20) DEFAULT 'auto'
     `);
 
-    // Add CHECK constraint on provider_preference (safe; existing NULLs pass).
+    // PostgreSQL has no ADD CONSTRAINT IF NOT EXISTS. Drop and recreate the
+    // idempotent check so retries and fresh installs behave identically.
     await client.query(`
       ALTER TABLE push_notifications
-        ADD CONSTRAINT IF NOT EXISTS push_notifications_provider_pref_check
+        DROP CONSTRAINT IF EXISTS push_notifications_provider_pref_check
+    `);
+    await client.query(`
+      ALTER TABLE push_notifications
+        ADD CONSTRAINT push_notifications_provider_pref_check
         CHECK (provider_preference IN ('auto', 'expo', 'apns', 'fcm'))
     `);
 

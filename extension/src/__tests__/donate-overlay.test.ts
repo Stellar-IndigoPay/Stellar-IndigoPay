@@ -4,11 +4,15 @@
  * Covers:
  * - Overlay mounts with correct project info
  * - Overlay mounts with direct donate view (no project)
- * - Close button works
- * - Backdrop click closes
- * - ESC key closes
- * - Preset amount buttons work
- * - Copy address button works
+ * - Loading state
+ * - Close button, backdrop, ESC key
+ * - Preset amount buttons + active class
+ * - Copy address button (clipboard and fallback)
+ * - Freighter connect/disconnect
+ * - Submit donation (success, error, minimum validation)
+ * - Custom amount input
+ * - Project with description renders
+ * - Unverified project badge
  */
 
 import { mountDonateOverlay, type DonateOverlayOptions } from "../inject/donate-overlay";
@@ -37,7 +41,6 @@ beforeEach(() => {
 
 afterEach(() => {
   jest.useRealTimers();
-  // Clean up any overlays
   const overlay = document.getElementById("indigopay-overlay");
   if (overlay) overlay.remove();
 });
@@ -93,6 +96,43 @@ describe("mountDonateOverlay", () => {
     cleanup();
   });
 
+  test("mounts project view with description", () => {
+    const opts = createOptions({
+      project: {
+        id: "proj-789",
+        name: "Project With Description",
+        category: "Clean Water",
+        verified: true,
+        walletAddress: "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
+        description: "This project provides clean water to communities in need across rural areas.",
+      },
+    });
+
+    const cleanup = mountDonateOverlay(opts);
+    const overlay = document.getElementById("indigopay-overlay");
+    expect(overlay!.querySelector(".igp-project-desc")).not.toBeNull();
+
+    cleanup();
+  });
+
+  test("mounts project without location", () => {
+    const opts = createOptions({
+      project: {
+        id: "proj-no-loc",
+        name: "No Location Project",
+        category: "Wind Energy",
+        verified: false,
+        walletAddress: "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
+      },
+    });
+
+    const cleanup = mountDonateOverlay(opts);
+    const overlay = document.getElementById("indigopay-overlay");
+    expect(overlay!.querySelector(".igp-project-location")).toBeNull();
+
+    cleanup();
+  });
+
   // ── 2. Direct donate view (no project) ──────────────────────────
 
   test("mounts direct donate view when no project matches", () => {
@@ -118,14 +158,28 @@ describe("mountDonateOverlay", () => {
     expect(overlay1).not.toBeNull();
 
     const cleanup2 = mountDonateOverlay(opts2);
-    // The first overlay should now be removed
     expect(document.querySelectorAll("#indigopay-overlay").length).toBe(1);
 
     cleanup1();
     cleanup2();
   });
 
-  // ── 3. Close button ─────────────────────────────────────────────
+  // ── 3. Loading state ────────────────────────────────────────────
+
+  test("shows loading spinner when isLoading is true", () => {
+    const opts = createOptions({ isLoading: true });
+
+    const cleanup = mountDonateOverlay(opts);
+    const overlay = document.getElementById("indigopay-overlay");
+
+    expect(overlay!.querySelector(".igp-loading")).not.toBeNull();
+    expect(overlay!.querySelector(".igp-spinner")).not.toBeNull();
+    expect(overlay!.textContent).toContain("Loading project info");
+
+    cleanup();
+  });
+
+  // ── 4. Close button ─────────────────────────────────────────────
 
   test("close button triggers onClose callback", () => {
     const onClose = jest.fn();
@@ -154,7 +208,7 @@ describe("mountDonateOverlay", () => {
     expect(document.getElementById("indigopay-overlay")).toBeNull();
   });
 
-  // ── 4. Backdrop click closes ────────────────────────────────────
+  // ── 5. Backdrop click closes ────────────────────────────────────
 
   test("backdrop click closes the overlay", () => {
     const onClose = jest.fn();
@@ -170,7 +224,7 @@ describe("mountDonateOverlay", () => {
     cleanup();
   });
 
-  // ── 5. ESC key closes ───────────────────────────────────────────
+  // ── 6. ESC key closes ───────────────────────────────────────────
 
   test("ESC key closes the overlay", () => {
     const onClose = jest.fn();
@@ -196,7 +250,7 @@ describe("mountDonateOverlay", () => {
     cleanup();
   });
 
-  // ── 6. Preset amount buttons ────────────────────────────────────
+  // ── 7. Preset amount buttons ────────────────────────────────────
 
   test("preset amount buttons set the amount input value", () => {
     const opts = createOptions({
@@ -215,7 +269,6 @@ describe("mountDonateOverlay", () => {
     const presetBtns = document.querySelectorAll(".igp-preset-btn");
     expect(presetBtns.length).toBeGreaterThanOrEqual(4);
 
-    // Click the "5" preset
     const fiveBtn = Array.from(presetBtns).find(
       (b) => b.getAttribute("data-amount") === "5",
     ) as HTMLButtonElement;
@@ -255,10 +308,9 @@ describe("mountDonateOverlay", () => {
     cleanup();
   });
 
-  // ── 7. Copy address button ──────────────────────────────────────
+  // ── 8. Copy address button ──────────────────────────────────────
 
   test("copy button copies address to clipboard", async () => {
-    // Mock clipboard API
     const writeTextMock = jest.fn().mockResolvedValue(undefined);
     Object.assign(navigator, {
       clipboard: {
@@ -266,7 +318,7 @@ describe("mountDonateOverlay", () => {
       },
     });
 
-    const opts = createOptions(); // Direct donate view has the copy button
+    const opts = createOptions();
     const cleanup = mountDonateOverlay(opts);
 
     const copyBtn = document.querySelector(".igp-copy-btn") as HTMLButtonElement;
@@ -280,7 +332,36 @@ describe("mountDonateOverlay", () => {
     cleanup();
   });
 
-  // ── 8. Freighter section ────────────────────────────────────────
+  test("copy button falls back when clipboard API fails", async () => {
+    const writeTextMock = jest.fn().mockRejectedValue(new Error("denied"));
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: writeTextMock,
+      },
+    });
+
+    document.execCommand = jest.fn().mockReturnValue(true);
+
+    const opts = createOptions();
+    const cleanup = mountDonateOverlay(opts);
+
+    const copyBtn = document.querySelector(".igp-copy-btn") as HTMLButtonElement;
+    expect(copyBtn).not.toBeNull();
+
+    copyBtn.click();
+
+    // Wait for async fallback to complete
+    await Promise.resolve();
+
+    // Should have tried clipboard API
+    expect(writeTextMock).toHaveBeenCalled();
+    // And fell back to execCommand
+    expect(document.execCommand).toHaveBeenCalledWith("copy");
+
+    cleanup();
+  });
+
+  // ── 9. Freighter section ────────────────────────────────────────
 
   test("shows Freighter connect button when Freighter is available", () => {
     const opts = createOptions({
@@ -328,7 +409,74 @@ describe("mountDonateOverlay", () => {
     cleanup();
   });
 
-  // ── 9. Submit button state ──────────────────────────────────────
+  test("Freighter connected state with project view", () => {
+    const opts = createOptions({
+      project: {
+        id: "proj-1",
+        name: "Test Project",
+        category: "Reforestation",
+        verified: true,
+        walletAddress: "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
+      },
+      freighterAvailable: true,
+      freighterPublicKey: "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
+    });
+
+    const cleanup = mountDonateOverlay(opts);
+    const overlay = document.getElementById("indigopay-overlay");
+    expect(overlay!.querySelector(".igp-freighter-connected")).not.toBeNull();
+
+    cleanup();
+  });
+
+  // ── 10. Connect Freighter button ────────────────────────────────
+
+  test("connect Freighter button triggers onConnectFreighter", async () => {
+    const onConnectFreighter = jest.fn().mockResolvedValue(
+      "GCONNECTEDKEYGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    );
+    const opts = createOptions({
+      freighterAvailable: true,
+      freighterPublicKey: "",
+      onConnectFreighter,
+    });
+
+    const cleanup = mountDonateOverlay(opts);
+    const connectBtn = document.querySelector("#igp-connect-freighter") as HTMLButtonElement;
+    expect(connectBtn).not.toBeNull();
+
+    connectBtn.click();
+
+    await jest.runAllTimersAsync();
+
+    expect(onConnectFreighter).toHaveBeenCalled();
+    expect(connectBtn.textContent).toContain("Connecting");
+
+    cleanup();
+  });
+
+  test("connect Freighter shows error on failure", async () => {
+    const onConnectFreighter = jest.fn().mockRejectedValue(new Error("User rejected"));
+    const opts = createOptions({
+      freighterAvailable: true,
+      freighterPublicKey: "",
+      onConnectFreighter,
+    });
+
+    const cleanup = mountDonateOverlay(opts);
+    const connectBtn = document.querySelector("#igp-connect-freighter") as HTMLButtonElement;
+    connectBtn.click();
+
+    await jest.runAllTimersAsync();
+
+    const statusEl = document.querySelector("#igp-donate-status");
+    expect(statusEl!.textContent).toContain("Failed to connect");
+    expect(statusEl!.className).toContain("igp-status-error");
+
+    cleanup();
+  });
+
+  // ── 11. Submit button state ─────────────────────────────────────
 
   test("submit button is disabled when no amount is entered", () => {
     const opts = createOptions({
@@ -349,7 +497,6 @@ describe("mountDonateOverlay", () => {
       "igp-submit-btn",
     ) as HTMLButtonElement;
 
-    // Without amount, button should be disabled
     expect(submitBtn.disabled).toBe(true);
 
     cleanup();
@@ -378,7 +525,7 @@ describe("mountDonateOverlay", () => {
     cleanup();
   });
 
-  // ── 10. Donation submission ─────────────────────────────────────
+  // ── 12. Donation submission ─────────────────────────────────────
 
   test("onDonate is called with amount and memo when submitted", async () => {
     const onDonate = jest.fn().mockResolvedValue(undefined);
@@ -398,31 +545,252 @@ describe("mountDonateOverlay", () => {
 
     const cleanup = mountDonateOverlay(opts);
 
-    // Set amount
     const amountInput = document.getElementById(
       "igp-amount-input",
     ) as HTMLInputElement;
     amountInput.value = "10";
 
-    // Set memo
     const memoInput = document.getElementById(
       "igp-memo-input",
     ) as HTMLInputElement;
     memoInput.value = "Great work!";
 
-    // Trigger input event to enable submit
     amountInput.dispatchEvent(new Event("input"));
 
-    // Click submit
     const submitBtn = document.getElementById(
       "igp-submit-btn",
     ) as HTMLButtonElement;
     submitBtn.click();
 
-    // Wait for async
     await jest.runAllTimersAsync();
 
     expect(onDonate).toHaveBeenCalledWith("10", "Great work!");
+
+    cleanup();
+  });
+
+  test("shows minimum donation error when amount is too low", async () => {
+    const onDonate = jest.fn().mockResolvedValue(undefined);
+    const opts = createOptions({
+      project: {
+        id: "proj-1",
+        name: "Test",
+        category: "Reforestation",
+        verified: true,
+        walletAddress:
+          "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
+      },
+      onDonate,
+      freighterPublicKey:
+        "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
+    });
+
+    const cleanup = mountDonateOverlay(opts);
+
+    // Set a valid amount first to enable the button
+    const amountInput = document.getElementById(
+      "igp-amount-input",
+    ) as HTMLInputElement;
+    amountInput.value = "5";
+    amountInput.dispatchEvent(new Event("input"));
+
+    // Verify button is enabled
+    const submitBtn = document.getElementById(
+      "igp-submit-btn",
+    ) as HTMLButtonElement;
+    expect(submitBtn.disabled).toBe(false);
+
+    // Now set amount too low
+    amountInput.value = "0.05";
+
+    submitBtn.click();
+
+    const statusEl = document.getElementById("igp-donate-status");
+    expect(statusEl!.textContent).toContain("Minimum donation");
+    expect(statusEl!.className).toContain("igp-status-error");
+    expect(onDonate).not.toHaveBeenCalled();
+
+    cleanup();
+  });
+
+  test("shows error message when donation fails", async () => {
+    const onDonate = jest.fn().mockRejectedValue(new Error("Insufficient funds"));
+    const opts = createOptions({
+      project: {
+        id: "proj-1",
+        name: "Test",
+        category: "Reforestation",
+        verified: true,
+        walletAddress:
+          "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
+      },
+      onDonate,
+      freighterPublicKey:
+        "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
+    });
+
+    const cleanup = mountDonateOverlay(opts);
+
+    const amountInput = document.getElementById(
+      "igp-amount-input",
+    ) as HTMLInputElement;
+    amountInput.value = "50";
+    amountInput.dispatchEvent(new Event("input"));
+
+    const submitBtn = document.getElementById(
+      "igp-submit-btn",
+    ) as HTMLButtonElement;
+    submitBtn.click();
+
+    await jest.runAllTimersAsync();
+
+    const statusEl = document.getElementById("igp-donate-status");
+    expect(statusEl!.textContent).toContain("Insufficient funds");
+    expect(statusEl!.className).toContain("igp-status-error");
+    expect(submitBtn.textContent).toBe("💚 Try Again");
+
+    cleanup();
+  });
+
+  test("shows generic error when donation throws without message", async () => {
+    const onDonate = jest.fn().mockRejectedValue("unknown error");
+    const opts = createOptions({
+      project: {
+        id: "proj-1",
+        name: "Test",
+        category: "Reforestation",
+        verified: true,
+        walletAddress:
+          "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
+      },
+      onDonate,
+      freighterPublicKey:
+        "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
+    });
+
+    const cleanup = mountDonateOverlay(opts);
+
+    const amountInput = document.getElementById(
+      "igp-amount-input",
+    ) as HTMLInputElement;
+    amountInput.value = "10";
+    amountInput.dispatchEvent(new Event("input"));
+
+    const submitBtn = document.getElementById(
+      "igp-submit-btn",
+    ) as HTMLButtonElement;
+    submitBtn.click();
+
+    await jest.runAllTimersAsync();
+
+    const statusEl = document.getElementById("igp-donate-status");
+    expect(statusEl!.textContent).toContain("Transaction failed");
+
+    cleanup();
+  });
+
+  test("shows success message after donation", async () => {
+    const onDonate = jest.fn().mockResolvedValue(undefined);
+    const opts = createOptions({
+      project: {
+        id: "proj-1",
+        name: "Test",
+        category: "Reforestation",
+        verified: true,
+        walletAddress:
+          "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
+      },
+      onDonate,
+      freighterPublicKey:
+        "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
+    });
+
+    const cleanup = mountDonateOverlay(opts);
+
+    const amountInput = document.getElementById(
+      "igp-amount-input",
+    ) as HTMLInputElement;
+    amountInput.value = "25";
+    amountInput.dispatchEvent(new Event("input"));
+
+    const submitBtn = document.getElementById(
+      "igp-submit-btn",
+    ) as HTMLButtonElement;
+    submitBtn.click();
+
+    await jest.runAllTimersAsync();
+
+    const statusEl = document.getElementById("igp-donate-status");
+    expect(statusEl!.textContent).toContain("Donation submitted successfully");
+    expect(submitBtn.textContent).toBe("✅ Done");
+
+    cleanup();
+  });
+
+  // ── 13. Custom amount input ─────────────────────────────────────
+
+  test("custom amount input triggers preset deselection and button update", () => {
+    const opts = createOptions({
+      project: {
+        id: "proj-1",
+        name: "Test",
+        category: "Reforestation",
+        verified: true,
+        walletAddress:
+          "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
+      },
+      freighterPublicKey:
+        "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
+    });
+
+    const cleanup = mountDonateOverlay(opts);
+
+    // First click a preset to make it active
+    const presetBtns = document.querySelectorAll(".igp-preset-btn");
+    const fiveBtn = Array.from(presetBtns).find(
+      (b) => b.getAttribute("data-amount") === "5",
+    ) as HTMLButtonElement;
+    fiveBtn.click();
+    expect(fiveBtn.classList.contains("active")).toBe(true);
+
+    // Then type a custom amount
+    const amountInput = document.getElementById(
+      "igp-amount-input",
+    ) as HTMLInputElement;
+    amountInput.value = "42";
+    amountInput.dispatchEvent(new Event("input"));
+
+    // Preset should lose active class
+    expect(fiveBtn.classList.contains("active")).toBe(false);
+
+    cleanup();
+  });
+
+  // ── 14. Direct donate view edge cases ───────────────────────────
+
+  test("direct donate with freighter connected shows 'Send Donation' button", () => {
+    const opts = createOptions({
+      freighterAvailable: true,
+      freighterPublicKey: "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
+    });
+
+    const cleanup = mountDonateOverlay(opts);
+    const submitBtn = document.getElementById("igp-submit-btn") as HTMLButtonElement;
+    expect(submitBtn).not.toBeNull();
+    expect(submitBtn.textContent).toContain("Send Donation");
+
+    cleanup();
+  });
+
+  test("direct donate with freighter not available shows missing message", () => {
+    const opts = createOptions({
+      freighterAvailable: false,
+      freighterPublicKey: "",
+    });
+
+    const cleanup = mountDonateOverlay(opts);
+    const overlay = document.getElementById("indigopay-overlay");
+    expect(overlay!.querySelector(".igp-freighter-missing")).not.toBeNull();
 
     cleanup();
   });

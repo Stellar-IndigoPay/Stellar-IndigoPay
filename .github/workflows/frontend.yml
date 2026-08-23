@@ -21,7 +21,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
@@ -44,7 +44,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
@@ -64,7 +64,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
@@ -88,7 +88,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
@@ -108,35 +108,35 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
-  working-directory: frontend
-  run: npm ci --legacy-peer-deps
-- name: Install json-server for mock API
-  run: npm install -g json-server
-- name: Start mock API server
-  working-directory: frontend
-  run: npx json-server --watch tests/e2e/fixtures/db.json --port 4000 &
-  env:
-    NODE_ENV: test
-- name: Cache Playwright browsers
-  uses: actions/cache@v4
-  id: playwright-cache
-  with:
-    path: ~/.cache/ms-playwright
-    key: ${{ runner.os }}-playwright-${{ hashFiles('frontend/package-lock.json') }}
-    restore-keys: |
-      ${{ runner.os }}-playwright-
+        working-directory: frontend
+        run: npm ci --legacy-peer-deps
+      - name: Install json-server for mock API
+        run: npm install -g json-server
+      - name: Start mock API server
+        working-directory: frontend
+        run: npx json-server --watch tests/e2e/fixtures/db.json --port 4000 &
+        env:
+          NODE_ENV: test
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
       - name: Install Playwright browsers (with dependencies)
         if: steps.playwright-cache.outputs.cache-hit != 'true'
+        working-directory: frontend
         run: npx playwright install --with-deps chromium
-        working-directory: frontend
-      - name: Install Playwright system dependencies (if cached)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: npx playwright install-deps chromium
-        working-directory: frontend
+      # No separate install-deps step on cache hits: ubuntu-latest already
+      # ships the Chromium system libraries, and `npx playwright install-deps`
+      # invokes apt-get which intermittently deadlocks on the runner's dpkg
+      # lock and hangs the job until the 15m timeout.
       - name: Build frontend for E2E
         working-directory: frontend
         run: npm run build
@@ -144,6 +144,24 @@ jobs:
           NEXT_PUBLIC_STELLAR_NETWORK: testnet
           NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
           NEXT_PUBLIC_API_URL: http://localhost:4000
+      - name: Start Next.js server
+        working-directory: frontend
+        run: |
+          E2E_TESTING=true \
+          NEXT_PUBLIC_STELLAR_NETWORK=testnet \
+          NEXT_PUBLIC_HORIZON_URL=https://horizon-testnet.stellar.org \
+          NEXT_PUBLIC_API_URL=http://localhost:4000 \
+          npm run start &
+          # Wait for the server to respond (up to 30s)
+          for i in $(seq 1 30); do
+            if curl -s -o /dev/null http://127.0.0.1:3000; then
+              echo "Server ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Server failed to start" >&2
+          exit 1
       - name: Run E2E tests
         working-directory: frontend
         run: npx playwright test
@@ -170,7 +188,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -178,16 +196,10 @@ jobs:
         working-directory: frontend
         run: npm ci --legacy-peer-deps
 
-      - name: Build frontend
+      - name: Build frontend (with bundle analysis)
         working-directory: frontend
-        run: ANALYZE=false npm run build
-        env:
-          NEXT_PUBLIC_STELLAR_NETWORK: testnet
-          NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
-          NEXT_PUBLIC_API_URL: http://localhost:4000
-
-      - name: Bundle analysis (ANALYZE=true)
-        working-directory: frontend
+        # ANALYZE=true produces the same .next output plus bundle-size
+        # reports, so a second build is unnecessary.
         run: ANALYZE=true npm run build
         env:
           NEXT_PUBLIC_STELLAR_NETWORK: testnet
@@ -233,7 +245,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -257,7 +269,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -268,9 +280,28 @@ jobs:
         # package.json + overrides keeps CI deterministic.
         run: npm ci --legacy-peer-deps
 
-      - name: Install Playwright browsers
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache-e2e
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: Install Playwright browsers (with dependencies)
+        if: steps.playwright-cache-e2e.outputs.cache-hit != 'true'
         working-directory: frontend
-        run: npx playwright install --with-deps chromium firefox webkit
+        # Every project in playwright.config.ts runs Chromium, so firefox and
+        # webkit are never used. Installing their system deps (apt-get) is what
+        # hung on ubuntu-latest and blew the 15m job timeout, so install only
+        # the browser the suite actually launches.
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Playwright system dependencies (if cached)
+        if: steps.playwright-cache-e2e.outputs.cache-hit == 'true'
+        working-directory: frontend
+        run: npx playwright install-deps chromium
 
       - name: Build frontend for E2E
         working-directory: frontend
@@ -279,6 +310,23 @@ jobs:
           NEXT_PUBLIC_STELLAR_NETWORK: testnet
           NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
           NEXT_PUBLIC_API_URL: http://localhost:4000
+      - name: Start Next.js server
+        working-directory: frontend
+        run: |
+          E2E_TESTING=true \
+          NEXT_PUBLIC_STELLAR_NETWORK=testnet \
+          NEXT_PUBLIC_HORIZON_URL=https://horizon-testnet.stellar.org \
+          NEXT_PUBLIC_API_URL=http://localhost:4000 \
+          npm run start &
+          for i in $(seq 1 30); do
+            if curl -s -o /dev/null http://127.0.0.1:3000; then
+              echo "Server ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Server failed to start" >&2
+          exit 1
       - name: Run Playwright tests
         working-directory: frontend
         # Visual regression snapshots are OS/font-render dependent — skip in CI,

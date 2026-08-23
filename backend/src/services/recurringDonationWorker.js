@@ -354,6 +354,7 @@ async function start(io) {
   );
 
   await boss.start();
+  await boss.createQueue(QUEUE);
   await boss.schedule(QUEUE, cronSchedule, {}, { tz: "UTC" });
   await boss.work(QUEUE, { teamSize: 1, teamConcurrency: 1 }, async () => {
     await checkDueSubscriptions(io);

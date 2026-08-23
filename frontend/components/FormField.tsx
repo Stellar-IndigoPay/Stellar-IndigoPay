@@ -66,7 +66,7 @@ export default function FormField({
       </label>
       {renderedChildren}
       {helper && !error && (
-        <p id={helperId} className="text-xs text-[#8aaa8a] font-body">
+        <p id={helperId} className="text-xs text-[#5a7a5a] dark:text-[#8aaa8a] font-body">
           {helper}
         </p>
       )}

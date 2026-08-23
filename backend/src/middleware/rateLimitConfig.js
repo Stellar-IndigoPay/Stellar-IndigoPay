@@ -42,6 +42,9 @@ const RATE_LIMIT_TIERS = {
   "GET /api/stats":                        { points: 60,  duration: 60   },
   "GET /api/impact/*":                     { points: 60,  duration: 60   },
   "GET /api/map":                          { points: 60,  duration: 60   },
+  "POST /api/attestations":                { points: 10,  duration: 60   },
+  "GET /api/attestations":                 { points: 60,  duration: 60   },
+  "GET /api/oracle/price":                 { points: 60,  duration: 60   },
 
   // ── Analytics endpoint (token-bucket for burst tolerance) ──────────────
   "GET /api/analytics/*":                  {

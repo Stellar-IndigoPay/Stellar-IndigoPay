@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 240" fill="none">
+  <defs>
+    <linearGradient id="brand-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#6366F1"/>
+      <stop offset="50%" stop-color="#818CF8"/>
+      <stop offset="100%" stop-color="#4F46E5"/>
+    </linearGradient>
+    <linearGradient id="leaf-grad" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0%" stop-color="#10B981"/>
+      <stop offset="100%" stop-color="#34D399"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Icon: combined star + leaf monogram -->
+  <g transform="translate(120, 120)">
+    <!-- Outer ring -->
+    <circle cx="0" cy="0" r="90" stroke="url(#brand-grad)" stroke-width="3" fill="none" opacity="0.25"/>
+    <circle cx="0" cy="0" r="82" stroke="url(#brand-grad)" stroke-width="1.5" fill="none" opacity="0.15"/>
+
+    <!-- Star shape (Stellar blockchain reference) -->
+    <polygon
+      points="0,-58 17,-18 58,-18 26,7 38,48 0,26 -38,48 -26,7 -58,-18 -17,-18"
+      fill="url(#brand-grad)"
+      opacity="0.9"
+    />
+
+    <!-- Leaf shape (climate reference) — overlays the star -->
+    <g transform="translate(0, -4)">
+      <path
+        d="M0,36 C-22,18 -28,-8 -4,-28 L0,-20 L4,-28 C28,-8 22,18 0,36Z"
+        fill="url(#leaf-grad)"
+        opacity="0.85"
+      />
+      <!-- Leaf vein -->
+      <line x1="0" y1="32" x2="0" y2="-16" stroke="#064E3B" stroke-width="1" opacity="0.3"/>
+      <line x1="0" y1="8" x2="-12" y2="-8" stroke="#064E3B" stroke-width="0.75" opacity="0.2"/>
+      <line x1="0" y1="8" x2="12" y2="-8" stroke="#064E3B" stroke-width="0.75" opacity="0.2"/>
+    </g>
+
+    <!-- Small orbiting dot (blockchain/crypto accent) -->
+    <circle cx="75" cy="-30" r="4" fill="#818CF8" opacity="0.7"/>
+    <circle cx="-68" cy="40" r="3" fill="#6366F1" opacity="0.5"/>
+  </g>
+
+  <!-- Project name -->
+  <text x="255" y="117" font-family="'Inter','Segoe UI',system-ui,-apple-system,sans-serif" font-weight="800" font-size="58" letter-spacing="-1.5" fill="#1E1B4B">
+    Stellar
+    <tspan fill="url(#brand-grad)">-Indigo</tspan>
+    <tspan fill="#6366F1">Pay</tspan>
+  </text>
+
+  <!-- Tagline -->
+  <text x="260" y="157" font-family="'Inter','Segoe UI',system-ui,-apple-system,sans-serif" font-weight="500" font-size="18" letter-spacing="0.5" fill="#6B7280">
+    Fund the planet. One XLM at a time.
+  </text>
+</svg>

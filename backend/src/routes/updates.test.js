@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 
 jest.mock("../db/pool", () => ({ query: jest.fn() }));
 jest.mock("../services/email", () => ({
@@ -39,10 +39,23 @@ describe("GET /api/updates/:projectId", () => {
 
   test("returns 400 INVALID_CURSOR for a malformed cursor", async () => {
     const res = await request(app)
-      .get("/api/updates/project-1?cursor=not-base64-json")
+      .get("/api/updates/11111111-2222-3333-8888-555555555555?cursor=not-base64-json")
       .expect(400);
 
     expect(res.body.error.code).toBe("INVALID_CURSOR");
+  });
+
+  test("returns 400 before querying for a malformed project ID", async () => {
+    const res = await request(app)
+      .get("/api/updates/not-a-uuid")
+      .expect(400);
+
+    expect(res.body.error).toBe("Validation failed");
+    expect(res.body.details).toContainEqual({
+      path: "projectId",
+      message: "Invalid UUID",
+    });
+    expect(pool.query).not.toHaveBeenCalled();
   });
 });
 
@@ -58,7 +71,7 @@ describe("POST /api/updates", () => {
     const res = await request(app)
       .post("/api/updates")
       .set("X-Admin-Key", "test-admin-key")
-      .send({ projectId: "project-1", body: "text" })
+      .send({ projectId: "11111111-2222-3333-8888-555555555555", body: "text" })
       .expect(400);
 
     expect(res.body.error.code).toBe("VALIDATION_ERROR");
@@ -88,7 +101,7 @@ describe("POST /api/updates/:updateId/like", () => {
 
   test("returns 400 VALIDATION_ERROR when donorAddress is missing", async () => {
     const res = await request(app)
-      .post("/api/updates/update-1/like")
+      .post("/api/updates/33333333-3333-4333-8333-333333333333/like")
       .send({})
       .expect(400);
 
@@ -100,10 +113,24 @@ describe("POST /api/updates/:updateId/like", () => {
     pool.query.mockResolvedValueOnce({ rows: [] });
 
     const res = await request(app)
-      .post("/api/updates/missing/like")
+      .post("/api/updates/44444444-4444-4444-8444-444444444444/like")
       .send({ donorAddress: "GDONOR" })
       .expect(404);
 
     expect(res.body.error.code).toBe("UPDATE_NOT_FOUND");
+  });
+
+  test("returns 400 before querying for a malformed update ID", async () => {
+    const res = await request(app)
+      .post("/api/updates/not-a-uuid/like")
+      .send({ donorAddress: "GDONOR" })
+      .expect(400);
+
+    expect(res.body.error).toBe("Validation failed");
+    expect(res.body.details).toContainEqual({
+      path: "updateId",
+      message: "Invalid UUID",
+    });
+    expect(pool.query).not.toHaveBeenCalled();
   });
 });

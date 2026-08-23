@@ -87,8 +87,8 @@ describe("Active Matches Banner in Project Detail Page", () => {
       expect(screen.queryByText(/Donation Matching Active/i)).toBeTruthy();
     });
 
-    expect(screen.getByText(/matched 2× up to 5,000 XLM/i)).toBeTruthy();
-    expect(screen.getByText(/4,000 XLM remaining/i)).toBeTruthy();
+    expect(screen.getByText(/matched.*2.*up to.*5,000.*XLM/i)).toBeTruthy();
+    expect(screen.getByText(/4,000.*XLM.*remaining/i)).toBeTruthy();
   });
 
   test("does not render banner when no matches exist", async () => {

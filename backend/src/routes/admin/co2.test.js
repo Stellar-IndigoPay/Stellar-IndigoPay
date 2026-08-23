@@ -97,7 +97,11 @@ describe("GET /api/admin/co2/flags", () => {
       .set("Authorization", `Bearer ${adminToken()}`);
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/status must be one of/);
+    expect(res.body.error).toMatchObject({
+      code: "VALIDATION_ERROR",
+      field: "status",
+    });
+    expect(res.body.error.detail).toMatch(/status must be one of/);
     expect(pool.query).not.toHaveBeenCalled();
   });
 });
@@ -183,7 +187,11 @@ describe("PATCH /api/admin/co2/flags/:projectId/resolve", () => {
       .send({ resolution: "maybe" });
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/resolution must be one of/);
+    expect(res.body.error).toMatchObject({
+      code: "VALIDATION_ERROR",
+      field: "resolution",
+    });
+    expect(res.body.error.detail).toMatch(/resolution must be one of/);
     expect(pool.query).not.toHaveBeenCalled();
   });
 
@@ -196,5 +204,6 @@ describe("PATCH /api/admin/co2/flags/:projectId/resolve", () => {
       .send({ resolution: "verified" });
 
     expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe("PROJECT_NOT_FOUND");
   });
 });

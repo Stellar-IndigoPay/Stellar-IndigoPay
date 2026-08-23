@@ -37,6 +37,7 @@ const router = express.Router();
 const pool = require("../../db/pool");
 const { adminRequired } = require("../../middleware/auth");
 const { logAdminAction } = require("../../services/audit");
+const { sendAppError } = require("../../errors");
 const {
   CATEGORY_BENCHMARKS,
   CO2_VERIFICATION_STATUSES,
@@ -91,8 +92,9 @@ router.get("/flags", adminRequired, async (req, res, next) => {
     const { status, limit = "50", page = "1" } = req.query;
 
     if (status && !CO2_VERIFICATION_STATUSES.includes(status)) {
-      return res.status(400).json({
-        error: `status must be one of: ${CO2_VERIFICATION_STATUSES.join(", ")}`,
+      return sendAppError(res, "VALIDATION_ERROR", {
+        field: "status",
+        detail: `status must be one of: ${CO2_VERIFICATION_STATUSES.join(", ")}`,
       });
     }
 
@@ -242,7 +244,7 @@ router.post("/verify/:projectId", adminRequired, async (req, res, next) => {
       [req.params.projectId],
     );
     const project = existing.rows[0];
-    if (!project) return res.status(404).json({ error: "Project not found" });
+    if (!project) return sendAppError(res, "PROJECT_NOT_FOUND");
 
     const result = await verifyProjectCO2Rate(project);
 
@@ -274,16 +276,18 @@ router.patch(
     try {
       const { resolution, notes } = req.body || {};
       if (!RESOLUTIONS.includes(resolution)) {
-        return res.status(400).json({
-          error: `resolution must be one of: ${RESOLUTIONS.join(", ")}`,
+        return sendAppError(res, "VALIDATION_ERROR", {
+          field: "resolution",
+          detail: `resolution must be one of: ${RESOLUTIONS.join(", ")}`,
         });
       }
       let notesStr = null;
       if (notes != null && notes !== "") {
         if (typeof notes !== "string" || notes.length > 2000) {
-          return res
-            .status(400)
-            .json({ error: "notes must be a string up to 2000 characters" });
+          return sendAppError(res, "VALIDATION_ERROR", {
+            field: "notes",
+            detail: "notes must be a string up to 2000 characters",
+          });
         }
         notesStr = notes.trim();
       }
@@ -293,7 +297,7 @@ router.patch(
         [req.params.projectId],
       );
       const row = existing.rows[0];
-      if (!row) return res.status(404).json({ error: "Project not found" });
+      if (!row) return sendAppError(res, "PROJECT_NOT_FOUND");
 
       const updated = await pool.query(
         `UPDATE projects

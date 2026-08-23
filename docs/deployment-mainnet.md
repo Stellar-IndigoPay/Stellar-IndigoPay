@@ -1,3 +1,5 @@
+> **📋 Looking for the full checklist?** See the **[Mainnet Deployment Checklist](mainnet-deployment-checklist.md)** — a comprehensive 9-phase runbook covering contract deployment, security hardening, k8s, monitoring, and emergency procedures. This document is the condensed original; the checklist is the authoritative guide.
+
 # Mainnet Deployment Runbook
 
 This runbook documents the steps required to deploy Stellar-IndigoPay to Stellar Mainnet, configure backend and frontend environment variables, and register the initial climate projects on-chain.

@@ -23,7 +23,9 @@ function generateReceiptPdf({ donation, project, receiptId, issuedAt, receiptHas
     `Ledger: ${donation.ledger_number || "Not recorded"}`,
     `Donation date: ${new Date(donation.created_at).toISOString()}`,
     `CO2 offset estimate: ${Number(donation.co2_offset_kg || 0).toFixed(2)} kg`,
-    "Verify on Stellar Expert: https://stellar.expert/explorer/testnet/tx/" + donation.transaction_hash,
+    "Verify on Stellar Expert: https://stellar.expert/explorer/" +
+      (process.env.STELLAR_NETWORK === "mainnet" ? "public" : "testnet") +
+      "/tx/" + donation.transaction_hash,
     `Receipt SHA-256: ${receiptHash}`,
     `Ed25519 signature: ${signature}`,
     "The transaction proof and signature above allow independent verification.",

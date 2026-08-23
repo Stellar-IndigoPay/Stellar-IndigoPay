@@ -2,7 +2,6 @@
  * pages/dashboard.tsx — Donor impact dashboard
  */
 import { useState, useEffect } from "react";
-import type { GetServerSideProps } from "next";
 import Link from "next/link";
 import WalletConnect from "@/components/WalletConnect";
 import EditProfileForm from "@/components/EditProfileForm";
@@ -11,6 +10,7 @@ import ImpactCertificate from "@/components/ImpactCertificate";
 import ProjectRating from "@/components/ProjectRating";
 import Tabs from "@/components/Tabs";
 import RecurringDonationsTab from "@/components/RecurringDonationsTab";
+import EmptyState from "@/components/EmptyState";
 import { fetchProfile, fetchDonorHistory, fetchProjects } from "@/lib/api";
 import {
   getDueMonthlySubscriptionsForDonor,
@@ -545,18 +545,17 @@ export default function Dashboard() {
                         <span>📜</span> Donation History
                       </h2>
                       {donationsList.length === 0 ? (
-                        <div className="text-center py-12">
-                          <p className="text-4xl mb-3">🌱</p>
-                          <p className="text-[#475569] dark:text-[#94A3B8] mb-4 font-body">
-                            No donations yet
-                          </p>
-                          <Link
-                            href="/projects"
-                            className="btn-primary text-sm"
-                          >
-                            Browse Projects →
-                          </Link>
-                        </div>
+                        <EmptyState
+                          variant="empty"
+                          title="No donations yet"
+                          className="py-12"
+                          headingLevel="h3"
+                          action={
+                            <Link href="/projects" className="btn-primary text-sm">
+                              Browse Projects →
+                            </Link>
+                          }
+                        />
                       ) : (
                         <div className="space-y-2">
                           {donationsList.map((d) => (
@@ -621,19 +620,18 @@ export default function Dashboard() {
                 content: (
                   <div className="animate-slide-up focus:outline-none focus-visible:ring-2 focus-visible:ring-[#818CF8] focus-visible:ring-offset-2 dark:focus-visible:ring-offset-[#0A0A1A]">
                     {savedProjects.length === 0 ? (
-                      <div className="card text-center py-20">
-                        <p className="text-5xl mb-4">❤️</p>
-                        <h2 className="text-xl font-display font-bold text-[#0F172A] dark:text-[#E2E8F0] mb-2">
-                          No saved projects yet
-                        </h2>
-                        <p className="text-[#475569] dark:text-[#94A3B8] mb-8 font-body">
-                          Save projects you&apos;re interested in to track their
-                          progress.
-                        </p>
-                        <Link href="/projects" className="btn-primary text-sm">
-                          Explore Projects
-                        </Link>
-                      </div>
+                      <EmptyState
+                        variant="empty"
+                        icon="❤️"
+                        title="No saved projects yet"
+                        description="Save projects you're interested in to track their progress."
+                        className="py-20"
+                        action={
+                          <Link href="/projects" className="btn-primary text-sm">
+                            Explore Projects
+                          </Link>
+                        }
+                      />
                     ) : (
                       <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
                         {savedProjects.map((project) => (
@@ -657,8 +655,3 @@ export default function Dashboard() {
   );
 }
 
-// Forces per-request SSR so the CSP nonce set in middleware.ts reaches
-// _document.tsx — see the matching comment in pages/index.tsx.
-export const getServerSideProps: GetServerSideProps = async () => {
-  return { props: {} };
-};

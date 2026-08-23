@@ -10,6 +10,12 @@ It uses [Playwright](https://playwright.dev/) (headless Chromium) and
 to evaluate the **real DOM** of every URL in `URLS_TO_SCAN`, against the
 `wcag2a / wcag2aa / wcag21a / wcag21aa` ruleset.
 
+Pages are scanned after the `load` event fires plus a short 2 s settle delay
+for client-rendered content.  `networkidle` is deliberately avoided because
+SSE streams (e.g. the Horizon donation ticker on the homepage) keep a
+persistent connection open and would cause a 30 s timeout on every page that
+uses live streaming.
+
 ## Running locally
 
 ```bash

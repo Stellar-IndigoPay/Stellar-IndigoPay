@@ -28,7 +28,16 @@ jest.mock("pg-boss", () => {
   }));
 });
 
+// The real advisory lock helper talks to Postgres; pass the guarded work
+// straight through so `runVerificationForAllProjects` stays under test, and
+// assert the lock is requested with the right key separately.
+jest.mock("./advisoryLock", () => ({
+  LOCK_KEYS: { co2Verification: "worker:co2_verification" },
+  withAdvisoryLock: jest.fn(async (_lockName, fn) => fn()),
+}));
+
 const pool = require("../db/pool");
+const { withAdvisoryLock, LOCK_KEYS } = require("./advisoryLock");
 const {
   CATEGORY_BENCHMARKS,
   IPCC_TIER1_FACTORS,
@@ -43,6 +52,7 @@ const {
   runVerificationForAllProjects,
   startCO2VerificationCron,
   stopCO2VerificationCron,
+  runScheduledVerification,
 } = require("./co2Verifier");
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -625,6 +635,36 @@ describe("stopCO2VerificationCron", () => {
   test("handles null boss gracefully", async () => {
     // Should not throw
     await expect(stopCO2VerificationCron()).resolves.not.toThrow();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 11. Scheduled verification lock (issue #677)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("runScheduledVerification", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test("acquires the co2-verification advisory lock around the batch run", async () => {
+    pool.query.mockResolvedValueOnce({ rows: [] }); // no active projects
+
+    await runScheduledVerification();
+
+    expect(withAdvisoryLock).toHaveBeenCalledWith(
+      LOCK_KEYS.co2Verification,
+      runVerificationForAllProjects,
+    );
+  });
+
+  test("returns false without running when the lock is not acquired", async () => {
+    withAdvisoryLock.mockResolvedValueOnce(false);
+
+    const result = await runScheduledVerification();
+
+    expect(result).toBe(false);
+    expect(pool.query).not.toHaveBeenCalled();
   });
 });
 

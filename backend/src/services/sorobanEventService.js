@@ -19,7 +19,11 @@
  *   - Batch commit: accumulate up to BATCH_SIZE events, then commit in a
  *     single DB transaction.
  *   - Failed events written to `soroban_event_dlq` with error details.
- *   - Prometheus metrics for throughput, lag, and failures.
+ *   - DLQ retries use exponential backoff with jitter; entries that exhaust
+ *     `DLQ_MAX_RETRIES` are quarantined (terminal state) so a permanently
+ *     malformed ("poison") event stops consuming pipeline capacity and
+ *     flooding logs, and is observable via a dedicated metric.
+ *   - Prometheus metrics for throughput, lag, failures, and quarantines.
  */
 "use strict";
 
@@ -35,13 +39,35 @@ const { registry } = require("./metrics");
 const { Counter, Gauge } = require("prom-client");
 const { v4: uuid } = require("uuid");
 const { computeBadges } = require("./store");
-const { insertEvent, processEvent } = require("./projectionEngine");
+const {
+  insertEvent,
+  processEvent,
+  co2OffsetForDonation,
+  toScaledInt,
+  scaledToDecimalString,
+} = require("./projectionEngine");
 
 // ── Configuration ───────────────────────────────────────────────────────────
 
 const POLL_INTERVAL_MS = 5_000; // 5 seconds
 const BATCH_SIZE = 50;
 const DLQ_MAX_RETRIES = 3;
+
+// DLQ retry policy: exponential backoff with jitter, then a terminal
+// quarantine once `DLQ_MAX_RETRIES` attempts are exhausted.
+const DLQ_BACKOFF_BASE_MS = Number(
+  process.env.SOROBAN_DLQ_BACKOFF_BASE_MS || 30_000, // 30 s
+);
+const DLQ_BACKOFF_MAX_MS = Number(
+  process.env.SOROBAN_DLQ_BACKOFF_MAX_MS || 8 * 60 * 60 * 1000, // 8 h cap
+);
+const DLQ_JITTER_MAX_MS = Number(
+  process.env.SOROBAN_DLQ_JITTER_MAX_MS || 5_000, // +/- 5 s
+);
+const DLQ_POLL_INTERVAL_MS = Number(
+  process.env.SOROBAN_DLQ_POLL_INTERVAL_MS || 60_000, // 1 min
+);
+const DLQ_BATCH_SIZE = Number(process.env.SOROBAN_DLQ_BATCH_SIZE || 10);
 
 // ── Prometheus metrics ──────────────────────────────────────────────────────
 
@@ -70,17 +96,21 @@ const sorobanEventsBatchDurationSeconds = new Gauge({
   registers: [registry],
 });
 
+const sorobanEventsDlqQuarantinedTotal = new Counter({
+  name: "indigopay_soroban_events_dlq_quarantined_total",
+  help: "Total Soroban event DLQ entries quarantined after exhausting retries, labelled by event_type.",
+  labelNames: ["event_type"],
+  registers: [registry],
+});
+
 // ── State ───────────────────────────────────────────────────────────────────
 
 let isRunning = false;
 let pollingTimer = null;
+let dlqTimer = null;
 let currentCursor = "";
 /** @type {import("socket.io").Server|null} */
 let io = null;
-/** @type {Set<string>} Tracks processed pagingTokens within the current session. */
-const processedTokens = new Set();
-/** Max size of the in-memory dedup set before it's pruned. */
-const MAX_DEDUP_SET_SIZE = 100_000;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -161,21 +191,76 @@ function extractValue(evt) {
 }
 
 /**
- * Prune the in-memory dedup set once it exceeds the max size.
- * Removes the oldest half of entries (Set iteration is insertion-ordered).
+ * Check if an event with this pagingToken has already been processed.
+ * Uses the database for durable deduplication across restarts.
+ * @param {string} pagingToken
+ * @param {object} client - Database client for transaction
+ * @returns {Promise<boolean>}
  */
-function pruneDedupSet() {
-  if (processedTokens.size <= MAX_DEDUP_SET_SIZE) return;
-  const toRemove = Math.floor(processedTokens.size / 2);
-  let removed = 0;
-  for (const token of processedTokens) {
-    processedTokens.delete(token);
-    if (++removed >= toRemove) break;
+async function isEventProcessed(pagingToken, client) {
+  if (!pagingToken) return false;
+  try {
+    const result = await client.query(
+      "SELECT 1 FROM soroban_processed_events WHERE paging_token = $1",
+      [pagingToken],
+    );
+    return result.rows.length > 0;
+  } catch (err) {
+    logger.error(
+      { event: "soroban_events_dedup_check_error", err: err.message },
+      "Failed to check event deduplication",
+    );
+    return false;
   }
-  logger.warn(
-    { event: "soroban_events_dedup_pruned", removed },
-    "Dedup set pruned to prevent memory growth",
-  );
+}
+
+/**
+ * Mark an event as processed by inserting its pagingToken into the database.
+ * @param {string} pagingToken
+ * @param {string} eventType
+ * @param {number} ledger
+ * @param {string} txHash
+ * @param {object} client - Database client for transaction
+ */
+async function markEventProcessed(pagingToken, eventType, ledger, txHash, client) {
+  if (!pagingToken) return;
+  try {
+    await client.query(
+      `INSERT INTO soroban_processed_events
+         (paging_token, event_type, ledger_sequence, transaction_hash, processed_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (paging_token) DO NOTHING`,
+      [pagingToken, eventType, ledger, txHash],
+    );
+  } catch (err) {
+    logger.error(
+      { event: "soroban_events_mark_processed_error", err: err.message, pagingToken },
+      "Failed to mark event as processed",
+    );
+  }
+}
+
+/**
+ * Clean up processed events older than 30 days to prevent unbounded growth.
+ * Called periodically from the polling loop.
+ */
+async function cleanupOldProcessedEvents() {
+  try {
+    const result = await pool.query(
+      "DELETE FROM soroban_processed_events WHERE processed_at < NOW() - INTERVAL '30 days'",
+    );
+    if (result.rowCount > 0) {
+      logger.info(
+        { event: "soroban_events_cleanup", deleted: result.rowCount },
+        "Cleaned up old processed events",
+      );
+    }
+  } catch (err) {
+    logger.error(
+      { event: "soroban_events_cleanup_error", err: err.message },
+      "Failed to clean up old processed events",
+    );
+  }
 }
 
 // ── Cursor persistence ──────────────────────────────────────────────────────
@@ -204,10 +289,12 @@ async function loadCursor() {
 /**
  * Persist the cursor to `indexer_state`.
  * @param {string} cursor
+ * @param {object} [client] - Optional database client for transaction
  */
-async function saveCursor(cursor) {
+async function saveCursor(cursor, client) {
+  const db = client || pool;
   try {
-    await pool.query(
+    await db.query(
       `INSERT INTO indexer_state (key, value, updated_at)
        VALUES ('soroban_event_cursor', $1, NOW())
        ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
@@ -224,25 +311,57 @@ async function saveCursor(cursor) {
 // ── DLQ ─────────────────────────────────────────────────────────────────────
 
 /**
- * Write a failed event to the dead-letter queue.
+ * Compute the delay for the next retry attempt using exponential backoff
+ * with jitter.
+ *
+ * At retry_count=0 the base delay is 30s, 60s at 1, 120s at 2, etc., capped
+ * at `DLQ_BACKOFF_MAX_MS` and padded with up to `DLQ_JITTER_MAX_MS` of
+ * randomness so a batch of failed events doesn't retry in lock-step.
+ *
+ * @param {number} retryCount — Number of attempts already made (0-based).
+ * @returns {number} Delay in milliseconds before the next attempt.
+ */
+function calculateBackoff(retryCount) {
+  const exponential = DLQ_BACKOFF_BASE_MS * Math.pow(2, retryCount);
+  const capped = Math.min(exponential, DLQ_BACKOFF_MAX_MS);
+  const jitter = Math.floor(Math.random() * (DLQ_JITTER_MAX_MS + 1));
+  return capped + jitter;
+}
+
+/**
+ * Write a failed event to the dead-letter queue with initial retry state.
+ * Re-enqueuing the same event (same paging token) that is still pending or
+ * retrying refreshes the error details without resetting its retry ladder,
+ * so a poison event keeps climbing toward quarantine instead of looping.
+ *
  * @param {object} evt — Raw event object
  * @param {string} eventType
  * @param {Error} error
  * @param {number} [attemptCount]
  */
 async function writeToDLQ(evt, eventType, error, attemptCount = DLQ_MAX_RETRIES) {
+  const pagingToken = evt.pagingToken || null;
   try {
     await pool.query(
       `INSERT INTO soroban_event_dlq
-         (event_type, contract_id, event_data, error_message, error_stack, attempt_count)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+         (event_type, contract_id, paging_token, event_data, error_message,
+          error_stack, attempt_count, retry_count, max_retries, next_attempt_at, status)
+       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, 0, $8, NOW(), 'pending')
+       ON CONFLICT (paging_token) WHERE status IN ('pending', 'retrying')
+       DO UPDATE SET
+         error_message = EXCLUDED.error_message,
+         error_stack = EXCLUDED.error_stack,
+         next_attempt_at = NOW(),
+         updated_at = NOW()`,
       [
         eventType,
         CONTRACT_ID,
+        pagingToken,
         JSON.stringify(evt),
         error.message || "Unknown error",
         error.stack || null,
         attemptCount,
+        DLQ_MAX_RETRIES,
       ],
     );
   } catch (err) {
@@ -250,6 +369,150 @@ async function writeToDLQ(evt, eventType, error, attemptCount = DLQ_MAX_RETRIES)
       { event: "soroban_events_dlq_write_error", err: err.message },
       "Failed to write event to DLQ",
     );
+  }
+}
+
+/**
+ * Re-run the handler for a single DLQ entry.
+ *
+ * On success the entry is marked `resolved`. On failure the retry ladder
+ * climbs: if `retry_count` reaches `max_retries` the entry is moved to the
+ * terminal `quarantined` state and the quarantine metric is incremented;
+ * otherwise `next_attempt_at` is scheduled with exponential backoff + jitter.
+ *
+ * @param {object} entry — Row from `soroban_event_dlq`.
+ * @returns {Promise<{ outcome: "resolved"|"retrying"|"quarantined", retryCount?: number }>}
+ */
+async function retryDLQEntry(entry) {
+  const { id, event_type, event_data, retry_count, max_retries } = entry;
+
+  let evt;
+  try {
+    evt = typeof event_data === "string" ? JSON.parse(event_data) : event_data;
+  } catch (err) {
+    logger.error(
+      { event: "soroban_events_dlq_undecodable", id, event_type, err: err.message },
+      "DLQ entry event data is not valid JSON — quarantining",
+    );
+    await pool.query(
+      `UPDATE soroban_event_dlq
+       SET retry_count = $2, status = 'quarantined', quarantined_at = NOW(), updated_at = NOW()
+       WHERE id = $1`,
+      [id, max_retries],
+    );
+    sorobanEventsDlqQuarantinedTotal.inc({ event_type });
+    return { outcome: "quarantined", retryCount: max_retries };
+  }
+
+  const handler = HANDLERS[event_type] || handleOtherEvent; // eslint-disable-line security/detect-object-injection
+
+  try {
+    const topics = extractTopics(evt);
+    const value = extractValue(evt);
+    await handler(evt, topics, value);
+
+    await pool.query(
+      `UPDATE soroban_event_dlq
+       SET status = 'resolved', resolved_at = NOW(), updated_at = NOW()
+       WHERE id = $1`,
+      [id],
+    );
+    logger.info(
+      { event: "soroban_events_dlq_resolved", id, eventType: event_type },
+      "DLQ entry reprocessed successfully",
+    );
+    return { outcome: "resolved" };
+  } catch (err) {
+    const nextRetryCount = retry_count + 1;
+
+    if (nextRetryCount >= max_retries) {
+      await pool.query(
+        `UPDATE soroban_event_dlq
+         SET retry_count = $2, status = 'quarantined', quarantined_at = NOW(), updated_at = NOW()
+         WHERE id = $1`,
+        [id, nextRetryCount],
+      );
+      sorobanEventsDlqQuarantinedTotal.inc({ event_type });
+      logger.error(
+        {
+          event: "soroban_events_dlq_quarantined",
+          id,
+          eventType: event_type,
+          retryCount: nextRetryCount,
+          err: err.message,
+        },
+        `DLQ entry exhausted ${max_retries} retries — quarantined as poison message`,
+      );
+      return { outcome: "quarantined", retryCount: nextRetryCount };
+    }
+
+    const nextAttemptAt = new Date(Date.now() + calculateBackoff(nextRetryCount));
+    await pool.query(
+      `UPDATE soroban_event_dlq
+       SET retry_count = $2, status = 'retrying', next_attempt_at = $3,
+           error_message = $4, updated_at = NOW()
+       WHERE id = $1`,
+      [id, nextRetryCount, nextAttemptAt, err.message || "Unknown error"],
+    );
+    logger.warn(
+      {
+        event: "soroban_events_dlq_retry_scheduled",
+        id,
+        eventType: event_type,
+        retryCount: nextRetryCount,
+        nextAttemptAt,
+        err: err.message,
+      },
+      `DLQ entry failed — scheduled retry with backoff`,
+    );
+    return { outcome: "retrying", retryCount: nextRetryCount };
+  }
+}
+
+/**
+ * Poll the DLQ for entries whose backoff window has elapsed and re-attempt
+ * them. Entries at the retry cap are quarantined by `retryDLQEntry`.
+ *
+ * @returns {Promise<{processed: number, resolved: number, retrying: number, quarantined: number}>}
+ */
+async function pollDLQ() {
+  try {
+    const result = await pool.query(
+      `SELECT id, event_type, event_data, retry_count, max_retries
+       FROM soroban_event_dlq
+       WHERE status IN ('pending', 'retrying')
+         AND retry_count < max_retries
+         AND next_attempt_at <= NOW()
+       ORDER BY next_attempt_at ASC
+       LIMIT $1`,
+      [DLQ_BATCH_SIZE],
+    );
+
+    const summary = { processed: result.rows.length, resolved: 0, retrying: 0, quarantined: 0 };
+    for (const entry of result.rows) {
+      const res = await retryDLQEntry(entry);
+      summary[res.outcome] = (summary[res.outcome] || 0) + 1;
+    }
+
+    if (result.rows.length > 0) {
+      logger.info(
+        {
+          event: "soroban_events_dlq_poll",
+          processed: summary.processed,
+          resolved: summary.resolved,
+          retrying: summary.retrying,
+          quarantined: summary.quarantined,
+        },
+        `DLQ retry cycle complete: ${summary.resolved} resolved, ${summary.retrying} retrying, ${summary.quarantined} quarantined`,
+      );
+    }
+    return summary;
+  } catch (err) {
+    logger.error(
+      { event: "soroban_events_dlq_poll_error", err: err.message },
+      "DLQ poll failed",
+    );
+    return { processed: 0, resolved: 0, retrying: 0, quarantined: 0 };
   }
 }
 
@@ -303,7 +566,7 @@ async function handleDonated(evt, topics, value) {
     const num = parseFloat(amount);
     xlmStr = isNaN(num) ? "0" : (num / 10_000_000).toFixed(7);
   }
-  const xlmAmount = parseFloat(xlmStr);
+  const xlmAmount = parseFloat(xlmStr); // display-only; DB/event writes use xlmStr below
 
   // Dedup by txHash — if already recorded, skip.
   // NOTE: evt.txHash is always present for contract-invoked events.
@@ -333,7 +596,7 @@ async function handleDonated(evt, topics, value) {
     await client.query(
       `INSERT INTO donations (id, project_id, donor_address, amount_xlm, amount, currency, transaction_hash, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
-      [donationId, projectId, donor, xlmAmount, xlmAmount, "XLM", txHash || "soroban-" + donationId],
+      [donationId, projectId, donor, xlmStr, xlmStr, "XLM", txHash || "soroban-" + donationId],
     );
 
     // Update project raised_xlm + donor_count
@@ -343,7 +606,7 @@ async function handleDonated(evt, topics, value) {
            donor_count = (SELECT COUNT(DISTINCT donor_address) FROM donations WHERE project_id = $2),
            updated_at = NOW()
        WHERE id = $2`,
-      [xlmAmount, projectId],
+      [xlmStr, projectId],
     );
 
     // Update donor profile
@@ -352,9 +615,12 @@ async function handleDonated(evt, topics, value) {
       [donor],
     );
     const prevTotal = profileResult.rows[0]
-      ? parseFloat(profileResult.rows[0].total_donated_xlm || "0")
-      : 0;
-    const newTotal = prevTotal + xlmAmount;
+      ? String(profileResult.rows[0].total_donated_xlm ?? "0")
+      : "0";
+    const newTotal = scaledToDecimalString(
+      toScaledInt(prevTotal, 7) + toScaledInt(xlmStr, 7),
+      7,
+    );
 
     const projectsSupportedResult = await client.query(
       "SELECT COUNT(DISTINCT project_id) AS count FROM donations WHERE donor_address = $1",
@@ -374,7 +640,7 @@ async function handleDonated(evt, topics, value) {
          projects_supported = EXCLUDED.projects_supported,
          badges = EXCLUDED.badges,
          updated_at = NOW()`,
-      [donor, newTotal.toFixed(7), projectsSupported, JSON.stringify(badges)],
+      [donor, newTotal, projectsSupported, JSON.stringify(badges)],
     );
 
     await client.query("COMMIT");
@@ -391,15 +657,13 @@ async function handleDonated(evt, topics, value) {
         "SELECT raised_xlm, co2_offset_kg FROM projects WHERE id = $1",
         [projectId],
       );
-      const raisedXlm = Number(
-        projectStats.rows[0] ? projectStats.rows[0].raised_xlm || 0 : 0,
-      );
-      const co2Kg = Number(
-        projectStats.rows[0] ? projectStats.rows[0].co2_offset_kg || 0 : 0,
-      );
-      const co2OffsetKg = raisedXlm > 0 && co2Kg > 0
-        ? (xlmAmount * co2Kg) / raisedXlm
-        : 0;
+      const raisedXlm = projectStats.rows[0]
+        ? String(projectStats.rows[0].raised_xlm ?? "0")
+        : "0";
+      const co2Kg = projectStats.rows[0]
+        ? String(projectStats.rows[0].co2_offset_kg ?? "0")
+        : "0";
+      const co2OffsetKg = co2OffsetForDonation(xlmStr, raisedXlm, co2Kg);
 
       const donationEvent = {
         event_type: "DonationRecorded",
@@ -407,8 +671,8 @@ async function handleDonated(evt, topics, value) {
         event_data: {
           donorAddress: donor,
           projectId,
-          amountXLM: xlmAmount,
-          amount: xlmAmount,
+          amountXLM: xlmStr,
+          amount: xlmStr,
           currency: "XLM",
           message: msgHash != null ? `msg#${msgHash}` : null,
           co2OffsetKg,
@@ -856,6 +1120,27 @@ async function handlePropRej(evt, _topics, value) {
 }
 
 /**
+ * Handle `prop_noq` — proposal rejected because the quorum floor was not met.
+ * Kept distinct from `prop_rej` so below-quorum outcomes are not conflated
+ * with majority rejections.
+ * Topics: [symbol("prop_noq")]
+ * Value: project_id
+ */
+async function handlePropNoq(evt, _topics, value) {
+  const projectId = typeof value === "string" ? value : String(value || "");
+
+  logger.info(
+    {
+      event: "soroban_events_prop_noq",
+      projectId,
+      ledger: evt.ledger,
+    },
+    "Governance proposal rejected — quorum not met",
+  );
+  return { action: "logged" };
+}
+
+/**
  * Handle `prop_veto` — proposal vetoed by admin.
  * Topics: [symbol("prop_veto"), admin_address]
  * Value: project_id
@@ -908,16 +1193,16 @@ async function handlePropNew(evt, topics, value) {
  * sub_creat, sub_canc.
  * These are logged but don't currently require database mutations.
  */
-async function handleOtherEvent(evt, eventType, topics, value) {
+async function handleOtherEvent(evt, topics, value) {
   logger.info(
     {
       event: "soroban_events_other",
-      eventType,
+      eventType: extractEventType(evt),
       topics: topics.slice(0, 5), // avoid logging huge arrays
       value: typeof value === "object" ? "[object]" : String(value).slice(0, 200),
       ledger: evt.ledger,
     },
-    `Soroban contract event "${eventType}" observed`,
+    "Soroban contract event observed",
   );
   return { action: "logged" };
 }
@@ -933,6 +1218,7 @@ const HANDLERS = {
   voted: handleVoted,
   proj_ver: handleProjVer,
   prop_rej: handlePropRej,
+  prop_noq: handlePropNoq,
   prop_veto: handlePropVeto,
   prop_new: handlePropNew,
   rec_cr: handleRecCr,
@@ -1023,61 +1309,98 @@ async function pollEvents() {
 
     for (const evt of events) {
       const pagingToken = evt.pagingToken || "";
-
-      // Dedup by pagingToken
-      if (pagingToken && processedTokens.has(pagingToken)) {
-        skipped++;
-        continue;
-      }
-
       const eventType = extractEventType(evt);
-      const handler = HANDLERS[eventType] || handleOtherEvent; // eslint-disable-line security/detect-object-injection
+      const ledger = evt.ledger || 0;
+      const txHash = evt.txHash || "";
 
+      // Use a transaction to atomically check dedup, process event, mark as processed, and update cursor
+      const client = await pool.connect();
       try {
-        const topics = extractTopics(evt);
-        const value = extractValue(evt);
-        await handler(evt, topics, value);
+        await client.query("BEGIN");
 
-        if (pagingToken) {
-          processedTokens.add(pagingToken);
+        // DB-level dedup check
+        const alreadyProcessed = await isEventProcessed(pagingToken, client);
+        if (alreadyProcessed) {
+          await client.query("COMMIT");
+          client.release();
+          skipped++;
+          logger.debug(
+            { event: "soroban_events_skipped", pagingToken, eventType },
+            "Event already processed - skipping",
+          );
+          continue;
         }
-        processed++;
-        sorobanEventsProcessedTotal.inc({ event_type: eventType, outcome: "success" });
+
+        const handler = HANDLERS[eventType] || handleOtherEvent; // eslint-disable-line security/detect-object-injection
+
+        try {
+          const topics = extractTopics(evt);
+          const value = extractValue(evt);
+          await handler(evt, topics, value);
+
+          // Mark event as processed in DB
+          await markEventProcessed(pagingToken, eventType, ledger, txHash, client);
+          
+          processed++;
+          sorobanEventsProcessedTotal.inc({ event_type: eventType, outcome: "success" });
+        } catch (err) {
+          failed++;
+          logger.error(
+            {
+              event: "soroban_events_handler_error",
+              eventType,
+              pagingToken,
+              err: err.message,
+            },
+            `Event handler "${eventType}" failed`,
+          );
+          sorobanEventsProcessedTotal.inc({ event_type: eventType, outcome: "failed" });
+
+          // Write to DLQ
+          await writeToDLQ(evt, eventType, err);
+          
+          // Still mark as processed to avoid infinite retry loops
+          await markEventProcessed(pagingToken, eventType, ledger, txHash, client);
+        }
+
+        // Update cursor atomically with event processing
+        if (pagingToken) {
+          newCursor = pagingToken;
+          await saveCursor(newCursor, client);
+        }
+
+        await client.query("COMMIT");
       } catch (err) {
-        failed++;
+        await client.query("ROLLBACK");
         logger.error(
           {
-            event: "soroban_events_handler_error",
-            eventType,
+            event: "soroban_events_transaction_error",
             pagingToken,
             err: err.message,
           },
-          `Event handler "${eventType}" failed`,
+          "Transaction failed for event processing",
         );
+        failed++;
         sorobanEventsProcessedTotal.inc({ event_type: eventType, outcome: "failed" });
-
-        // Write to DLQ
-        await writeToDLQ(evt, eventType, err);
-        // Still mark as processed to avoid infinite retry loops
-        if (pagingToken) {
-          processedTokens.add(pagingToken);
-        }
-      }
-
-      // Track the latest cursor
-      if (pagingToken) {
-        newCursor = pagingToken;
+      } finally {
+        client.release();
       }
     }
 
-    // Persist cursor so restarts don't reprocess
+    // Update in-memory cursor
     if (newCursor && newCursor !== currentCursor) {
       currentCursor = newCursor;
-      await saveCursor(currentCursor);
     }
 
-    // Prune dedup set if needed
-    pruneDedupSet();
+    // Cleanup old processed events (run periodically, not on every batch)
+    if (Math.random() < 0.01) { // ~1% of batches
+      cleanupOldProcessedEvents().catch((err) => {
+        logger.error(
+          { event: "soroban_events_cleanup_failed", err: err.message },
+          "Background cleanup of processed events failed",
+        );
+      });
+    }
 
     // Track lag
     if (events.length > 0) {
@@ -1159,6 +1482,20 @@ async function start(socketIo) {
   if (typeof pollingTimer.unref === "function") {
     pollingTimer.unref();
   }
+
+  // Schedule DLQ retry cycles with exponential backoff
+  dlqTimer = setInterval(() => {
+    pollDLQ().catch((err) =>
+      logger.error(
+        { event: "soroban_events_dlq_poll_loop_error", err: err.message },
+        "DLQ retry cycle failed",
+      ),
+    );
+  }, DLQ_POLL_INTERVAL_MS);
+
+  if (typeof dlqTimer.unref === "function") {
+    dlqTimer.unref();
+  }
 }
 
 /**
@@ -1177,6 +1514,11 @@ async function stop() {
     pollingTimer = null;
   }
 
+  if (dlqTimer) {
+    clearInterval(dlqTimer);
+    dlqTimer = null;
+  }
+
   io = null;
 
   // Persist the current cursor before shutting down
@@ -1190,14 +1532,13 @@ async function stop() {
  * Return health status for readiness probes.
  *
  * @returns {{isRunning: boolean, currentCursor: string,
- *   processedTokenCount: number, contractId: string|undefined,
+ *   contractId: string|undefined,
  *   pollIntervalMs: number, timestamp: string}}
  */
 function getStatus() {
   return {
     isRunning,
     currentCursor,
-    processedTokenCount: processedTokens.size,
     contractId: CONTRACT_ID,
     pollIntervalMs: POLL_INTERVAL_MS,
     timestamp: new Date().toISOString(),
@@ -1216,7 +1557,19 @@ async function rescan(fromCursor) {
     currentCursor = fromCursor;
   } else {
     currentCursor = ""; // start from beginning
-    processedTokens.clear();
+    // Clear processed events table for full rescan
+    try {
+      await pool.query("TRUNCATE TABLE soroban_processed_events");
+      logger.info(
+        { event: "soroban_events_rescan_cleared" },
+        "Cleared processed events table for full rescan",
+      );
+    } catch (err) {
+      logger.error(
+        { event: "soroban_events_rescan_clear_error", err: err.message },
+        "Failed to clear processed events table",
+      );
+    }
   }
 
   logger.info(
@@ -1242,4 +1595,8 @@ module.exports = {
   extractValue,
   pollEvents,
   HANDLERS,
+  writeToDLQ,
+  retryDLQEntry,
+  pollDLQ,
+  calculateBackoff,
 };

@@ -203,6 +203,12 @@ exports[`DonorProfile Component matches snapshot for badge tier: EarthGuardian 1
               >
                 Jan 1, 2023
               </span>
+              <button
+                class="text-[10px] text-[#227239] underline disabled:opacity-50"
+                type="button"
+              >
+                Download tax receipt
+              </button>
             </div>
           </div>
         </div>
@@ -425,6 +431,12 @@ exports[`DonorProfile Component matches snapshot for badge tier: Forest 1`] = `
               >
                 Jan 1, 2023
               </span>
+              <button
+                class="text-[10px] text-[#227239] underline disabled:opacity-50"
+                type="button"
+              >
+                Download tax receipt
+              </button>
             </div>
           </div>
         </div>
@@ -812,6 +824,12 @@ exports[`DonorProfile Component matches snapshot for badge tier: Seedling 1`] = 
               >
                 Jan 1, 2023
               </span>
+              <button
+                class="text-[10px] text-[#227239] underline disabled:opacity-50"
+                type="button"
+              >
+                Download tax receipt
+              </button>
             </div>
           </div>
         </div>
@@ -1034,6 +1052,12 @@ exports[`DonorProfile Component matches snapshot for badge tier: Tree 1`] = `
               >
                 Jan 1, 2023
               </span>
+              <button
+                class="text-[10px] text-[#227239] underline disabled:opacity-50"
+                type="button"
+              >
+                Download tax receipt
+              </button>
             </div>
           </div>
         </div>
