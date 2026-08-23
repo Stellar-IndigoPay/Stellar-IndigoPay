@@ -93,7 +93,7 @@ health check failure.
 
 ### Rotation Scope
 
-The following secrets are rotated every quarter:
+The following secrets are rotated every quarter or validated by the quarterly rotation workflow:
 
 | Secret                     | Format                                      |
 | -------------------------- | ------------------------------------------- |
@@ -101,7 +101,8 @@ The following secrets are rotated every quarter:
 | `JWT_SECRET`               | 64-char base64 random                       |
 | `WEBHOOK_SIGNING_SECRET`   | 64-char hex random                          |
 | `ADMIN_API_KEY`            | `ip_admin_` + 48-char hex                   |
-| `RECURRING_SIGNER_SECRET`  | 44-char base64 random                       |
+| `ORACLE_ADMIN_SECRET`      | Stellar signer seed, rotated by managed signer ceremony |
+| `RECURRING_SIGNER_SECRET`  | Stellar signer seed, rotated by managed signer ceremony |
 
 ### Rotation Workflow
 
@@ -112,7 +113,7 @@ The rotation is implemented as a GitHub Actions workflow at
 
 **Manual trigger:** Use `workflow_dispatch` from the Actions tab with
 optional inputs:
-- `secrets_to_rotate`: comma-separated list (defaults to all five)
+- `secrets_to_rotate`: comma-separated list (defaults to app secrets; signer seeds are selected only for managed-secret validation)
 - `skip_health_check`: boolean (use with caution)
 - `skip_rollback`: boolean (debugging use only)
 
@@ -172,3 +173,8 @@ GET /api/admin/secret-rotations/latest/status — quick status
 ```
 
 All endpoints require admin authentication via bearer token.
+
+
+### Managed signer secret delivery
+
+`ORACLE_ADMIN_SECRET` and `RECURRING_SIGNER_SECRET` are synced from AWS Secrets Manager into the dedicated `stellar-indigopay-signer-secrets` Kubernetes Secret and mounted as read-only files in the backend Pod. The backend reads those files through `ORACLE_ADMIN_SECRET_FILE` and `RECURRING_SIGNER_SECRET_FILE`; direct long-lived env-var signer seeds are rejected outside `test`/`development`. Because Stellar seeds cannot be replaced with random bytes safely, the rotation workflow fails fast for these keys and directs operators to the managed signer/HSM-backed rotation ceremony before rollout health checks and audit logging.

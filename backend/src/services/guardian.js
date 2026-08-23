@@ -1,8 +1,10 @@
 const { server: stellarServer, NETWORK_PASSPHRASE, submitTransaction } = require("./stellar");
 const { Contract, nativeToScVal, Keypair, TransactionBuilder } = require("@stellar/stellar-sdk");
 const logger = require("../logger");
-const { Gauge, Counter } = require("prom-client");
+const { Counter } = require("prom-client");
 const { registry } = require("./metrics");
+const { getSigningSecret } = require("./signingSecretProvider");
+const { withAdvisoryLock, LOCK_KEYS } = require("./advisoryLock");
 
 // 12-hour cadence
 const GUARDIAN_INTERVAL_MS = 12 * 60 * 60 * 1000;
@@ -19,15 +21,11 @@ const guardianUpdateCounter = new Counter({
 
 async function buildExtendAllTtlTransaction() {
   const contractId = process.env.CONTRACT_ID;
-  const adminSecret = process.env.ORACLE_ADMIN_SECRET;
+  const adminSecret = await getSigningSecret("oracleAdmin");
 
   if (!contractId) {
     throw new Error("CONTRACT_ID not configured");
   }
-  if (!adminSecret) {
-    throw new Error("ORACLE_ADMIN_SECRET not configured");
-  }
-
   const keypair = Keypair.fromSecret(adminSecret);
   const adminPublicKey = keypair.publicKey();
 
@@ -63,17 +61,25 @@ async function runGuardian() {
   }
 }
 
+/**
+ * Guardian cycle guarded by a per-worker Postgres advisory lock so only one
+ * replica extends TTLs at a time (issue #677).
+ */
+async function runGuardianCycle() {
+  return withAdvisoryLock(LOCK_KEYS.guardian, runGuardian);
+}
+
 function start() {
   if (intervalId) return;
   
   // Run on startup
-  runGuardian().catch((err) => {
+  runGuardianCycle().catch((err) => {
     logger.error({ event: "guardian_startup_failed", err: err.message }, "Initial guardian run failed");
   });
 
   intervalId = setInterval(async () => {
     try {
-      await runGuardian();
+      await runGuardianCycle();
     } catch (err) {
       // Logged in runGuardian
     }
@@ -94,6 +100,7 @@ function stop() {
 module.exports = {
   buildExtendAllTtlTransaction,
   runGuardian,
+  runGuardianCycle,
   start,
   stop,
 };

@@ -12,8 +12,8 @@
  *
  * Post-scan flow:
  *   scanning → validating → found   (green: project name, auto-navigate)
- *                         → unknown (yellow: address not in registry,
- *                                    donor may still donate to it)
+ *                         → inactive (red: registered but not active — blocked)
+ *                         → unknown (red: address not in registry — blocked)
  *                         → invalid (red: not a Stellar/IndigoPay QR)
  *
  * Every successful scan is persisted to AsyncStorage (last 20, newest
@@ -36,6 +36,11 @@ import { CameraView, useCameraPermissions } from "expo-camera";
 import axios from "axios";
 import { parseQRData, ParsedQR } from "../utils/qrParser";
 import {
+  resolveProjectByAddress,
+  RegistryProject,
+  DestinationValidationResult,
+} from "../utils/projectValidation";
+import {
   addToHistory,
   clearScanHistory,
   getScanHistory,
@@ -49,30 +54,28 @@ type ValidationState =
   | "scanning"
   | "validating"
   | "found"
+  | "inactive"
   | "unknown"
   | "invalid";
 
-interface RegistryProject {
-  id: string;
-  name: string;
-  walletAddress: string;
-}
-
-/** Look up a scanned wallet address in the backend project registry. */
+/**
+ * Resolve a scanned wallet address against the backend project registry.
+ * Fetches the registry (active + inactive) and returns whether the address
+ * belongs to a known active project, a known inactive project, or no project.
+ */
 async function lookupAddress(
   address: string,
-): Promise<{ found: boolean; project?: RegistryProject }> {
+): Promise<DestinationValidationResult> {
   try {
-    const res = await axios.get(
-      `${API_URL}/api/projects?wallet=${encodeURIComponent(address)}`,
-    );
+    const res = await axios.get(`${API_URL}/api/projects?limit=100`);
     const list: RegistryProject[] = Array.isArray(res.data?.data)
       ? res.data.data
       : [];
-    const project = list.find((p) => p.walletAddress === address);
-    return { found: !!project, project };
+    return resolveProjectByAddress(list, address);
   } catch {
-    return { found: false };
+    // Fail closed: on a lookup error, treat the destination as unknown so a
+    // donation is never sent to an unverified address.
+    return { kind: "unknown" };
   }
 }
 
@@ -166,7 +169,7 @@ export default function ScanScreen() {
     // Otherwise validate the scanned address against the project registry.
     if (parsed.address) {
       const result = await lookupAddress(parsed.address);
-      if (result.found && result.project) {
+      if (result.kind === "found") {
         setValidationState("found");
         setProjectInfo(result.project);
         await addToHistory({
@@ -180,6 +183,9 @@ export default function ScanScreen() {
           amount: parsed.amount,
           memo: parsed.memo,
         });
+      } else if (result.kind === "inactive") {
+        setValidationState("inactive");
+        setProjectInfo(result.project);
       } else {
         setValidationState("unknown");
       }
@@ -189,28 +195,10 @@ export default function ScanScreen() {
     setValidationState("invalid");
   };
 
-  /** "Donate anyway" for addresses that aren't in the project registry. */
-  const donateToUnknownAddress = async () => {
-    if (!pendingScan?.address) return;
-    await addToHistory({ ...pendingScan, timestamp: Date.now() });
-    refreshHistory();
-    navigateToDonate("scan", {
-      wallet: pendingScan.address,
-      amount: pendingScan.amount,
-      memo: pendingScan.memo,
-    });
-  };
-
   const openHistoryItem = (item: ScanHistoryItem) => {
     setHistoryVisible(false);
     if (item.projectId) {
       navigateToDonate(item.projectId, {
-        amount: item.amount,
-        memo: item.memo,
-      });
-    } else if (item.address) {
-      navigateToDonate("scan", {
-        wallet: item.address,
         amount: item.amount,
         memo: item.memo,
       });
@@ -308,25 +296,34 @@ export default function ScanScreen() {
             </View>
           )}
 
+          {validationState === "inactive" && (
+            <View style={styles.statusCard}>
+              <Text style={styles.foundIcon}>🚫</Text>
+              <Text style={styles.errorText}>
+                {projectInfo?.name
+                  ? `${projectInfo.name} is not accepting donations right now.`
+                  : "This project is not accepting donations right now."}
+              </Text>
+              <Text style={styles.warningSubText}>
+                The scanned wallet belongs to an inactive project.
+              </Text>
+            </View>
+          )}
+
           {validationState === "unknown" && (
             <View style={styles.statusCard}>
-              <Text style={styles.foundIcon}>⚠️</Text>
-              <Text style={styles.warningText}>
-                Address not in the project registry.
+              <Text style={styles.foundIcon}>⛔</Text>
+              <Text style={styles.errorText}>
+                This address is not a registered IndigoPay project.
               </Text>
               <Text style={styles.warningSubText}>
                 {pendingScan?.address
                   ? `${pendingScan.address.slice(0, 8)}…${pendingScan.address.slice(-4)}`
                   : ""}
               </Text>
-              <TouchableOpacity
-                style={[styles.button, { marginTop: 12 }]}
-                onPress={donateToUnknownAddress}
-                accessibilityRole="button"
-                accessibilityLabel="Donate to this address anyway"
-              >
-                <Text style={styles.buttonText}>Donate Anyway</Text>
-              </TouchableOpacity>
+              <Text style={styles.warningSubText}>
+                Donations are only sent to registered, active project wallets.
+              </Text>
             </View>
           )}
 

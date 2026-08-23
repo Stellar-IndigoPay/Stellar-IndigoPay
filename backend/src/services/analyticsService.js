@@ -9,9 +9,35 @@
  *
  * Each function accepts optional { from, to } Date params to scope
  * queries to a time range.
+ *
+ * Query-time bounds (closes #718):
+ *   - Every aggregate runs through runBoundedQuery(), which applies an
+ *     explicit statement_timeout (ANALYTICS_STATEMENT_TIMEOUT_MS) scoped to
+ *     that query via SET LOCAL, so a degraded plan can never stall the admin
+ *     dashboard.
+ *   - Result sets are capped with paginated windows (LIMIT).
+ *   - getDonationTrends / getCategoryBreakdown clamp { from, to } to a
+ *     bounded window (TRENDS_MAX_DAYS) unless the caller explicitly supplies
+ *     one, keeping the default path off full-table scans of the donations
+ *     ledger.
  */
 
 const pool = require("../db/pool");
+
+// -- Bounds ----------------------------------------------------------
+
+const ANALYTICS_STATEMENT_TIMEOUT_MS = Number(
+  process.env.ANALYTICS_STATEMENT_TIMEOUT_MS || 1500,
+);
+
+const TRENDS_MAX_DAYS = 1826; // ~5 years of daily rows
+const PROJECT_PERFORMANCE_LIMIT = 100;
+const GEOGRAPHIC_LIMIT = 250;
+const RETENTION_LIMIT = 200;
+const CATEGORY_LIMIT = 100;
+const GROWTH_MONTHS_LIMIT = 120; // ~10 years of monthly rows
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 // -- Helpers ----------------------------------------------------------
 
@@ -29,6 +55,48 @@ function dateClause(from, to, column = "created_at") {
   return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", values };
 }
 
+/**
+ * Clamp an optional { from, to } range to at most `maxDays`. When only one
+ * bound is given the other is derived (from → now, to → now-maxDays), so the
+ * returned window is always finite. A missing range stays unbounded so the
+ * call site decides whether that is acceptable.
+ * @param {{ from?: Date|string, to?: Date|string }} [range]
+ * @param {number} [maxDays]
+ * @returns {{ from: Date|null, to: Date|null }}
+ */
+function clampRange(range = {}, maxDays = TRENDS_MAX_DAYS) {
+  let from = range.from ? new Date(range.from) : null;
+  let to = range.to ? new Date(range.to) : null;
+  if (!from && !to) return { from: null, to: null };
+  if (!to) to = new Date();
+  if (!from) from = new Date(to.getTime() - maxDays * DAY_MS);
+  if (to.getTime() - from.getTime() > maxDays * DAY_MS) {
+    from = new Date(to.getTime() - maxDays * DAY_MS);
+  }
+  return { from, to };
+}
+
+/**
+ * Run an aggregate query under an explicit statement_timeout budget. Uses a
+ * dedicated connection with SET LOCAL so the timeout is scoped to this query
+ * and never bleeds into pooled connections or subsequent statements.
+ */
+async function runBoundedQuery(sql, values = []) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL statement_timeout = ${ANALYTICS_STATEMENT_TIMEOUT_MS}`);
+    const result = await client.query(sql, values);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // -- Exports ----------------------------------------------------------
 
 /**
@@ -37,7 +105,8 @@ function dateClause(from, to, column = "created_at") {
  * @returns {Promise<Array<{ day: string, donationCount: number, totalXLM: string, uniqueDonors: number, avgDonationXLM: string }>>}
  */
 async function getDonationTrends(range = {}) {
-  const { where, values } = dateClause(range.from, range.to, "day");
+  const { from, to } = clampRange(range);
+  const { where, values } = dateClause(from, to, "day");
 
   // Refresh the materialized view first for fresh data
   try {
@@ -51,13 +120,14 @@ async function getDonationTrends(range = {}) {
     }
   }
 
-  const result = await pool.query(
+  const result = await runBoundedQuery(
     `SELECT day, donation_count AS "donationCount",
             total_xlm AS "totalXLM", unique_donors AS "uniqueDonors",
             avg_donation_xlm AS "avgDonationXLM"
      FROM mv_daily_donations
      ${where}
-     ORDER BY day ASC`,
+     ORDER BY day ASC
+     LIMIT ${TRENDS_MAX_DAYS}`,
     values,
   );
 
@@ -72,15 +142,14 @@ async function getDonationTrends(range = {}) {
 
 /**
  * Project performance metrics sorted by raised amount.
- * @param {{ from?: Date|string, to?: Date|string }} [range]
  * @returns {Promise<Array>}
  */
-async function getProjectPerformance(range = {}) {
+async function getProjectPerformance() {
   try {
     await pool.query("REFRESH MATERIALIZED VIEW mv_project_performance");
   } catch { /* fallback */ }
 
-  const result = await pool.query(
+  const result = await runBoundedQuery(
     `SELECT id, name, category, location, raised_xlm AS "raisedXLM",
             donor_count AS "donorCount", goal_xlm AS "goalXLM",
             co2_offset_kg AS "co2OffsetKg", status, verified,
@@ -89,7 +158,7 @@ async function getProjectPerformance(range = {}) {
             created_at AS "createdAt"
      FROM mv_project_performance
      ORDER BY raised_xlm DESC
-     LIMIT 100`,
+     LIMIT ${PROJECT_PERFORMANCE_LIMIT}`,
   );
 
   return result.rows.map((r) => ({
@@ -119,11 +188,12 @@ async function getGeographicImpact() {
     await pool.query("REFRESH MATERIALIZED VIEW mv_geographic_impact");
   } catch { /* fallback */ }
 
-  const result = await pool.query(
+  const result = await runBoundedQuery(
     `SELECT country, project_count AS "projectCount", total_xlm AS "totalXLM",
             donor_count AS "donorCount", total_co2_kg AS "totalCO2Kg"
      FROM mv_geographic_impact
-     ORDER BY total_xlm DESC`,
+     ORDER BY total_xlm DESC
+     LIMIT ${GEOGRAPHIC_LIMIT}`,
   );
 
   return result.rows.map((r) => ({
@@ -144,13 +214,13 @@ async function getDonorRetention() {
     await pool.query("REFRESH MATERIALIZED VIEW mv_donor_cohorts");
   } catch { /* fallback */ }
 
-  const result = await pool.query(
+  const result = await runBoundedQuery(
     `SELECT cohort_month AS "cohortMonth", cohort_size AS "cohortSize",
             activity_month AS "activityMonth", active_donors AS "activeDonors",
             retention_pct AS "retentionPct"
      FROM mv_donor_cohorts
      ORDER BY cohort_month DESC, activity_month ASC
-     LIMIT 200`,
+     LIMIT ${RETENTION_LIMIT}`,
   );
 
   return result.rows.map((r) => ({
@@ -163,26 +233,40 @@ async function getDonorRetention() {
 }
 
 /**
+ * Build the SQL for the category breakdown query, scoped to an optional
+ * { from, to } range. Exported separately so EXPLAIN regression tests can
+ * inspect the plan without executing against the app pool.
+ * @param {{ from?: Date|string, to?: Date|string }} [range]
+ * @returns {{ sql: string, values: Array }}
+ */
+function buildCategoryBreakdownQuery(range = {}) {
+  const { from, to } = clampRange(range);
+  const { where, values } = dateClause(from, to, "d.created_at");
+  const whereClause = where ? `${where} AND p.status = 'active'` : "WHERE p.status = 'active'";
+
+  return {
+    sql: `SELECT p.category,
+                 COUNT(DISTINCT d.id)::int AS "donationCount",
+                 COALESCE(SUM(d.amount_xlm), 0) AS "totalXLM",
+                 COUNT(DISTINCT d.donor_address)::int AS "donorCount"
+          FROM donations d
+          JOIN projects p ON p.id = d.project_id
+          ${whereClause}
+          GROUP BY p.category
+          ORDER BY "totalXLM" DESC
+          LIMIT ${CATEGORY_LIMIT}`,
+    values,
+  };
+}
+
+/**
  * Category breakdown — donations by project category.
  * @param {{ from?: Date|string, to?: Date|string }} [range]
  * @returns {Promise<Array>}
  */
 async function getCategoryBreakdown(range = {}) {
-  const { where, values } = dateClause(range.from, range.to, "d.created_at");
-  const whereClause = where ? `${where} AND p.status = 'active'` : "WHERE p.status = 'active'";
-
-  const result = await pool.query(
-    `SELECT p.category,
-            COUNT(DISTINCT d.id)::int AS "donationCount",
-            COALESCE(SUM(d.amount_xlm), 0) AS "totalXLM",
-            COUNT(DISTINCT d.donor_address)::int AS "donorCount"
-     FROM donations d
-     JOIN projects p ON p.id = d.project_id
-     ${whereClause}
-     GROUP BY p.category
-     ORDER BY "totalXLM" DESC`,
-    values,
-  );
+  const { sql, values } = buildCategoryBreakdownQuery(range);
+  const result = await runBoundedQuery(sql, values);
 
   return result.rows.map((r) => ({
     category: r.category,
@@ -193,38 +277,55 @@ async function getCategoryBreakdown(range = {}) {
 }
 
 /**
+ * Build the SQL for the platform growth query (summary + monthly rows).
+ * Exported separately so EXPLAIN regression tests can inspect the plan
+ * without executing against the app pool.
+ * @returns {{ summary: { sql: string, values: Array }, monthly: { sql: string, values: Array } }}
+ */
+function buildPlatformGrowthQueries() {
+  return {
+    summary: {
+      sql: `SELECT
+              (SELECT COUNT(*)::int FROM projects) AS "totalProjects",
+              (SELECT COUNT(*)::int FROM donations) AS "totalDonations",
+              (SELECT COUNT(DISTINCT donor_address)::int FROM donations) AS "totalDonors",
+              (SELECT COALESCE(SUM(amount_xlm), 0) FROM donations) AS "totalXLM",
+              (SELECT COUNT(DISTINCT donor_address)::int
+               FROM donations
+               WHERE created_at >= NOW() - INTERVAL '30 days') AS "activeDonors30d",
+              (SELECT COALESCE(SUM(amount_xlm), 0)
+               FROM donations
+               WHERE created_at >= NOW() - INTERVAL '30 days') AS "totalXLM30d"
+            FROM (VALUES (1)) t`,
+      values: [],
+    },
+    monthly: {
+      sql: `SELECT
+              DATE_TRUNC('month', created_at)::date AS "month",
+              COUNT(*)::int AS "donations",
+              COALESCE(SUM(amount_xlm), 0) AS "totalXLM",
+              COUNT(DISTINCT donor_address)::int AS "donors"
+            FROM donations
+            GROUP BY DATE_TRUNC('month', created_at)
+            ORDER BY "month" ASC
+            LIMIT ${GROWTH_MONTHS_LIMIT}`,
+      values: [],
+    },
+  };
+}
+
+/**
  * Platform growth metrics — cumulative and monthly totals.
  * @returns {Promise<object>}
  */
 async function getPlatformGrowth() {
-  const [summary, monthly] = await Promise.all([
-    pool.query(
-      `SELECT
-         (SELECT COUNT(*)::int FROM projects) AS "totalProjects",
-         (SELECT COUNT(*)::int FROM donations) AS "totalDonations",
-         (SELECT COUNT(DISTINCT donor_address)::int FROM donations) AS "totalDonors",
-         (SELECT COALESCE(SUM(amount_xlm), 0) FROM donations) AS "totalXLM",
-         (SELECT COUNT(DISTINCT donor_address)::int
-          FROM donations
-          WHERE created_at >= NOW() - INTERVAL '30 days') AS "activeDonors30d",
-         (SELECT COALESCE(SUM(amount_xlm), 0)
-          FROM donations
-          WHERE created_at >= NOW() - INTERVAL '30 days') AS "totalXLM30d"
-       FROM (VALUES (1)) t`,
-    ),
-    pool.query(
-      `SELECT
-         DATE_TRUNC('month', created_at)::date AS "month",
-         COUNT(*)::int AS "donations",
-         COALESCE(SUM(amount_xlm), 0) AS "totalXLM",
-         COUNT(DISTINCT donor_address)::int AS "donors"
-       FROM donations
-       GROUP BY DATE_TRUNC('month', created_at)
-       ORDER BY "month" ASC`,
-    ),
+  const { summary, monthly } = buildPlatformGrowthQueries();
+  const [summaryResult, monthlyResult] = await Promise.all([
+    runBoundedQuery(summary.sql, summary.values),
+    runBoundedQuery(monthly.sql, monthly.values),
   ]);
 
-  const s = summary.rows[0];
+  const s = summaryResult.rows[0];
   return {
     summary: {
       totalProjects: Number(s.totalProjects),
@@ -234,7 +335,7 @@ async function getPlatformGrowth() {
       activeDonors30d: Number(s.activeDonors30d),
       totalXLM30d: String(s.totalXLM30d || "0"),
     },
-    monthlyGrowth: monthly.rows.map((r) => ({
+    monthlyGrowth: monthlyResult.rows.map((r) => ({
       month: r.month instanceof Date ? r.month.toISOString().slice(0, 7) : String(r.month).slice(0, 7),
       donations: Number(r.donations),
       totalXLM: String(r.totalXLM || "0"),
@@ -250,4 +351,16 @@ module.exports = {
   getDonorRetention,
   getCategoryBreakdown,
   getPlatformGrowth,
+  // Exported for EXPLAIN regression tests and bounds unit tests.
+  buildCategoryBreakdownQuery,
+  buildPlatformGrowthQueries,
+  clampRange,
+  runBoundedQuery,
+  ANALYTICS_STATEMENT_TIMEOUT_MS,
+  TRENDS_MAX_DAYS,
+  PROJECT_PERFORMANCE_LIMIT,
+  GEOGRAPHIC_LIMIT,
+  RETENTION_LIMIT,
+  CATEGORY_LIMIT,
+  GROWTH_MONTHS_LIMIT,
 };

@@ -37,6 +37,7 @@ import {
 import { useBiometricAuth } from "../../hooks/useBiometricAuth";
 import { useTheme } from "../theme";
 import { enqueueDonation } from "../../utils/donationQueue";
+import { safeRandomUUID } from "../../utils/uuid";
 import { useConnectivity } from "../../lib/connectivity";
 import SyncStatusIcon from "../../components/SyncStatusIcon";
 
@@ -192,6 +193,14 @@ export default function DonateScreen() {
     }
 
     /**
+     * Generate a unique idempotency key up front so the same key can be used
+     * for both the online POST and any offline queue replay. This lets the
+     * backend deduplicate a submission that succeeded server-side but whose
+     * response was lost, preventing double-recorded donations.
+     */
+    const idempotencyKey = safeRandomUUID();
+
+    /**
      * Issue #481: require biometric (or device-PIN) confirmation before
      * signing any Soroban / Stellar transaction. The hook also gracefully
      * handles devices that don't have biometric hardware — it drops
@@ -242,15 +251,21 @@ export default function DonateScreen() {
       const horizonResult = await server.submitTransaction(transaction);
       const transactionHash = horizonResult.hash;
 
-      await axios.post(`${API_URL}/api/donations`, {
-        projectId: selectedProject.id,
-        donorAddress: publicKey,
-        amountXLM: donationAmount.toFixed(7),
-        amount: donationAmount.toFixed(7),
-        currency: "XLM",
-        message: message.trim() || undefined,
-        transactionHash,
-      });
+      await axios.post(
+        `${API_URL}/api/donations`,
+        {
+          projectId: selectedProject.id,
+          donorAddress: publicKey,
+          amountXLM: donationAmount.toFixed(7),
+          amount: donationAmount.toFixed(7),
+          currency: "XLM",
+          message: message.trim() || undefined,
+          transactionHash,
+        },
+        {
+          headers: { "Idempotency-Key": idempotencyKey },
+        },
+      );
 
       setStatusType("success");
       setStatusMessage(
@@ -279,6 +294,7 @@ export default function DonateScreen() {
             currency: "XLM",
             message: message.trim() || undefined,
             donorAddress: publicKey,
+            idempotencyKey,
           });
           setStatusType("info");
           setStatusMessage(

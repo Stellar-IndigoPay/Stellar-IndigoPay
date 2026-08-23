@@ -2,16 +2,23 @@
 #
 # HorizontalPodAutoscaler for the backend Deployment. Replaces the
 # static `replicas: 2` in backend.yaml — the controller will scale up
-# to the max replicas on CPU/memory pressure, and back down to the
-# min replicas after a stabilization window.
+# to the max replicas on queue backlog/indexer lag or CPU/memory pressure,
+# and back down to the min replicas after a stabilization window.
 #
-# Requires metrics-server (or k8s-prometheus-adapter if using custom
-# metrics). Install via:
-#   helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
-#   helm install metrics-server metrics-server/metrics-server --namespace kube-system
+# Requires k8s-prometheus-adapter (or metrics-server for resource fallbacks).
+# Prometheus adapter rules map `queue_depth` and `indexer_lag_seconds` to the
+# Custom/External Metrics API.
+# Install Prometheus adapter via Helm:
+#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#   helm install prometheus-adapter prometheus-community/prometheus-adapter \
+#     --set rules.existing=prometheus-adapter-config
 #
-# Scaling is conservative by default: targets 70% CPU and 80% memory
-# to avoid thrashing. Bump targets if profiling shows headroom.
+# Primary scaling triggers:
+#   - queue_depth (pg-boss queue backlog per replica > 20)
+#   - indexer_lag_seconds (cluster-wide indexer lag > 10s)
+# Fallback triggers:
+#   - CPU utilization (70%)
+#   - Memory utilization (80%)
 
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -28,6 +35,20 @@ spec:
   minReplicas: 2
   maxReplicas: 10
   metrics:
+    - type: External
+      external:
+        metric:
+          name: queue_depth
+        target:
+          type: AverageValue
+          averageValue: "20"
+    - type: External
+      external:
+        metric:
+          name: indexer_lag_seconds
+        target:
+          type: Value
+          value: "10"
     - type: Resource
       resource:
         name: cpu

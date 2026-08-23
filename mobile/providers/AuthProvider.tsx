@@ -41,6 +41,12 @@ import { AppState, type AppStateStatus } from "react-native";
 import * as secureStore from "../lib/secureStore";
 import { authenticate } from "../hooks/useBiometricAuth";
 import { deleteSecretKey } from "../lib/wallet/sdk";
+import {
+  checkDeviceIntegrity,
+  enforceIntegrityPolicy,
+  getIntegrityPolicy,
+  type IntegrityPolicy,
+} from "../lib/deviceIntegrity";
 
 const SESSION_KEY = "wallet_session";
 const AUTO_LOCK_BACKGROUND_MS = 60_000;
@@ -64,6 +70,13 @@ export interface AuthContextValue {
   isAuthenticated: boolean;
   /** True only while the unlock prompt is open. */
   isUnlocking: boolean;
+  /**
+   * True when the device failed the jailbreak/root integrity check.
+   * Exposed so gated UI can show a warning/block message.
+   */
+  isDeviceCompromised: boolean;
+  /** Active device-integrity policy (`off` | `warn` | `block`). */
+  integrityPolicy: IntegrityPolicy;
   /** Current in-memory session. Read-only; do NOT mutate from callers. */
   session: WalletSession | null;
   /**
@@ -83,6 +96,8 @@ const noopContext: AuthContextValue = {
   state: "locked",
   isAuthenticated: false,
   isUnlocking: false,
+  isDeviceCompromised: false,
+  integrityPolicy: "block",
   session: null,
   unlock: async () => false,
   lock: () => undefined,
@@ -96,12 +111,34 @@ export interface AuthProviderProps {
   children: ReactNode;
 }
 
+/**
+ * Root provider that owns the wallet session lifecycle (hydrate →
+ * lock/unlock/clear) and enforces the device-integrity policy from
+ * `lib/deviceIntegrity` before any sensitive read or write.
+ */
 export function AuthProvider({ children }: AuthProviderProps) {
   const [state, setState] = useState<AuthState>("hydrating");
   const [session, setSession] = useState<WalletSession | null>(null);
   const [isUnlocking, setIsUnlocking] = useState(false);
+  const [isDeviceCompromised, setIsDeviceCompromised] = useState(false);
+  const [integrityPolicy] = useState<IntegrityPolicy>(() => getIntegrityPolicy());
   const backgroundedAtRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
+
+  // ---- Device-integrity probe: surface jailbreak/root compromise so
+  //                            gated UI can warn/block without waiting for
+  //                            an unlock attempt.
+  useEffect(() => {
+    (async () => {
+      try {
+        const result = await checkDeviceIntegrity();
+        if (!mountedRef.current) return;
+        setIsDeviceCompromised(result.isCompromised);
+      } catch {
+        // Detector is best-effort; fail open (state stays clean).
+      }
+    })();
+  }, []);
 
   // ---- Hydration on mount: surface "locked" if a stored session exists;
   //                            "cleared" if no session at all. We do
@@ -152,6 +189,15 @@ export function AuthProvider({ children }: AuthProviderProps) {
     if (state === "hydrating") return false; // caller should retry
 
     if (!mountedRef.current) return false;
+
+    // Authoritative integrity gate: refuse before prompting and before
+    // reading SESSION_KEY. `authenticate()` also enforces the policy
+    // internally, but keeping the decision here means a compromised device
+    // can never reach SecureStore even if that helper ever changes.
+    const decision = await enforceIntegrityPolicy(integrityPolicy);
+    if (!mountedRef.current) return false;
+    if (decision.action === "block") return false;
+
     setIsUnlocking(true);
     try {
       const success = await authenticate("Unlock IndigoPay to continue");
@@ -171,7 +217,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     } finally {
       if (mountedRef.current) setIsUnlocking(false);
     }
-  }, [state, authenticate]);
+  }, [state, authenticate, integrityPolicy]);
 
   const lock = useCallback(() => {
     setState((prev) => (prev === "unlocked" ? "locked" : prev));
@@ -189,6 +235,12 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   const storeSession = useCallback(
     async (next: WalletSession): Promise<boolean> => {
+      // Never persist a session on a compromised device under a `block`
+      // policy — writing to SecureStore would expose the session blob.
+      const decision = await enforceIntegrityPolicy(integrityPolicy);
+      if (!mountedRef.current) return false;
+      if (decision.action === "block") return false;
+
       const ok = await secureStore.set(SESSION_KEY, next);
       if (!ok) return false;
       if (!mountedRef.current) return false;
@@ -196,7 +248,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       setState("unlocked");
       return true;
     },
-    [],
+    [integrityPolicy],
   );
 
   const value = useMemo<AuthContextValue>(
@@ -204,13 +256,25 @@ export function AuthProvider({ children }: AuthProviderProps) {
       state,
       isAuthenticated: state === "unlocked",
       isUnlocking,
+      isDeviceCompromised,
+      integrityPolicy,
       session,
       unlock,
       lock,
       clear,
       storeSession,
     }),
-    [state, isUnlocking, session, unlock, lock, clear, storeSession],
+    [
+      state,
+      isUnlocking,
+      isDeviceCompromised,
+      integrityPolicy,
+      session,
+      unlock,
+      lock,
+      clear,
+      storeSession,
+    ],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

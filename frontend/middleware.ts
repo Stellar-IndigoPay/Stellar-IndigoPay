@@ -16,9 +16,6 @@ const LEAFLET_TILE_SOURCES = [
   "https://c.tile.openstreetmap.org",
 ].join(" ");
 
-// unpkg.com serves the Leaflet CSS loaded dynamically in ProjectMap.tsx.
-const UNPKG = "https://unpkg.com";
-
 export function buildCsp(nonce: string, isWidget: boolean): string {
   // API origin: 'self' covers same-origin deploys; NEXT_PUBLIC_API_URL covers
   // deployed backends and CI/E2E environments (e.g. http://localhost:4000).
@@ -49,8 +46,7 @@ export function buildCsp(nonce: string, isWidget: boolean): string {
     // nonce tags the Next.js script injection; strict-dynamic propagates trust
     // to the bundles it loads (inline scripts are nonce'd, never inline-allowed).
     `script-src ${scriptSrc}`,
-    // unpkg serves the Leaflet CSS stylesheet.
-    `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com ${UNPKG}`,
+    `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com`,
     "font-src 'self' https://fonts.gstatic.com",
     // OSM tile images are loaded as <img> elements by Leaflet TileLayer.
     // Leaflet marker icons use data: URIs (our inline SVG divIcon).
