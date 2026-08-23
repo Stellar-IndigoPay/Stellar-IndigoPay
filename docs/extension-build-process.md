@@ -100,6 +100,8 @@ The production build generates the following files in `dist/`:
 - `settings.js.map` - Source map for settings
 - `content-script.js.map` - Source map for content script
 
+The browser extension ZIP is generated from this build output and is not committed to git. CI creates the release archive from source and verifies it is reproducible, so maintainers should run `npm run package` locally only when preparing a release bundle.
+
 ## Chrome-Specific Build
 
 ### Chrome Build Process
@@ -119,12 +121,12 @@ The production build generates the following files in `dist/`:
    cp settings.html dist/
    ```
 
-3. **Create distribution package:**
+3. **Create the release package:**
    ```bash
-   cd dist
-   zip -r ../indigopay-extension.zip .
-   cd ..
+   npm run package
    ```
+
+   This creates `extension/greenpay-extension.zip` from the built files and the root extension assets. The repository does not track the generated ZIP.
 
 ### Chrome Manifest Differences
 

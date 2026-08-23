@@ -13,6 +13,13 @@
  *                                button would dead-end)
  *   - state === 'hydrating'   → spinner
  *
+ * Device integrity (issue #693): when the AuthProvider reports a
+ * compromised device, the locked fallback reflects the configured
+ * policy — `block` replaces the unlock button with a hard-stop message
+ * (the provider's `unlock()` already refuses via the integrity check, so
+ * this is belt-and-braces UX, not the enforcement itself), while `warn`
+ * keeps the unlock button but surfaces a caution banner.
+ *
  * The 'cleared' state fallback is critical: a user with no stored
  * session has nothing to unlock, and tapping the Unlock button would
  * silently fail (unlock() returns false). We render the CTA as a
@@ -28,6 +35,7 @@ import {
   View,
 } from "react-native";
 import { useAuth, type AuthState } from "../providers/AuthProvider";
+import { type IntegrityPolicy } from "../lib/deviceIntegrity";
 
 export interface AuthGateProps {
   children: ReactNode;
@@ -37,12 +45,24 @@ export interface AuthGateProps {
   promptBody?: string;
 }
 
+/**
+ * Gate sensitive screens behind an unlocked session, rendering a
+ * state-aware fallback (spinner / connect / unlock / hard-stop) and
+ * surfacing the configured device-integrity policy on compromise.
+ */
 export function AuthGate({
   children,
   promptTitle = "Unlock to continue",
   promptBody = "IndigoPay requires a quick biometric check before showing this screen.",
 }: AuthGateProps) {
-  const { isAuthenticated, isUnlocking, unlock, state } = useAuth();
+  const {
+    isAuthenticated,
+    isUnlocking,
+    unlock,
+    state,
+    isDeviceCompromised,
+    integrityPolicy,
+  } = useAuth();
 
   if (state === "unlocked" && isAuthenticated) return <>{children}</>;
 
@@ -57,6 +77,8 @@ export function AuthGate({
         promptTitle={promptTitle}
         promptBody={promptBody}
         isUnlocking={isUnlocking}
+        isDeviceCompromised={isDeviceCompromised}
+        integrityPolicy={integrityPolicy}
         onUnlock={unlock}
       />
     </View>
@@ -68,14 +90,22 @@ interface FallbackContentProps {
   promptTitle: string;
   promptBody: string;
   isUnlocking: boolean;
+  isDeviceCompromised: boolean;
+  integrityPolicy: IntegrityPolicy;
   onUnlock: () => Promise<boolean>;
 }
 
+/**
+ * Render the correct fallback for the current auth state and integrity
+ * policy (loading / connect / block / warn / default unlock UI).
+ */
 function FallbackContent({
   state,
   promptTitle,
   promptBody,
   isUnlocking,
+  isDeviceCompromised,
+  integrityPolicy,
   onUnlock,
 }: FallbackContentProps) {
   if (state === "hydrating") {
@@ -120,6 +150,25 @@ function FallbackContent({
     );
   }
 
+  // Under a `block` policy the provider refuses to unlock anyway; render a
+  // hard-stop message instead of an unlock button that would silently fail.
+  if (isDeviceCompromised && integrityPolicy === "block") {
+    return (
+      <>
+        <Text style={styles.icon} accessibilityElementsHidden>
+          {"\u26a0\ufe0f"}
+        </Text>
+        <Text style={styles.title} accessibilityRole="header">
+          Device not trusted
+        </Text>
+        <Text style={styles.body} accessibilityRole="alert">
+          IndigoPay detected that this device may be rooted or jailbroken.
+          For your security, access to this screen has been blocked.
+        </Text>
+      </>
+    );
+  }
+
   return (
     <>
       <Text style={styles.icon} accessibilityElementsHidden>
@@ -128,6 +177,14 @@ function FallbackContent({
       <Text style={styles.title} accessibilityRole="header">
         {promptTitle}
       </Text>
+      {isDeviceCompromised && integrityPolicy === "warn" ? (
+        <View style={styles.warningBanner} accessibilityRole="alert">
+          <Text style={styles.warningBannerText}>
+            {"\u26a0\ufe0f"} This device may be rooted or jailbroken. Proceed
+            with caution.
+          </Text>
+        </View>
+      ) : null}
       <Text style={styles.body}>{promptBody}</Text>
       <Pressable
         accessibilityRole="button"
@@ -179,6 +236,22 @@ const styles = StyleSheet.create({
     textAlign: "center",
     marginBottom: 24,
     lineHeight: 20,
+  },
+  warningBanner: {
+    backgroundColor: "rgba(245, 158, 11, 0.14)",
+    borderColor: "rgba(245, 158, 11, 0.4)",
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginBottom: 16,
+    alignSelf: "stretch",
+  },
+  warningBannerText: {
+    fontSize: 13,
+    color: "#e2b46a",
+    textAlign: "center",
+    lineHeight: 18,
   },
   button: {
     backgroundColor: "#227239",

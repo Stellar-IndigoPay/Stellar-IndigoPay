@@ -1,6 +1,11 @@
 // Smoke test: every new module loads without throwing.
 // Run with: `node scripts/load-modules.js` from inside the backend/ dir.
 "use strict";
+
+require("dotenv").config();
+const { validateEnv } = require("../src/config/env");
+validateEnv();
+
 require("../src/services/metrics");
 require("../src/services/lifecycle");
 require("../src/middleware/requestId");

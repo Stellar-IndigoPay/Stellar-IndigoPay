@@ -27,3 +27,25 @@ pub fn emit_stealth_scan(env: &Env, project_wallet: &Address, donation_count: u3
         (donation_count, env.ledger().timestamp()),
     );
 }
+
+/// Emitted when a project wallet withdraws stealth-donated funds from the
+/// `DonationContract` to its own wallet (#621). `remaining_balance` lets
+/// indexers reconcile on-chain `total_raised` with funds actually received
+/// by the project.
+pub fn emit_stealth_withdrawal(
+    env: &Env,
+    project_wallet: &Address,
+    token: &Address,
+    amount: i128,
+    remaining_balance: i128,
+) {
+    env.events().publish(
+        (symbol_short!("StlthWdr"), project_wallet.clone()),
+        (
+            token.clone(),
+            amount,
+            remaining_balance,
+            env.ledger().timestamp(),
+        ),
+    );
+}

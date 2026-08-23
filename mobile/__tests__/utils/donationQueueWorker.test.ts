@@ -52,6 +52,7 @@ import { classifyFailure, isDuplicateResponse } from "../../utils/failureClassif
 
 const mkDonation = (id: string, projectId = "p1") => ({
   id,
+  idempotencyKey: "123e4567-e89b-42d3-a456-426614174000",
   projectId,
   projectName: "Project",
   amount: "10",
@@ -148,6 +149,37 @@ describe("processQueue — retryable vs permanent", () => {
       expect.any(String),
       expect.objectContaining({ permanent: true, errorCode: "TX_FAILED" }),
     );
+  });
+});
+
+describe("processQueue — idempotency key header", () => {
+  test("sends the queued donation's Idempotency-Key header on replay", async () => {
+    const d = mkDonation("d1");
+    (getRetryEligibleDonations as jest.Mock).mockResolvedValue([d]);
+    (axios.post as jest.Mock).mockResolvedValue({
+      status: 201,
+      data: { data: { transactionHash: "tx1" } },
+    });
+
+    await processQueue();
+
+    expect(axios.post).toHaveBeenCalledTimes(1);
+    const [, , config] = (axios.post as jest.Mock).mock.calls[0];
+    expect(config.headers["Idempotency-Key"]).toBe(d.idempotencyKey);
+  });
+
+  test("omits the header when a legacy queued donation has no idempotency key", async () => {
+    const d = { ...mkDonation("d1"), idempotencyKey: undefined as unknown as string };
+    (getRetryEligibleDonations as jest.Mock).mockResolvedValue([d]);
+    (axios.post as jest.Mock).mockResolvedValue({
+      status: 201,
+      data: { data: { transactionHash: "tx1" } },
+    });
+
+    await processQueue();
+
+    const [, , config] = (axios.post as jest.Mock).mock.calls[0];
+    expect(config.headers).toBeUndefined();
   });
 });
 

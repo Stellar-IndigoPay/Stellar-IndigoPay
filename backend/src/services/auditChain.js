@@ -43,9 +43,9 @@ function canonicalize(fields) {
     fields.created_at,
     fields.prev_hash,
   ];
-  return parts
-    .map((v) => (v === null || v === undefined ? "" : String(v)))
-    .join("|");
+  return JSON.stringify(
+    parts.map((v) => (v === null || v === undefined ? "" : String(v)))
+  );
 }
 
 /**
