@@ -1,5 +1,6 @@
 import React from "react";
 import { SkeletonProgressBar, type SkeletonPalette } from "./Skeleton";
+import { formatNumber } from "@/utils/format";
 
 interface ProjectProgressBarProps {
   raisedXLM: string | number;
@@ -37,11 +38,11 @@ export default function ProjectProgressBar({
         </span>
         {hasGoal ? (
           <span className="text-xs text-[#475569] dark:text-[#94A3B8]">
-            {parsedRaised.toLocaleString()} / {parsedGoal.toLocaleString()} XLM
+            {formatNumber(parsedRaised)} / {formatNumber(parsedGoal)} XLM
           </span>
         ) : (
           <span className="text-xs text-[#64748B] dark:text-[#94A3B8]">
-            Raised: {parsedRaised.toLocaleString()} XLM
+            Raised: {formatNumber(parsedRaised)} XLM
           </span>
         )}
       </div>

@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Fragment, useMemo, useState } from "react";
-import { formatCO2, formatXLM, progressPercent } from "@/utils/format";
+import { formatCO2, formatXLM, formatNumber, progressPercent } from "@/utils/format";
 import type { ClimateProject } from "@/utils/types";
 
 interface ProjectComparisonProps {
@@ -102,7 +102,7 @@ export default function ProjectComparison({
                 if (row.key === "co2") value = `${co2PerXLM.toFixed(2)} kg`;
                 if (row.key === "progress") value = `${pct}%`;
                 if (row.key === "donorCount")
-                  value = project.donorCount.toLocaleString();
+                  value = formatNumber(project.donorCount);
                 if (row.key === "goal") value = formatXLM(project.goalXLM);
                 if (row.key === "raised") value = formatXLM(project.raisedXLM);
                 if (row.key === "status") value = project.status;

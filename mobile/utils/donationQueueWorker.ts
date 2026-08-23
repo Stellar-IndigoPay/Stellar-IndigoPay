@@ -43,6 +43,13 @@ let connectivitySubscription: (() => void) | null = null;
 
 /**
  * Submit a single queued donation to the backend.
+ *
+ * The donation's client-generated idempotency key is sent as the
+ * `Idempotency-Key` header so the backend can deduplicate retried
+ * submissions within its 24-hour replay window. Reusing the same key
+ * across attempts guarantees the donation is recorded exactly once even
+ * when a prior response was lost in transit.
+ *
  * Returns the transaction hash on success.
  */
 async function submitDonation(
@@ -60,6 +67,9 @@ async function submitDonation(
 
   const res = await axios.post(`${API_URL}/api/donations`, payload, {
     timeout: 15_000,
+    headers: donation.idempotencyKey
+      ? { "Idempotency-Key": donation.idempotencyKey }
+      : undefined,
   });
   const txHash =
     res.data?.data?.transactionHash ||

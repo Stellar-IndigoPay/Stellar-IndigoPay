@@ -40,9 +40,6 @@ const LEAFLET_TILE_SOURCES = [
   "https://c.tile.openstreetmap.org",
 ].join(" ");
 
-// unpkg serves the Leaflet CSS (dynamically injected by ProjectMap.tsx)
-const UNPKG = "https://unpkg.com";
-
 function buildStaticCsp(allowFraming = false) {
   const frameAncestors = allowFraming
     ? "frame-ancestors *"
@@ -51,8 +48,7 @@ function buildStaticCsp(allowFraming = false) {
     "default-src 'self'",
     // static fallback uses placeholder nonce for inline scripts; actual nonce injected by middleware
     `script-src 'self' 'nonce-{nonce}' https://*.stellar.org`,
-    // unpkg serves the Leaflet CSS stylesheet loaded dynamically in ProjectMap.
-    `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com ${UNPKG}`,
+    `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com`,
     "font-src 'self' https://fonts.gstatic.com",
     // OSM tiles loaded as images; Leaflet marker icons use data: URIs.
     `img-src 'self' data: blob: ${LEAFLET_TILE_SOURCES}`,

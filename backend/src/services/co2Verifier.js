@@ -71,6 +71,7 @@
 
 const pool = require("../db/pool");
 const logger = require("../logger");
+const { withAdvisoryLock, LOCK_KEYS } = require("./advisoryLock");
 
 // ── Prometheus metric (lazy-loaded to avoid circular deps) ──────────────
 
@@ -987,6 +988,20 @@ const DEFAULT_CRON = "0 3 * * 0"; // Every Sunday at 03:00 UTC
 let boss = null;
 
 /**
+ * One scheduled verification run, guarded by a per-worker Postgres advisory
+ * lock so only one replica verifies projects at a time (issue #677).
+ *
+ * pg-boss already deduplicates the cron schedule across replicas, but the lock
+ * makes the invariant explicit and protects against any duplicate job delivery.
+ */
+async function runScheduledVerification() {
+  return withAdvisoryLock(
+    LOCK_KEYS.co2Verification,
+    runVerificationForAllProjects,
+  );
+}
+
+/**
  * Start the CO₂ verification cron scheduler.
  *
  * Registers a pg-boss cron job that runs weekly. The schedule can be
@@ -1033,7 +1048,7 @@ async function startCO2VerificationCron() {
         { event: "co2_verification_cron_triggered" },
         "[co2Verifier] Scheduled verification run starting",
       );
-      await runVerificationForAllProjects();
+      await runScheduledVerification();
     });
 
     logger.info(
@@ -1095,4 +1110,5 @@ module.exports = {
   // Cron scheduling
   startCO2VerificationCron,
   stopCO2VerificationCron,
+  runScheduledVerification,
 };
