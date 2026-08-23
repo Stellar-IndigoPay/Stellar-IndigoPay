@@ -2,8 +2,8 @@
  * lib/__tests__/oraclePrice.test.ts — Unit tests for lib/oraclePrice.ts
  *
  * Covers the oracle-backed XLM/USD price source: URL selection, response
- * envelope unwrapping, and graceful `null` fallbacks for invalid or
- * unavailable oracle responses.
+ * envelope unwrapping, metadata extraction (updatedAt, source), and graceful
+ * null fallbacks for invalid or unavailable oracle responses.
  *
  * @jest-environment jsdom
  */
@@ -13,9 +13,10 @@ const ORACLE_URL = "http://localhost:4000/api/oracle/price";
 
 // Helper: create a mock fetch Response object.
 function mockFetchResponse(body: unknown, init?: { status?: number }) {
+  const status = init?.status ?? 200;
   return {
-    ok: init?.status ? init.status >= 200 && init.status < 300 : true,
-    status: init?.status ?? 200,
+    ok: status >= 200 && status < 300,
+    status,
     json: () => Promise.resolve(body),
   };
 }
@@ -40,10 +41,40 @@ describe("fetchXlmPrice", () => {
     );
     global.fetch = mockFetch;
 
-    const price = await fetchXlmPrice();
+    const result = await fetchXlmPrice();
 
-    expect(price).toBe(0.125);
+    expect(result.price).toBe(0.125);
     expect(mockFetch).toHaveBeenCalledWith(ORACLE_URL, { signal: undefined });
+  });
+
+  it("returns updatedAt and source from the response", async () => {
+    global.fetch = jest.fn().mockResolvedValue(
+      mockFetchResponse({
+        success: true,
+        data: { price: 0.12, updatedAt: 1_700_000_000_000, source: "stellar-dex" },
+      }),
+    );
+
+    const result = await fetchXlmPrice();
+
+    expect(result.updatedAt).toBe(1_700_000_000_000);
+    expect(result.source).toBe("stellar-dex");
+  });
+
+  it("includes fetchedAt (epoch ms) in the result", async () => {
+    const before = Date.now();
+    global.fetch = jest.fn().mockResolvedValue(
+      mockFetchResponse({
+        success: true,
+        data: { price: 0.12, updatedAt: null, source: "oracle" },
+      }),
+    );
+
+    const result = await fetchXlmPrice();
+    const after = Date.now();
+
+    expect(result.fetchedAt).toBeGreaterThanOrEqual(before);
+    expect(result.fetchedAt).toBeLessThanOrEqual(after);
   });
 
   it("passes the abort signal through to fetch", async () => {
@@ -63,7 +94,7 @@ describe("fetchXlmPrice", () => {
     });
   });
 
-  it("returns null when the oracle has no cached price", async () => {
+  it("returns price: null when the oracle has no cached price", async () => {
     global.fetch = jest.fn().mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -71,10 +102,11 @@ describe("fetchXlmPrice", () => {
       }),
     );
 
-    await expect(fetchXlmPrice()).resolves.toBeNull();
+    const result = await fetchXlmPrice();
+    expect(result.price).toBeNull();
   });
 
-  it("returns null when the price is not a positive number", async () => {
+  it("returns price: null when the price is not a positive number", async () => {
     global.fetch = jest.fn().mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -82,20 +114,35 @@ describe("fetchXlmPrice", () => {
       }),
     );
 
-    await expect(fetchXlmPrice()).resolves.toBeNull();
+    const result = await fetchXlmPrice();
+    expect(result.price).toBeNull();
   });
 
-  it("returns null on a non-ok response", async () => {
+  it("returns price: null on a non-ok response", async () => {
     global.fetch = jest
       .fn()
       .mockResolvedValue(mockFetchResponse({ error: "down" }, { status: 503 }));
 
-    await expect(fetchXlmPrice()).resolves.toBeNull();
+    const result = await fetchXlmPrice();
+    expect(result.price).toBeNull();
   });
 
-  it("returns null when the fetch rejects (oracle unavailable)", async () => {
+  it("returns price: null when the fetch rejects (oracle unavailable)", async () => {
     global.fetch = jest.fn().mockRejectedValue(new Error("network error"));
 
-    await expect(fetchXlmPrice()).resolves.toBeNull();
+    const result = await fetchXlmPrice();
+    expect(result.price).toBeNull();
+  });
+
+  it("uses 'oracle' as fallback source when source field is missing", async () => {
+    global.fetch = jest.fn().mockResolvedValue(
+      mockFetchResponse({
+        success: true,
+        data: { price: 0.1, updatedAt: null },
+      }),
+    );
+
+    const result = await fetchXlmPrice();
+    expect(result.source).toBe("oracle");
   });
 });

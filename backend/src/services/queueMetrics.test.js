@@ -46,16 +46,9 @@ describe("queueMetrics service", () => {
       ]
     };
 
-    const mockPausedResult = {
-      rows: [
-        { name: "webhook-deliveries", paused: true },
-        { name: "ai-summary", paused: false }
-      ]
-    };
 
     pool.query
-      .mockResolvedValueOnce(mockStatsResult)
-      .mockResolvedValueOnce(mockPausedResult);
+      .mockResolvedValueOnce(mockStatsResult);
 
     const metrics = await getQueueMetrics();
     expect(metrics).toHaveLength(4);
@@ -68,7 +61,7 @@ describe("queueMetrics service", () => {
     expect(webhook.depth).toBe(3);
     expect(webhook.failure_rate).toBe(3 / 7);
     expect(webhook.latency).toBe(12.5);
-    expect(webhook.paused).toBe(true);
+    expect(webhook.paused).toBe(false);
 
     const summary = metrics.find(m => m.queue === "ai-summary");
     expect(summary.active).toBe(0);

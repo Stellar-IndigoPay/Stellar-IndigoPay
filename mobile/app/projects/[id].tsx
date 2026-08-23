@@ -25,7 +25,7 @@ import {
 } from "react-native";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { useEffect, useRef, useState } from "react";
-import axios from "axios";
+import { apiClient, pinnedFetch } from "../../lib/apiClient";
 import { useTheme } from "../theme";
 import {
   getPushToken,
@@ -201,7 +201,7 @@ export default function ProjectDetailScreen() {
 
   const checkFollowStatus = async (projectId: string, token: string) => {
     try {
-      const response = await fetch(
+      const response = await pinnedFetch(
         `${API_URL}/api/notifications/follows?token=${encodeURIComponent(token)}`,
       );
       const data = await response.json();
@@ -217,7 +217,7 @@ export default function ProjectDetailScreen() {
 
   const loadProject = async (projectId: string) => {
     try {
-      const res = await axios.get(`${API_URL}/api/projects/${projectId}`);
+      const res = await apiClient.get(`${API_URL}/api/projects/${projectId}`);
       setProject(res.data.data);
     } catch {
       // Project not found — handled in render

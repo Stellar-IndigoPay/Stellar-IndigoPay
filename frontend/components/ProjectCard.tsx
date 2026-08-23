@@ -8,13 +8,15 @@ import type { ClimateProject } from "@/utils/types";
 import {
   formatXLM,
   formatCO2,
+  formatUSDEquivalent,
   progressPercent,
   statusClass,
   statusLabel,
   CATEGORY_ICONS,
 } from "@/utils/format";
 import CircularProgress from "./CircularProgress";
-import { useXlmPrice } from "@/lib/priceContext";
+import { usePriceContext } from "@/lib/priceContext";
+import { PriceStaleIndicator } from "@/components/PriceStaleIndicator";
 import { useWishlist } from "@/hooks/useWishlist";
 import ProjectProgressBar from "./ProjectProgressBar";
 import { SkeletonCard } from "./Skeleton";
@@ -24,7 +26,7 @@ export default function ProjectCard({ project }: { project: ClimateProject }) {
   const { t, tPlural } = useI18n();
   const pct = progressPercent(project.raisedXLM, project.goalXLM);
   const isComplete = pct >= 100;
-  const xlmUsd = useXlmPrice();
+  const { xlmUsd, isStale, isDegraded, priceAgeMs } = usePriceContext();
   const { toggleWishlist, isInWishlist } = useWishlist();
   const isWishlisted = isInWishlist(project.id);
 
@@ -114,7 +116,28 @@ export default function ProjectCard({ project }: { project: ClimateProject }) {
                 className="w-full"
               />
               <div className="flex items-center justify-between text-[11px] text-[var(--text-secondary)] font-body">
-                <span>{formatXLM(project.raisedXLM)} {t("project.raised")}</span>
+                <span className="flex items-center gap-1">
+                  {formatXLM(project.raisedXLM)} {t("project.raised")}
+                  {isDegraded ? (
+                    <>
+                      {" "}
+                      <span className="text-orange-500 dark:text-orange-400" aria-label="USD equivalent unavailable">—</span>
+                      <PriceStaleIndicator isStale={isStale} isDegraded={isDegraded} priceAgeMs={priceAgeMs} />
+                    </>
+                  ) : xlmUsd !== null && project.raisedXLM ? (
+                    <>
+                      {" "}
+                      <span
+                        className="text-[#64748B] dark:text-[#94A3B8]"
+                        data-testid="card-usd-equivalent"
+                        data-price-stale={isStale ? "true" : undefined}
+                      >
+                        {formatUSDEquivalent(project.raisedXLM, xlmUsd)}
+                      </span>
+                      <PriceStaleIndicator isStale={isStale} isDegraded={isDegraded} priceAgeMs={priceAgeMs} />
+                    </>
+                  ) : null}
+                </span>
                 <span>
                   {project.goalXLM && Number(project.goalXLM) > 0
                     ? `${t("project.goal")}: ${formatXLM(project.goalXLM)}`

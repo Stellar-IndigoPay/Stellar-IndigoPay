@@ -12,7 +12,7 @@ import {
 } from "react-native";
 import { useRouter } from "expo-router";
 import { useEffect, useState } from "react";
-import axios from "axios";
+import { apiClient } from "../../lib/apiClient";
 import { useTheme } from "../theme";
 import { getCachedData, setCachedData } from "../../utils/cache";
 
@@ -62,7 +62,7 @@ export default function ProjectsScreen() {
 
   const loadProjects = async () => {
     try {
-      const res = await axios.get(`${API_URL}/api/projects`);
+      const res = await apiClient.get(`${API_URL}/api/projects`);
       const data = res.data.data;
       setProjects(data);
       setFilteredProjects(data);

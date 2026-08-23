@@ -98,6 +98,20 @@ pub struct SlashEvent {
     pub ledger: u32,
 }
 
+/// Maximum number of slash events retained per reporter.
+/// Older entries are evicted in a ring-buffer fashion.
+pub const MAX_SLASH_HISTORY: u32 = 20;
+
+/// Ring-buffer pointer for per-reporter slash history.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SlashHistoryMeta {
+    /// Index of the *next* write slot (wraps at MAX_SLASH_HISTORY).
+    pub next_index: u32,
+    /// Total events written so far (capped at MAX_SLASH_HISTORY once full).
+    pub count: u32,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -119,6 +133,10 @@ pub enum DataKey {
     ReporterStake(Address),
     StakeAvailableAt(Address),
     SlashHistory(Address),
+    /// Per-reporter slash-history ring-buffer metadata.
+    SlashHistoryMeta(Address),
+    /// Individual slash event stored at a ring-buffer slot.
+    SlashEv(Address, u32),
 }
 
 #[contract]
@@ -449,16 +467,24 @@ impl SimpleOracle {
         let updated = current
             .checked_add(amount)
             .expect("Reporter stake overflow");
-        let cooldown: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::UnstakeCooldown)
-            .unwrap_or(DEFAULT_UNSTAKE_COOLDOWN);
-        let available_at = env
-            .ledger()
-            .sequence()
-            .checked_add(cooldown)
-            .expect("Stake cooldown overflow");
+        // One availability timestamp governs the reporter's aggregate stake.
+        // Preserve it for top-ups so already-unlocked stake is not re-locked.
+        let available_at = if current == 0 {
+            let cooldown: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::UnstakeCooldown)
+                .unwrap_or(DEFAULT_UNSTAKE_COOLDOWN);
+            env.ledger()
+                .sequence()
+                .checked_add(cooldown)
+                .expect("Stake cooldown overflow")
+        } else {
+            env.storage()
+                .instance()
+                .get(&DataKey::StakeAvailableAt(reporter.clone()))
+                .expect("Stake cooldown not set")
+        };
 
         env.storage()
             .instance()
@@ -548,23 +574,33 @@ impl SimpleOracle {
             .instance()
             .get(&DataKey::StakeTreasury)
             .expect("Stake treasury not configured");
-        let mut history: Vec<SlashEvent> = env
-            .storage()
-            .instance()
-            .get(&DataKey::SlashHistory(reporter.clone()))
-            .unwrap_or(Vec::new(&env));
-        history.push_back(SlashEvent {
+        let meta_key = DataKey::SlashHistoryMeta(reporter.clone());
+        let mut meta: SlashHistoryMeta =
+            env.storage()
+                .instance()
+                .get(&meta_key)
+                .unwrap_or(SlashHistoryMeta {
+                    next_index: 0,
+                    count: 0,
+                });
+
+        let slot = meta.next_index;
+        let event = SlashEvent {
             amount,
             reason: reason.clone(),
             ledger: env.ledger().sequence(),
-        });
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::SlashEv(reporter.clone(), slot), &event);
+        meta.count = (meta.count + 1).min(MAX_SLASH_HISTORY);
+        meta.next_index = (slot + 1) % MAX_SLASH_HISTORY;
+        env.storage().instance().set(&meta_key, &meta);
 
         env.storage()
             .instance()
             .set(&DataKey::ReporterStake(reporter.clone()), &remaining);
-        env.storage()
-            .instance()
-            .set(&DataKey::SlashHistory(reporter.clone()), &history);
         env.events().publish(
             (Symbol::new(&env, "stake_slash"), reporter.clone()),
             (amount, remaining, reason),
@@ -585,10 +621,58 @@ impl SimpleOracle {
     }
 
     pub fn get_slash_history(env: Env, reporter: Address) -> Vec<SlashEvent> {
+        let meta: SlashHistoryMeta = env
+            .storage()
+            .instance()
+            .get(&DataKey::SlashHistoryMeta(reporter.clone()))
+            .unwrap_or(SlashHistoryMeta {
+                next_index: 0,
+                count: 0,
+            });
+        if meta.count == 0 {
+            return Vec::new(&env);
+        }
+        let mut result = Vec::new(&env);
+        let start = if meta.count < MAX_SLASH_HISTORY {
+            0
+        } else {
+            meta.next_index
+        };
+        for i in 0..meta.count {
+            let slot = (start + i) % MAX_SLASH_HISTORY;
+            if let Some(event) = env
+                .storage()
+                .instance()
+                .get::<DataKey, SlashEvent>(&DataKey::SlashEv(reporter.clone(), slot))
+            {
+                result.push_back(event);
+            }
+        }
+        result
+    }
+
+    /// Returns the number of slash events currently stored for a reporter.
+    /// Capped at [`MAX_SLASH_HISTORY`].
+    pub fn get_slash_count(env: Env, reporter: Address) -> u32 {
+        let meta: SlashHistoryMeta = env
+            .storage()
+            .instance()
+            .get(&DataKey::SlashHistoryMeta(reporter))
+            .unwrap_or(SlashHistoryMeta {
+                next_index: 0,
+                count: 0,
+            });
+        meta.count
+    }
+
+    /// Returns the slash event stored at a specific ring-buffer slot for a reporter.
+    /// Panics if the slot has never been written.
+    pub fn get_slash_event_at(env: Env, reporter: Address, index: u32) -> SlashEvent {
+        assert!(index < MAX_SLASH_HISTORY, "Slash event index out of bounds");
         env.storage()
             .instance()
-            .get(&DataKey::SlashHistory(reporter))
-            .unwrap_or(Vec::new(&env))
+            .get(&DataKey::SlashEv(reporter, index))
+            .expect("Slash event slot is empty")
     }
 
     pub fn add_source_oracle(env: Env, admin: Address, oracle_address: Address) {
@@ -2048,6 +2132,30 @@ mod tests {
     }
 
     #[test]
+    fn test_stake_top_up_preserves_existing_cooldown() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        let (stake_token, _) = setup_staking(&env, &contract_id, &admin, &reporter, 1_000, 10);
+        let starting_balance = token::Client::new(&env, &stake_token).balance(&reporter);
+
+        client.stake(&reporter, &1_000);
+        env.ledger().set_sequence_number(5);
+        client.stake(&reporter, &500);
+
+        env.ledger().set_sequence_number(9);
+        assert!(client.try_unstake(&reporter).is_err());
+
+        env.ledger().set_sequence_number(10);
+        client.unstake(&reporter);
+
+        assert_eq!(client.get_reporter_stake(&reporter), 0);
+        assert_eq!(
+            token::Client::new(&env, &stake_token).balance(&reporter),
+            starting_balance
+        );
+    }
+
+    #[test]
     fn test_slash_event() {
         let (env, contract_id, admin, reporter) = setup();
         let client = SimpleOracleClient::new(&env, &contract_id);
@@ -2063,6 +2171,61 @@ mod tests {
         let events = env.events().all().filter_by_contract(&contract_id);
         let latest = std::format!("{:?}", events.events().last().unwrap());
         assert!(latest.contains("stake_slash"));
+    }
+
+    #[test]
+    fn test_slash_history_is_bounded() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        setup_staking(&env, &contract_id, &admin, &reporter, 1_000, 10);
+        client.stake(&reporter, &1_500);
+
+        // Slash MAX_SLASH_HISTORY + 5 times to trigger eviction
+        for i in 1..=MAX_SLASH_HISTORY + 5 {
+            env.ledger().set_sequence_number(i);
+            client.slash(&admin, &reporter, &10, &String::from_str(&env, "slash"));
+        }
+
+        // Count must never exceed MAX_SLASH_HISTORY
+        assert_eq!(client.get_slash_count(&reporter), MAX_SLASH_HISTORY);
+
+        // Reconstructed history must have exactly MAX_SLASH_HISTORY entries
+        assert_eq!(client.get_slash_history(&reporter).len(), MAX_SLASH_HISTORY);
+
+        // Ring-buffer metadata should show next_index has wrapped
+        env.as_contract(&contract_id, || {
+            let meta: SlashHistoryMeta = env
+                .storage()
+                .instance()
+                .get(&DataKey::SlashHistoryMeta(reporter.clone()))
+                .unwrap();
+            assert_eq!(meta.count, MAX_SLASH_HISTORY);
+            assert_eq!(meta.next_index, 5 % MAX_SLASH_HISTORY);
+        });
+    }
+
+    #[test]
+    fn test_slash_eviction_overwrites_oldest() {
+        let (env, contract_id, admin, reporter) = setup();
+        let client = SimpleOracleClient::new(&env, &contract_id);
+        setup_staking(&env, &contract_id, &admin, &reporter, 1_000, 10);
+        client.stake(&reporter, &1_500);
+
+        // Fill the ring buffer exactly
+        for i in 1..=MAX_SLASH_HISTORY {
+            env.ledger().set_sequence_number(i);
+            client.slash(&admin, &reporter, &10, &String::from_str(&env, "fill"));
+        }
+
+        // The first slot should have ledger == 1
+        let first = client.get_slash_event_at(&reporter, &0);
+        assert_eq!(first.ledger, 1);
+
+        // Write one more — it should overwrite slot 0
+        env.ledger().set_sequence_number(MAX_SLASH_HISTORY + 1);
+        client.slash(&admin, &reporter, &10, &String::from_str(&env, "over"));
+        let overwritten = client.get_slash_event_at(&reporter, &0);
+        assert_eq!(overwritten.ledger, MAX_SLASH_HISTORY + 1);
     }
 }
 
