@@ -3,7 +3,8 @@
  */
 import { formatXLM, formatUSDEquivalent, shortenAddress, badgeEmoji } from "@/utils/format";
 import { accountUrl } from "@/lib/stellar";
-import { useXlmPrice } from "@/lib/priceContext";
+import { usePriceContext } from "@/lib/priceContext";
+import { PriceStaleIndicator } from "@/components/PriceStaleIndicator";
 import type { LeaderboardEntry } from "@/utils/types";
 import { SkeletonList } from "./Skeleton";
 import { useLeaderboard } from "@/hooks/queries";
@@ -67,7 +68,7 @@ export default function LeaderboardTable({
   limit?: number;
   period?: "all" | "month" | "year";
 }) {
-  const xlmUsd = useXlmPrice();
+  const { xlmUsd, isStale, isDegraded, priceAgeMs } = usePriceContext();
 
   const {
     data: entries,
@@ -159,11 +160,24 @@ export default function LeaderboardTable({
             <p className="font-mono font-semibold text-[#4F46E5] dark:text-[#818CF8] text-sm">
               {formatXLM(entry.totalDonatedXLM)}
             </p>
-            {formatUSDEquivalent(entry.totalDonatedXLM, xlmUsd) && (
-              <p className="text-[11px] text-[#64748B] dark:text-[#94A3B8] font-body">
-                {formatUSDEquivalent(entry.totalDonatedXLM, xlmUsd)}
+            {isDegraded ? (
+              <p
+                className="text-[11px] text-orange-500 dark:text-orange-400 font-body flex items-center justify-end gap-0.5"
+                data-testid="leaderboard-usd-degraded"
+              >
+                <span aria-label="USD equivalent unavailable">—</span>
+                <PriceStaleIndicator isStale={isStale} isDegraded={isDegraded} priceAgeMs={priceAgeMs} />
               </p>
-            )}
+            ) : formatUSDEquivalent(entry.totalDonatedXLM, xlmUsd) ? (
+              <p
+                className="text-[11px] text-[#64748B] dark:text-[#94A3B8] font-body flex items-center justify-end gap-0.5"
+                data-testid="leaderboard-usd-equivalent"
+                data-price-stale={isStale ? "true" : undefined}
+              >
+                {formatUSDEquivalent(entry.totalDonatedXLM, xlmUsd)}
+                <PriceStaleIndicator isStale={isStale} isDegraded={isDegraded} priceAgeMs={priceAgeMs} />
+              </p>
+            ) : null}
             <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-body">
               donated
             </p>

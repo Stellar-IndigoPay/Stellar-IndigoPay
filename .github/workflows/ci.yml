@@ -15,26 +15,32 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Start Timer
+        working-directory: .
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
+      - uses: ./.github/actions/setup-node-cached
         with:
           node-version: "22"
-          cache: "npm"
-          cache-dependency-path: backend/package-lock.json
-      - run: npm ci
+          working-directory: backend
       - run: npm run lint
       - run: npm run migration:lint
       - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7
         with:
-          context: ./backend
-          file: ./backend/Dockerfile
-          target: test
+          context: .
+          file: ./backend/Dockerfile.test
           load: true
           tags: indigopay-backend-test:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - run: docker compose -f docker-compose.test.yml up --abort-on-container-exit --exit-code-from backend
         working-directory: .
+      - name: Budget Check
+        if: always()
+        uses: ./.github/actions/budget-check
+        with:
+          start-time: ${{ env.START_TIME }}
+          max-seconds: "900"
 
   mobile:
     name: Mobile (jest)
@@ -117,7 +123,7 @@ jobs:
       - name: Validate OpenAPI spec with Spectral (built-in OAS rules)
         run: npx @stoplight/spectral-cli@6.14.3 lint docs/api/openapi.yaml --ruleset .spectral.yaml
 
-      - name: Validate project-specific conventions (429, descriptions, summaries)
+      - name: Validate spec conventions + detect OpenAPI route drift
         run: node scripts/validate-openapi.js
 
   zap_scan:

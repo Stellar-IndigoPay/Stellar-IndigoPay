@@ -50,9 +50,8 @@ services:
   backend:
     image: indigopay-backend-test:ci
     build:
-      context: ./backend
-      dockerfile: Dockerfile
-      target: test
+      context: .
+      dockerfile: backend/Dockerfile.test
     environment:
       NODE_ENV: test
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/stellar_indigopay_test
@@ -60,9 +59,22 @@ services:
       STELLAR_NETWORK: testnet
       HORIZON_URL: https://horizon-testnet.stellar.org
       ALLOWED_ORIGINS: http://localhost:3000
+      # The OpenAPI drift test requires repo-root scripts/validate-openapi.js,
+      # which resolves js-yaml from the backend image's node_modules. NODE_PATH
+      # lets that mounted module find /app/node_modules (see volumes below).
+      NODE_PATH: /app/node_modules
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # The backend image only carries the ./backend build context, so the
+    # OpenAPI drift test (backend/__tests__/scripts/openapi-drift.test.js)
+    # cannot reach the repo-root scripts/ and docs/ trees otherwise. The
+    # script resolves these relative to its own location (/scripts), so it
+    # also expects docs/ and backend/src as siblings at the container root.
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./docs:/docs:ro
+      - ./backend/src:/backend/src:ro
     command: sh -c "npm run db:migrate && npm test"

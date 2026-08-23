@@ -10,10 +10,12 @@ const withBundleAnalyzerConfig = withBundleAnalyzer({
 // ---------------------------------------------------------------------------
 // Content Security Policy
 // ---------------------------------------------------------------------------
-// The LIVE CSP (with a per-request nonce) is generated dynamically in
-// middleware.ts.  The constants below are the canonical allowlist reference
-// and provide a static fallback for any edge-case that bypasses middleware
-// (e.g. raw static-file serving without Next.js runtime).
+// The LIVE CSP is generated dynamically in middleware.ts.  The constants below
+// are the canonical allowlist reference and provide a static fallback for any
+// edge-case that bypasses middleware (e.g. raw static-file serving without
+// Next.js runtime). Both layers allow the single inline script (the FOUC
+// theme script) via its SHA-256 hash rather than a per-request nonce, so the
+// policy is identical for SSG / ISR / edge-cached and server-rendered HTML.
 //
 // connect-src covers:
 //   • Stellar Horizon (testnet + mainnet) — REST API + EventSource streaming
@@ -46,8 +48,10 @@ function buildStaticCsp(allowFraming = false) {
     : "frame-ancestors 'none'";
   return [
     "default-src 'self'",
-    // static fallback uses placeholder nonce for inline scripts; actual nonce injected by middleware
-    `script-src 'self' 'nonce-{nonce}' https://*.stellar.org`,
+    // static fallback uses the FOUC theme-script SHA-256, which is the
+    // only inline script that can appear on SSG pages (no per-request nonce).
+    // Keep in sync with FOUC_THEME_SCRIPT_HASH in lib/csp.ts.
+    `script-src 'self' 'sha256-ErtPdouQiLu8LLZozyBPb9ROeob7973X5nwZqhHweqY=' https://*.stellar.org`,
     `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com`,
     "font-src 'self' https://fonts.gstatic.com",
     // OSM tiles loaded as images; Leaflet marker icons use data: URIs.
@@ -88,7 +92,7 @@ const nextConfig = {
     return [
       {
         // Applied to every route.  middleware.ts overrides Content-Security-Policy
-        // with the nonce-stamped version for all HTML responses.
+        // with the hash-stamped version for all HTML responses.
         source: "/((?!api/csp-report).*)",
         headers: [
           { key: "Content-Security-Policy", value: buildStaticCsp(false) },

@@ -75,6 +75,12 @@ describe("auditChain.computeRowHash", () => {
     const asStr = computeRowHash({ id: "1", actor: "a", action: "b", metadata: "{\"x\":1}", prev_hash: GENESIS_PREV_HASH });
     expect(asObj).toBe(asStr);
   });
+
+  it("is injective (does not collide on pipe characters)", () => {
+    const hash1 = computeRowHash({ id: "a|b", actor: "c", action: "act", prev_hash: GENESIS_PREV_HASH });
+    const hash2 = computeRowHash({ id: "a", actor: "b|c", action: "act", prev_hash: GENESIS_PREV_HASH });
+    expect(hash1).not.toBe(hash2);
+  });
 });
 
 describe("auditChain.getPrevHash", () => {

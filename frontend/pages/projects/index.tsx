@@ -3,7 +3,6 @@
  */
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import dynamic from "next/dynamic";
-import type { GetServerSideProps } from "next";
 import { useRouter } from "next/router";
 import ProjectCard, { ProjectCardSkeleton } from "@/components/ProjectCard";
 import {
@@ -652,8 +651,3 @@ export default function ProjectsPage() {
   );
 }
 
-// Forces per-request SSR so the CSP nonce set in middleware.ts reaches
-// _document.tsx — see the matching comment in pages/index.tsx.
-export const getServerSideProps: GetServerSideProps = async () => {
-  return { props: {} };
-};

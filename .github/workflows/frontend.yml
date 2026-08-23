@@ -16,66 +16,75 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Start Timer
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup-node-cached
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install frontend dependencies
-        working-directory: frontend
-        # --legacy-peer-deps tolerates jest-axe@8 asserting peer jest@^29
-        # while we actually use jest@^30. Pinning the exact version in
-        # package.json + overrides keeps CI deterministic.
-        run: npm ci --legacy-peer-deps
+          working-directory: frontend
+          legacy-peer-deps: 'true'
       - name: Lint
         working-directory: frontend
         run: npm run lint
+      - name: Budget Check
+        if: always()
+        uses: ./.github/actions/budget-check
+        with:
+          start-time: ${{ env.START_TIME }}
+          max-seconds: '600'
 
   frontend-typecheck:
     name: Frontend TypeScript
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Start Timer
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup-node-cached
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci --legacy-peer-deps
+          working-directory: frontend
+          legacy-peer-deps: 'true'
       - name: TypeScript type-check
         working-directory: frontend
         run: npm run type-check
+      - name: Budget Check
+        if: always()
+        uses: ./.github/actions/budget-check
+        with:
+          start-time: ${{ env.START_TIME }}
+          max-seconds: '600'
 
   frontend-tests-smoke:
     name: Frontend jest smoke (jest-axe resolves)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Start Timer
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup-node-cached
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci --legacy-peer-deps
+          working-directory: frontend
+          legacy-peer-deps: 'true'
       - name: Verify jest-axe + axe-core resolve
         working-directory: frontend
         run: npm run test:smoke:install
       - name: Run Tabs + MonthlyGivingSetup jest smoke
         working-directory: frontend
         run: npm run test:smoke
+      - name: Budget Check
+        if: always()
+        uses: ./.github/actions/budget-check
+        with:
+          start-time: ${{ env.START_TIME }}
+          max-seconds: '600'
 
   frontend-tests:
     name: Frontend Unit + Accessibility Tests
@@ -83,37 +92,44 @@ jobs:
     timeout-minutes: 10
     needs: [frontend-tests-smoke]
     steps:
+      - name: Start Timer
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup-node-cached
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci --legacy-peer-deps
+          working-directory: frontend
+          legacy-peer-deps: 'true'
       - name: Run jest (unit + a11y)
         working-directory: frontend
         run: npm test -- --ci --colors=false
+      - name: Budget Check
+        if: always()
+        uses: ./.github/actions/budget-check
+        with:
+          start-time: ${{ env.START_TIME }}
+          max-seconds: '600'
 
   frontend-e2e:
     name: Frontend End-to-End Tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shardIndex: [1, 2, 3]
+        shardTotal: [3]
     steps:
+      - name: Start Timer
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup-node-cached
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci --legacy-peer-deps
+          working-directory: frontend
+          legacy-peer-deps: 'true'
       - name: Install json-server for mock API
         run: npm install -g json-server
       - name: Start mock API server
@@ -164,7 +180,7 @@ jobs:
           exit 1
       - name: Run E2E tests
         working-directory: frontend
-        run: npx playwright test
+        run: npx playwright test --shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }}
         env:
           NEXT_PUBLIC_STELLAR_NETWORK: testnet
           NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
@@ -175,6 +191,12 @@ jobs:
         with:
           name: playwright-traces
           path: frontend/test-results/
+      - name: Budget Check
+        if: always()
+        uses: ./.github/actions/budget-check
+        with:
+          start-time: ${{ env.START_TIME }}
+          max-seconds: '600'
 
   frontend-build:
     name: Frontend Build
@@ -182,6 +204,8 @@ jobs:
     timeout-minutes: 15
     needs: [frontend-lint, frontend-typecheck, frontend-tests, frontend-e2e]
     steps:
+      - name: Start Timer
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -233,12 +257,20 @@ jobs:
             exit 1
           fi
           echo "All route chunks within 250KB budget."
+      - name: Budget Check
+        if: always()
+        uses: ./.github/actions/budget-check
+        with:
+          start-time: ${{ env.START_TIME }}
+          max-seconds: '600'
 
   storybook:
     name: Storybook Build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Start Timer
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -256,29 +288,33 @@ jobs:
       - name: Build Storybook
         working-directory: frontend
         run: npm run build-storybook
+      - name: Budget Check
+        if: always()
+        uses: ./.github/actions/budget-check
+        with:
+          start-time: ${{ env.START_TIME }}
+          max-seconds: '600'
 
   e2e:
     name: Playwright E2E
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
+    strategy:
+      fail-fast: false
+      matrix:
+        shardIndex: [1, 2, 3]
+        shardTotal: [3]
     steps:
+      - name: Start Timer
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup-node-cached
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        # --legacy-peer-deps tolerates jest-axe@8 asserting peer jest@^29
-        # while we actually use jest@^30. Pinning the exact version in
-        # package.json + overrides keeps CI deterministic.
-        run: npm ci --legacy-peer-deps
+          working-directory: frontend
+          legacy-peer-deps: 'true'
 
       - name: Cache Playwright browsers
         uses: actions/cache@v4
@@ -331,7 +367,7 @@ jobs:
         working-directory: frontend
         # Visual regression snapshots are OS/font-render dependent — skip in CI,
         # run locally where the baseline images were generated.
-        run: npm run test:e2e -- --reporter=html,list --grep-invert "Visual regression"
+        run: npm run test:e2e -- --shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }} --reporter=html,list --grep-invert "Visual regression"
         env:
           NEXT_PUBLIC_STELLAR_NETWORK: testnet
           NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
@@ -344,3 +380,10 @@ jobs:
           name: playwright-report
           path: frontend/playwright-report/
           retention-days: 14
+      - name: Budget Check
+        if: always()
+        uses: ./.github/actions/budget-check
+        with:
+          start-time: ${{ env.START_TIME }}
+          max-seconds: '600'
+
