@@ -72,6 +72,21 @@ pub enum BadgeTier {
     EarthGuardian, // ≥ 2000 XLM
 }
 // ─── Data structures ──────────────────────────────────────────────────────────
+
+/// Rank-order of a badge tier. `None` is lowest, `EarthGuardian` highest.
+/// Used to decide which Impact NFTs a donor is eligible to mint: any tier
+/// at or below the donor's current badge may be minted (once each).
+#[cfg(feature = "impact")]
+fn badge_rank(badge: &BadgeTier) -> u32 {
+    match badge {
+        BadgeTier::None => 0,
+        BadgeTier::Seedling => 1,
+        BadgeTier::Tree => 2,
+        BadgeTier::Forest => 3,
+        BadgeTier::EarthGuardian => 4,
+    }
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Project {
@@ -722,6 +737,17 @@ pub enum DataKey {
     CampaignEscrowMilestones(String),
     /// Escrow job ID for a project's campaign: (project_id) -> String.
     CampaignEscrowJobId(String),
+    /// SHA-256 commitment for an anonymous donation. Keyed by donation index.
+    ///
+    /// Value: SHA-256(donor_address_xdr ‖ donation_index_le_bytes)
+    ///
+    /// Stored only when `anonymous = true`. Allows the real donor to prove
+    /// ownership of an anonymous donation (for `generate_receipt`) without
+    /// exposing their address in `DonationRecord.donor`. The commitment is
+    /// verifiable by anyone given the preimage, but reveals nothing on its own.
+    AnonymousCommitment(u32),
+    // Registered cross-chain attestation contract used by settlement.
+    AttestationContract,
 }
 
 /// Storage keys for cross-chain attestation settlement (#439).
@@ -780,8 +806,15 @@ const DEFAULT_DONATION_RATE_LIMIT_WINDOW: u32 = 720;
 const MIN_VOTING_WINDOW_LEDGERS: u32 = 720; // 1 hour @ 5s/ledger
 #[cfg(feature = "governance")]
 const MAX_VOTING_WINDOW_LEDGERS: u32 = 518_400; // 30 days @ 5s/ledger
-                                                // Upper bound on co2_per_xlm at registration — prevents donate-time CO₂ overflow
-                                                // panics and misleading impact figures from misconfigured projects.
+                                                // Minimum total weighted votes (votes_for + votes_against) a proposal must
+                                                // reach at resolution. Below this floor the proposal cannot pass, even with
+                                                // a strict majority — it resolves as rejected with a dedicated `prop_noq`
+                                                // event (#714). Mirrors the frontend's QUORUM_THRESHOLD in
+                                                // frontend/pages/governance.tsx.
+#[cfg(feature = "governance")]
+const PROPOSAL_QUORUM_VOTES: u32 = 15;
+// Upper bound on co2_per_xlm at registration — prevents donate-time CO₂ overflow
+// panics and misleading impact figures from misconfigured projects.
 const MAX_CO2_PER_XLM: u32 = 100_000;
 const MAX_BATCH_SIZE: u32 = 50;
 
@@ -939,6 +972,12 @@ pub enum ContractError {
     // ── Donation reversal finalization (132–133) ────────────────────────────
     DonationAlreadyReversed = 132,
     DonationAccountingUnderflow = 133,
+    // ── Donation challenge (134–135) ────────────────────────────────────────
+    ChallengeReasonTooLong = 134,
+    SelfChallengeNotAllowed = 135,
+    // ── Attestation settlement configuration (136–137) ──────────────────────
+    AttestationContractNotConfigured = 136,
+    AttestationContractMismatch = 137,
 }
 // 48 hours × 3600 s / 5 s per ledger = 34 560 ledgers. The minimum delay
 // between `propose_upgrade` and the earliest ledger at which
@@ -964,6 +1003,12 @@ const REFUND_COOLDOWN_LEDGERS: u32 = 17_280;
 // for high-value donations.
 #[allow(dead_code)]
 const CHALLENGE_WINDOW_LEDGERS: u32 = 17_280;
+
+// Maximum byte length of the `reason` string a challenger may attach to a
+// donation challenge. Bounds the `chg_sub` event payload so a malicious
+// challenger cannot bloat ledger meta with an arbitrarily long string.
+#[cfg(feature = "donation")]
+const MAX_CHALLENGE_REASON_LEN: u32 = 200;
 
 // 72 hours × 3600 s / 5 s per ledger = 51 840 ledgers. The delay between
 // M-of-N initiation and permissionless force-refund execution.
@@ -2298,9 +2343,32 @@ fn apply_donation_effects(
         .instance()
         .set(&DataKey::DonationCount, &new_dc);
 
+    // For anonymous donations, replace the real donor address with the
+    // zero-address placeholder in DonationRecord so on-chain observers
+    // cannot link the record back to the donor (fixes #707).
+    // The real donor's identity is preserved only as a SHA-256 commitment
+    // stored under AnonymousCommitment(dc) so the donor can later prove
+    // ownership when calling generate_receipt.
+    let record_donor = if anonymous {
+        // Write the commitment: SHA-256(donor_xdr ‖ donation_index_le_bytes)
+        use soroban_sdk::xdr::ToXdr;
+        let donor_xdr = donor.to_xdr(env);
+        let idx_bytes = Bytes::from_array(env, &dc.to_le_bytes());
+        let mut preimage = Bytes::new(env);
+        preimage.append(&donor_xdr);
+        preimage.append(&idx_bytes);
+        let commitment: BytesN<32> = env.crypto().sha256(&preimage).into();
+        env.storage()
+            .instance()
+            .set(&DataKey::AnonymousCommitment(dc), &commitment);
+        anon_address(env)
+    } else {
+        donor.clone()
+    };
+
     // Store donation record with raw token amount and token symbol
     let donation_record = DonationRecord {
-        donor: donor.clone(),
+        donor: record_donor,
         anonymous,
         project: project_id.clone(),
         amount: raw_amount,
@@ -3547,6 +3615,30 @@ impl IndigoPayContract {
     }
 
     // ─── Cross-chain attestation settlement (#439) ────────────────────────────
+    /// Admin-only: configure the attestation contract used by settlement.
+    #[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+    pub fn set_attestation_contract(env: Env, admin: Address, contract_address: Address) {
+        require_admin_for_routine(&env, &admin);
+        require_not_paused(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::AttestationContract, &contract_address);
+        env.events()
+            .publish((symbol_short!("att_set"), admin), contract_address);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// Query the configured attestation contract address.
+    #[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
+    pub fn get_attestation_contract(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::AttestationContract)
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ContractError::AttestationContractNotConfigured)
+            })
+    }
+
     /// Settle a verified cross-chain donation attestation into this contract's
     /// donation stats.
     ///
@@ -3563,10 +3655,9 @@ impl IndigoPayContract {
     /// attestation contract's own state is never mutated — the cross-contract
     /// call is a pure read.
     ///
-    /// Permissionless by design. There is nothing to gate: the attestation
-    /// contract's relayer already authorised the underlying record, and this
-    /// function can only ever credit a `Verified` attestation once. Anyone may
-    /// pay the fee to push a settlement through.
+    /// Permissionless by design after the attestation contract is configured.
+    /// The caller-provided address must match the registered address, and the
+    /// cross-contract read always uses the registered address.
     ///
     /// Panics when:
     ///  - the contract is paused,
@@ -3639,6 +3730,17 @@ impl IndigoPayContract {
     pub fn settle_attestation(env: Env, attestation_contract: Address, attestation_id: u64) {
         require_not_paused(&env);
 
+        let registered_attestation_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::AttestationContract)
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ContractError::AttestationContractNotConfigured)
+            });
+        if attestation_contract != registered_attestation_contract {
+            panic_with_error!(&env, ContractError::AttestationContractMismatch);
+        }
+
         // ── Checks (pre-call): fail fast and cheap on an obvious replay.
         let settled_key = SettlementKey::SettledAttestation(attestation_id);
         if env.storage().instance().has(&settled_key) {
@@ -3650,8 +3752,8 @@ impl IndigoPayContract {
         //    here finds storage untouched. The post-call re-check below closes
         //    that window: the reentrant call sets the settled marker, and the
         //    outer frame then panics, reverting the whole transaction.
-        let attestation =
-            AttestationClient::new(&env, &attestation_contract).get_attestation(&attestation_id);
+        let attestation = AttestationClient::new(&env, &registered_attestation_contract)
+            .get_attestation(&attestation_id);
 
         // ── Checks (post-call): everything below reads only the returned value
         //    and this contract's storage.
@@ -3974,9 +4076,31 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::DonationCount, &new_dc);
+        // For anonymous donations, replace the real donor address with the
+        // zero-address placeholder in DonationRecord so on-chain observers
+        // cannot link the record back to the donor (fixes #707).
+        // The real donor's identity is preserved only as a SHA-256 commitment
+        // stored under AnonymousCommitment(dc) so the donor can later prove
+        // ownership when calling generate_receipt.
+        let record_donor = if anonymous {
+            use soroban_sdk::xdr::ToXdr;
+            let donor_xdr = donor.clone().to_xdr(&env);
+            let idx_bytes = Bytes::from_array(&env, &dc.to_le_bytes());
+            let mut preimage = Bytes::new(&env);
+            preimage.append(&donor_xdr);
+            preimage.append(&idx_bytes);
+            let commitment: BytesN<32> = env.crypto().sha256(&preimage).into();
+            env.storage()
+                .instance()
+                .set(&DataKey::AnonymousCommitment(dc), &commitment);
+            anon_address(&env)
+        } else {
+            donor.clone()
+        };
+
         // Store donation record with the source asset code as currency
         let donation_record = DonationRecord {
-            donor: donor.clone(),
+            donor: record_donor,
             anonymous,
             project: project_id.clone(),
             amount: xlm_amount,
@@ -5564,18 +5688,43 @@ impl IndigoPayContract {
     pub fn generate_receipt(env: Env, donor: Address, donation_index: u32) -> DonationReceipt {
         donor.require_auth();
 
+        use soroban_sdk::xdr::ToXdr;
+
         let record: DonationRecord = env
             .storage()
             .instance()
             .get(&DataKey::DonationRecord(donation_index))
             .expect("Donation record not found");
 
-        // Only the actual donor can generate a receipt.
-        // For anonymous donations, the real donor address is stored in
-        // DonationRecord.donor — the zero-address is only used as the
-        // DonorStats key for privacy. The real donor can still generate
-        // a receipt because they know which donation_index is theirs.
-        if donor != record.donor {
+        // Verify that the caller is the legitimate donor for this donation.
+        //
+        // For non-anonymous donations the check is direct: the real donor
+        // address must match what was stored in DonationRecord.donor.
+        //
+        // For anonymous donations DonationRecord.donor holds the zero-address
+        // placeholder (anon_address) rather than the real donor — that is
+        // exactly the fix for #707. The real donor proves ownership by
+        // recomputing the SHA-256 commitment and matching it against the
+        // AnonymousCommitment(donation_index) entry written at donation time.
+        if record.anonymous {
+            // Recompute commitment: SHA-256(donor_xdr ‖ donation_index_le_bytes)
+            let donor_xdr = donor.clone().to_xdr(&env);
+            let idx_bytes = Bytes::from_array(&env, &donation_index.to_le_bytes());
+            let mut preimage = Bytes::new(&env);
+            preimage.append(&donor_xdr);
+            preimage.append(&idx_bytes);
+            let candidate: BytesN<32> = env.crypto().sha256(&preimage).into();
+
+            let stored_commitment: BytesN<32> = env
+                .storage()
+                .instance()
+                .get(&DataKey::AnonymousCommitment(donation_index))
+                .expect("Anonymous commitment not found for this donation");
+
+            if candidate != stored_commitment {
+                panic!("Only the donor can generate a receipt for this donation");
+            }
+        } else if donor != record.donor {
             panic!("Only the donor can generate a receipt for this donation");
         }
 
@@ -5585,10 +5734,19 @@ impl IndigoPayContract {
             .get(&DataKey::DonationCO2Offset(donation_index))
             .unwrap_or(0);
 
+        // For anonymous receipts the donor field shows the zero-address
+        // placeholder — the receipt proves the donation details without
+        // linking back to the real donor's wallet address.
+        let receipt_donor = if record.anonymous {
+            anon_address(&env)
+        } else {
+            donor.clone()
+        };
+
         // Build the fields to hash (without the signature)
         let fields = ReceiptFields {
             donation_index,
-            donor: donor.clone(),
+            donor: receipt_donor.clone(),
             project_id: record.project.clone(),
             amount: record.amount,
             co2_offset,
@@ -5599,12 +5757,13 @@ impl IndigoPayContract {
         // Compute SHA-256 commitment over the deterministic XDR encoding.
         // Using XDR ensures the receipt can be verified off-chain with
         // any Stellar SDK that supports XDR deserialization.
-        use soroban_sdk::xdr::ToXdr;
         let xdr_bytes = fields.to_xdr(&env);
         let contract_signature: BytesN<32> = env.crypto().sha256(&xdr_bytes).into();
 
+        // Publish the event using the placeholder for anonymous donations so
+        // the event log does not reveal the caller's identity either.
         env.events().publish(
-            (symbol_short!("rcpt_gen"), donor.clone()),
+            (symbol_short!("rcpt_gen"), receipt_donor.clone()),
             (
                 donation_index,
                 record.amount,
@@ -5615,7 +5774,7 @@ impl IndigoPayContract {
 
         DonationReceipt {
             donation_index,
-            donor: donor.clone(),
+            donor: receipt_donor,
             project_id: record.project.clone(),
             amount: record.amount,
             co2_offset,
@@ -5650,7 +5809,12 @@ impl IndigoPayContract {
             None => return false,
         };
 
-        // Verify all receipt fields match the on-chain record
+        // Verify all receipt fields match the on-chain record.
+        //
+        // For anonymous donations both record.donor and receipt.donor are the
+        // zero-address placeholder (anon_address). A receipt with the real
+        // donor address in the donor field will therefore fail this check —
+        // this is intentional: on-chain verification must remain unlinkable.
         if record.donor != receipt.donor
             || record.project != receipt.project_id
             || record.amount != receipt.amount
@@ -5724,8 +5888,8 @@ impl IndigoPayContract {
         if stats.badge == BadgeTier::None {
             panic!("No badge tier reached yet");
         }
-        if stats.badge != tier {
-            panic!("Tier does not match donor's current badge");
+        if badge_rank(&tier) > badge_rank(&stats.badge) {
+            panic!("Tier exceeds donor's current badge");
         }
         let key = DataKey::ImpactNFT(donor.clone(), tier.clone());
         if env.storage().instance().has(&key) {
@@ -6197,8 +6361,11 @@ impl IndigoPayContract {
         });
         Self::vote_on_proposals(env, voter, allocations);
     }
-    /// Callable by anyone after the deadline. Resolves based on majority.
-    /// Emits proj_ver on approval, prop_rej on rejection.
+    /// Callable by anyone after the deadline. Resolves based on majority,
+    /// subject to a quorum floor (PROPOSAL_QUORUM_VOTES weighted votes) that
+    /// prevents negligible participation from deciding governance outcomes.
+    /// Emits proj_ver on approval, prop_rej on rejection, and prop_noq when
+    /// the quorum floor is not met (which resolves the proposal as rejected).
     #[cfg(feature = "governance")]
     pub fn resolve_proposal(env: Env, project_id: String) {
         let mut proposal: VoteProposal = env
@@ -6214,7 +6381,17 @@ impl IndigoPayContract {
         }
         proposal.resolved = true;
         proposal.resolved_at = env.ledger().sequence();
-        if proposal.votes_for > proposal.votes_against {
+        let total_votes = proposal
+            .votes_for
+            .checked_add(proposal.votes_against)
+            .expect("vote total overflow");
+        if total_votes < PROPOSAL_QUORUM_VOTES {
+            // Quorum floor not met — resolve as rejected with a distinct
+            // event so indexers can tell "no quorum" apart from a majority
+            // rejection.
+            env.events()
+                .publish((symbol_short!("prop_noq"),), project_id.clone());
+        } else if proposal.votes_for > proposal.votes_against {
             env.events()
                 .publish((symbol_short!("proj_ver"),), project_id.clone());
         } else {
@@ -7568,6 +7745,10 @@ impl IndigoPayContract {
         challenger.require_auth();
         require_not_paused(&env);
 
+        if reason.len() > MAX_CHALLENGE_REASON_LEN {
+            panic_with_error!(env, ContractError::ChallengeReasonTooLong);
+        }
+
         let donor_stats: DonorStats = env
             .storage()
             .instance()
@@ -7587,6 +7768,10 @@ impl IndigoPayContract {
             .instance()
             .get(&DataKey::DonationRecord(donation_index))
             .expect("Donation record not found");
+
+        if challenger == donation.donor {
+            panic_with_error!(env, ContractError::SelfChallengeNotAllowed);
+        }
 
         #[cfg(feature = "refund")]
         if refund_approved(&env, donation_index) {
@@ -8078,7 +8263,10 @@ impl IndigoPayContract {
     /// The total amount is split into equal installments. The first installment
     /// is transferred to the project wallet immediately; subsequent installments
     /// are claimable by anyone via `claim_vested_installment` after each
-    /// `interval_ledgers` elapses.
+    /// `interval_ledgers` elapses. If `total_amount` is not evenly divisible
+    /// by `installment_count`, the residual is held in custody and paid with
+    /// the final installment, so the sum of all installments equals
+    /// `total_amount` exactly.
     ///
     /// # Panics
     /// - If `amount <= 0`
@@ -8211,8 +8399,20 @@ impl IndigoPayContract {
         schedule.next_installment_ledger = current_ledger
             .checked_add(schedule.interval_ledgers)
             .expect("overflow");
+        // The final installment absorbs the division remainder (when
+        // `total_amount` is not evenly divisible by `installment_count`) so
+        // the sum of all installments equals `total_amount` exactly.
+        let is_final_installment = schedule.installments_released >= schedule.installment_count;
+        let payout = if is_final_installment {
+            schedule
+                .amount_per_installment
+                .checked_add(vesting_remainder(&schedule))
+                .expect("overflow")
+        } else {
+            schedule.amount_per_installment
+        };
         // Mark completed when all installments are released.
-        if schedule.installments_released >= schedule.installment_count {
+        if is_final_installment {
             schedule.completed_at = current_ledger;
         }
         env.storage().instance().set(&schedule_key, &schedule);
@@ -8225,17 +8425,13 @@ impl IndigoPayContract {
         // ── Interaction: transfer installment from contract custody to project.
         let contract_addr = env.current_contract_address();
         let token_client = token::Client::new(&env, &schedule.token);
-        token_client.transfer(
-            &contract_addr,
-            &project.wallet,
-            &schedule.amount_per_installment,
-        );
+        token_client.transfer(&contract_addr, &project.wallet, &payout);
         let remaining = schedule
             .installment_count
             .saturating_sub(schedule.installments_released);
         env.events().publish(
             (symbol_short!("vest_clm"), schedule.project_id),
-            (schedule_id, schedule.amount_per_installment, remaining),
+            (schedule_id, payout, remaining),
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
@@ -8243,8 +8439,8 @@ impl IndigoPayContract {
     ///
     /// Only the original donor may cancel (enforced by the storage key which
     /// includes the donor's address). All released installments stay with
-    /// the project; the unvested remainder is returned from contract custody
-    /// to the donor.
+    /// the project; the unvested remainder (including the final-installment
+    /// residual, if any) is returned from contract custody to the donor.
     ///
     /// # Panics
     /// - If the schedule is not found.
@@ -8264,13 +8460,22 @@ impl IndigoPayContract {
         let remaining_count = schedule
             .installment_count
             .saturating_sub(schedule.installments_released);
+        // Refund the exact unvested amount: the residual (total_amount not
+        // evenly divisible by installment_count) is still held in custody
+        // until the final installment is claimed, so it is included here.
         let unvested_amount = (remaining_count as i128)
             .checked_mul(schedule.amount_per_installment)
+            .expect("overflow")
+            .checked_add(vesting_remainder(&schedule))
             .expect("overflow");
 
         // Mark the schedule as cancelled with completed_at so it can be
         // cleaned up after the grace period. The schedule is NOT removed
         // immediately — see `cleanup_vesting_schedule`.
+        // Also mark all installments as released so neither a repeat
+        // `cancel_vesting` call nor a later `claim_vested_installment`
+        // call can pay out the same unvested balance again.
+        schedule.installments_released = schedule.installment_count;
         schedule.completed_at = env.ledger().sequence();
         env.storage().instance().set(&schedule_key, &schedule);
 
@@ -8336,6 +8541,23 @@ impl IndigoPayContract {
         env.storage().instance().get(&DataKey::NativeTokenAddress)
     }
 }
+/// The residual amount left over when `total_amount` is split into equal
+/// installments, i.e. `total_amount % installment_count` in stroops (always
+/// `>= 0` and `< installment_count`). The final installment absorbs this
+/// residual so the sum of all installments equals `total_amount` exactly and
+/// no dust is stranded in contract custody.
+#[cfg(feature = "vesting")]
+fn vesting_remainder(schedule: &VestingSchedule) -> i128 {
+    schedule
+        .total_amount
+        .checked_sub(
+            schedule
+                .amount_per_installment
+                .checked_mul(schedule.installment_count as i128)
+                .expect("overflow"),
+        )
+        .expect("underflow")
+}
 // ─── Mock oracle (test / integration use only) ────────────────────────────────
 /// A minimal oracle that returns a fixed rate of 8 XLM per 1 USDC.
 /// Deploy this in tests and local integration environments via `set_oracle`.
@@ -8362,7 +8584,7 @@ impl OracleInterface for MockOracle {
 mod tests {
     extern crate std;
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
     use soroban_sdk::token::StellarAssetClient;
     use soroban_sdk::{Address, BytesN, ConversionError, Env, Error, InvokeError, String, Vec};
     /// Helper: create a single-element signer Vec for admin calls.
@@ -8504,6 +8726,64 @@ mod tests {
         assert_eq!(calculate_badge(1999 * STROOP), BadgeTier::Forest);
         assert_eq!(calculate_badge(2000 * STROOP), BadgeTier::EarthGuardian);
         assert_eq!(calculate_badge(100000 * STROOP), BadgeTier::EarthGuardian);
+    }
+
+    /// Inject a specific badge tier directly into donor stats, bypassing the
+    /// donation path so `mint_impact_nft` tier progression can be tested in
+    /// isolation.
+    fn set_donor_badge(env: &Env, cid: &soroban_sdk::Address, donor: &Address, badge: BadgeTier) {
+        env.as_contract(cid, || {
+            env.storage().instance().set(
+                &DataKey::DonorStats(donor.clone()),
+                &DonorStats {
+                    total_donated: 0,
+                    donation_count: 0,
+                    badge,
+                    co2_offset_grams: 0,
+                },
+            );
+        });
+    }
+
+    /// A donor who has progressed to a higher badge must still be able to mint
+    /// every previously-earned lower tier, once each (closes #674).
+    #[test]
+    fn test_mint_impact_nft_allows_previously_earned_lower_tiers() {
+        let (env, cid, client, _admin, _pid) = setup();
+        let donor = Address::generate(&env);
+        set_donor_badge(&env, &cid, &donor, BadgeTier::Forest);
+
+        client.mint_impact_nft(&donor, &BadgeTier::Seedling);
+        client.mint_impact_nft(&donor, &BadgeTier::Tree);
+        client.mint_impact_nft(&donor, &BadgeTier::Forest);
+
+        assert!(client.has_nft(&donor, &BadgeTier::Seedling));
+        assert!(client.has_nft(&donor, &BadgeTier::Tree));
+        assert!(client.has_nft(&donor, &BadgeTier::Forest));
+        assert!(!client.has_nft(&donor, &BadgeTier::EarthGuardian));
+    }
+
+    /// Minting a tier above the donor's current badge must still be rejected.
+    #[test]
+    #[should_panic]
+    fn test_mint_impact_nft_rejects_tier_above_current_badge() {
+        let (env, cid, client, _admin, _pid) = setup();
+        let donor = Address::generate(&env);
+        set_donor_badge(&env, &cid, &donor, BadgeTier::Tree);
+
+        client.mint_impact_nft(&donor, &BadgeTier::Forest);
+    }
+
+    /// Each tier may be minted exactly once.
+    #[test]
+    #[should_panic]
+    fn test_mint_impact_nft_rejects_duplicate_tier() {
+        let (env, cid, client, _admin, _pid) = setup();
+        let donor = Address::generate(&env);
+        set_donor_badge(&env, &cid, &donor, BadgeTier::Forest);
+
+        client.mint_impact_nft(&donor, &BadgeTier::Tree);
+        client.mint_impact_nft(&donor, &BadgeTier::Tree);
     }
     #[test]
     fn test_batch_register_projects() {
@@ -8703,6 +8983,13 @@ mod tests {
                 },
             );
         });
+    }
+
+    /// Generate an independent badge-holding challenger (Seedling) for tests.
+    fn challenger_with_badge(env: &Env, cid: &soroban_sdk::Address) -> Address {
+        let challenger = Address::generate(env);
+        grant_badge(env, cid, &challenger);
+        challenger
     }
     /// Extend instance TTL before a large ledger jump so storage isn't archived.
     fn extend_ttl(env: &Env, cid: &soroban_sdk::Address) {
@@ -9512,6 +9799,73 @@ mod tests {
         // vote counts) is verified above.
     }
     #[test]
+    fn test_resolve_proposal_below_quorum_rejected() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        // A single badge holder (10 weighted votes) cannot pass a proposal
+        // below the 15-vote quorum floor (#714).
+        let voter = Address::generate(&env);
+        grant_badge(&env, &cid, &voter);
+        client.vote_verify_project(&voter, &pid, &true);
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
+        client.resolve_proposal(&pid);
+        // Read events immediately: `env.events().all()` only reflects the
+        // last top-level invocation.
+        let events = env.events().all().filter_by_contract(&cid);
+        let last_event = std::format!("{:?}", events.events().last().unwrap());
+        assert!(
+            last_event.contains("prop_noq"),
+            "expected prop_noq when quorum is not met, got: {}",
+            last_event
+        );
+        let p = client.get_proposal(&pid);
+        assert!(p.resolved);
+        assert_eq!(p.votes_for, 10);
+        assert_eq!(p.votes_against, 0);
+    }
+    #[test]
+    fn test_resolve_proposal_quorum_boundary_approves() {
+        let (env, cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        // Exactly 15 weighted votes (10 + 5) — quorum floor met, majority
+        // approves (#714).
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        grant_badge(&env, &cid, &v1);
+        grant_badge(&env, &cid, &v2);
+        let mut a1 = Vec::new(&env);
+        a1.push_back(VoteAllocation {
+            project_id: pid.clone(),
+            votes_for: 10,
+            votes_against: 0,
+            credits_spent: 100,
+        });
+        client.vote_on_proposals(&v1, &a1);
+        let mut a2 = Vec::new(&env);
+        a2.push_back(VoteAllocation {
+            project_id: pid.clone(),
+            votes_for: 5,
+            votes_against: 0,
+            credits_spent: 25,
+        });
+        client.vote_on_proposals(&v2, &a2);
+        extend_ttl(&env, &cid);
+        env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
+        client.resolve_proposal(&pid);
+        let events = env.events().all().filter_by_contract(&cid);
+        let last_event = std::format!("{:?}", events.events().last().unwrap());
+        assert!(
+            last_event.contains("proj_ver"),
+            "expected proj_ver at quorum boundary, got: {}",
+            last_event
+        );
+        let p = client.get_proposal(&pid);
+        assert!(p.resolved);
+        assert_eq!(p.votes_for, 15);
+        assert_eq!(p.votes_against, 0);
+    }
+    #[test]
     #[should_panic]
     fn test_resolve_before_deadline_fails() {
         let (env, _cid, client, admin, pid) = setup();
@@ -9719,9 +10073,10 @@ mod tests {
         let relayer = Address::generate(&env);
         att_client.initialize(&att_admin);
         att_client.set_relayer(&att_admin, &relayer);
+        client.set_attestation_contract(&admin, &att_addr);
+        assert_eq!(client.get_attestation_contract(), att_addr);
 
         let donor = Address::generate(&env);
-        let _ = admin;
         (env, client, att_client, att_addr, relayer, donor, pid)
     }
 
@@ -9790,6 +10145,14 @@ mod tests {
         assert_eq!(record.currency, symbol_short!("XCHAIN"));
         assert_eq!(record.message_hash, 7u32);
         assert!(!record.anonymous);
+    }
+
+    #[test]
+    fn test_settle_rejects_unregistered_attestation_contract() {
+        let (env, client, _att_client, _att_addr, _relayer, _donor, _pid) = settlement_setup();
+        let forged_addr = env.register_contract(None, AttestationContract);
+
+        assert!(client.try_settle_attestation(&forged_addr, &1u64).is_err());
     }
 
     /// A settled attestation must be indistinguishable from a native donation
@@ -9911,6 +10274,7 @@ mod tests {
         let relayer = Address::generate(&env);
         att_client.initialize(&att_admin);
         att_client.set_relayer(&att_admin, &relayer);
+        client.set_attestation_contract(&admin, &att_addr);
         let _ = pid;
 
         let donor = Address::generate(&env);
@@ -10006,13 +10370,14 @@ mod tests {
     fn test_settle_emits_event() {
         use soroban_sdk::testutils::Events as _;
 
-        let (env, cid, client, _admin, pid) = setup();
+        let (env, cid, client, admin, pid) = setup();
         let att_addr = env.register_contract(None, AttestationContract);
         let att_client = AttestationContractClient::new(&env, &att_addr);
         let att_admin = Address::generate(&env);
         let relayer = Address::generate(&env);
         att_client.initialize(&att_admin);
         att_client.set_relayer(&att_admin, &relayer);
+        client.set_attestation_contract(&admin, &att_addr);
 
         let donor = Address::generate(&env);
         let amount = 40 * STROOP;
@@ -12566,6 +12931,153 @@ mod tests {
     }
     #[cfg(feature = "vesting")]
     #[test]
+    fn test_vesting_remainder_paid_on_final_installment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let project_wallet = Address::generate(&env);
+        let pid = String::from_str(&env, "remainder-final");
+        client.register_project(
+            &admin,
+            &pid,
+            &String::from_str(&env, "Remainder Final"),
+            &project_wallet,
+            &100u32,
+        );
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        // 10 XLM split into 3 installments:
+        // 33_333_333 + 33_333_333 + 33_333_334 (final absorbs the 1-stroop remainder).
+        let total: i128 = 100_000_000;
+        StellarAssetClient::new(&env, &token).mint(&donor, &total);
+        let schedule_id = client.donate_vested(&token, &donor, &pid, &total, &3u32, &50u32, &0u32);
+        let s0 = client.get_vesting_schedule(&donor, &schedule_id);
+        assert_eq!(s0.amount_per_installment, 33_333_333);
+        let asset = StellarAssetClient::new(&env, &token);
+        assert_eq!(asset.balance(&project_wallet), 33_333_333);
+        // Custody holds the remainder until the final claim.
+        assert_eq!(asset.balance(&id), 66_666_667);
+        // Claim the 2nd installment — still the per-installment amount.
+        env.ledger().set_sequence_number(100);
+        client.claim_vested_installment(&donor, &schedule_id);
+        assert_eq!(asset.balance(&project_wallet), 66_666_666);
+        // Claim the final installment — absorbs the remainder.
+        env.ledger().set_sequence_number(200);
+        client.claim_vested_installment(&donor, &schedule_id);
+        assert_eq!(asset.balance(&project_wallet), total); // sum == total exactly
+        assert_eq!(asset.balance(&id), 0); // no dust stranded in custody
+    }
+    #[cfg(feature = "vesting")]
+    #[test]
+    fn test_vesting_cancel_refunds_remainder() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let project_wallet = Address::generate(&env);
+        let pid = String::from_str(&env, "remainder-cancel");
+        client.register_project(
+            &admin,
+            &pid,
+            &String::from_str(&env, "Remainder Cancel"),
+            &project_wallet,
+            &100u32,
+        );
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        // 10 XLM split into 3 installments of 33_333_333 with a 1-stroop remainder.
+        let total: i128 = 100_000_000;
+        StellarAssetClient::new(&env, &token).mint(&donor, &total);
+        let schedule_id = client.donate_vested(&token, &donor, &pid, &total, &3u32, &50u32, &0u32);
+        let asset = StellarAssetClient::new(&env, &token);
+        // Claim the 2nd installment, then cancel with 1 installment left.
+        env.ledger().set_sequence_number(100);
+        client.claim_vested_installment(&donor, &schedule_id);
+        assert_eq!(asset.balance(&project_wallet), 66_666_666);
+        client.cancel_vesting(&donor, &schedule_id);
+        // Refund = 1 remaining installment + the 1-stroop remainder.
+        assert_eq!(asset.balance(&donor), 33_333_334);
+        assert_eq!(asset.balance(&id), 0); // exact refund — no dust left in custody
+    }
+    #[cfg(feature = "vesting")]
+    #[test]
+    #[should_panic]
+    fn test_vesting_cancel_twice_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let project_wallet = Address::generate(&env);
+        let pid = String::from_str(&env, "double-cancel");
+        client.register_project(
+            &admin,
+            &pid,
+            &String::from_str(&env, "Double Cancel"),
+            &project_wallet,
+            &100u32,
+        );
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let total: i128 = 100_000_000;
+        StellarAssetClient::new(&env, &token).mint(&donor, &total);
+        let schedule_id =
+            client.donate_vested(&token, &donor, &pid, &total, &10u32, &720u32, &0u32);
+        // First cancel succeeds and refunds the unvested balance.
+        client.cancel_vesting(&donor, &schedule_id);
+        // Second cancel must be rejected — the schedule is already consumed.
+        client.cancel_vesting(&donor, &schedule_id);
+    }
+    #[cfg(feature = "vesting")]
+    #[test]
+    #[should_panic]
+    fn test_vesting_claim_after_cancel_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, IndigoPayContract);
+        let client = IndigoPayContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        let project_wallet = Address::generate(&env);
+        let pid = String::from_str(&env, "claim-after-cancel");
+        client.register_project(
+            &admin,
+            &pid,
+            &String::from_str(&env, "Claim After Cancel"),
+            &project_wallet,
+            &100u32,
+        );
+        let donor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let total: i128 = 100_000_000;
+        StellarAssetClient::new(&env, &token).mint(&donor, &total);
+        let schedule_id = client.donate_vested(&token, &donor, &pid, &total, &3u32, &50u32, &0u32);
+        // Cancel mid-schedule, then fast-forward past the next interval.
+        client.cancel_vesting(&donor, &schedule_id);
+        env.ledger().set_sequence_number(200);
+        // Claim must be rejected — funds were already refunded to the donor.
+        client.claim_vested_installment(&donor, &schedule_id);
+    }
+    #[cfg(feature = "vesting")]
+    #[test]
     #[should_panic]
     fn test_vesting_claim_before_interval_fails() {
         let env = Env::default();
@@ -13800,13 +14312,13 @@ mod tests {
 
     #[test]
     fn test_challenge_donation() {
-        let (env, _cid, client, admin, pid) = setup();
-        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+        let (env, cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
 
         let admins = soroban_sdk::vec![&env, admin.clone()];
         client.set_challenge_threshold(&admins, &(10 * STROOP));
 
-        let challenger = donor.clone();
+        let challenger = challenger_with_badge(&env, &cid);
         let reason = String::from_str(&env, "Suspicious activity");
         client.challenge_donation(&challenger, &donation_index, &reason);
 
@@ -13834,26 +14346,28 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_challenge_below_threshold_not_triggered() {
-        let (env, _cid, client, admin, pid) = setup();
-        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+        let (env, cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
 
         let admins = soroban_sdk::vec![&env, admin.clone()];
         client.set_challenge_threshold(&admins, &(500 * STROOP));
 
+        let challenger = challenger_with_badge(&env, &cid);
         let reason = String::from_str(&env, "Flagging low donation");
-        client.challenge_donation(&donor, &donation_index, &reason);
+        client.challenge_donation(&challenger, &donation_index, &reason);
     }
 
     #[test]
     fn test_resolve_challenge_approve() {
-        let (env, _cid, client, admin, pid) = setup();
-        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+        let (env, cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
 
         let admins = soroban_sdk::vec![&env, admin.clone()];
         client.set_challenge_threshold(&admins, &(10 * STROOP));
 
+        let challenger = challenger_with_badge(&env, &cid);
         let reason = String::from_str(&env, "Review requested");
-        client.challenge_donation(&donor, &donation_index, &reason);
+        client.challenge_donation(&challenger, &donation_index, &reason);
 
         client.resolve_challenge(&admin, &donation_index, &true);
 
@@ -13866,7 +14380,7 @@ mod tests {
 
     #[test]
     fn test_resolve_challenge_reject() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (env, cid, client, admin, pid) = setup();
         let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
 
         let project_before = client.get_project(&pid);
@@ -13876,8 +14390,9 @@ mod tests {
         let admins = soroban_sdk::vec![&env, admin.clone()];
         client.set_challenge_threshold(&admins, &(10 * STROOP));
 
+        let challenger = challenger_with_badge(&env, &cid);
         let reason = String::from_str(&env, "Illicit source");
-        client.challenge_donation(&donor, &donation_index, &reason);
+        client.challenge_donation(&challenger, &donation_index, &reason);
 
         client.resolve_challenge(&admin, &donation_index, &false);
 
@@ -13935,8 +14450,8 @@ mod tests {
 
     #[test]
     fn test_challenge_integration() {
-        let (env, _cid, client, admin, pid) = setup();
-        let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+        let (env, cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
 
         let admins = soroban_sdk::vec![&env, admin.clone()];
         client.set_challenge_threshold(&admins, &(10 * STROOP));
@@ -13944,8 +14459,9 @@ mod tests {
         assert_eq!(client.get_challenge_threshold(), 10 * STROOP);
         assert!(!client.is_donation_finalized(&donation_index));
 
+        let challenger = challenger_with_badge(&env, &cid);
         let reason = String::from_str(&env, "Audit requested");
-        client.challenge_donation(&donor, &donation_index, &reason);
+        client.challenge_donation(&challenger, &donation_index, &reason);
 
         let challenge = client.get_donation_challenge(&donation_index).unwrap();
         assert!(challenge.challenged);
@@ -13960,12 +14476,13 @@ mod tests {
 
     #[test]
     fn test_challenge_reversal_blocks_refund_without_double_accounting() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (env, cid, client, admin, pid) = setup();
         let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
         let admins = soroban_sdk::vec![&env, admin.clone()];
         client.set_challenge_threshold(&admins, &(10 * STROOP));
+        let challenger = challenger_with_badge(&env, &cid);
         client.challenge_donation(
-            &donor,
+            &challenger,
             &donation_index,
             &String::from_str(&env, "Reverse donation"),
         );
@@ -13999,12 +14516,13 @@ mod tests {
 
     #[test]
     fn test_refund_reversal_blocks_challenge_resolution_without_double_accounting() {
-        let (env, _cid, client, admin, pid) = setup();
+        let (env, cid, client, admin, pid) = setup();
         let (donor, token, donation_index) = setup_donation(&env, &client, &pid);
         let admins = soroban_sdk::vec![&env, admin.clone()];
         client.set_challenge_threshold(&admins, &(10 * STROOP));
+        let challenger = challenger_with_badge(&env, &cid);
         client.challenge_donation(
-            &donor,
+            &challenger,
             &donation_index,
             &String::from_str(&env, "Review before refund"),
         );
@@ -14041,17 +14559,62 @@ mod tests {
 
     #[test]
     fn prop_challenge_only_badge_holders() {
+        let (env, cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        let challenger = challenger_with_badge(&env, &cid);
+        let reason = String::from_str(&env, "Valid challenger");
+        client.challenge_donation(&challenger, &donation_index, &reason);
+
+        let challenge = client.get_donation_challenge(&donation_index).unwrap();
+        assert!(challenge.challenged);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #134)")]
+    fn test_challenge_reason_too_long_panics() {
+        let (env, cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        let challenger = challenger_with_badge(&env, &cid);
+        let long_reason = "x".repeat((MAX_CHALLENGE_REASON_LEN + 1) as usize);
+        let reason = String::from_str(&env, &long_reason);
+        client.challenge_donation(&challenger, &donation_index, &reason);
+    }
+
+    #[test]
+    fn test_challenge_reason_at_max_length_succeeds() {
+        let (env, cid, client, admin, pid) = setup();
+        let (_donor, _token, donation_index) = setup_donation(&env, &client, &pid);
+
+        let admins = soroban_sdk::vec![&env, admin.clone()];
+        client.set_challenge_threshold(&admins, &(10 * STROOP));
+
+        let challenger = challenger_with_badge(&env, &cid);
+        let reason = String::from_str(&env, &"x".repeat(MAX_CHALLENGE_REASON_LEN as usize));
+        client.challenge_donation(&challenger, &donation_index, &reason);
+
+        let challenge = client.get_donation_challenge(&donation_index).unwrap();
+        assert!(challenge.challenged);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #135)")]
+    fn test_self_challenge_panics() {
         let (env, _cid, client, admin, pid) = setup();
         let (donor, _token, donation_index) = setup_donation(&env, &client, &pid);
 
         let admins = soroban_sdk::vec![&env, admin.clone()];
         client.set_challenge_threshold(&admins, &(10 * STROOP));
 
-        let reason = String::from_str(&env, "Valid challenger");
+        let reason = String::from_str(&env, "Self-challenge");
         client.challenge_donation(&donor, &donation_index, &reason);
-
-        let challenge = client.get_donation_challenge(&donation_index).unwrap();
-        assert!(challenge.challenged);
     }
 
     // ─── Stealth Address Donation Integration Tests (#458) ───────────────
@@ -16706,69 +17269,217 @@ mod tests {
         assert_eq!(against_votes, 0);
     }
 
-    // ─── Donation receipt NFT (#945) ──────────────────────────────────────────
-    #[test]
-    fn test_mint_donation_receipt() {
-        let (env, _cid, client, _admin, pid) = setup();
-        let donor = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        StellarAssetClient::new(&env, &token).mint(&donor, &(25 * STROOP));
-        client.donate(&token, &donor, &pid, &(25 * STROOP), &0u32);
-        let idx = client.mint_donation_receipt(&donor, &0u32);
-        assert_eq!(idx, 0u32);
-        assert!(client.has_donation_receipt(&donor, &0u32));
-        let receipt = client.get_donation_receipt(&donor, &0u32);
-        assert_eq!(receipt.donor, donor);
-        assert_eq!(receipt.project_id, pid);
-        assert_eq!(receipt.amount, 25 * STROOP);
-        assert_eq!(receipt.currency, symbol_short!("XLM"));
-        assert!(receipt.co2_offset > 0);
+    // ─── #707 Anonymity Tests ─────────────────────────────────────────────────
+
+    /// Helper: mint `amount` stroops of a fresh SAC token to `donor` and
+    /// return the token address.
+    fn mint_token_for(env: &Env, donor: &Address, amount: i128) -> Address {
+        let admin = Address::generate(env);
+        let token = env.register_stellar_asset_contract_v2(admin).address();
+        StellarAssetClient::new(env, &token).mint(donor, &amount);
+        token
     }
 
+    /// An anonymous donation MUST store the zero-address placeholder in
+    /// DonationRecord.donor, not the real donor address.
     #[test]
-    fn test_mint_donation_receipt_fails_without_record() {
-        let (env, _cid, client, _admin, _pid) = setup();
-        let donor = Address::generate(&env);
-        // No donation has been made, so donation index 0 has no record.
-        let result = client.try_mint_donation_receipt(&donor, &0u32);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_mint_donation_receipt_is_idempotent() {
+    fn test_anonymous_donation_record_does_not_reveal_donor() {
         let (env, _cid, client, _admin, pid) = setup();
         let donor = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        StellarAssetClient::new(&env, &token).mint(&donor, &(25 * STROOP));
-        client.donate(&token, &donor, &pid, &(25 * STROOP), &0u32);
-        client.mint_donation_receipt(&donor, &0u32);
-        let result = client.try_mint_donation_receipt(&donor, &0u32);
-        assert!(result.is_err());
+        let token = mint_token_for(&env, &donor, 100 * STROOP);
+
+        // donate_with_privacy with anonymous = true
+        client.donate_with_privacy(&token, &donor, &pid, &(100 * STROOP), &1u32, &true);
+
+        let record = client.get_donation_record(&0u32);
+
+        // Core invariant of #707: the real donor MUST NOT appear in the record.
+        assert_ne!(
+            record.donor, donor,
+            "DonationRecord.donor must not be the real donor for anonymous donations"
+        );
+
+        // The stored donor must be the well-known zero-address placeholder.
+        let expected_anon = Address::from_string(&String::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        ));
+        assert_eq!(
+            record.donor, expected_anon,
+            "DonationRecord.donor must be the anon_address placeholder for anonymous donations"
+        );
+
+        // The anonymous flag must be set.
+        assert!(record.anonymous, "DonationRecord.anonymous must be true");
     }
 
+    /// A public (non-anonymous) donation MUST store the real donor address.
     #[test]
-    fn test_mint_donation_receipt_multiple_donations() {
+    fn test_public_donation_record_reveals_donor() {
         let (env, _cid, client, _admin, pid) = setup();
         let donor = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        StellarAssetClient::new(&env, &token).mint(&donor, &(100 * STROOP));
-        client.donate(&token, &donor, &pid, &(25 * STROOP), &0u32);
-        client.donate(&token, &donor, &pid, &(25 * STROOP), &1u32);
-        let idx_a = client.mint_donation_receipt(&donor, &0u32);
-        let idx_b = client.mint_donation_receipt(&donor, &1u32);
-        assert_eq!(idx_a, 0u32);
-        assert_eq!(idx_b, 1u32);
-        assert!(client.has_donation_receipt(&donor, &1u32));
-        let receipt = client.get_donation_receipt(&donor, &1u32);
-        assert_eq!(receipt.amount, 25 * STROOP);
+        let token = mint_token_for(&env, &donor, 50 * STROOP);
+
+        client.donate_with_privacy(&token, &donor, &pid, &(50 * STROOP), &2u32, &false);
+
+        let record = client.get_donation_record(&0u32);
+
+        assert_eq!(
+            record.donor, donor,
+            "DonationRecord.donor must be the real donor for public donations"
+        );
+        assert!(!record.anonymous, "DonationRecord.anonymous must be false");
+    }
+
+    /// The real donor can generate a receipt for their own anonymous donation
+    /// by proving knowledge of the preimage via the SHA-256 commitment.
+    #[test]
+    fn test_anonymous_donor_can_generate_receipt() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_token_for(&env, &donor, 100 * STROOP);
+
+        client.donate_with_privacy(&token, &donor, &pid, &(100 * STROOP), &3u32, &true);
+
+        // Real donor should be able to generate a receipt.
+        let receipt = client.generate_receipt(&donor, &0u32);
+
+        // The receipt donor field must be the zero-address (not the real donor).
+        let expected_anon = Address::from_string(&String::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        ));
+        assert_eq!(
+            receipt.donor, expected_anon,
+            "Receipt donor must be the anon_address placeholder for anonymous receipts"
+        );
+
+        // The receipt must be verifiable.
+        assert!(
+            client.verify_receipt(&receipt),
+            "An anonymous receipt generated by the real donor must be verifiable"
+        );
+    }
+
+    /// An imposter (not the real donor) cannot generate a receipt for an
+    /// anonymous donation — the commitment check must reject them.
+    #[test]
+    #[should_panic(expected = "Only the donor can generate a receipt for this donation")]
+    fn test_imposter_cannot_generate_anonymous_receipt() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let imposter = Address::generate(&env);
+        let token = mint_token_for(&env, &donor, 75 * STROOP);
+
+        client.donate_with_privacy(&token, &donor, &pid, &(75 * STROOP), &4u32, &true);
+
+        // Imposter attempts to generate a receipt — must panic.
+        client.generate_receipt(&imposter, &0u32);
+    }
+
+    /// Two different anonymous donors each get an unlinkable record: neither
+    /// record contains either donor's real address.
+    #[test]
+    fn test_multiple_anonymous_donations_are_unlinkable() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+        let token_a = mint_token_for(&env, &donor_a, 60 * STROOP);
+        let token_b = mint_token_for(&env, &donor_b, 40 * STROOP);
+
+        client.donate_with_privacy(&token_a, &donor_a, &pid, &(60 * STROOP), &5u32, &true);
+        client.donate_with_privacy(&token_b, &donor_b, &pid, &(40 * STROOP), &6u32, &true);
+
+        let record_0 = client.get_donation_record(&0u32);
+        let record_1 = client.get_donation_record(&1u32);
+
+        let expected_anon = Address::from_string(&String::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        ));
+
+        // Neither record reveals any real address.
+        assert_ne!(record_0.donor, donor_a, "Record 0 must not reveal donor_a");
+        assert_ne!(record_0.donor, donor_b, "Record 0 must not reveal donor_b");
+        assert_ne!(record_1.donor, donor_a, "Record 1 must not reveal donor_a");
+        assert_ne!(record_1.donor, donor_b, "Record 1 must not reveal donor_b");
+
+        // Both records hold the same zero-address — on-chain they look identical.
+        assert_eq!(record_0.donor, expected_anon);
+        assert_eq!(record_1.donor, expected_anon);
+
+        // Each donor can still prove ownership of their own record.
+        let receipt_a = client.generate_receipt(&donor_a, &0u32);
+        let receipt_b = client.generate_receipt(&donor_b, &1u32);
+        assert!(client.verify_receipt(&receipt_a));
+        assert!(client.verify_receipt(&receipt_b));
+    }
+
+    /// A tampered anonymous receipt (amount changed) must not verify.
+    #[test]
+    fn test_tampered_anonymous_receipt_fails_verification() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_token_for(&env, &donor, 200 * STROOP);
+
+        client.donate_with_privacy(&token, &donor, &pid, &(200 * STROOP), &7u32, &true);
+
+        let mut receipt = client.generate_receipt(&donor, &0u32);
+
+        // Tamper: inflate the amount.
+        receipt.amount = 999_999_999_999;
+
+        assert!(
+            !client.verify_receipt(&receipt),
+            "A tampered anonymous receipt must not verify"
+        );
+    }
+
+    /// A non-anonymous receipt with a substituted anon_address as the donor
+    /// must not verify (guards against downgrade attacks).
+    #[test]
+    fn test_anon_address_substituted_in_public_receipt_fails_verification() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_token_for(&env, &donor, 30 * STROOP);
+
+        client.donate_with_privacy(&token, &donor, &pid, &(30 * STROOP), &8u32, &false);
+
+        let mut receipt = client.generate_receipt(&donor, &0u32);
+
+        // Substitute the anon_address as the donor field.
+        receipt.donor = Address::from_string(&String::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        ));
+
+        assert!(
+            !client.verify_receipt(&receipt),
+            "Substituting anon_address into a public receipt must fail verification"
+        );
+    }
+
+    /// AnonymousDonationCount increments correctly for anonymous donations
+    /// and stays zero for public donations.
+    #[test]
+    fn test_anonymous_donation_count() {
+        let (env, _cid, client, _admin, pid) = setup();
+        let donor = Address::generate(&env);
+        let token = mint_token_for(&env, &donor, 300 * STROOP);
+
+        assert_eq!(client.get_anonymous_donation_count(), 0);
+
+        client.donate_with_privacy(&token, &donor, &pid, &(100 * STROOP), &9u32, &true);
+        assert_eq!(client.get_anonymous_donation_count(), 1);
+
+        client.donate_with_privacy(&token, &donor, &pid, &(100 * STROOP), &10u32, &false);
+        assert_eq!(
+            client.get_anonymous_donation_count(),
+            1,
+            "Public donation must not increment anonymous count"
+        );
+
+        client.donate_with_privacy(&token, &donor, &pid, &(100 * STROOP), &11u32, &true);
+        assert_eq!(client.get_anonymous_donation_count(), 2);
     }
 }

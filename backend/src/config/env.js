@@ -17,7 +17,7 @@ const envSchema = z.object({
     .enum(["development", "production", "test"])
     .optional()
     .default("development"),
-  STELLAR_NETWORK: z.enum(["testnet", "mainnet"]).optional().default("testnet"),
+  STELLAR_NETWORK: z.enum(["testnet", "mainnet"]).optional(),
   HORIZON_URL: z
     .string()
     .url()
@@ -123,18 +123,27 @@ const envSchema = z.object({
 
 function validateEnv() {
   const result = envSchema.safeParse(process.env);
+  const missingProductionNetwork =
+    result.success &&
+    result.data.NODE_ENV === "production" &&
+    !result.data.STELLAR_NETWORK;
 
-  if (!result.success) {
+  if (!result.success || missingProductionNetwork) {
     // zod v4 renamed `error.errors` to `error.issues`. Fall back to
     // `errors` for any v3 shim that still defines it.
-    const issues = (result.error.issues || result.error.errors || [])
-      .map((e) => `  - ${(e.path || []).join(".")}: ${e.message}`)
-      .join("\n");
+    const issues = missingProductionNetwork
+      ? "  - STELLAR_NETWORK: STELLAR_NETWORK is required in production"
+      : (result.error.issues || result.error.errors || [])
+        .map((e) => `  - ${(e.path || []).join(".")}: ${e.message}`)
+        .join("\n");
     console.error(`\n[Startup] Environment validation failed:\n${issues}\n`);
     process.exit(1);
   }
 
-  return result.data;
+  return {
+    ...result.data,
+    STELLAR_NETWORK: result.data.STELLAR_NETWORK || "testnet",
+  };
 }
 
 module.exports = { validateEnv };

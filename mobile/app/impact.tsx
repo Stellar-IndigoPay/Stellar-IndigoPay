@@ -10,7 +10,7 @@ import {
   TouchableOpacity,
 } from "react-native";
 import { useEffect, useRef, useState } from "react";
-import axios from "axios";
+import { apiClient } from "../lib/apiClient";
 import { captureRef } from "react-native-view-shot";
 import * as Sharing from "expo-sharing";
 import { useTheme } from "./theme";
@@ -57,13 +57,13 @@ export default function ImpactScreen() {
   const loadImpactData = async (pk: string) => {
     try {
       const [profileRes, donationsRes, impactRes] = await Promise.all([
-        axios
+        apiClient
           .get(`${API_URL}/api/profiles/${pk}`)
           .catch(() => ({ data: { data: null } })),
-        axios
+        apiClient
           .get(`${API_URL}/api/donations/donor/${pk}`)
           .catch(() => ({ data: { data: [] } })),
-        axios
+        apiClient
           .get(`${API_URL}/api/impact/donor/${pk}`)
           .catch(() => ({ data: { data: null } })),
       ]);

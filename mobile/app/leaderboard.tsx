@@ -13,7 +13,7 @@ import {
 } from "react-native";
 import { useEffect, useState } from "react";
 import { useRouter } from "expo-router";
-import axios from "axios";
+import { apiClient } from "../lib/apiClient";
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
 
@@ -55,7 +55,7 @@ export default function LeaderboardScreen() {
 
   const fetchLeaderboard = async () => {
     try {
-      const res = await axios.get(`${API_URL}/api/leaderboard`);
+      const res = await apiClient.get(`${API_URL}/api/leaderboard`);
       setEntries(res.data.data ?? []);
     } catch {
       setError("Failed to load leaderboard");
