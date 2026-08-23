@@ -332,5 +332,50 @@
     "search": "Rechercher",
     "filter": "Filtrer",
     "retry": "Réessayer"
+  },
+  "validation": {
+    "wallet": {
+      "invalid": "Adresse Stellar invalide"
+    },
+    "assetCode": {
+      "invalid": "Code d'actif invalide"
+    },
+    "txHash": {
+      "invalid": "Hash de transaction invalide"
+    },
+    "amount": {
+      "invalidFormat": "{{field}} doit être un nombre décimal valide",
+      "tooSmall": "{{field}} doit être d'au moins {{min}}",
+      "tooLarge": "{{field}} doit être d'au plus {{max}}",
+      "precision": "{{field}} doit avoir au plus {{max}} décimales"
+    },
+    "length": {
+      "between": "{{field}} doit contenir entre {{min}} et {{max}} caractères",
+      "max": "{{field}} doit contenir au plus {{max}} caractères"
+    },
+    "list": {
+      "max": "{{field}} doit contenir au plus {{max}} éléments"
+    },
+    "format": {
+      "invalid": "{{detail}}"
+    },
+    "number": {
+      "positive": "{{field}} doit être un nombre positif",
+      "nonNegative": "{{field}} doit être un nombre non négatif"
+    },
+    "enum": {
+      "invalid": "{{field}} doit être l'un des suivants : {{options}}"
+    },
+    "email": {
+      "invalid": "{{field}} doit être une adresse e-mail valide"
+    },
+    "url": {
+      "invalid": "{{field}} doit être une URL valide"
+    },
+    "required": "{{field}} est obligatoire",
+    "upload": {
+      "tooLarge": "Le fichier dépasse la taille maximale de {{maxMB}} Mo",
+      "invalidType": "Le type de fichier doit être l'un des suivants : {{types}}"
+    }
   }
 }
