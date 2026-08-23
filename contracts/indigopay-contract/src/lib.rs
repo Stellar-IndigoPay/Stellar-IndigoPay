@@ -894,7 +894,6 @@ pub enum ContractError {
     EscrowFundingFailed = 63,
     EscrowReleaseFailed = 64,
     EscrowClaimFailed = 65,
-    InsufficientContractBalanceForEscrow = 136,
     // ── Governance & voting (66–75) ─────────────────────────────────────────
     CannotDelegateToSelf = 66,
     AlreadyDelegatedToThisAddress = 67,
@@ -979,6 +978,8 @@ pub enum ContractError {
     // ── Attestation settlement configuration (136–137) ──────────────────────
     AttestationContractNotConfigured = 136,
     AttestationContractMismatch = 137,
+    // ── Escrow balance guard (138) ───────────────────────────────────────────
+    InsufficientContractBalanceForEscrow = 138,
 }
 // 48 hours × 3600 s / 5 s per ledger = 34 560 ledgers. The minimum delay
 // between `propose_upgrade` and the earliest ledger at which
