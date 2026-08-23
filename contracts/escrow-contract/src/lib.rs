@@ -607,9 +607,6 @@ impl EscrowContract {
         if job.client != client {
             panic_with_error!(&env, EscrowError::OnlyClientCanRelease);
         }
-        if job.disputed {
-            panic_with_error!(&env, EscrowError::JobDisputedAdminMustResolve);
-        }
         if milestone_index >= job.milestones.len() {
             panic_with_error!(&env, EscrowError::InvalidMilestoneIndex);
         }
@@ -769,6 +766,11 @@ impl EscrowContract {
     }
 
     /// M-of-N admin (deprecated): Mark a job as disputed, freezing remaining releases.
+    ///
+    /// Delegates to the milestone-level dispute representation for backward
+    /// compatibility: every unreleased milestone is flagged `disputed` so the
+    /// non-deprecated `resolve_milestone_dispute` can also unblock a job
+    /// disputed through this entrypoint (issue #613).
     #[deprecated]
     pub fn dispute_job(env: Env, signers: Vec<Address>, job_id: String) {
         require_admin(&env, &signers);
@@ -778,6 +780,24 @@ impl EscrowContract {
             .instance()
             .get(&DataKey::Job(job_id.clone()))
             .expect("Job not found");
+
+        // Mirror the dispute onto every unreleased milestone so the
+        // milestone-level resolution path can resolve it later.
+        let mut milestones = job.milestones.clone();
+        for i in 0..milestones.len() {
+            let mut milestone = milestones.get(i).unwrap().clone();
+            if !milestone.released {
+                milestone.disputed = true;
+                #[cfg(feature = "oracle-escrow")]
+                {
+                    milestone.verified = false;
+                    milestone.proof_hash = None;
+                }
+            }
+            milestones.set(i, milestone);
+        }
+        job.milestones = milestones;
+
         job.disputed = true;
         job.status = JobStatus::Disputed;
         reputation_job_disputed(&env, &job);
@@ -789,6 +809,9 @@ impl EscrowContract {
     }
 
     /// M-of-N admin (deprecated): Resolve a dispute and release remaining funds.
+    ///
+    /// Works for both dispute entrypoints now that `dispute_milestone` keeps
+    /// `job.disputed` in sync with the milestone-level flags (issue #613).
     #[deprecated]
     pub fn resolve_dispute(
         env: Env,
@@ -878,6 +901,7 @@ impl EscrowContract {
         }
         milestones.set(milestone_index, milestone);
         job.milestones = milestones;
+        job.disputed = true;
         job.status = JobStatus::Disputed;
         reputation_job_disputed(&env, &job);
 
@@ -932,6 +956,7 @@ impl EscrowContract {
 
         let all_released = job.milestones.iter().all(|m| m.released);
         let any_disputed = job.milestones.iter().any(|m| m.disputed);
+        job.disputed = any_disputed;
         job.status = if all_released {
             JobStatus::Completed
         } else if any_disputed {
@@ -1017,9 +1042,6 @@ impl EscrowContract {
         if job.freelancer != freelancer {
             panic_with_error!(&env, EscrowError::OnlyJobFreelancerCanClaim);
         }
-        if job.disputed {
-            panic_with_error!(&env, EscrowError::JobDisputedCannotClaimMilestone);
-        }
         if env.ledger().sequence() < job.release_after {
             panic_with_error!(&env, EscrowError::ReleasePeriodNotReached);
         }
@@ -1079,7 +1101,7 @@ impl EscrowContract {
     /// M-of-N admin: extend a job's release period. `new_release_after` is the
     /// new absolute ledger sequence at which the freelancer may auto-claim
     /// unclaimed milestones; it must be later than the job's current
-    /// `release_after` (extension only — the period can never be shortened).
+    /// `release_after` and cannot exceed the job deadline.
     pub fn update_release_after(
         env: Env,
         signers: Vec<Address>,
@@ -1096,6 +1118,9 @@ impl EscrowContract {
 
         if new_release_after <= job.release_after {
             panic_with_error!(&env, EscrowError::NewReleaseAfterMustExtendCurrent);
+        }
+        if new_release_after > job.deadline {
+            panic_with_error!(&env, EscrowError::ReleaseAfterExceedsDeadline);
         }
 
         job.release_after = new_release_after;
@@ -2863,6 +2888,38 @@ mod tests {
 
         let current = client.get_job(&job_id).unwrap().release_after;
         client.update_release_after(&signers1(&env, &admin), &job_id, &(current - 1));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_update_release_after_cannot_exceed_deadline_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-release-after-past-deadline");
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 100));
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+
+        let deadline = client.get_job(&job_id).unwrap().deadline;
+        client.update_release_after(&signers1(&env, &admin), &job_id, &(deadline + 1));
     }
 
     #[test]
