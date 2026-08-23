@@ -264,3 +264,29 @@ groups:
             The last successful secret rotation was {{ $value | humanizeTimestamp }}.
             Rotations are scheduled quarterly (every 91 days). Consider running
             the workflow manually if the automated schedule has been failing.
+
+  - name: stellar-indigopay-gitops-drift
+    interval: 30s
+    rules:
+      - alert: ArgoCDAppOutOfSync
+        expr: argocd_app_info{sync_status="OutOfSync"} == 1
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "ArgoCD application {{ $labels.name }} is OutOfSync"
+          description: |
+            Cluster state has drifted from repository gitops/ manifests for >5m.
+          runbook: docs/runbooks/gitops-argocd-drift.md
+
+      - alert: ArgoCDAppDegraded
+        expr: argocd_app_info{health_status="Degraded"} == 1
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "ArgoCD application {{ $labels.name }} health is Degraded"
+          description: |
+            One or more resources managed by ArgoCD are degraded.
+          runbook: docs/runbooks/gitops-argocd-drift.md
+

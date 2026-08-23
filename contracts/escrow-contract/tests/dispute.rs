@@ -245,3 +245,131 @@ fn test_dispute_non_existent_job_panics() {
     let job_id = SorobanString::from_str(&env, "ghost-job");
     client.dispute_job(&common::signers1(&env, &admin), &job_id);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cross-path dispute-model tests (issue #613)
+//
+// The deprecated `dispute_job` / `resolve_dispute` and the milestone-level
+// `dispute_milestone` / `resolve_milestone_dispute` used to maintain two
+// disjoint dispute representations. Interleaving them could strand a job: a
+// job disputed via `dispute_job` set `job.disputed` but no milestone flag, so
+// `resolve_milestone_dispute` panicked with `MilestoneIsNotDisputed`. These
+// tests pin the unified behavior in both directions.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Dispute via the deprecated path, then resolve via the milestone path.
+#[test]
+fn test_dispute_job_then_resolve_milestone_dispute() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = common::setup(&env);
+
+    let client_addr = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let token = common::create_token(&env);
+    common::fund(&env, &token, &client_addr, 1000i128);
+    let job_id = SorobanString::from_str(&env, "job-deprecated-then-ms");
+
+    let mut milestones = Vec::new(&env);
+    milestones.push_back(escrow_contract::Milestone {
+        name: SorobanString::from_str(&env, "M1"),
+        percentage: 50,
+        released: false,
+        disputed: false,
+        oracle: None,
+        verified: false,
+        proof_hash: None,
+    });
+    milestones.push_back(escrow_contract::Milestone {
+        name: SorobanString::from_str(&env, "M2"),
+        percentage: 50,
+        released: false,
+        disputed: false,
+        oracle: None,
+        verified: false,
+        proof_hash: None,
+    });
+
+    client.create_job(
+        &client_addr,
+        &freelancer,
+        &job_id,
+        &token,
+        &1000i128,
+        &milestones,
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
+    );
+
+    // Deprecated dispute now mirrors the dispute onto every unreleased
+    // milestone, so the milestone-level resolution path can unblock the job.
+    client.dispute_job(&common::signers1(&env, &admin), &job_id);
+
+    let job = client.get_job(&job_id).unwrap();
+    assert_eq!(job.status, JobStatus::Disputed);
+    assert!(job.disputed);
+    assert!(job.milestones.get(0).unwrap().disputed);
+    assert!(job.milestones.get(1).unwrap().disputed);
+
+    // Resolve milestones one at a time through the non-deprecated path.
+    client.resolve_milestone_dispute(&common::signers1(&env, &admin), &job_id, &0u32, &true);
+    let job2 = client.get_job(&job_id).unwrap();
+    assert_eq!(job2.status, JobStatus::Disputed);
+    assert!(job2.disputed);
+    assert!(job2.milestones.get(0).unwrap().released);
+    assert!(!job2.milestones.get(0).unwrap().disputed);
+    assert!(job2.milestones.get(1).unwrap().disputed);
+
+    client.resolve_milestone_dispute(&common::signers1(&env, &admin), &job_id, &1u32, &true);
+    let job3 = client.get_job(&job_id).unwrap();
+    assert_eq!(job3.status, JobStatus::Completed);
+    assert!(!job3.disputed);
+    assert!(job3.milestones.get(1).unwrap().released);
+    assert!(!job3.milestones.get(1).unwrap().disputed);
+
+    // Freelancer received the full amount through milestone-level resolution.
+    assert_eq!(common::token_balance(&env, &token, &freelancer), 1000i128);
+}
+
+/// Dispute via the milestone path, then resolve via the deprecated path.
+#[test]
+fn test_dispute_milestone_then_resolve_dispute() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = common::setup(&env);
+
+    let client_addr = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let token = common::create_token(&env);
+    common::fund(&env, &token, &client_addr, 1000i128);
+    let job_id = SorobanString::from_str(&env, "job-ms-then-deprecated");
+
+    common::create_simple_job(
+        &env,
+        &client,
+        &client_addr,
+        &freelancer,
+        &token,
+        "job-ms-then-deprecated",
+        1000i128,
+    );
+
+    // Milestone-level dispute now keeps `job.disputed` in sync, so the
+    // deprecated job-level resolution path can also unblock the job.
+    client.dispute_milestone(&common::signers1(&env, &admin), &job_id, &0u32);
+
+    let job = client.get_job(&job_id).unwrap();
+    assert_eq!(job.status, JobStatus::Disputed);
+    assert!(job.disputed);
+    assert!(job.milestones.get(0).unwrap().disputed);
+
+    client.resolve_dispute(&common::signers1(&env, &admin), &job_id, &true);
+
+    let job2 = client.get_job(&job_id).unwrap();
+    assert_eq!(job2.status, JobStatus::Completed);
+    assert!(!job2.disputed);
+    assert!(job2.milestones.get(0).unwrap().released);
+    assert!(!job2.milestones.get(0).unwrap().disputed);
+
+    // Freelancer received the full amount through the deprecated resolution.
+    assert_eq!(common::token_balance(&env, &token, &freelancer), 1000i128);
+}

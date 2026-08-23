@@ -11,6 +11,10 @@ describe("env.js configuration", () => {
     process.env = { ...originalEnv };
   });
 
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
   afterAll(() => {
     process.env = originalEnv;
   });
@@ -51,6 +55,7 @@ describe("env.js configuration", () => {
     process.env.JWT_SECRET = "test-secret";
     process.env.DATABASE_URL = "postgres://localhost:5432/test";
     process.env.NODE_ENV = "production";
+    process.env.STELLAR_NETWORK = "mainnet";
 
     const { validateEnv } = require("./env");
     const env = validateEnv();
@@ -114,6 +119,7 @@ describe("env.js configuration", () => {
 
   test("apply defaults STELLAR_NETWORK when not set", () => {
     delete process.env.STELLAR_NETWORK;
+    process.env.NODE_ENV = "test";
     process.env.JWT_SECRET = "test-secret";
     process.env.DATABASE_URL = "postgres://localhost:5432/test";
 
@@ -121,5 +127,41 @@ describe("env.js configuration", () => {
     const env = validateEnv();
 
     expect(env.STELLAR_NETWORK).toBe("testnet"); // default
+  });
+
+  test.each(["testnet", "mainnet"])(
+    "accepts the %s Stellar network",
+    (network) => {
+      process.env.NODE_ENV = "production";
+      process.env.STELLAR_NETWORK = network;
+
+      const { validateEnv } = require("./env");
+
+      expect(validateEnv().STELLAR_NETWORK).toBe(network);
+    },
+  );
+
+  test.each([
+    ["missing", undefined],
+    ["invalid", "Mainnet"],
+  ])("rejects %s STELLAR_NETWORK in production", (_label, network) => {
+    process.env.NODE_ENV = "production";
+    if (network === undefined) {
+      delete process.env.STELLAR_NETWORK;
+    } else {
+      process.env.STELLAR_NETWORK = network;
+    }
+
+    const exitSpy = jest.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit");
+    });
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    const { validateEnv } = require("./env");
+
+    expect(validateEnv).toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("STELLAR_NETWORK"),
+    );
   });
 });

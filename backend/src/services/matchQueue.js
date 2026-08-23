@@ -22,6 +22,8 @@ const QUEUE = "donation-match";
 let boss = null;
 
 async function start() {
+  if (boss) return;
+
   const connectionString =
     process.env.DATABASE_URL ||
     "postgres://postgres:postgres@localhost:5432/indigopay";
@@ -105,10 +107,23 @@ async function start() {
 }
 
 async function stop() {
-  if (boss) {
-    await boss.stop({ timeout: 5000 });
-    boss = null;
-  }
+  const currentBoss = boss;
+  if (!currentBoss) return;
+  boss = null;
+
+  // pg-boss 10 schedules worker removal from `offWork()` but does not await
+  // that removal from `stop()`. Keep its client pool open while the polling
+  // loops observe the stop signal, then close the pg-boss-owned pool only
+  // after those loops have had a chance to exit. Otherwise a late poll calls
+  // Node's timers/promises module after Jest has torn the environment down.
+  await currentBoss.stop({
+    graceful: true,
+    close: false,
+    timeout: 5_000,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  const db = currentBoss.getDb?.();
+  if (db?.opened) await db.close();
 }
 
 /**

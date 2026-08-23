@@ -25,18 +25,22 @@ async function getQueueMetrics() {
       COUNT(*) FILTER (WHERE state IN ('created', 'retry')) AS waiting,
       COUNT(*) FILTER (WHERE state = 'failed') AS failed,
       COUNT(*) FILTER (WHERE state = 'completed') AS completed,
-      AVG(EXTRACT(EPOCH FROM (completedat - startedat))) FILTER (WHERE state = 'completed') AS avg_latency
+      AVG(EXTRACT(EPOCH FROM (completed_on - started_on))) FILTER (WHERE state = 'completed') AS avg_latency
     FROM (
-      SELECT name, state, startedat, completedat FROM pgboss.job
+      SELECT name, state, started_on, completed_on FROM pgboss.job
       UNION ALL
-      SELECT name, state, startedat, completedat FROM pgboss.archive
+      SELECT name, state, started_on, completed_on FROM pgboss.archive
     ) all_jobs
     WHERE name = ANY($1)
     GROUP BY name
   `;
 
+  // pg-boss 10 no longer stores a `paused` column on queue. Keep the
+  // response shape used by the admin API, but derive the compatibility value
+  // in SQL so scrapes work against the current pg-boss schema without noisy
+  // PostgreSQL errors.
   const pausedQuery = `
-    SELECT name, paused FROM pgboss.queue WHERE name = ANY($1)
+    SELECT name, false AS paused FROM pgboss.queue WHERE name = ANY($1)
   `;
 
   // We run queries in parallel. If pg-boss tables don't exist yet, we catch
