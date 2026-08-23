@@ -1,5 +1,2 @@
 title = "IndigoPay Gitleaks Config"
 
-[allowlist]
-paths = []
-regexes = []
