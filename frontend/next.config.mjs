@@ -73,6 +73,10 @@ const nextConfig = {
   experimental: {
 
     optimizePackageImports: ["@sentry/nextjs"],
+    // Allows importing `shared/validation.js` (a sibling of `frontend/`,
+    // holding the single source of truth for validation rules) without
+    // duplicating it inside the frontend package. See Issue #90-follow-up.
+    externalDir: true,
   },
   images: {
     remotePatterns: [

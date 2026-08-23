@@ -1,36 +1,45 @@
 import { z } from "zod";
 import { PROJECT_CATEGORIES } from "@/utils/format";
+// Single source of truth for validation rules (Issue #90-follow-up).
+// Every bound, format regex, and error-message key below comes from
+// `shared/validation.js` — the same module the backend's
+// `src/validators/schemas.js` builds on — so client and server can no
+// longer silently drift (amount bounds, decimal precision, message
+// length, wallet/tx-hash formats, ...). Typed via validation.d.ts.
+import * as shared from "@shared/validation";
+
+const {
+  stellarAddress: sharedWalletSchema,
+  transactionHash: sharedTxHashSchema,
+  amountString,
+  nonNegativeAmountString,
+  boundedText,
+  emailField,
+  urlField,
+  enumField,
+  createDonationSchema,
+  createProfileSchema,
+  createProjectSubmissionSchema,
+  RULES,
+} = shared;
+
+// The frontend always talks to whichever network NEXT_PUBLIC_STELLAR_NETWORK
+// points at, so its asset list (e.g. testnet-only EURT) matches the backend
+// it's actually calling rather than being hard-coded.
+const NETWORK =
+  process.env.NEXT_PUBLIC_STELLAR_NETWORK === "mainnet" ? "mainnet" : "testnet";
 
 // ── Shared enums ─────────────────────────────────────────────────────────────
 export const DONATION_CURRENCIES = ["XLM", "USDC", "EURT"] as const;
 
 // ── Reusable validators ──────────────────────────────────────────────────────
 
-export const walletAddressSchema = z
-  .string()
-  .regex(/^G[A-Z2-7]{55}$/, "Invalid Stellar address");
-
-export const stellarTxHashSchema = z
-  .string()
-  .regex(/^[a-fA-F0-9]{64}$/, "Invalid transaction hash");
-
-export const positiveNumberString = z.string().refine(
-  (val) => {
-    if (val === "" || val == null) return false;
-    const n = Number.parseFloat(val);
-    return Number.isFinite(n) && n > 0;
-  },
-  { message: "Must be a positive number" },
-);
-
-export const nonNegativeNumberString = z.string().refine(
-  (val) => {
-    if (val === "" || val == null) return false;
-    const n = Number.parseFloat(val);
-    return Number.isFinite(n) && n >= 0;
-  },
-  { message: "Must be a non-negative number" },
-);
+export const walletAddressSchema: z.ZodTypeAny = sharedWalletSchema;
+export const stellarTxHashSchema: z.ZodTypeAny = sharedTxHashSchema;
+export const positiveNumberString: z.ZodTypeAny = amountString({ field: "Value" });
+export const nonNegativeNumberString: z.ZodTypeAny = nonNegativeAmountString({
+  field: "Value",
+});
 
 // ── Document schema (used inside verification) ───────────────────────────────
 
@@ -51,61 +60,43 @@ export const documentSchema = z.object({
 });
 
 // ── Donation request schema ─────────────────────────────────────────────────
-
+// This is the exact schema that used to diverge from the backend's
+// donationSchema (min amount, decimal precision). DonateForm only
+// collects amount/message/projectId client-side (address, tx hash, and
+// currency are filled in after wallet signing), so this stays a subset
+// of the backend's full createDonationSchema, built from the same
+// amountString/boundedText primitives.
 export const donationSchema = z.object({
-  projectId: z.string().min(1, "Project ID is required"),
-  amount: z
-    .string()
-    .regex(/^\d+(\.\d{1,7})?$/)
-    .refine(
-      (val) => {
-        const n = Number.parseFloat(val);
-        return Number.isFinite(n) && n >= 1;
-      },
-      { message: "Minimum donation is 1" },
-    ),
-  message: z
-    .string()
-    .max(100, "Message must be at most 100 characters")
-    .optional(),
+  projectId: boundedText({ field: "Project ID", max: 200, required: true }),
+  amount: amountString({ field: "Amount" }),
+  message: boundedText({ field: "Message", max: RULES.MESSAGE_MAX_LEN }),
 });
+
+/** Full donation payload schema (address, tx hash, currency, amount). */
+export const fullDonationSchema = createDonationSchema({ network: NETWORK });
 
 // ── Verification request schema ──────────────────────────────────────────────
 
 export const verificationRequestSchema = z.object({
-  organizationName: z
-    .string()
-    .min(2, "organizationName must be 2-200 characters")
-    .max(200, "organizationName must be 2-200 characters"),
-  organizationWebsite: z
-    .string()
-    .url("organizationWebsite must be a valid http(s) URL")
-    .max(500, "organizationWebsite must be a string up to 500 characters")
-    .optional()
-    .or(z.literal("")),
-  organizationCountry: z
-    .string()
-    .max(80, "organizationCountry must be a string up to 80 characters")
-    .optional()
-    .or(z.literal("")),
-  contactEmail: z.string().email("contactEmail must be a valid email"),
-  walletAddress: walletAddressSchema,
-  projectName: z
-    .string()
-    .min(2, "projectName must be 2-200 characters")
-    .max(200, "projectName must be 2-200 characters"),
-  projectCategory: z.enum(PROJECT_CATEGORIES as [string, ...string[]], {
-    message: `projectCategory must be one of: ${PROJECT_CATEGORIES.join(", ")}`,
+  organizationName: boundedText({
+    field: "Organization name",
+    min: 2,
+    max: 200,
+    required: true,
   }),
-  projectLocation: z
-    .string()
-    .min(2, "projectLocation must be 2-200 characters")
-    .max(200, "projectLocation must be 2-200 characters"),
-  projectDescription: z
-    .string()
-    .max(5000, "projectDescription must be a string up to 5000 characters")
-    .optional()
-    .or(z.literal("")),
+  organizationWebsite: urlField("Organization website").optional().or(z.literal("")),
+  organizationCountry: boundedText({ field: "Organization country", max: 80 }),
+  contactEmail: emailField("Contact email"),
+  walletAddress: walletAddressSchema,
+  projectName: boundedText({ field: "Project name", min: 2, max: 200, required: true }),
+  projectCategory: enumField(PROJECT_CATEGORIES, "Project category"),
+  projectLocation: boundedText({
+    field: "Project location",
+    min: 2,
+    max: 200,
+    required: true,
+  }),
+  projectDescription: boundedText({ field: "Project description", max: 5000 }),
   co2PerXLM: nonNegativeNumberString,
   expectedAnnualTonnesCO2: z
     .union([z.literal(""), nonNegativeNumberString])
@@ -115,74 +106,18 @@ export const verificationRequestSchema = z.object({
     .max(20, "supportingDocuments must contain at most 20 entries")
     .optional()
     .default([]),
-  notes: z
-    .string()
-    .max(2000, "notes must be a string up to 2000 characters")
-    .optional()
-    .or(z.literal("")),
+  notes: boundedText({ field: "Notes", max: 2000 }),
 });
 
 // ── Profile schema ─────────────────────────────────────────────────────────
 
-export const profileSchema = z.object({
-  displayName: z
-    .string()
-    .min(2, "Display name must be between 2 and 30 characters")
-    .max(30, "Display name must be between 2 and 30 characters")
-    .regex(
-      /^[a-zA-Z0-9_ ]+$/,
-      "Only letters, numbers, underscores, and spaces allowed",
-    )
-    .optional()
-    .or(z.literal("")),
-  bio: z
-    .string()
-    .max(300, "Bio must be at most 300 characters")
-    .optional()
-    .or(z.literal("")),
-});
+export const profileSchema = createProfileSchema();
 
-// ── Project submission schema ───────────────────────────────────────────────
+// ── Project submission ("registration") schema ───────────────────────────
 
-export const projectSubmissionSchema = z.object({
-  name: z
-    .string()
-    .min(3, "name must be between 3 and 120 characters")
-    .max(120, "name must be between 3 and 120 characters"),
-  category: z.enum(PROJECT_CATEGORIES as [string, ...string[]], {
-    message: `category must be one of: ${PROJECT_CATEGORIES.join(", ")}`,
-  }),
-  description: z
-    .string()
-    .min(10, "description must be between 10 and 5000 characters")
-    .max(5000, "description must be between 10 and 5000 characters"),
-  location: z
-    .string()
-    .min(2, "location must be between 2 and 200 characters")
-    .max(200, "location must be between 2 and 200 characters"),
-  goalXLM: positiveNumberString,
-  walletAddress: walletAddressSchema,
-  organization: z.object({
-    name: z.string().min(1, "Organization name is required"),
-    website: z
-      .string()
-      .url("Organization website must be a valid URL")
-      .optional()
-      .or(z.literal("")),
-    country: z.string().optional(),
-    contactEmail: z.string().email("Contact email must be a valid email"),
-  }),
-  co2Methodology: z.object({
-    name: z.string().min(1, "Methodology name is required"),
-    verificationBody: z.string().optional(),
-    annualTonnesCO2: positiveNumberString,
-    documentUrl: z
-      .string()
-      .url("Document URL must be a valid URL")
-      .optional()
-      .or(z.literal("")),
-  }),
-  impactMetrics: z.array(z.string()).optional().default([]),
+export const projectSubmissionSchema = createProjectSubmissionSchema({
+  network: NETWORK,
+  categories: PROJECT_CATEGORIES,
 });
 
 // ── Inferred form data types ──────────────────────────────────────────────────

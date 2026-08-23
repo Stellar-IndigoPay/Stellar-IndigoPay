@@ -12,6 +12,7 @@ const customJestConfig = {
   setupFilesAfterEnv: ["<rootDir>/jest.setup.ts"],
   moduleNameMapper: {
     "^@/(.*)$": "<rootDir>/$1",
+    "^@shared/(.*)$": "<rootDir>/../shared/$1",
     "^zod$": "<rootDir>/node_modules/zod",
   },
   // Only run unit/snapshot tests here; Playwright e2e lives in /e2e
