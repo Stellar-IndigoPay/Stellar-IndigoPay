@@ -55,13 +55,19 @@ jobs:
           wasm-opt --version
 
       - name: Check WASM size
+        env:
+          WASM_SIZE_LIMIT: ${{ vars.WASM_SIZE_LIMIT || 65536 }}
         run: |
           wasm-opt -Oz target/wasm32v1-none/release/indigopay_contract.wasm \
             -o target/wasm32v1-none/release/indigopay_contract.opt.wasm
           size=$(stat -c%s target/wasm32v1-none/release/indigopay_contract.opt.wasm)
-          echo "WASM size (slim + wasm-opt): $size bytes"
-          if [ $size -gt 65536 ]; then
-            echo "Error: WASM binary exceeds 64KB limit"
+          echo "WASM size (slim + wasm-opt): $size bytes (limit: $WASM_SIZE_LIMIT)"
+          if ! [[ "$WASM_SIZE_LIMIT" =~ ^[0-9]+$ ]] || [ "$WASM_SIZE_LIMIT" -le 0 ]; then
+            echo "::error title=Invalid WASM_SIZE_LIMIT::WASM_SIZE_LIMIT must be a positive integer byte limit"
+            exit 1
+          fi
+          if [ "$size" -gt "$WASM_SIZE_LIMIT" ]; then
+            echo "Error: WASM binary exceeds configured limit ($WASM_SIZE_LIMIT bytes)"
             exit 1
           fi
 
@@ -106,3 +112,47 @@ jobs:
         with:
           name: coverage-report
           path: contracts/indigopay-contract/coverage/
+  verification:
+    name: Formal Verification (Kani)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts/indigopay-contract/verification/kani
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts/indigopay-contract/verification/kani
+
+      - name: Cache Kani dependencies
+        id: kani-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-kani
+            ~/.cargo/bin/kani
+            ~/.kani
+          key: kani-verifier-${{ runner.os }}-${{ hashFiles('.github/workflows/contracts.yml') }}
+
+      - name: Install Kani Verifier
+        if: steps.kani-cache.outputs.cache-hit != 'true'
+        run: |
+          cargo install --locked kani-verifier
+          cargo kani setup
+
+      - name: Run Kani verification
+        run: cargo kani
+
+      - name: Upload verification report
+        uses: actions/upload-artifact@v4
+        with:
+          name: kani-verification-report
+          path: ./target/kani

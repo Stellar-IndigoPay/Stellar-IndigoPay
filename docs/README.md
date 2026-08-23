@@ -49,6 +49,7 @@ for everything in this directory. Pick the section that matches what you need.
 | **[Indexer](indexer.md)**                        | The Stellar Horizon stream → Postgres indexer, including shutdown wiring.                                                                              |
 | **[Performance & Load Testing](performance.md)** | p50 / p95 / p99 targets, k6 invocation, threshold semantics, and the baseline table.                                                                   |
 | **[CI / CD pipeline](../.github/workflows/)**    | Per-app workflows (`frontend.yml`, `extension.yml`, `mobile.yml`, `contracts.yml`), main CI (backend, helm, gitleaks, OpenAPI lint, ZAP), release, SBOM, and image scanning. |
+| **[Mobile Certificate Pinning](mobile-pinning.md)** | How the mobile app pins backend API traffic (policy, rotation, remote updates, native enforcement, pin generation). |
 
 ### Smart contracts
 
@@ -148,6 +149,7 @@ docs/
 ├── webhook-receiver.md        ← partner webhook guide
 ├── zap-triage.md              ← OWASP ZAP results workflow
 ├── extension-build-process.md ← browser extension packaging
+├── mobile-pinning.md          ← mobile certificate pinning
 ├── DEPLOYMENT.md              ← Helm / k8s deployment
 ├── deployment-mainnet.md      ← Stellar Mainnet launch
 ├── external-secrets.md        ← external-secrets-operator

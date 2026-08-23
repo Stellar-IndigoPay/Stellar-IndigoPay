@@ -60,6 +60,9 @@ describe("enqueueDonation", () => {
 
     expect(d.id).toBeDefined();
     expect(d.id).toMatch(/^dq_/);
+    expect(d.idempotencyKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
     expect(d.projectId).toBe("proj-1");
     expect(d.projectName).toBe("Amazon Reforestation");
     expect(d.amount).toBe("10.0000000");
@@ -83,6 +86,18 @@ describe("enqueueDonation", () => {
     const parsed = JSON.parse(raw!);
     expect(parsed).toHaveLength(1);
     expect(parsed[0].projectName).toBe("Amazon Reforestation");
+    expect(parsed[0].idempotencyKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+  });
+
+  test("accepts and persists a caller-supplied idempotency key", async () => {
+    const key = "123e4567-e89b-42d3-a456-426614174000";
+    const d = await enqueueDonation({ ...mockDonation, idempotencyKey: key });
+
+    expect(d.idempotencyKey).toBe(key);
+    const raw = await AsyncStorage.getItem("donation_queue");
+    expect(JSON.parse(raw!)[0].idempotencyKey).toBe(key);
   });
 });
 

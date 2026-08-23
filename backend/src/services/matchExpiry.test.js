@@ -13,6 +13,14 @@ jest.mock("../logger", () => ({
   error: jest.fn(),
 }));
 
+// The real advisory lock helper talks to Postgres; in these tests we pass the
+// guarded work straight through so `checkAndExpireMatches` behaviour stays
+// under test, and assert the lock is requested with the right key separately.
+jest.mock("./advisoryLock", () => ({
+  LOCK_KEYS: { matchExpiry: "worker:match_expiry" },
+  withAdvisoryLock: jest.fn(async (_lockName, fn) => fn()),
+}));
+
 // Re-require after mocks so the module picks them up
 let matchExpiry;
 let pool;
@@ -71,6 +79,33 @@ describe("checkAndExpireMatches", () => {
       expect.objectContaining({ event: "match_expiry_error" }),
       expect.any(String),
     );
+  });
+});
+
+describe("runMatchExpiryCycle", () => {
+  test("acquires the match-expiry advisory lock around the cycle", async () => {
+    const { withAdvisoryLock, LOCK_KEYS } = require("./advisoryLock");
+    pool.query
+      .mockResolvedValueOnce({ rowCount: 0 })
+      .mockResolvedValueOnce({ rowCount: 0 });
+
+    const result = await matchExpiry.runMatchExpiryCycle();
+
+    expect(result).toEqual({ expired: 0, exhausted: 0 });
+    expect(withAdvisoryLock).toHaveBeenCalledWith(
+      LOCK_KEYS.matchExpiry,
+      matchExpiry.checkAndExpireMatches,
+    );
+  });
+
+  test("returns false without running when the lock is not acquired", async () => {
+    const { withAdvisoryLock } = require("./advisoryLock");
+    withAdvisoryLock.mockResolvedValueOnce(false);
+
+    const result = await matchExpiry.runMatchExpiryCycle();
+
+    expect(result).toBe(false);
+    expect(pool.query).not.toHaveBeenCalled();
   });
 });
 

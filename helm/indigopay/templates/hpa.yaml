@@ -21,6 +21,7 @@ spec:
   metrics:
     {{- range .Values.autoscaling.metrics }}
     - type: {{ .type }}
+      {{- if eq .type "Resource" }}
       resource:
         name: {{ .resource.name }}
         target:
@@ -31,6 +32,20 @@ spec:
           {{- if eq .resource.target.type "AverageValue" }}
           averageValue: {{ .resource.target.averageValue }}
           {{- end }}
+      {{- end }}
+      {{- if eq .type "External" }}
+      external:
+        metric:
+          name: {{ .external.metric.name }}
+        target:
+          type: {{ .external.target.type }}
+          {{- if eq .external.target.type "AverageValue" }}
+          averageValue: {{ .external.target.averageValue }}
+          {{- end }}
+          {{- if eq .external.target.type "Value" }}
+          value: {{ .external.target.value }}
+          {{- end }}
+      {{- end }}
     {{- end }}
   behavior:
     scaleDown:
