@@ -216,6 +216,19 @@ groups:
             There are more than 100 failed jobs in queue '{{ $labels.queue }}' for the last 10 minutes.
             Check the worker logs.
 
+      - alert: WorkerFreshness
+        expr: time() - indigopay_worker_last_heartbeat_timestamp > 300
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Worker freshness alert (>5 min since last heartbeat)"
+          description: |
+            Worker pod has not sent a heartbeat in over 5 minutes.
+            This could indicate a disruption or crash.
+            Runbook: docs/worker-disruption-runbook.md
+
+
       - alert: OracleStale
         expr: time() - indigopay_oracle_price_updated_timestamp > 900
         for: 5m
@@ -264,3 +277,29 @@ groups:
             The last successful secret rotation was {{ $value | humanizeTimestamp }}.
             Rotations are scheduled quarterly (every 91 days). Consider running
             the workflow manually if the automated schedule has been failing.
+
+  - name: stellar-indigopay-gitops-drift
+    interval: 30s
+    rules:
+      - alert: ArgoCDAppOutOfSync
+        expr: argocd_app_info{sync_status="OutOfSync"} == 1
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "ArgoCD application {{ $labels.name }} is OutOfSync"
+          description: |
+            Cluster state has drifted from repository gitops/ manifests for >5m.
+          runbook: docs/runbooks/gitops-argocd-drift.md
+
+      - alert: ArgoCDAppDegraded
+        expr: argocd_app_info{health_status="Degraded"} == 1
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "ArgoCD application {{ $labels.name }} health is Degraded"
+          description: |
+            One or more resources managed by ArgoCD are degraded.
+          runbook: docs/runbooks/gitops-argocd-drift.md
+

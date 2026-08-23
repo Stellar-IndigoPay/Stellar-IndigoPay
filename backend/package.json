@@ -14,7 +14,8 @@
     "lint": "eslint src/**/*.js",
     "docs": "typedoc --options typedoc.json",
     "test": "jest --maxWorkers=2",
-    "load-test": "k6 run ../scripts/load-test.js"
+    "load-test": "k6 run ../scripts/load-test.js",
+    "test:coverage": "jest --maxWorkers=2 --coverage"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",

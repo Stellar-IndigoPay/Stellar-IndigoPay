@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "scripts": {
     "build": "webpack --config webpack.config.js",
+    "package": "node scripts/package-extension.js",
     "dev": "webpack --watch --config webpack.config.js",
     "test": "jest",
     "lint": "tsc --noEmit --project tsconfig.json",
@@ -20,6 +21,7 @@
     "ts-loader": "^9.5.1",
     "typescript": "^6.0.3",
     "webpack": "^5.90.1",
-    "webpack-cli": "^7.1.0"
+    "webpack-cli": "^7.1.0",
+    "yazl": "^3.0.0"
   }
 }

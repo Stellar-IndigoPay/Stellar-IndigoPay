@@ -46,9 +46,8 @@ async function getQueueMetrics() {
   // We run queries in parallel. If pg-boss tables don't exist yet, we catch
   // the database error and return default/empty counts so that the server doesn't crash.
   try {
-    const [statsRes, pausedRes] = await Promise.all([
-      pool.query(statsQuery, [VALID_QUEUES]),
-      pool.query(pausedQuery, [VALID_QUEUES])
+    const [statsRes] = await Promise.all([
+      pool.query(statsQuery, [VALID_QUEUES])
     ]);
 
     const statsMap = {};
@@ -62,10 +61,7 @@ async function getQueueMetrics() {
       };
     }
 
-    const pausedMap = {};
-    for (const row of pausedRes.rows) {
-      pausedMap[row.name] = !!row.paused;
-    }
+    const pausedMap = {}; // paused column removed from pgboss schema
 
     return VALID_QUEUES.map(name => {
       // eslint-disable-next-line security/detect-object-injection

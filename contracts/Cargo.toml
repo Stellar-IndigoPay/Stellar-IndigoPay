@@ -1,5 +1,6 @@
 [workspace]
 members = ["indigopay-contract", "escrow-contract", "oracle-contract", "attestation-contract"]
+exclude = ["indigopay-contract/verification/kani"]
 resolver = "2"
 
 [profile.release]

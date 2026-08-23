@@ -50,9 +50,8 @@ services:
   backend:
     image: indigopay-backend-test:ci
     build:
-      context: ./backend
-      dockerfile: Dockerfile
-      target: test
+      context: .
+      dockerfile: backend/Dockerfile.test
     environment:
       NODE_ENV: test
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/stellar_indigopay_test

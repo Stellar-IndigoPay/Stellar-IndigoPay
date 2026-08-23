@@ -21,16 +21,22 @@ jobs:
       run:
         working-directory: mobile
     steps:
+      - name: Start Timer
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup-node-cached
         with:
           node-version: "22"
-          cache: "npm"
-          cache-dependency-path: mobile/package-lock.json
-      - run: npm ci
+          working-directory: mobile
       - uses: expo/expo-github-action@v8
         with:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
       - run: eas build --platform all --profile preview --non-interactive
         if: env.EXPO_TOKEN_SET == 'true'
+      - name: Budget Check
+        if: always()
+        uses: ./.github/actions/budget-check
+        with:
+          start-time: ${{ env.START_TIME }}
+          max-seconds: '900'

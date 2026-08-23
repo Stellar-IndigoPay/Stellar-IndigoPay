@@ -38,6 +38,23 @@
         </div>
       </header>
 
+      <!-- API degraded / connecting state -->
+      <div
+        id="api-status-banner"
+        class="api-status-banner hidden"
+        role="status"
+        aria-live="polite"
+      >
+        <span id="api-status-text" class="api-status-text"></span>
+        <button
+          id="api-status-retry"
+          class="btn api-status-retry-btn hidden"
+          type="button"
+        >
+          Retry
+        </button>
+      </div>
+
       <!-- Top Projects -->
       <main>
         <div class="section-header">
