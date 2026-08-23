@@ -9,6 +9,21 @@ use escrow_contract::{JobStatus, Milestone};
 
 mod common;
 
+/// Build a single milestone with the given name and percentage. All other
+/// fields default to the "not yet released/disputed" state used throughout
+/// these tests.
+fn milestone(env: &Env, name: &str, percentage: u32) -> Milestone {
+    Milestone {
+        name: SorobanString::from_str(env, name),
+        percentage,
+        released: false,
+        disputed: false,
+        oracle: None,
+        verified: false,
+        proof_hash: None,
+    }
+}
+
 #[test]
 fn test_create_amend_then_release_new_milestones() {
     let env = Env::default();
@@ -135,5 +150,120 @@ fn test_amend_after_release_panics_integration() {
         verified: false,
         proof_hash: None,
     });
+    client.amend_job_milestones(&client_addr, &freelancer, &job_id, &new_milestones);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Amendment validation: `amend_job_milestones` must enforce the same
+// per-milestone invariants as `create_job` (#671).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+#[should_panic]
+fn test_amend_empty_milestones_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = common::setup(&env);
+
+    let client_addr = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let token = common::create_token(&env);
+    common::fund(&env, &token, &client_addr, 1000i128);
+    let job_id = SorobanString::from_str(&env, "job-amend-empty");
+    client.create_job(
+        &client_addr,
+        &freelancer,
+        &job_id,
+        &token,
+        &1000i128,
+        &common::three_milestones(&env),
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
+    );
+
+    let empty: Vec<Milestone> = Vec::new(&env);
+    client.amend_job_milestones(&client_addr, &freelancer, &job_id, &empty);
+}
+
+#[test]
+#[should_panic]
+fn test_amend_zero_percentage_milestone_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = common::setup(&env);
+
+    let client_addr = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let token = common::create_token(&env);
+    common::fund(&env, &token, &client_addr, 1000i128);
+    let job_id = SorobanString::from_str(&env, "job-amend-zero-pct");
+    client.create_job(
+        &client_addr,
+        &freelancer,
+        &job_id,
+        &token,
+        &1000i128,
+        &common::three_milestones(&env),
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
+    );
+
+    let mut new_milestones: Vec<Milestone> = Vec::new(&env);
+    new_milestones.push_back(milestone(&env, "Zero", 0));
+    new_milestones.push_back(milestone(&env, "Full", 100));
+    client.amend_job_milestones(&client_addr, &freelancer, &job_id, &new_milestones);
+}
+
+#[test]
+#[should_panic]
+fn test_amend_milestone_name_too_long_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = common::setup(&env);
+
+    let client_addr = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let token = common::create_token(&env);
+    common::fund(&env, &token, &client_addr, 1000i128);
+    let job_id = SorobanString::from_str(&env, "job-amend-long-name");
+    client.create_job(
+        &client_addr,
+        &freelancer,
+        &job_id,
+        &token,
+        &1000i128,
+        &common::three_milestones(&env),
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
+    );
+
+    let long_name = "m".repeat(escrow_contract::MAX_MILESTONE_NAME_LEN as usize + 1);
+    let mut new_milestones: Vec<Milestone> = Vec::new(&env);
+    new_milestones.push_back(milestone(&env, &long_name, 100));
+    client.amend_job_milestones(&client_addr, &freelancer, &job_id, &new_milestones);
+}
+
+#[test]
+#[should_panic]
+fn test_amend_duplicate_milestone_name_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = common::setup(&env);
+
+    let client_addr = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let token = common::create_token(&env);
+    common::fund(&env, &token, &client_addr, 1000i128);
+    let job_id = SorobanString::from_str(&env, "job-amend-dup");
+    client.create_job(
+        &client_addr,
+        &freelancer,
+        &job_id,
+        &token,
+        &1000i128,
+        &common::three_milestones(&env),
+        &escrow_contract::RELEASE_AFTER_LEDGERS,
+    );
+
+    let mut new_milestones: Vec<Milestone> = Vec::new(&env);
+    new_milestones.push_back(milestone(&env, "Duplicate", 40));
+    new_milestones.push_back(milestone(&env, "Duplicate", 60));
     client.amend_job_milestones(&client_addr, &freelancer, &job_id, &new_milestones);
 }
