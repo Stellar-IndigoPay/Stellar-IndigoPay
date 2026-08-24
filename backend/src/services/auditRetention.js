@@ -26,9 +26,16 @@
  */
 
 const logger = require("../logger");
+const { GENESIS_PREV_HASH, recordAnchor, clearAnchor } = require("./auditChain");
 
 /**
  * Delete audit rows older than `retentionMonths`.
+ *
+ * Pruning removes the oldest rows (including, eventually, the genesis row),
+ * which would otherwise break `auditChain.verifyChain`. After a prune that
+ * leaves rows behind, we re-anchor the chain by recording the oldest
+ * surviving row's `prev_hash`; if the log is emptied we clear the anchor so a
+ * fresh genesis chain can start from `prev_hash = '0'`.
  *
  * @param {Object} client - pg client / pool with `.query()`
  * @param {number} [retentionMonths] - override; defaults to env or 12
@@ -59,6 +66,23 @@ async function dropOldPartitions(
   );
 
   const deleted = result.rowCount ?? 0;
+
+  if (deleted > 0) {
+    // Re-anchor the hash chain so verifyChain can still validate the
+    // surviving suffix now that the oldest rows (incl. genesis) are gone.
+    const survivor = await client.query(
+      `SELECT id, prev_hash FROM admin_audit_log
+       ORDER BY created_at ASC, id ASC
+       LIMIT 1`,
+    );
+    if (survivor.rows.length > 0) {
+      const anchorHash = survivor.rows[0].prev_hash || GENESIS_PREV_HASH;
+      await recordAnchor(client, anchorHash, survivor.rows[0].id);
+    } else {
+      await clearAnchor(client);
+    }
+  }
+
   logger.info(
     { event: "audit_retention_run", months, deleted },
     `[auditRetention] Deleted ${deleted} audit row(s) older than ${months} month(s)`,

@@ -21,6 +21,7 @@
  *   is not installed (CI, dev, OSS forks).
  */
 import { Platform } from "react-native";
+import { pinnedFetch } from "./apiClient";
 
 const REPORT_ENDPOINT = "/api/errors/report";
 
@@ -88,7 +89,7 @@ export async function captureException(
     // Cap each report at 3 seconds so a stuck network cannot hold the
     // RN bridge open during a render-error fallback.
     const timeout = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(`${apiUrl}${REPORT_ENDPOINT}`, {
+    const res = await pinnedFetch(`${apiUrl}${REPORT_ENDPOINT}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body,

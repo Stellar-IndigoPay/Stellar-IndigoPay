@@ -7,9 +7,12 @@ address must remain allow-listed and hold at least the configured `min_stake`
 before `report_price` accepts its observations.
 
 The administrator configures one staking token, a minimum stake, a treasury,
-and an unstaking cooldown. Deposits reset the reporter's cooldown. After the
-cooldown, `unstake` withdraws the reporter's entire remaining balance, which
-also prevents further reporting until the reporter stakes again.
+and an unstaking cooldown. The first deposit for a zero-balance reporter starts
+the cooldown. Because stake is stored as one aggregate balance with one
+availability timestamp, top-ups preserve the existing cooldown rather than
+re-locking the reporter's earlier stake. After the cooldown, `unstake` withdraws
+the reporter's entire remaining balance, which also prevents further reporting
+until the reporter stakes again.
 
 Slashing is an explicit administrator action. The contract does not
 automatically decide whether an observation was malicious. A slash:

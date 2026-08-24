@@ -12,7 +12,7 @@ import {
 } from "react-native";
 import { useEffect, useState } from "react";
 import { useLocalSearchParams } from "expo-router";
-import axios from "axios";
+import { apiClient } from "../../lib/apiClient";
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
 
@@ -73,10 +73,10 @@ export default function ProfileScreen() {
   const loadProfile = async (pk: string) => {
     try {
       const [profileRes, donationsRes] = await Promise.all([
-        axios
+        apiClient
           .get(`${API_URL}/api/profiles/${pk}`)
           .catch(() => ({ data: { data: null } })),
-        axios
+        apiClient
           .get(`${API_URL}/api/donations/donor/${pk}`)
           .catch(() => ({ data: { data: [] } })),
       ]);

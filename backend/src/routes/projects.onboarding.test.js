@@ -5,6 +5,24 @@ jest.mock("../db/pool", () => ({
   connect: jest.fn(),
 }));
 
+jest.mock("../services/redis", () => ({
+  get: jest.fn().mockResolvedValue(null),
+  set: jest.fn().mockResolvedValue("OK"),
+  deletePattern: jest.fn().mockResolvedValue(0),
+}));
+
+jest.mock("../services/stellar", () => ({
+  getOnChainProject: jest.fn().mockResolvedValue(null),
+  getProjectDonationEvents: jest.fn().mockResolvedValue([]),
+  CONTRACT_ID: "test-contract-id",
+  server: { loadAccount: jest.fn(), getTransaction: jest.fn() },
+  NETWORK_PASSPHRASE: "Test SDF Network ; September 2015",
+}));
+
+jest.mock("../services/summaryQueue", () => ({
+  enqueueAISummary: jest.fn().mockResolvedValue(undefined),
+}));
+
 const express = require("express");
 const request = require("supertest");
 const pool = require("../db/pool");
@@ -30,8 +48,8 @@ describe("Project onboarding checklist API", () => {
   let app;
 
   beforeEach(() => {
-    app = buildApp();
     jest.clearAllMocks();
+    app = buildApp();
   });
 
   test("GET /api/projects/:id/onboarding returns checklist items", async () => {

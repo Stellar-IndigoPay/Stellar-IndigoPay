@@ -1,0 +1,52 @@
+# k8s/prometheus-adapter-configmap.yaml
+#
+# Configuration for k8s-prometheus-adapter to expose custom backend workload
+# metrics (pg-boss queue depth and indexer lag) to the Kubernetes
+# External / Custom Metrics API for HorizontalPodAutoscaler (HPA).
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-adapter-config
+  namespace: stellar-indigopay
+  labels:
+    app: prometheus-adapter
+data:
+  config.yaml: |
+    rules:
+      - seriesQuery: 'queue_depth{namespace!="",pod!=""}'
+        resources:
+          overrides:
+            namespace: {resource: "namespace"}
+            pod: {resource: "pod"}
+        name:
+          matches: "^queue_depth"
+          as: "queue_depth"
+        metricsQuery: 'sum(queue_depth{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
+
+      - seriesQuery: 'indexer_lag_seconds{namespace!="",pod!=""}'
+        resources:
+          overrides:
+            namespace: {resource: "namespace"}
+            pod: {resource: "pod"}
+        name:
+          matches: "^indexer_lag_seconds"
+          as: "indexer_lag_seconds"
+        metricsQuery: 'max(indexer_lag_seconds{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
+
+    externalRules:
+      - seriesQuery: 'queue_depth'
+        resources:
+          template: <<.Resource>>
+        name:
+          matches: "^queue_depth$"
+          as: "queue_depth"
+        metricsQuery: 'sum(queue_depth{<<.LabelMatchers>>})'
+
+      - seriesQuery: 'indexer_lag_seconds'
+        resources:
+          template: <<.Resource>>
+        name:
+          matches: "^indexer_lag_seconds$"
+          as: "indexer_lag_seconds"
+        metricsQuery: 'max(indexer_lag_seconds{<<.LabelMatchers>>})'

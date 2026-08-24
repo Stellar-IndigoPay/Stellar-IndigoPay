@@ -13,7 +13,7 @@ import {
 import { useRouter } from "expo-router";
 import { useCallback, useEffect, useState } from "react";
 import { Linking } from "react-native";
-import axios from "axios";
+import { apiClient } from "../lib/apiClient";
 import * as Notifications from "expo-notifications";
 import { useTheme } from "./theme";
 import { getCachedData, setCachedData } from "../utils/cache";
@@ -193,7 +193,7 @@ export default function HomeScreen() {
     setNetworkError(false);
  
     try {
-      const res = await axios.get(`${API_URL}/api/projects`);
+      const res = await apiClient.get(`${API_URL}/api/projects`);
       const data: ClimateProject[] = res.data.data ?? res.data;
       setProjects(Array.isArray(data) ? data : [data]);
       await setCachedData(CACHE_KEY_PROJECTS, data);
@@ -207,7 +207,7 @@ export default function HomeScreen() {
     }
  
     try {
-      const statsRes = await axios.get(`${API_URL}/api/stats/global`);
+      const statsRes = await apiClient.get(`${API_URL}/api/stats/global`);
       const statsData = statsRes.data.data ?? statsRes.data;
       setStats(statsData);
     } catch (e) {

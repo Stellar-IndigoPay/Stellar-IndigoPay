@@ -115,4 +115,41 @@ router.get("/slo", adminRequired, async (req, res, next) => {
   }
 });
 
+const pool = require("../../db/pool");
+
+/**
+ * GET /api/admin/metrics/dsr
+ * Returns system-wide DSR metrics (count of exports and erasures)
+ */
+router.get("/dsr", adminRequired, async (req, res, next) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        SUM(CASE WHEN name = 'dsr-export' AND state = 'completed' THEN 1 ELSE 0 END) as exports_completed,
+        SUM(CASE WHEN name = 'dsr-export' AND state IN ('created', 'active', 'retry') THEN 1 ELSE 0 END) as exports_pending,
+        SUM(CASE WHEN name = 'dsr-export' AND state = 'failed' THEN 1 ELSE 0 END) as exports_failed,
+        SUM(CASE WHEN name = 'dsr-erase' AND state = 'completed' THEN 1 ELSE 0 END) as erasures_completed,
+        SUM(CASE WHEN name = 'dsr-erase' AND state IN ('created', 'active', 'retry') THEN 1 ELSE 0 END) as erasures_pending,
+        SUM(CASE WHEN name = 'dsr-erase' AND state = 'failed' THEN 1 ELSE 0 END) as erasures_failed
+      FROM pgboss.job
+      WHERE name IN ('dsr-export', 'dsr-erase')
+    `);
+
+    const row = result.rows[0];
+    res.json({
+      success: true,
+      data: {
+        exportsCompleted: parseInt(row.exports_completed, 10) || 0,
+        exportsPending: parseInt(row.exports_pending, 10) || 0,
+        exportsFailed: parseInt(row.exports_failed, 10) || 0,
+        erasuresCompleted: parseInt(row.erasures_completed, 10) || 0,
+        erasuresPending: parseInt(row.erasures_pending, 10) || 0,
+        erasuresFailed: parseInt(row.erasures_failed, 10) || 0,
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;

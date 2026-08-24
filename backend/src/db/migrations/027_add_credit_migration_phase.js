@@ -27,8 +27,14 @@ module.exports = {
     if (rows.length === 0) return;
 
     await client.query(`
-      ALTER TABLE credits
-      ADD COLUMN IF NOT EXISTS legacy_status TEXT DEFAULT 'pending'
+      DO $$
+      BEGIN
+        IF to_regclass('public.credits') IS NOT NULL THEN
+          ALTER TABLE credits
+          ADD COLUMN IF NOT EXISTS legacy_status TEXT DEFAULT 'pending';
+        END IF;
+      END
+      $$;
     `);
   },
 
@@ -40,8 +46,14 @@ module.exports = {
     if (rows.length === 0) return;
 
     await client.query(`
-      ALTER TABLE credits
-      DROP COLUMN IF EXISTS legacy_status
+      DO $$
+      BEGIN
+        IF to_regclass('public.credits') IS NOT NULL THEN
+          ALTER TABLE credits
+          DROP COLUMN IF EXISTS legacy_status;
+        END IF;
+      END
+      $$;
     `);
   },
 };

@@ -1,5 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { FOUC_THEME_SCRIPT_HASH } from "@/lib/csp";
+
 const STELLAR_CONNECT = [
   "https://horizon-testnet.stellar.org",
   "https://horizon.stellar.org",
@@ -16,7 +18,7 @@ const LEAFLET_TILE_SOURCES = [
   "https://c.tile.openstreetmap.org",
 ].join(" ");
 
-export function buildCsp(nonce: string, isWidget: boolean): string {
+export function buildCsp(isWidget: boolean): string {
   // API origin: 'self' covers same-origin deploys; NEXT_PUBLIC_API_URL covers
   // deployed backends and CI/E2E environments (e.g. http://localhost:4000).
   // Falls back to localhost:4000 in local dev when the env var is not set.
@@ -28,14 +30,19 @@ export function buildCsp(nonce: string, isWidget: boolean): string {
     ...(apiUrl ? [apiUrl] : []),
   ].join(" ");
 
+  // The only inline executable script is the pre-hydration FOUC theme script,
+  // which has fixed content and is therefore allowed via its SHA-256 hash.
+  // A hash is deterministic and cache-safe: SSG / ISR / edge-cached HTML has
+  // no per-request nonce, so a nonce-stamped CSP would block every script on
+  // those pages. External Next.js bundles load from 'self'. No 'strict-dynamic'
+  // is used because it would ignore 'self' and require the nonce we removed.
+  //
   // next dev's Fast Refresh runtime (react-refresh-utils) bootstraps modules
-  // via eval() and injects inline scripts without the nonce; production
-  // bundles never do. Keep 'unsafe-inline'/'unsafe-eval' strictly dev-only so
-  // the production CSP relies solely on the nonce + strict-dynamic (#688).
+  // via eval() and injects inline scripts; production bundles never do. Keep
+  // 'unsafe-inline'/'unsafe-eval' strictly dev-only.
   const scriptSrc = [
     "'self'",
-    `'nonce-${nonce}'`,
-    "'strict-dynamic'",
+    FOUC_THEME_SCRIPT_HASH,
     ...(process.env.NODE_ENV === "development"
       ? ["'unsafe-inline'", "'unsafe-eval'"]
       : []),
@@ -43,8 +50,6 @@ export function buildCsp(nonce: string, isWidget: boolean): string {
 
   const directives = [
     "default-src 'self'",
-    // nonce tags the Next.js script injection; strict-dynamic propagates trust
-    // to the bundles it loads (inline scripts are nonce'd, never inline-allowed).
     `script-src ${scriptSrc}`,
     `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com`,
     "font-src 'self' https://fonts.gstatic.com",
@@ -76,15 +81,10 @@ export function buildCsp(nonce: string, isWidget: boolean): string {
 }
 
 export function middleware(request: NextRequest) {
-  const nonce = btoa(crypto.randomUUID());
   const isWidget = request.nextUrl.pathname.startsWith("/widget/");
-  const csp = buildCsp(nonce, isWidget);
+  const csp = buildCsp(isWidget);
 
-  const requestHeaders = new Headers(request.headers);
-  // x-nonce is read in pages/_document.tsx to stamp <Head> and <NextScript>
-  requestHeaders.set("x-nonce", nonce);
-
-  const response = NextResponse.next({ request: { headers: requestHeaders } });
+  const response = NextResponse.next();
   response.headers.set("Content-Security-Policy", csp);
   // Define the named endpoint referenced by the CSP `report-to` directive.
   response.headers.set("Reporting-Endpoints", 'csp-endpoint="/api/csp-report"');
