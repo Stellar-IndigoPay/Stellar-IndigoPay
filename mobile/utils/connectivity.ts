@@ -16,7 +16,7 @@
  *   - isOnline() reports the last known state synchronously.
  *   - stopConnectivityWatcher() tears everything down (idempotent).
  */
-import axios from "axios";
+import { apiClient } from "../lib/apiClient";
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
 const HEALTH_URL = `${API_URL}/api/health`;
@@ -31,7 +31,7 @@ const listeners = new Set<ConnectivityListener>();
 
 async function probe(): Promise<boolean> {
   try {
-    await axios.get(HEALTH_URL, { timeout: PROBE_TIMEOUT_MS });
+    await apiClient.get(HEALTH_URL, { timeout: PROBE_TIMEOUT_MS });
     return true;
   } catch {
     return false;

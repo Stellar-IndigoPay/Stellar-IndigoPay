@@ -44,7 +44,7 @@ export default function OfflineQueueIndicator({ onPress }: Props) {
     const refresh = async () => {
       try {
         const summary = await getQueueSummary();
-        setPendingCount(summary.pending + summary.retrying);
+        setPendingCount(summary.pending + summary.in_flight);
         setFailedCount(summary.failed);
       } catch {
         // Ignore

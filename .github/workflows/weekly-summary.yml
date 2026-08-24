@@ -1,0 +1,22 @@
+name: Weekly CI Summary
+
+on:
+  schedule:
+    - cron: '0 8 * * 1' # Run every Monday at 8 AM
+  workflow_dispatch:
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Summary
+        run: |
+          echo "Weekly CI Summary Report" > summary.txt
+          echo "Please check the flake-detection runs and quarantined tests in FLAKY_QUARANTINE.md." >> summary.txt
+          # Additional API calls to fetch metrics could be added here
+      - name: Upload Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-ci-summary
+          path: summary.txt
+          retention-days: 14

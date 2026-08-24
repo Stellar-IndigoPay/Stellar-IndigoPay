@@ -82,6 +82,15 @@ pub const RELEASE_AFTER_LEDGERS: u32 = 10;
 pub const DEFAULT_DEADLINE_LEDGERS: u32 = 1_555_200; // 90 days @ 5s/ledger
 pub const MAX_MILESTONE_NAME_LEN: u32 = 64; // bytes; enforced at create + amend
 
+/// Hard cap on the number of jobs kept in instance storage. `create_job`
+/// rejects new jobs once the stored count reaches this limit
+/// (`JobCountExceedsMaximum`).
+pub const MAX_JOBS: u32 = 256;
+
+/// Maximum page size accepted by `get_job_ids(from, count)`. Larger `count`
+/// values are rejected with `JobIdsPageSizeExceedsMaximum`.
+pub const MAX_JOB_IDS_PAGE_SIZE: u32 = 100;
+
 // ─── Contract error codes ───────────────────────────────────────────────────
 //
 // Every error returned by the escrow contract carries a unique numeric code.
@@ -159,6 +168,9 @@ pub enum EscrowError {
     ThresholdExceedsAdminCount = 60,
     AdminTransferInProgress = 61,
     AdminSetUpdateFailed = 62,
+    // ── Job enumeration (63–64) ───────────────────────────────────────────
+    JobIdsPageSizeExceedsMaximum = 63,
+    JobCountExceedsMaximum = 64,
 }
 
 /// Validate a milestone vector against the invariants that must hold at every
@@ -221,9 +233,22 @@ fn compute_proportional_payout(
     if proportion == 100 {
         return amount;
     }
-    amount
-        .checked_mul(proportion)
-        .and_then(|product| product.checked_div(100i128))
+    // Split `amount` into quotient and remainder *before* multiplying so the
+    // intermediate value cannot overflow for large amounts: an
+    // `amount * proportion` product can exceed `i128::MAX` even when the final
+    // payout fits (e.g. `i128::MAX / 2` with two 50% milestones). The
+    // quotient/remainder decomposition preserves floor division exactly.
+    let quotient = amount.checked_div(100i128);
+    let remainder = amount.checked_rem(100i128);
+    quotient
+        .and_then(|whole| whole.checked_mul(proportion))
+        .and_then(|whole| {
+            remainder
+                .and_then(|fraction| fraction.checked_mul(proportion))
+                // `fraction < 100`, so `fraction * proportion / 100` fits for
+                // any valid `proportion <= 100`.
+                .and_then(|fraction| whole.checked_add(fraction / 100i128))
+        })
         .unwrap_or_else(|| panic_with_error!(env, err))
 }
 
@@ -485,6 +510,9 @@ impl EscrowContract {
             .instance()
             .get(&DataKey::JobCount)
             .unwrap_or(0);
+        if count >= MAX_JOBS {
+            panic_with_error!(&env, EscrowError::JobCountExceedsMaximum);
+        }
         let next_count = count.checked_add(1).expect("JobCount overflow");
         env.storage()
             .instance()
@@ -1101,7 +1129,7 @@ impl EscrowContract {
     /// M-of-N admin: extend a job's release period. `new_release_after` is the
     /// new absolute ledger sequence at which the freelancer may auto-claim
     /// unclaimed milestones; it must be later than the job's current
-    /// `release_after` (extension only — the period can never be shortened).
+    /// `release_after` and cannot exceed the job deadline.
     pub fn update_release_after(
         env: Env,
         signers: Vec<Address>,
@@ -1118,6 +1146,9 @@ impl EscrowContract {
 
         if new_release_after <= job.release_after {
             panic_with_error!(&env, EscrowError::NewReleaseAfterMustExtendCurrent);
+        }
+        if new_release_after > job.deadline {
+            panic_with_error!(&env, EscrowError::ReleaseAfterExceedsDeadline);
         }
 
         job.release_after = new_release_after;
@@ -1205,11 +1236,29 @@ impl EscrowContract {
             .unwrap_or(0)
     }
 
-    pub fn get_job_ids(env: Env) -> Vec<String> {
-        env.storage()
+    /// Return a bounded window of job IDs in creation order.
+    pub fn get_job_ids(env: Env, from: u32, count: u32) -> Vec<String> {
+        if count > MAX_JOB_IDS_PAGE_SIZE {
+            panic_with_error!(&env, EscrowError::JobIdsPageSizeExceedsMaximum);
+        }
+
+        let ids: Vec<String> = env
+            .storage()
             .instance()
             .get(&DataKey::JobIds)
-            .unwrap_or_else(|| Vec::new(&env))
+            .unwrap_or_else(|| Vec::new(&env));
+        let end = from.saturating_add(count).min(ids.len());
+        let mut page = Vec::new(&env);
+        let mut index = from;
+
+        while index < end {
+            if let Some(job_id) = ids.get(index) {
+                page.push_back(job_id);
+            }
+            index += 1;
+        }
+
+        page
     }
 
     /// Return the immutable aggregate history for `freelancer`.
@@ -2121,7 +2170,7 @@ mod tests {
         let (_admin, client) = setup(&env);
 
         assert_eq!(client.get_job_count(), 0);
-        assert_eq!(client.get_job_ids().len(), 0);
+        assert_eq!(client.get_job_ids(&0, &MAX_JOB_IDS_PAGE_SIZE).len(), 0);
 
         let client_addr = Address::generate(&env);
         let freelancer = Address::generate(&env);
@@ -2165,10 +2214,70 @@ mod tests {
         );
 
         assert_eq!(client.get_job_count(), 2);
-        let ids = client.get_job_ids();
+        let ids = client.get_job_ids(&0, &MAX_JOB_IDS_PAGE_SIZE);
         assert_eq!(ids.len(), 2);
         assert_eq!(ids.get(0).unwrap(), job_1);
         assert_eq!(ids.get(1).unwrap(), job_2);
+
+        let first_page = client.get_job_ids(&0, &1);
+        assert_eq!(first_page.len(), 1);
+        assert_eq!(first_page.get(0).unwrap(), job_1);
+
+        let second_page = client.get_job_ids(&1, &1);
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page.get(0).unwrap(), job_2);
+
+        assert_eq!(client.get_job_ids(&2, &1).len(), 0);
+        assert_eq!(client.get_job_ids(&u32::MAX, &1).len(), 0);
+        assert!(client
+            .try_get_job_ids(&0, &(MAX_JOB_IDS_PAGE_SIZE + 1))
+            .is_err());
+    }
+
+    #[test]
+    fn test_create_job_rejects_when_job_count_cap_is_reached() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, EscrowContract);
+        let client = EscrowContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&signers1(&env, &admin), &1u32);
+
+        env.as_contract(&cid, || {
+            env.storage().instance().set(&DataKey::JobCount, &MAX_JOBS);
+        });
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, "M1"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+
+        let job_id = String::from_str(&env, "job-over-cap");
+        assert!(client
+            .try_create_job(
+                &client_addr,
+                &freelancer,
+                &job_id,
+                &token,
+                &1000i128,
+                &milestones,
+                &RELEASE_AFTER_LEDGERS,
+            )
+            .is_err());
     }
 
     #[test]
@@ -2885,6 +2994,38 @@ mod tests {
 
         let current = client.get_job(&job_id).unwrap().release_after;
         client.update_release_after(&signers1(&env, &admin), &job_id, &(current - 1));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_update_release_after_cannot_exceed_deadline_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(&env, "job-release-after-past-deadline");
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 100));
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+
+        let deadline = client.get_job(&job_id).unwrap().deadline;
+        client.update_release_after(&signers1(&env, &admin), &job_id, &(deadline + 1));
     }
 
     #[test]

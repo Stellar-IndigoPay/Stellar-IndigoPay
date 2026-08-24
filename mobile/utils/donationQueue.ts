@@ -13,6 +13,7 @@
  *   RETRY_BACKOFF_MS — exponential backoff schedule (6 attempts)
  */
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { safeRandomUUID } from "./uuid";
 
 const STORAGE_KEY = "donation_queue";
 const MAX_QUEUE_SIZE = 100;
@@ -41,6 +42,13 @@ export type DonationStatus = "pending" | "retrying" | "submitted" | "failed";
 
 export interface QueuedDonation {
   id: string;
+  /**
+   * Client-generated idempotency key (UUID v4) sent to the backend as the
+   * `Idempotency-Key` header on replay. Lets the server deduplicate retried
+   * submissions so a donation is recorded exactly once even when a response
+   * is lost mid-flight.
+   */
+  idempotencyKey: string;
   projectId: string;
   projectName: string;
   amount: string;
@@ -124,8 +132,14 @@ export function onQueueItemUpdate(listener: QueueUpdateListener): () => void {
 
 /**
  * Enqueue a new donation for offline submission.
- * The donation is persisted to AsyncStorage with initial status "pending".
+ * The donation is persisted to AsyncStorage with initial status "pending"
+ * and a client-generated idempotency key so replays are deduplicated.
  *
+ * @param params.idempotencyKey - optional caller-supplied UUID v4. When
+ *        omitted, a fresh key is generated. Callers that attempt an online
+ *        submission before falling back to the queue should pass the same
+ *        key used on that attempt so a partially-completed server write is
+ *        replayed (not duplicated).
  * @returns The newly created QueuedDonation.
  */
 export async function enqueueDonation(params: {
@@ -135,10 +149,12 @@ export async function enqueueDonation(params: {
   currency: "XLM" | "USDC";
   message?: string;
   donorAddress: string;
+  idempotencyKey?: string;
 }): Promise<QueuedDonation> {
   const now = Date.now();
   const donation: QueuedDonation = {
     id: generateId(),
+    idempotencyKey: params.idempotencyKey ?? safeRandomUUID(),
     projectId: params.projectId,
     projectName: params.projectName,
     amount: params.amount,

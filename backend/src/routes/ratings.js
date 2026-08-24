@@ -16,7 +16,7 @@ const { AppError } = require("../errors");
 router.post("/", async (req, res, next) => {
   try {
     const { projectId, donorAddress, rating, review } = req.body;
-    if (!projectId || !donorAddress || !rating) {
+    if (!projectId || !donorAddress || rating === undefined || rating === null) {
       throw new AppError("VALIDATION_ERROR", {
         detail: "projectId, donorAddress, and rating are required",
       });

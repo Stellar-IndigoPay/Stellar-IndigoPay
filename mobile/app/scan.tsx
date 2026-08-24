@@ -33,7 +33,7 @@ import {
 } from "react-native";
 import { useRouter } from "expo-router";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import axios from "axios";
+import { apiClient } from "../lib/apiClient";
 import { parseQRData, ParsedQR } from "../utils/qrParser";
 import {
   resolveProjectByAddress,
@@ -67,7 +67,7 @@ async function lookupAddress(
   address: string,
 ): Promise<DestinationValidationResult> {
   try {
-    const res = await axios.get(`${API_URL}/api/projects?limit=100`);
+    const res = await apiClient.get(`${API_URL}/api/projects?limit=100`);
     const list: RegistryProject[] = Array.isArray(res.data?.data)
       ? res.data.data
       : [];

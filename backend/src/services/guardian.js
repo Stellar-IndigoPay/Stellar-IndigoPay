@@ -4,6 +4,7 @@ const logger = require("../logger");
 const { Counter } = require("prom-client");
 const { registry } = require("./metrics");
 const { getSigningSecret } = require("./signingSecretProvider");
+const { withAdvisoryLock, LOCK_KEYS } = require("./advisoryLock");
 
 // 12-hour cadence
 const GUARDIAN_INTERVAL_MS = 12 * 60 * 60 * 1000;
@@ -60,17 +61,25 @@ async function runGuardian() {
   }
 }
 
+/**
+ * Guardian cycle guarded by a per-worker Postgres advisory lock so only one
+ * replica extends TTLs at a time (issue #677).
+ */
+async function runGuardianCycle() {
+  return withAdvisoryLock(LOCK_KEYS.guardian, runGuardian);
+}
+
 function start() {
   if (intervalId) return;
   
   // Run on startup
-  runGuardian().catch((err) => {
+  runGuardianCycle().catch((err) => {
     logger.error({ event: "guardian_startup_failed", err: err.message }, "Initial guardian run failed");
   });
 
   intervalId = setInterval(async () => {
     try {
-      await runGuardian();
+      await runGuardianCycle();
     } catch (err) {
       // Logged in runGuardian
     }
@@ -91,6 +100,7 @@ function stop() {
 module.exports = {
   buildExtendAllTtlTransaction,
   runGuardian,
+  runGuardianCycle,
   start,
   stop,
 };
