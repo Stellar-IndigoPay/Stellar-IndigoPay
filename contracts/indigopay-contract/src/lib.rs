@@ -512,6 +512,35 @@ pub trait EscrowInterface {
     );
 }
 
+#[cfg(feature = "escrow")]
+const MAX_CAMPAIGN_ESCROW_MILESTONE_NAME_LEN: u32 = 64;
+
+#[cfg(feature = "escrow")]
+fn validate_campaign_escrow_milestones(milestones: &Vec<EscrowMilestone>) {
+    if milestones.is_empty() {
+        panic!("Milestone vector cannot be empty");
+    }
+
+    for milestone in milestones.iter() {
+        if milestone.percentage == 0 {
+            panic!("Milestone percentage must be positive");
+        }
+        if milestone.name.len() > MAX_CAMPAIGN_ESCROW_MILESTONE_NAME_LEN {
+            panic!("Milestone name too long");
+        }
+    }
+
+    for i in 0..milestones.len() {
+        let a = milestones.get(i).unwrap();
+        for j in (i + 1)..milestones.len() {
+            let b = milestones.get(j).unwrap();
+            if a.name == b.name {
+                panic!("Duplicate milestone name");
+            }
+        }
+    }
+}
+
 // ─── Cross-chain attestation settlement (#439) ─────────────────────────────
 /// Lifecycle of a cross-chain donation attestation.
 ///
@@ -3159,6 +3188,8 @@ impl IndigoPayContract {
         if deadline_ledger <= current {
             panic!("Campaign deadline must be in the future");
         }
+
+        validate_campaign_escrow_milestones(&milestones);
 
         // Validate milestones sum to 100%
         let mut total_pct: u32 = 0;
@@ -10438,6 +10469,150 @@ mod tests {
         client.cancel_admin_transfer(&signers1(&env, &admin));
     }
     // ─── Time-bound campaign tests ──────────────────────────────────────────
+    #[test]
+    #[cfg(feature = "escrow")]
+    #[should_panic]
+    fn test_create_campaign_with_escrow_empty_milestones_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.set_escrow_contract_address(&signers1(&env, &admin), &Address::generate(&env));
+        let milestones = Vec::<EscrowMilestone>::new(&env);
+        client.create_campaign_with_escrow(
+            &admin,
+            &pid,
+            &(100 * STROOP),
+            &(env.ledger().sequence() + 100),
+            &milestones,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "escrow")]
+    #[should_panic]
+    fn test_create_campaign_with_escrow_zero_percentage_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.set_escrow_contract_address(&signers1(&env, &admin), &Address::generate(&env));
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(EscrowMilestone {
+            name: String::from_str(&env, "Design"),
+            percentage: 0,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+        milestones.push_back(EscrowMilestone {
+            name: String::from_str(&env, "Build"),
+            percentage: 100,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+        client.create_campaign_with_escrow(
+            &admin,
+            &pid,
+            &(100 * STROOP),
+            &(env.ledger().sequence() + 100),
+            &milestones,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "escrow")]
+    #[should_panic]
+    fn test_create_campaign_with_escrow_duplicate_name_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.set_escrow_contract_address(&signers1(&env, &admin), &Address::generate(&env));
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(EscrowMilestone {
+            name: String::from_str(&env, "Milestone"),
+            percentage: 50,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+        milestones.push_back(EscrowMilestone {
+            name: String::from_str(&env, "Milestone"),
+            percentage: 50,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+        client.create_campaign_with_escrow(
+            &admin,
+            &pid,
+            &(100 * STROOP),
+            &(env.ledger().sequence() + 100),
+            &milestones,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "escrow")]
+    #[should_panic]
+    fn test_create_campaign_with_escrow_name_too_long_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.set_escrow_contract_address(&signers1(&env, &admin), &Address::generate(&env));
+        let long_name = String::from_str(&env, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(EscrowMilestone {
+            name: long_name,
+            percentage: 100,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+        client.create_campaign_with_escrow(
+            &admin,
+            &pid,
+            &(100 * STROOP),
+            &(env.ledger().sequence() + 100),
+            &milestones,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "escrow")]
+    #[should_panic]
+    fn test_create_campaign_with_escrow_total_not_100_panics() {
+        let (env, _cid, client, admin, pid) = setup();
+        client.set_escrow_contract_address(&signers1(&env, &admin), &Address::generate(&env));
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(EscrowMilestone {
+            name: String::from_str(&env, "Design"),
+            percentage: 40,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+        milestones.push_back(EscrowMilestone {
+            name: String::from_str(&env, "Build"),
+            percentage: 40,
+            released: false,
+            disputed: false,
+            oracle: None,
+            verified: false,
+            proof_hash: None,
+        });
+        client.create_campaign_with_escrow(
+            &admin,
+            &pid,
+            &(100 * STROOP),
+            &(env.ledger().sequence() + 100),
+            &milestones,
+        );
+    }
+
     #[test]
     fn test_create_campaign_sets_active_goal_and_deadline() {
         let (env, _cid, client, admin, pid) = setup();
