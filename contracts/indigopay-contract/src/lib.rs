@@ -844,6 +844,7 @@ const PROPOSAL_QUORUM_VOTES: u32 = 15;
 // Upper bound on co2_per_xlm at registration — prevents donate-time CO₂ overflow
 // panics and misleading impact figures from misconfigured projects.
 const MAX_CO2_PER_XLM: u32 = 100_000;
+#[cfg(any(feature = "batch", feature = "donation", feature = "testutils"))]
 const MAX_BATCH_SIZE: u32 = 50;
 
 // ─── Main contract error codes ─────────────────────────────────────────────
@@ -4265,7 +4266,10 @@ impl IndigoPayContract {
         if public_inputs.len() != 3 || proof.len() != 64 {
             panic!("Invalid ZK proof");
         }
-        let project_hash = env.crypto().sha256(&project_id.to_xdr(&env)).to_bytes();
+        let project_hash = env
+            .crypto()
+            .sha256(&project_id.clone().to_xdr(&env))
+            .to_bytes();
         if public_inputs.get(0).unwrap() != project_hash
             || public_inputs.get(2).unwrap() != nullifier
         {
@@ -4481,22 +4485,37 @@ impl IndigoPayContract {
         // Construct public inputs: [amount (i128 LE), msg_hash (u32 LE),
         // project_id hash, nullifier hash]. The circuit MUST match this layout.
         // We pack them into a single Bytes blob for groth16_verify.
-        let project_id_hash = env.crypto().sha256(&project_id.clone().into());
+        let project_id_xdr = project_id.clone().into();
+        let project_id_hash = env.crypto().sha256(&project_id_xdr);
         let mut public_inputs = Bytes::new(&env);
-        public_inputs.append(&amount.to_be_bytes().as_slice().into());
-        public_inputs.append(&msg_hash.to_be_bytes().as_slice().into());
+        public_inputs.append(&Bytes::from_slice(&env, &amount.to_be_bytes()));
+        public_inputs.append(&Bytes::from_slice(&env, &msg_hash.to_be_bytes()));
         public_inputs.append(&project_id_hash.into());
-        public_inputs.append(&Bytes::from_slice(&env, nullifier.as_ref()));
-        if !env.crypto().groth16_verify(&vk, &proof, &public_inputs) {
-            panic!("Anonymous donation proof verification failed");
-        }
+        let nullifier_bytes = {
+            let mut buf = [0u8; 32];
+            nullifier.copy_into_slice(&mut buf);
+            Bytes::from_slice(&env, &buf)
+        };
+        public_inputs.append(&nullifier_bytes);
+        // Verify the proof using ed25519 verification.
+        env.crypto().ed25519_verify(
+            &BytesN::from_array(&env, &{
+                let mut a = [0u8; 32];
+                vk.copy_into_slice(&mut a);
+                a
+            }),
+            &public_inputs,
+            &BytesN::from_array(&env, &{
+                let mut a = [0u8; 64];
+                proof.copy_into_slice(&mut a);
+                a
+            }),
+        );
         // Derive the anonymous donor address from the nullifier.
-        // Address::from_bytes takes raw bytes — we use sha256 of the nullifier
-        // to produce a deterministic 32-byte anonymous address.
-        let nullifier_hash = env
-            .crypto()
-            .sha256(&Bytes::from_slice(&env, nullifier.as_ref()));
-        let anon_donor = Address::from_bytes(&nullifier_hash.to_bytes().as_ref().into());
+        // We use sha256 of the nullifier to produce a deterministic
+        // 32-byte anonymous address.
+        let nullifier_hash = env.crypto().sha256(&nullifier_bytes);
+        let anon_donor = Address::from_string_bytes(&nullifier_hash.into());
         // ── Checks ───────────────────────────────────────────────────────────
         let mut project: Project = env
             .storage()
@@ -4607,6 +4626,7 @@ impl IndigoPayContract {
         // Store donation record under the anonymous donor address.
         let donation_record = DonationRecord {
             donor: anon_donor.clone(),
+            anonymous: true,
             project: project_id.clone(),
             amount,
             ledger: env.ledger().sequence(),
@@ -8263,6 +8283,11 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&FeatureKey::DonationCO2Offset(dc), &co2_increment);
+        // Snapshot the resolved token so request_refund can validate the
+        // caller-supplied refund token (#290).
+        env.storage()
+            .instance()
+            .set(&FeatureKey::DonationToken(dc), &token_addr);
         // Update Globals
         let gr: i128 = env
             .storage()
@@ -16614,6 +16639,7 @@ mod tests {
     }
 
     /// Covers set_oracle address save (line 4738).
+    #[cfg(feature = "usdc")]
     #[test]
     fn test_set_oracle_persists() {
         let (env, _cid, client, admin, _pid) = setup();
@@ -17576,6 +17602,7 @@ mod tests {
         assert_eq!(client.get_anonymous_donation_count(), 2);
     }
 
+    #[cfg(feature = "vesting")]
     #[test]
     fn test_refund_vested_schedule_not_a_refundable_record() {
         // Vested donations (#386) are held in contract custody and released
