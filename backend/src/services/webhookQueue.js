@@ -28,6 +28,7 @@ const PgBoss = require("pg-boss");
 const pool = require("../db/pool");
 const logger = require("../logger");
 const { metrics } = require("./metrics");
+const { injectTraceMetadata, withSpan } = require("../telemetry");
 const { createDrainController } = require("./workerLifecycle");
 const {
   computeEventId,

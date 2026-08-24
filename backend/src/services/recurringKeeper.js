@@ -25,6 +25,7 @@ const {
   rpc,
 } = require("@stellar/stellar-sdk");
 const { metrics } = require("./metrics");
+const { withSpan } = require("../telemetry");
 const { getSigningSecret } = require("./signingSecretProvider");
 const { withAdvisoryLock, LOCK_KEYS } = require("./advisoryLock");
 const { createDrainController } = require("./workerLifecycle");

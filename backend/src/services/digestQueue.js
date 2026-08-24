@@ -5,6 +5,7 @@ const pool = require("../db/pool");
 const logger = require("../logger");
 const { buildDigests } = require("./digestBuilder");
 const { sendDigestEmail } = require("./email");
+const { injectTraceMetadata, withSpan } = require("../telemetry");
 const { createDrainController } = require("./workerLifecycle");
 
 const DRAIN_TIMEOUT_MS = 15_000;
