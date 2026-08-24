@@ -44,10 +44,12 @@ jobs:
 
       - name: promtool check rules
         run: |
-          docker run --rm -v "$PWD:/work" prom/prometheus:v2.53.0 \
-            promtool check rules /work/monitoring/alert-rules.yml
+          docker run --rm --entrypoint promtool \
+            -v "$PWD:/work" prom/prometheus:v2.53.0 \
+            check rules /work/monitoring/alert-rules.yml
 
       - name: promtool test rules (CanaryRolloutAborted)
         run: |
-          docker run --rm -v "$PWD:/work" prom/prometheus:v2.53.0 \
-            promtool test rules /work/monitoring/tests/rollout-alerts-test.yml
+          docker run --rm --entrypoint promtool \
+            -v "$PWD:/work" prom/prometheus:v2.53.0 \
+            test rules /work/monitoring/tests/rollout-alerts-test.yml
