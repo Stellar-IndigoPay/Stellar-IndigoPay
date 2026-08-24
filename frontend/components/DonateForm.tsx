@@ -25,9 +25,11 @@ import { recordDonation } from "@/lib/api";
 import { useRecordDonation } from "@/hooks/queries";
 import useOnlineStatus from "@/hooks/useOnlineStatus";
 import { queueDonation, syncQueuedDonations } from "@/lib/offlineDonationQueue";
-import { formatXLM, formatCO2 } from "@/utils/format";
+import { formatXLM, formatCO2, formatUSDEquivalent } from "@/utils/format";
 import { trackEvent } from "@/lib/analytics";
 import { safeRandomUUID } from "@/utils/uuid";
+import { usePriceContext } from "@/lib/priceContext";
+import { PriceStaleIndicator } from "@/components/PriceStaleIndicator";
 import type { ClimateProject } from "@/utils/types";
 import type { DonorAsset, ConversionEstimate } from "@/lib/dex";
 
@@ -85,6 +87,7 @@ export default function DonateForm({
   const [conversionError, setConversionError] = useState<string | null>(null);
   const isOnline = useOnlineStatus();
   const recordDonationMutation = useRecordDonation();
+  const { xlmUsd, isStale, isDegraded, priceAgeMs } = usePriceContext();
 
   useEffect(() => {
     if (!initialAmount) return;
@@ -620,6 +623,28 @@ export default function DonateForm({
               role="alert"
             >
               Minimum donation is 1 {currency}
+            </p>
+          )}
+
+          {/* USD equivalent with staleness indicator */}
+          {currency === "XLM" && amount && !isNaN(amountNum) && amountNum > 0 && (
+            <p
+              className="mt-2 text-xs text-[#64748B] dark:text-[#94A3B8] font-body flex items-center gap-1"
+              data-testid="usd-equivalent"
+              data-price-stale={isStale || isDegraded ? "true" : undefined}
+            >
+              {isDegraded ? (
+                <>
+                  <span>≈</span>
+                  <span className="text-orange-500 dark:text-orange-400" aria-label="USD equivalent unavailable">—</span>
+                  <PriceStaleIndicator isStale={isStale} isDegraded={isDegraded} priceAgeMs={priceAgeMs} />
+                </>
+              ) : xlmUsd !== null ? (
+                <>
+                  <span>{formatUSDEquivalent(amountNum, xlmUsd)}</span>
+                  <PriceStaleIndicator isStale={isStale} isDegraded={isDegraded} priceAgeMs={priceAgeMs} />
+                </>
+              ) : null}
             </p>
           )}
 

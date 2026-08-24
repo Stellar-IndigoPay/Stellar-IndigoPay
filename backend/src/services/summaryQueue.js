@@ -16,6 +16,26 @@ const { logAdminAction } = require("./audit");
 
 const QUEUE = "ai-summary";
 
+/**
+ * Deterministic, non-AI fallback summary. Used only when the provider is
+ * down (retries + circuit breaker exhausted, or a non-retryable error) and
+ * the project has no existing summary to fall back to — so the job always
+ * produces *something* for the donor-facing UI rather than leaving the
+ * field empty indefinitely.
+ *
+ * @param {{ category: string, description: string }} project
+ * @returns {string}
+ */
+function buildRuleBasedFallbackSummary({ category, description }) {
+  const cat = (category || "").trim() || "This project";
+  const desc = (description || "").trim();
+  const snippet = desc.length > 220 ? `${desc.slice(0, 217).trim()}...` : desc;
+  const base = snippet
+    ? `${cat} — ${snippet}`
+    : `${cat}. A detailed description has not been provided yet.`;
+  return sanitizeSummary(`${base} Your donation directly supports this work.`);
+}
+
 let boss = null;
 
 /**
@@ -45,9 +65,23 @@ async function start(io) {
   await boss.work(QUEUE, { teamSize: 2, teamConcurrency: 1 }, async ([job]) => {
     const { projectId, name, category, description, adminAddress } = job.data;
 
-    let summaryResult;
+    // Fetched up front so a provider outage has something to fall back to
+    // — never overwritten unless generation (or a rule-based degrade)
+    // actually produces a new summary below.
+    const existingResult = await pool.query(
+      "SELECT ai_summary, ai_summary_model FROM projects WHERE id = $1",
+      [projectId],
+    );
+    const existingRow = existingResult.rows[0];
+    if (!existingRow) return; // project was deleted while job was queued
+    const existingSummary = existingRow.ai_summary || null;
+
+    let summaryResult = null;
+    let fallback = null;
+
     try {
       summaryResult = await generateProjectSummary({
+        id: projectId,
         name,
         category,
         description,
@@ -61,7 +95,61 @@ async function start(io) {
         );
         return;
       }
-      throw err; // pg-boss will retry according to retryLimit
+
+      // A transient, still-retryable error (a single 429/5xx that hasn't
+      // exhausted claude.js's own retry budget yet, or the breaker isn't
+      // open) is worth another full job attempt via pg-boss's retryLimit
+      // rather than immediately degrading to a possibly-stale fallback.
+      if (err.retryable && !err.breakerOpen) {
+        throw err;
+      }
+
+      // Retries + circuit breaker exhausted, or a non-retryable error
+      // (malformed response, breaker open) — degrade instead of failing
+      // the job silently.
+      if (existingSummary) {
+        fallback = {
+          summary: existingSummary,
+          model: existingRow.ai_summary_model,
+          stale: true,
+        };
+        logger.warn(
+          {
+            event: "ai_summary_fallback_stale",
+            projectId,
+            err: err.message,
+          },
+          "[summaryQueue] Provider unavailable — serving existing summary (stale)",
+        );
+      } else {
+        fallback = {
+          summary: buildRuleBasedFallbackSummary({ category, description }),
+          model: "fallback-rule-based",
+          stale: false,
+        };
+        logger.warn(
+          {
+            event: "ai_summary_fallback_rule_based",
+            projectId,
+            err: err.message,
+          },
+          "[summaryQueue] Provider unavailable and no cached summary — using rule-based fallback",
+        );
+      }
+    }
+
+    // Stale fallback: the project row already holds this exact summary —
+    // nothing to write, just audit that generation was skipped.
+    if (fallback && fallback.stale) {
+      logAdminAction({
+        actor: adminAddress || "system",
+        action: "project.summary.fallback_stale",
+        targetType: "project",
+        targetId: projectId,
+        metadata: { model: fallback.model },
+        ipAddress: null,
+      });
+      return;
     }
 
     const sourceHash = crypto
@@ -70,8 +158,10 @@ async function start(io) {
       .digest("hex");
 
     // Final storage-boundary guard: never persist a summary that still
-    // contains markdown/HTML or that sanitizes down to nothing.
-    const summary = sanitizeSummary(summaryResult.summary);
+    // contains markdown/HTML or that sanitizes down to nothing. (The
+    // rule-based fallback is already sanitized; re-sanitizing is a no-op.)
+    const summaryText = summaryResult ? summaryResult.summary : fallback.summary;
+    const summary = sanitizeSummary(summaryText);
     if (!summary) {
       console.error(
         "[summaryQueue] summary empty after sanitization; skipping store",
@@ -79,6 +169,8 @@ async function start(io) {
       );
       return;
     }
+
+    const model = summaryResult ? summaryResult.model : fallback.model;
 
     const updated = await pool.query(
       `UPDATE projects
@@ -89,7 +181,7 @@ async function start(io) {
               updated_at              = NOW()
         WHERE id = $4
         RETURNING ai_summary, ai_summary_generated_at, ai_summary_model`,
-      [summary, summaryResult.model, sourceHash, projectId],
+      [summary, model, sourceHash, projectId],
     );
 
     const row = updated.rows[0];
@@ -103,15 +195,20 @@ async function start(io) {
           row.ai_summary_generated_at,
         ).toISOString(),
         aiSummaryModel: row.ai_summary_model,
+        // Only the rule-based path reaches this emit — the stale-fallback
+        // path (existing summary already correct) returns earlier above.
+        fallback: Boolean(fallback),
       });
     }
 
     logAdminAction({
       actor: adminAddress || "system",
-      action: "project.summary.generated",
+      action: fallback
+        ? "project.summary.fallback_generated"
+        : "project.summary.generated",
       targetType: "project",
       targetId: projectId,
-      metadata: { model: summaryResult.model },
+      metadata: { model },
       ipAddress: null,
     });
   });

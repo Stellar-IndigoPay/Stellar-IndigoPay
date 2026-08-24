@@ -1,7 +1,54 @@
 "use strict";
 
+jest.mock("@sentry/node", () => ({
+  init: jest.fn(),
+  Handlers: {
+    requestHandler: jest.fn(() => (req, res, next) => next()),
+    tracingHandler: jest.fn(() => (req, res, next) => next()),
+    errorHandler: jest.fn(() => (err, req, res, next) => next(err)),
+  },
+  captureException: jest.fn(),
+  close: jest.fn().mockResolvedValue(),
+}));
+
+jest.mock("../routes/ratings", () => {
+  const express = require("express");
+  const router = express.Router();
+  router.post("/", (req, res) => res.status(201).json({ success: true }));
+  return router;
+});
+
+jest.mock("../services/redis", () => ({
+  getClient: jest.fn().mockReturnValue({
+    pipeline: () => ({
+      zadd: jest.fn(),
+      zremrangebyscore: jest.fn(),
+      zcard: jest.fn(),
+      expire: jest.fn(),
+      exec: jest.fn().mockResolvedValue([null, null, [null, 0]]),
+    }),
+    evalsha: jest.fn().mockResolvedValue([1, 10, 0]),
+    script: jest.fn().mockResolvedValue("mock-sha"),
+  }),
+  initRedis: jest.fn().mockReturnValue({ ring: null }),
+}));
+
+jest.mock("pg", () => ({
+  Pool: jest.fn(() => ({
+    connect: jest.fn().mockResolvedValue({ query: jest.fn(), release: jest.fn() }),
+    query: jest.fn().mockResolvedValue({ rows: [] }),
+    end: jest.fn().mockResolvedValue(),
+    on: jest.fn(),
+  }))
+}));
+
 const request = require("supertest");
+jest.mock("../db/pool", () => ({
+  query: jest.fn().mockResolvedValue({ rows: [] }),
+  runWithQueryRole: jest.fn((method, cb) => cb())
+}));
 const app = require("../server");
+
 
 describe("CSRF protection", () => {
   const agent = request.agent(app);

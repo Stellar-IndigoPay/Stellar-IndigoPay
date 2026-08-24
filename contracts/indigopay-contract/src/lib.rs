@@ -655,6 +655,11 @@ pub enum DataKey {
     // Ledger sequence at which the pending upgrade becomes executable.
     // Set together with `PendingUpgrade` and cleared on execute/cancel.
     UpgradeEffectiveAt,
+    // Time-locked vesting donation schedules. `VestingSchedule(donor, id)`
+    // holds one schedule; `DonorVestingCount(donor)` allocates unique,
+    // monotonically increasing schedule ids per donor.
+    VestingSchedule(Address, u32),
+    DonorVestingCount(Address),
     // Hash of the last EXECUTED contract upgrade. Set by
     // `execute_upgrade` after `env.deployer().update_current_contract_wasm`
     // returns. Used by indexers to confirm which WASM is currently
@@ -700,9 +705,6 @@ pub enum DataKey {
     // protection.
     Nullifier(BytesN<32>),
     ZkDonationRecord(u32),
-    // Time-locked donation vesting (#386)
-    VestingSchedule(Address, u32),
-    DonorVestingCount(Address),
     // Platform fee configuration (#385)
     /// Fee in basis points (0–500, max 5%).
     PlatformFeeBps,
@@ -894,6 +896,7 @@ pub enum ContractError {
     EscrowFundingFailed = 63,
     EscrowReleaseFailed = 64,
     EscrowClaimFailed = 65,
+    InsufficientContractBalanceForEscrow = 136,
     // ── Governance & voting (66–75) ─────────────────────────────────────────
     CannotDelegateToSelf = 66,
     AlreadyDelegatedToThisAddress = 67,
@@ -3330,16 +3333,24 @@ impl IndigoPayContract {
             .get(&DataKey::CampaignEscrowMilestones(project_id.clone()))
             .expect("Campaign escrow milestones not found");
 
-        let total_raised = project.total_raised;
-        if total_raised <= 0 {
-            panic!("No funds raised to escrow");
+        let contract_balance: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProjectContractBalance(
+                project_id.clone(),
+                token.clone(),
+            ))
+            .unwrap_or(0);
+
+        if contract_balance <= 0 {
+            panic_with_error!(&env, ContractError::InsufficientContractBalanceForEscrow);
         }
 
         // Use project_id as the escrow job ID for a deterministic link
         let job_id = project_id.clone();
 
         // Call escrow contract to create the job.
-        // The escrow's create_job will transfer `total_raised` from the
+        // The escrow's create_job will transfer `contract_balance` from the
         // indigopay contract (which holds the escrow-routed funds) to itself.
         let escrow_client = EscrowClient::new(&env, &escrow_addr);
         escrow_client.create_job(
@@ -3347,7 +3358,7 @@ impl IndigoPayContract {
             &project.wallet,                 // freelancer = project wallet
             &job_id,
             &token,
-            &total_raised,
+            &contract_balance,
             &milestones,
             &release_after,
         );
@@ -3359,7 +3370,7 @@ impl IndigoPayContract {
 
         env.events().publish(
             (symbol_short!("esc_fnd"), admin, project_id),
-            (job_id, total_raised),
+            (job_id, contract_balance),
         );
     }
     /// Admin-only: release a specific milestone for an escrow campaign.
@@ -8999,6 +9010,9 @@ mod tests {
                 .extend_ttl(VOTING_WINDOW_LEDGERS * 4, VOTING_WINDOW_LEDGERS * 4);
         });
     }
+
+    #[cfg(test)]
+    mod escrow_test;
 
     // ─── Project Verification Oracle tests ─────────────────────────────────
 

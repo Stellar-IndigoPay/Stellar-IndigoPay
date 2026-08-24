@@ -1,0 +1,71 @@
+name: Nightly Property Tests (extended)
+
+# Extended property-based runs for the financial-integrity components
+# (projection engine, Merkle tree, audit chain). CI runs the same suites with
+# fixed seeds and few iterations; this job broadens coverage with a fresh
+# seed and many more iterations. See backend/test/properties/README.md.
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Base PROPERTY_SEED (empty = fresh date-derived seed)"
+        required: false
+        default: ""
+      iterations:
+        description: "Iterations per property"
+        required: false
+        default: "2000"
+
+permissions:
+  contents: read
+
+jobs:
+  properties:
+    name: Property suites (extended, fresh seed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Resolve seed
+        id: seed
+        run: |
+          SEED="${{ github.event.inputs.seed }}"
+          if [ -z "$SEED" ]; then
+            SEED=$(( $(date -u +%s) % 2147483647 ))
+          fi
+          echo "seed=$SEED" >> "$GITHUB_OUTPUT"
+          echo "::notice::Nightly property run base seed: $SEED"
+
+      - name: Run extended property suites
+        env:
+          PROPERTY_SEED: ${{ steps.seed.outputs.seed }}
+          PROPERTY_ITERATIONS: ${{ github.event.inputs.iterations || '2000' }}
+        run: |
+          echo "PROPERTY_SEED=$PROPERTY_SEED" | tee property-run-seed.txt
+          echo "PROPERTY_ITERATIONS=$PROPERTY_ITERATIONS" | tee -a property-run-seed.txt
+          npm run test:properties:extended
+
+      - name: Upload run metadata on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: property-failure-seed-${{ steps.seed.outputs.seed }}
+          path: backend/property-run-seed.txt
+          if-no-files-found: ignore

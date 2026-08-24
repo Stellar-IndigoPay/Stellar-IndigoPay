@@ -27,9 +27,16 @@ const {
 const { metrics } = require("./metrics");
 const { getSigningSecret } = require("./signingSecretProvider");
 const { withAdvisoryLock, LOCK_KEYS } = require("./advisoryLock");
+const { createDrainController } = require("./workerLifecycle");
 
 let intervalId = null;
 let isExecuting = false;
+
+// Tracks whether a keeper cycle is currently in flight so `stop()` can
+// wait for it to finish (or release control after its grace period)
+// instead of returning immediately while a cycle is still submitting
+// on-chain transactions — see issue #931.
+const drain = createDrainController("recurring_keeper");
 
 /**
  * Start the recurring donation keeper loop.
@@ -38,19 +45,19 @@ async function start() {
   if (intervalId) return;
 
   // Run initial cycle
-  runKeeperCycleWithLock().catch((err) => {
+  drain.trackJob(() => runKeeperCycleWithLock()).catch((err) => {
     logger.error({ event: "recurring_keeper_initial_error", err: err.message }, "Error in initial keeper cycle");
   });
 
   // Check every 60 seconds
   intervalId = setInterval(async () => {
-    if (isExecuting) {
-      logger.debug({ event: "recurring_keeper_skip_overlap" }, "Previous keeper cycle still running, skipping this tick");
+    if (isExecuting || drain.isDraining()) {
+      logger.debug({ event: "recurring_keeper_skip_overlap" }, "Previous keeper cycle still running, or worker draining; skipping this tick");
       return;
     }
     isExecuting = true;
     try {
-      await runKeeperCycleWithLock();
+      await drain.trackJob(() => runKeeperCycleWithLock());
     } catch (err) {
       logger.error({ event: "recurring_keeper_cycle_error", err: err.message }, "Error during keeper cycle");
     } finally {
@@ -61,12 +68,18 @@ async function start() {
 
 /**
  * Stop the recurring donation keeper loop.
+ *
+ * Stops scheduling new cycles immediately, then waits (up to the drain
+ * grace period) for any cycle currently in flight to finish submitting
+ * its on-chain transactions, so a SIGTERM never truncates a keeper cycle
+ * mid-submission.
  */
 async function stop() {
   if (intervalId) {
     clearInterval(intervalId);
     intervalId = null;
   }
+  await drain.beginDrain();
 }
 
 /**
