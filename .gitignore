@@ -4,6 +4,7 @@ out/
 target/
 dist/
 build/
+extension/*.zip
 *.log
 *.tsbuildinfo
 

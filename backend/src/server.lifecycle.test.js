@@ -22,6 +22,7 @@ const STARTED_SERVICES = [
   "match_expiry",
   "retention_worker",
   "digest_queue",
+  "dsr_queue",
   "indexer",
   "indexer_reconciler",
   "indexer_dlq_worker",

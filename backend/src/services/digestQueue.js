@@ -5,6 +5,12 @@ const pool = require("../db/pool");
 const logger = require("../logger");
 const { buildDigests } = require("./digestBuilder");
 const { sendDigestEmail } = require("./email");
+const { createDrainController } = require("./workerLifecycle");
+
+const DRAIN_TIMEOUT_MS = 15_000;
+const drain = createDrainController("digest_dispatcher", {
+  gracePeriodMs: DRAIN_TIMEOUT_MS,
+});
 
 const APP_URL = process.env.APP_URL || "http://localhost:3000";
 const DEFAULT_CRONS = {
@@ -234,21 +240,22 @@ async function start() {
     await boss.work(
       queueName,
       { teamSize: 1, teamConcurrency: 1 },
-      async () => {
-        try {
-          await runDigest(type);
-        } catch (err) {
-          logger.error(
-            {
-              event: "digest_worker_error",
-              digestType: type,
-              err: err.message,
-            },
-            `[digestQueue] ${type} digest worker failed`,
-          );
-          throw err;
-        }
-      },
+      async () =>
+        drain.trackJob(async () => {
+          try {
+            await runDigest(type);
+          } catch (err) {
+            logger.error(
+              {
+                event: "digest_worker_error",
+                digestType: type,
+                err: err.message,
+              },
+              `[digestQueue] ${type} digest worker failed`,
+            );
+            throw err;
+          }
+        }),
     );
 
     logger.info(
@@ -278,7 +285,12 @@ async function enqueueDigest(type) {
 
 async function stop() {
   if (!boss) return;
-  await boss.stop({ graceful: true, timeout: 15_000 });
+  // pg-boss's own `graceful: true` stop already stops claiming new jobs
+  // and waits (up to `timeout`) for active handlers to finish; we mark
+  // the drain state around it so the `worker_draining` metric and
+  // `getWorkerDrainStates()` reflect reality for the same window.
+  const bossStop = boss.stop({ graceful: true, timeout: DRAIN_TIMEOUT_MS });
+  await Promise.all([bossStop, drain.beginDrain()]);
   boss = null;
 }
 
@@ -290,4 +302,6 @@ module.exports = {
   claimDigestSend,
   markDigestSent,
   markDigestFailed,
+  // Test-only: introspect drain state without a real SIGTERM.
+  _drain: drain,
 };

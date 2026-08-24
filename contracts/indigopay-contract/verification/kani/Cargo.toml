@@ -1,0 +1,9 @@
+[package]
+name = "indigopay-verification-kani"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dev-dependencies]
+kani = "0.0.1"

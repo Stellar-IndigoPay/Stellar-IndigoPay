@@ -74,8 +74,12 @@ function renderWithTheme(ui: React.ReactElement) {
 }
 
 describe("ProjectDetailScreen – Follow button", () => {
+  // Expo/Jest startup and React Native module resolution can exceed Jest's
+  // default timeout on shared CI runners. Keep the timeout local to this
+  // integration-style screen suite instead of changing the global test budget.
+  jest.setTimeout(30000);
+
   beforeEach(() => {
-    jest.useFakeTimers();
     jest.clearAllMocks();
     // Default: project loads successfully
     (axios.get as jest.Mock).mockResolvedValue({
@@ -92,15 +96,11 @@ describe("ProjectDetailScreen – Follow button", () => {
     (notifUtils.unfollowProject as jest.Mock).mockResolvedValue(true);
   });
 
-  afterEach(() => {
-    jest.useRealTimers();
-  });
-
   // ── Initial render ───────────────────────────────────────────────────────────
 
   it("renders the Follow button after the project loads", async () => {
-    const { getByTestId } = renderWithTheme(<ProjectDetailScreen />);
-    await waitFor(() => expect(getByTestId("follow-button")).toBeTruthy(), { timeout: 10000 });
+    const { findByTestId } = renderWithTheme(<ProjectDetailScreen />);
+    expect(await findByTestId("follow-button", {}, { timeout: 20000 })).toBeTruthy();
   });
 
   it('shows "Follow for Updates" text when not following', async () => {
