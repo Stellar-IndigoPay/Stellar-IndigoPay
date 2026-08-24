@@ -5,7 +5,7 @@
 import FormField from "@/components/FormField";
 import { useFormValidation } from "@/hooks/useFormValidation";
 import { donationSchema } from "@/lib/validation/schemas";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   buildDonationTransaction,
   buildContractDonationTransaction,
@@ -13,23 +13,36 @@ import {
   buildApproveTransaction,
   submitTransaction,
   explorerUrl,
-  getXLMBalance,
+  getAccountSummary,
+  getBaseReserveXLM,
   getAssetBalance,
   getDonorStats,
   hashMessage,
   CONTRACT_ID,
+  estimateFeeStroops,
+  calculateMaxDonation,
+  BASE_RESERVE_XLM,
+  formatFeeXLM,
+  simulateDonation,
+  pollTransaction,
+  type SimulationResult,
 } from "@/lib/stellar";
-import { Asset } from "@stellar/stellar-sdk";
+import { Asset, Transaction } from "@stellar/stellar-sdk";
 import { signTransactionWithWallet } from "@/lib/wallet";
-import { recordDonation } from "@/lib/api";
+import { recordDonation, checkIdempotency } from "@/lib/api";
 import { useRecordDonation } from "@/hooks/queries";
 import useOnlineStatus from "@/hooks/useOnlineStatus";
-import { queueDonation, syncQueuedDonations } from "@/lib/offlineDonationQueue";
+import {
+  queueDonation,
+  syncQueuedDonations,
+} from "@/lib/offlineDonationQueue";
 import { formatXLM, formatCO2, formatUSDEquivalent } from "@/utils/format";
 import { trackEvent } from "@/lib/analytics";
 import { safeRandomUUID } from "@/utils/uuid";
 import { usePriceContext } from "@/lib/priceContext";
 import { PriceStaleIndicator } from "@/components/PriceStaleIndicator";
+import TransactionPreview from "@/components/TransactionPreview";
+import { ENABLE_DONATION_V2 } from "@/lib/featureFlags";
 import type { ClimateProject } from "@/utils/types";
 import type { DonorAsset, ConversionEstimate } from "@/lib/dex";
 
@@ -44,10 +57,13 @@ interface DonateFormProps {
 type Step =
   | "idle"
   | "building"
+  | "preview"
   | "signing"
   | "submitting"
+  | "polling"
   | "recording"
   | "success"
+  | "unknown"
   | "error";
 
 const PRESETS_XLM = ["10", "25", "50", "100", "250"];
@@ -74,8 +90,16 @@ export default function DonateForm({
   const [step, setStep] = useState<Step>("idle");
   const [error, setError] = useState<string | null>(null);
   const [txHash, setTxHash] = useState<string | null>(null);
+  // Workstream 5: the simulated transaction shown in the preview step.
+  const [simulation, setSimulation] = useState<SimulationResult | null>(null);
+  // Workstream 6: wallet rejections are a cancel, not an error — show a
+  // dismissible notice instead of an error banner.
+  const [cancelNotice, setCancelNotice] = useState<string | null>(null);
   const [xlmBalance, setXlmBalance] = useState<string | null>(null);
   const [usdcBalance, setUsdcBalance] = useState<string | null>(null);
+  // Workstream 1: the account's true minimum reserve, (2 + subentries) × the
+  // live Stellar base reserve — the Max button must leave this intact.
+  const [reserveXLM, setReserveXLM] = useState<number>(BASE_RESERVE_XLM);
   const [trustlineMissing, setTrustlineMissing] = useState<boolean>(false);
   const [donorBadge, setDonorBadge] = useState<string | null>(null);
   // DEX path-payment state
@@ -111,9 +135,13 @@ export default function DonateForm({
     async function loadBalances() {
       if (!publicKey) return;
       try {
-        const xlm = await getXLMBalance(publicKey);
+        const summary = await getAccountSummary(publicKey);
+        const baseReserve = await getBaseReserveXLM();
         if (!mounted) return;
-        setXlmBalance(xlm);
+        setXlmBalance(summary.balance);
+        // Accounts with trustlines, signers, or offers owe more than the bare
+        // 2-XLM minimum — compute the real reserve from subentries.
+        setReserveXLM((2 + summary.subentries) * baseReserve);
         if (currency === "USDC") {
           const issuer = process.env.NEXT_PUBLIC_USDC_ISSUER;
           if (!issuer) {
@@ -135,11 +163,32 @@ export default function DonateForm({
     }
 
     loadBalances();
+    // Workstream 1: real-time balance polling so the Max button and
+    // insufficient-balance validation stay accurate while the form is open.
+    const pollTimer = setInterval(loadBalances, 10_000);
     return () => {
       mounted = false;
+      clearInterval(pollTimer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [publicKey, currency, balanceRefreshKey]);
+
+  // Workstream 6: if a previous visit ended in the "unknown" state (a
+  // transaction was submitted but never confirmed before the tab closed),
+  // restore the persisted hash so the donor can check the explorer.
+  useEffect(() => {
+    if (!ENABLE_DONATION_V2) return;
+    if (typeof window === "undefined") return;
+    try {
+      const pending = window.sessionStorage.getItem("indigopay-unknown-tx");
+      if (pending) {
+        setTxHash(pending);
+        setStep("unknown");
+      }
+    } catch {
+      // sessionStorage may be unavailable (private browsing) — ignore.
+    }
+  }, []);
 
   const { errors, validate, clearField } = useFormValidation(donationSchema);
   const [validationAnnouncement, setValidationAnnouncement] = useState<string>("");
@@ -163,6 +212,42 @@ export default function DonateForm({
     projectId: project.id,
   }).success;
 
+  // ── Workstream 1: fee estimate, Max button, and balance validation ──
+  const feeStroops = estimateFeeStroops(1);
+  const balanceNum =
+    xlmBalance !== null ? parseFloat(xlmBalance) : null;
+  const usdcBalanceNum =
+    usdcBalance !== null ? parseFloat(usdcBalance) : null;
+
+  // Max safe donation: balance − reserve − fee − 1 stroop margin.  The
+  // reserve is the account's true minimum ((2 + subentries) × live base
+  // reserve), not a fixed 2 XLM.
+  const maxDonationXLM =
+    balanceNum !== null && balanceNum > 0
+      ? calculateMaxDonation(balanceNum, reserveXLM, feeStroops)
+      : "0";
+  const maxDonationNum = parseFloat(maxDonationXLM);
+
+  // Insufficient balance: the submit gate must agree with the Max button —
+  // for XLM the spendable amount is balance − reserve − fee − 1 stroop, so
+  // anything above the computed maximum is rejected up front instead of being
+  // signed and then refused by Horizon for falling below the base reserve.
+  const amountExceedsBalance =
+    amountNum > 0
+      ? currency === "XLM"
+        ? balanceNum !== null && amountNum > maxDonationNum
+        : usdcBalanceNum !== null && amountNum > usdcBalanceNum
+      : false;
+  const balanceErrorMessage =
+    amountExceedsBalance && amountNum > 0
+      ? currency === "XLM"
+        ? `Insufficient balance (${balanceNum!.toFixed(2)} XLM available)`
+        : `Insufficient balance (${usdcBalanceNum!.toFixed(2)} USDC available)`
+      : null;
+
+  const canSubmit =
+    isValid && !amountExceedsBalance && step === "idle";
+
   // Calculate CO₂ impact for XLM donations
   const co2Impact =
     currency === "XLM" && amount && !isNaN(amountNum) && project.co2_per_xlm
@@ -180,21 +265,234 @@ export default function DonateForm({
     return "text-[#4F46E5]";
   };
 
-  useEffect(() => {
+  // Drain the offline queue with the idempotency pre-check wired in. Used by
+  // the online listener below AND by the service-worker nudge message, so a
+  // background-sync event and an open tab both run the exact same routine
+  // (BroadcastChannel tab lock + server-side dedup).
+  const drainQueuedDonations = useCallback(() => {
     if (!isOnline) return;
 
-    void syncQueuedDonations(async (payload) => {
-      try {
-        await recordDonation({
-          ...payload,
-          transactionHash: payload.transactionHash || "queued-offline",
-        });
-        return true;
-      } catch {
-        return false;
-      }
-    });
+    void syncQueuedDonations(
+      async (payload) => {
+        try {
+          await recordDonation({
+            ...payload,
+            transactionHash: payload.transactionHash || "queued-offline",
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      {
+        // Workstream 2: never re-submit a donation another tab or a
+        // background-sync attempt already recorded — the server dedupes by
+        // idempotency key, so check before submitting and drop the queue item.
+        checkAlreadyProcessed: async (payload) =>
+          payload.idempotencyKey
+            ? checkIdempotency(payload.idempotencyKey).catch(() => false)
+            : false,
+      },
+    );
   }, [isOnline]);
+
+  // Drain when connectivity returns.
+  useEffect(() => {
+    drainQueuedDonations();
+  }, [drainQueuedDonations]);
+
+  // Drain when the service worker wakes us with a background-sync nudge
+  // (public/sw.js — "indigopay-queue-sync" message).
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
+      return;
+    }
+    const onMessage = (event: MessageEvent) => {
+      if (event.data === "indigopay-queue-sync") {
+        drainQueuedDonations();
+      }
+    };
+    navigator.serviceWorker.addEventListener("message", onMessage);
+    return () =>
+      navigator.serviceWorker.removeEventListener("message", onMessage);
+  }, [drainQueuedDonations]);
+
+  // The build parameters are kept between the preview step and the confirm
+  // step so the transaction is REBUILT fresh at confirm time — the donor
+  // reviews the exact destination/amount/fee, while the sequence number and
+  // 60s time bound start at confirmation, so a slow reader can never sign a
+  // stale transaction (tx_too_late).
+  const pendingParamsRef = useRef<{
+    fromPublicKey: string;
+    toPublicKey: string;
+    amount: string;
+    memo: string;
+    asset?: { code: string; issuer?: string };
+  } | null>(null);
+  // The idempotency key generated when the donation flow started is kept
+  // alongside so the confirm step (and any offline retry) records with the
+  // SAME key — never regenerated, so the server can dedupe a retry of a
+  // donation that actually went through before the connection dropped.
+  const pendingIdempotencyRef = useRef<string | null>(null);
+
+  // ── Workstream 6: shared error recovery for the standard payment path ──
+  const handleDonationError = async (err: unknown) => {
+    const fallbackError =
+      err instanceof Error ? err.message : "An error occurred";
+
+    // A wallet rejection is a cancel, not a failure: nothing was sent, so
+    // return to a clean form with a dismissible notice instead of an error.
+    if (
+      /declined|rejected|cancelled|denied|user closed|popup closed/i.test(
+        fallbackError,
+      )
+    ) {
+      setStep("idle");
+      setCancelNotice(
+        "Signature cancelled — nothing was sent from your wallet. You can try again whenever you're ready.",
+      );
+      window.setTimeout(() => setCancelNotice(null), 8000);
+      return;
+    }
+
+    if (!navigator.onLine) {
+      await queueDonation({
+        projectId: project.id,
+        donorAddress: publicKey,
+        amount: amountNum.toString(),
+        currency,
+        message: message.trim() || undefined,
+        // Reuse the flow's idempotency key: if the original request actually
+        // reached the server before the connection dropped, a retry with the
+        // same key is recognised as a duplicate and never double-recorded.
+        idempotencyKey: pendingIdempotencyRef.current ?? safeRandomUUID(),
+      });
+      setError(
+        "The donation could not be submitted right now, so it was queued for automatic retry.",
+      );
+      setStep("success");
+      setTxHash(null);
+      return;
+    }
+
+    setError(fallbackError);
+    setStep("error");
+    setTimeout(() => setStep("idle"), 3000);
+  };
+
+  /**
+   * Sign → submit → record for the standard XLM/USDC payment path.
+   *
+   * In V2 mode, a submission that drops before returning a result is not
+   * reported as a failure: we poll Horizon for up to 60s and only fall back
+   * to the honest "unknown" state (with an explorer link, persisted across
+   * reloads) if the transaction never appears.
+   */
+  const submitStandardPayment = async (
+    tx: Transaction,
+    idempotencyKey?: string,
+  ) => {
+    const txHash = tx.hash().toString();
+
+    setStep("signing");
+    const { signedXDR, error: signErr } = await signTransactionWithWallet(
+      tx.toXDR(),
+    );
+    if (signErr || !signedXDR) throw new Error(signErr || "Signing failed");
+
+    trackEvent("donation_signed", {
+      projectId: project.id,
+      amountXLM: currency === "XLM" ? amountNum.toString() : undefined,
+    });
+
+    setStep("submitting");
+    let result: { hash: string } | undefined;
+    try {
+      result = await submitTransaction(signedXDR);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const looksLikeNetworkDrop =
+        /timeout|timed out|etimedout|econnreset|fetch failed|network error|socket hang up/i.test(
+          msg,
+        );
+
+      if (ENABLE_DONATION_V2 && looksLikeNetworkDrop) {
+        setStep("polling");
+        try {
+          await pollTransaction(txHash);
+          setTxHash(txHash);
+        } catch {
+          setTxHash(txHash);
+          try {
+            window.sessionStorage.setItem("indigopay-unknown-tx", txHash);
+          } catch {
+            // sessionStorage unavailable — unknown state still shown this visit.
+          }
+          setStep("unknown");
+          return;
+        }
+      } else {
+        throw err;
+      }
+    }
+
+    setTxHash(result?.hash ?? txHash);
+    setStep("recording");
+    // Record via React Query mutation (revalidates the donation feed) and
+    // also via the direct API call for immediate persistence.  Both send the
+    // same idempotency key; the on-chain payment is the source of truth, so a
+    // duplicate-key rejection on the second write must never surface as an
+    // error after the donation already succeeded (allSettled, not all).
+    await Promise.allSettled([
+      recordDonationMutation.mutateAsync({
+        projectId: project.id,
+        donorAddress: publicKey,
+        amount: amountNum.toString(),
+        currency: currency,
+        message: message.trim() || undefined,
+        transactionHash: result?.hash ?? txHash,
+        idempotencyKey,
+      }),
+      recordDonation({
+        projectId: project.id,
+        donorAddress: publicKey,
+        amount: amountNum.toString(),
+        currency: currency,
+        message: message.trim() || undefined,
+        transactionHash: result?.hash ?? txHash,
+        idempotencyKey,
+      }),
+    ]);
+
+    trackEvent("donation_confirmed", {
+      projectId: project.id,
+      amountXLM: currency === "XLM" ? amountNum.toString() : undefined,
+    });
+
+    refreshBalances();
+    setStep("success");
+    onSuccess?.();
+  };
+
+  /**
+   * V2 preview confirmation — the donor reviewed the simulation and clicked
+   * "Confirm & Sign".  Rebuilds the transaction fresh (same params, fresh
+   * sequence + 60s time bound) so the signed transaction is never stale, then
+   * signs and submits.
+   */
+  const handleConfirmSign = async () => {
+    if (step !== "preview" || !pendingParamsRef.current) return;
+    setError(null);
+    try {
+      const freshTx = await buildDonationTransaction(pendingParamsRef.current);
+      await submitStandardPayment(
+        freshTx,
+        pendingIdempotencyRef.current ?? undefined,
+      );
+    } catch (err: unknown) {
+      await handleDonationError(err);
+    }
+  };
 
   const handleDonate = async () => {
     const isOk = validate({
@@ -208,6 +506,7 @@ export default function DonateForm({
     // Generate a unique idempotency key so the backend can safely deduplicate
     // retried donation-recording requests within 24 hours.
     const idempotencyKey = safeRandomUUID();
+    pendingIdempotencyRef.current = idempotencyKey;
 
     if (!isOnline) {
       await queueDonation({
@@ -398,84 +697,68 @@ export default function DonateForm({
           );
       }
 
-      const tx = await buildDonationTransaction({
+      const paymentParams = {
         fromPublicKey: publicKey,
         toPublicKey: project.walletAddress,
         amount:
           currency === "XLM" ? amountNum.toFixed(7) : amountNum.toFixed(2),
         memo: `IndigoPay:${project.id.slice(0, 16)}`,
         asset,
-      });
+      };
+      const tx = await buildDonationTransaction(paymentParams);
 
-      setStep("signing");
-      const { signedXDR, error: signErr } = await signTransactionWithWallet(
-        tx.toXDR(),
-      );
-      if (signErr || !signedXDR) throw new Error(signErr || "Signing failed");
-
-      trackEvent("donation_signed", {
-        projectId: project.id,
-        amountXLM: currency === "XLM" ? amountNum.toString() : undefined,
-      });
-
-      setStep("submitting");
-      const result = await submitTransaction(signedXDR);
-      setTxHash(result.hash);
-
-      setStep("recording");
-      // Record via React Query mutation (revalidates the donation feed) and
-      // also via the direct API call for immediate persistence.
-      await Promise.all([
-        recordDonationMutation.mutateAsync({
-          projectId: project.id,
-          donorAddress: publicKey,
-          amount: amountNum.toString(),
-          currency: currency,
-          message: message.trim() || undefined,
-          transactionHash: result.hash,
-          idempotencyKey,
-        }),
-        recordDonation({
-          projectId: project.id,
-          donorAddress: publicKey,
-          amount: amountNum.toString(),
-          currency: currency,
-          message: message.trim() || undefined,
-          transactionHash: result.hash,
-          idempotencyKey,
-        }),
-      ]);
-
-      trackEvent("donation_confirmed", {
-        projectId: project.id,
-        amountXLM: currency === "XLM" ? amountNum.toString() : undefined,
-      });
-
-      refreshBalances();
-      setStep("success");
-      onSuccess?.();
-    } catch (err: unknown) {
-      const fallbackError =
-        err instanceof Error ? err.message : "An error occurred";
-      if (!navigator.onLine) {
-        await queueDonation({
-          projectId: project.id,
-          donorAddress: publicKey,
-          amount: amountNum.toString(),
+      // Workstream 5 (V2): show the simulation preview before the wallet
+      // prompt — no blind signing.  The params are kept so the transaction is
+      // rebuilt fresh at confirm time (stale-tx safety), never re-signed.
+      if (ENABLE_DONATION_V2) {
+        pendingParamsRef.current = paymentParams;
+        const sim = await simulateDonation({
+          fromPublicKey: publicKey,
+          toPublicKey: project.walletAddress,
+          amount:
+            currency === "XLM" ? amountNum.toFixed(7) : amountNum.toFixed(2),
           currency,
-          message: message.trim() || undefined,
-          idempotencyKey,
+          memo: `IndigoPay:${project.id.slice(0, 16)}`,
+          asset,
         });
-        setError("The donation could not be submitted right now, so it was queued for automatic retry.");
-        setStep("success");
-        setTxHash(null);
+        setSimulation(sim);
+        setStep("preview");
         return;
       }
-      setError(fallbackError);
-      setStep("error");
-      setTimeout(() => setStep("idle"), 3000);
+
+      // Legacy flow: straight to sign + submit.
+      await submitStandardPayment(tx, idempotencyKey);
+    } catch (err: unknown) {
+      await handleDonationError(err);
     }
   };
+
+  // Workstream 2: a donation queued for offline retry is a real, safe outcome
+  // — show an explicit confirmation card (txHash is null, so the on-chain
+  // success screen below must not be confused with it).
+  if (step === "success" && !txHash) {
+    return (
+      <div
+        className="card text-center animate-slide-up"
+        data-testid="donation-queued"
+      >
+        <div className="w-16 h-16 rounded-2xl bg-[rgba(99,102,241,0.08)] dark:bg-[rgba(129,140,248,0.10)] border border-[rgba(99,102,241,0.15)] dark:border-[rgba(129,140,248,0.20)] flex items-center justify-center text-2xl mx-auto mb-4">
+          📶
+        </div>
+        <h3 className="font-display text-xl font-semibold text-[#0F172A] dark:text-[#E2E8F0] mb-2">
+          Donation queued
+        </h3>
+        <p className="text-[#475569] dark:text-[#94A3B8] text-sm font-body mb-4">
+          {error ??
+            "Your donation was queued and will be sent automatically when you're back online."}
+        </p>
+        <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-body">
+          You can close this page — it will be submitted the next time you
+          connect.
+        </p>
+      </div>
+    );
+  }
 
   if (step === "success" && txHash) {
     return (
@@ -528,6 +811,91 @@ export default function DonateForm({
       </div>
     );
   }
+  // Workstream 5 (V2): the review step — render the preview instead of the
+  // form so the donor confirms the exact transaction before any wallet prompt.
+  // The preview stays mounted (in busy state) while signing/submitting so the
+  // donor always sees what they approved.
+  if (
+    simulation &&
+    ENABLE_DONATION_V2 &&
+    (["preview", "signing", "submitting", "polling"] as Step[]).includes(step)
+  ) {
+    return (
+      <div className="card animate-fade-in" aria-busy={step !== "preview"}>
+        <h3 className="font-display text-lg font-semibold text-[#0F172A] dark:text-[#E2E8F0] mb-1">
+          Confirm your donation
+        </h3>
+        <p className="text-[#475569] dark:text-[#94A3B8] text-sm mb-5 font-body">
+          Review the details below before approving in your wallet.
+        </p>
+        <TransactionPreview
+          simulation={simulation}
+          projectName={project.name}
+          onConfirm={handleConfirmSign}
+          onBack={() => {
+            pendingParamsRef.current = null;
+            pendingIdempotencyRef.current = null;
+            setSimulation(null);
+            setStep("idle");
+          }}
+          busy={step !== "preview"}
+        />
+      </div>
+    );
+  }
+
+  // Workstream 6: the honest "unknown" state — the transaction was submitted
+  // but we never learned its outcome.  Never claim failure; link the explorer.
+  if (step === "unknown" && txHash) {
+    return (
+      <div
+        className="card text-center animate-slide-up"
+        data-testid="donation-unknown"
+      >
+        <div className="w-16 h-16 rounded-2xl bg-amber-100 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/40 flex items-center justify-center text-2xl mx-auto mb-4">
+          ⏳
+        </div>
+        <h3 className="font-display text-xl font-semibold text-[#0F172A] dark:text-[#E2E8F0] mb-2">
+          We couldn&apos;t confirm your transaction
+        </h3>
+        <p className="text-[#475569] dark:text-[#94A3B8] text-sm mb-2 font-body leading-relaxed">
+          Your donation request was submitted, but the connection dropped before
+          we could confirm it. It may still complete — check your wallet or the
+          Stellar explorer for its status.
+        </p>
+        <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-body mb-4">
+          Your funds were not lost. If you see the transaction on the explorer,
+          no action is needed.
+        </p>
+        <a
+          href={explorerUrl(txHash)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 text-sm text-[#4F46E5] dark:text-[#818CF8] hover:text-[#6366F1] transition-colors font-body font-medium mb-4"
+          data-testid="unknown-explorer-link"
+        >
+          Check transaction on Stellar Expert ↗
+        </a>
+        <div>
+          <button
+            onClick={() => {
+              try {
+                window.sessionStorage.removeItem("indigopay-unknown-tx");
+              } catch {
+                // ignore
+              }
+              setTxHash(null);
+              setStep("idle");
+            }}
+            className="text-sm text-[#475569] dark:text-[#94A3B8] underline hover:text-[#0F172A] dark:hover:text-[#E2E8F0] font-body"
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="card animate-fade-in" aria-busy={step !== "idle"}>
       {/* Hidden live region describing the current donation flow status so
@@ -536,7 +904,9 @@ export default function DonateForm({
         {step === "building" && "Building donation transaction…"}
         {step === "signing" && "Awaiting wallet signature."}
         {step === "submitting" && "Submitting transaction to Stellar."}
+        {step === "polling" && "Checking whether the transaction was included on-chain."}
         {step === "recording" && "Recording donation. Almost done."}
+        {step === "unknown" && "The transaction was submitted but its status is unknown. See the explorer link."}
       </p>
       {/* Hidden live region that assertively announces validation errors
           (e.g. invalid amount, message too long) when the user clicks
@@ -555,6 +925,25 @@ export default function DonateForm({
       <p className="text-[#475569] dark:text-[#94A3B8] text-sm mb-5 font-body">
         100% goes directly to the project wallet.
       </p>
+
+      {/* Workstream 6: wallet-cancel notice — dismissible, not an error. */}
+      {cancelNotice && (
+        <div
+          className="mb-4 p-3 rounded-xl bg-[rgba(99,102,241,0.06)] dark:bg-[rgba(129,140,248,0.08)] border border-[rgba(99,102,241,0.15)] dark:border-[rgba(129,140,248,0.20)] text-sm text-[#0F172A] dark:text-[#E2E8F0] font-body flex items-start justify-between gap-3"
+          role="status"
+          data-testid="cancel-notice"
+        >
+          <span>{cancelNotice}</span>
+          <button
+            type="button"
+            onClick={() => setCancelNotice(null)}
+            aria-label="Dismiss notice"
+            className="shrink-0 text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F172A] dark:hover:text-[#E2E8F0] transition-colors"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       <div className="space-y-4">
         {/* Currency selector */}
@@ -603,19 +992,41 @@ export default function DonateForm({
               </button>
             ))}
           </div>
-          <input
-            type="number"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            placeholder="Or enter custom amount..."
-            min="1"
-            step="1"
-            className="input-field"
-            data-testid="donation-amount"
-            aria-invalid={Boolean(amount) && !isValid}
-            aria-describedby={amount && !isValid ? "donate-amount-error" : undefined}
-            inputMode="decimal"
-          />
+          <div className="flex items-start gap-2">
+            <input
+              type="number"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="Or enter custom amount..."
+              min="1"
+              step="1"
+              className="input-field flex-1"
+              data-testid="donation-amount"
+              aria-invalid={Boolean(amount) && (!isValid || Boolean(balanceErrorMessage))}
+              aria-describedby={
+                amount && (!isValid || balanceErrorMessage)
+                  ? "donate-amount-error"
+                  : undefined
+              }
+              inputMode="decimal"
+            />
+            {/* Workstream 1: Max button — balance − reserve − fee − 1 stroop. */}
+            {currency === "XLM" && balanceNum !== null && (
+              <button
+                type="button"
+                onClick={() => {
+                  setAmount(maxDonationXLM);
+                  clearField("amount");
+                }}
+                disabled={maxDonationNum <= 0}
+                className="shrink-0 px-3 py-2 rounded-xl text-sm font-semibold font-body border transition-all border-[rgba(99,102,241,0.25)] dark:border-[rgba(129,140,248,0.30)] text-[#4F46E5] dark:text-[#818CF8] hover:bg-[rgba(99,102,241,0.06)] dark:hover:bg-[rgba(129,140,248,0.08)] disabled:opacity-40 disabled:cursor-not-allowed"
+                data-testid="max-button"
+                title={`Max: ${formatXLM(maxDonationNum)} (keeps the ${reserveXLM.toFixed(2)} XLM reserve and network fee)`}
+              >
+                Max
+              </button>
+            )}
+          </div>
           {amount && !isValid && (
             <p
               id="donate-amount-error"
@@ -623,6 +1034,24 @@ export default function DonateForm({
               role="alert"
             >
               Minimum donation is 1 {currency}
+            </p>
+          )}
+          {balanceErrorMessage && (
+            <p
+              className="mt-1 text-xs text-[#B91C1C] dark:text-[#FCA5A5]"
+              role="alert"
+              data-testid="insufficient-balance-error"
+            >
+              {balanceErrorMessage}
+            </p>
+          )}
+          {currency === "XLM" && balanceNum !== null && (
+            <p
+              className="mt-1 text-xs text-[#64748B] dark:text-[#94A3B8] font-body"
+              data-testid="fee-estimate"
+            >
+              Estimated network fee: {formatFeeXLM(feeStroops)} · Balance:{" "}
+              {formatXLM(balanceNum)}
             </p>
           )}
 
@@ -785,7 +1214,7 @@ export default function DonateForm({
 
       <button
         onClick={handleDonate}
-        disabled={!isValid || step !== "idle"}
+        disabled={!canSubmit}
         className="btn-primary w-full flex items-center justify-center gap-2"
         data-testid="donate-button"
       >
@@ -798,13 +1227,19 @@ export default function DonateForm({
         {step === "signing" && (
           <>
             <Spinner />
-            Sign in Freighter...
+            Sign in wallet...
           </>
         )}
         {step === "submitting" && (
           <>
             <Spinner />
             Submitting...
+          </>
+        )}
+        {step === "polling" && (
+          <>
+            <Spinner />
+            Confirming on-chain...
           </>
         )}
         {step === "recording" && <>Done</>}

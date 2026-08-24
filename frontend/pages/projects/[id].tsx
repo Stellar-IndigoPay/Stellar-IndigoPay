@@ -32,6 +32,7 @@ import {
   unfollowProject,
 } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
+import { sanitizeHtml } from "@/lib/sanitize";
 import {
   formatXLM,
   formatCO2,
@@ -313,7 +314,7 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
       <html>
         <head>
           <meta charset="utf-8">
-          <title>${project.name} - Impact Report</title>
+          <title>${sanitizeHtml(project.name)} - Impact Report</title>
           <style>
             @media print {
               @page { margin: 0.75in; }
@@ -597,7 +598,7 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
           
           <div class="section">
             <h3 class="section-title">Project Overview</h3>
-            <div class="description">${project.description}</div>
+            <div class="description">${sanitizeHtml(project.description)}</div>
           </div>
           
           <div class="section">
@@ -652,9 +653,9 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
                 .map(
                   (update) => `
                 <li class="update-item">
-                  <div class="update-title">${update.title}</div>
+                  <div class="update-title">${sanitizeHtml(update.title)}</div>
                   <div class="update-date">${formatDate(update.createdAt)}</div>
-                  <div class="update-body">${update.body}</div>
+                  <div class="update-body">${sanitizeHtml(update.body)}</div>
                 </li>
               `,
                 )
@@ -2019,9 +2020,12 @@ export const getServerSideProps: GetServerSideProps = async (context) => {
   }
 };
 
-/** Simple markdown-to-HTML: bold, italic, links, line breaks. */
+/** Simple markdown-to-HTML: bold, italic, links, line breaks. The output is
+ *  passed through DOMPurify (lib/sanitize) so user-controlled update bodies
+ *  can never inject <script>/<iframe>/event handlers or `javascript:` URLs
+ *  into other donors' browsers (issue #1096, Workstream 3). */
 function renderMarkdown(text: string): string {
-  return text
+  const html = text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -2032,6 +2036,7 @@ function renderMarkdown(text: string): string {
       '<a href="$2" target="_blank" rel="noopener noreferrer" class="text-forest-600 hover:underline">$1</a>',
     )
     .replace(/\n/g, "<br />");
+  return sanitizeHtml(html);
 }
 
 function formatCountdown(deadline: string, nowMs: number) {

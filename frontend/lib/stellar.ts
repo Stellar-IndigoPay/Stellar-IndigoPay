@@ -93,6 +93,85 @@ export async function getFriendBotFunding(publicKey: string): Promise<string> {
   return getXLMBalance(publicKey);
 }
 
+// ── Dynamic base-reserve & account summary (issue #1096, Workstream 1) ───────
+
+// The Stellar base reserve is a network parameter that can change via
+// governance, and accounts with subentries (trustlines, signers, offers) owe
+// more reserve than a bare account.  The Max button therefore queries the
+// live value instead of assuming a fixed 2 XLM.
+let cachedBaseReserve: number | null = null;
+let cachedBaseReserveAt = 0;
+const BASE_RESERVE_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * Test-only: drop the cached base reserve so the next call re-queries
+ * Horizon.  Harmless in production (it only forces one extra ledger fetch).
+ */
+export function resetBaseReserveCache(): void {
+  cachedBaseReserve = null;
+  cachedBaseReserveAt = 0;
+}
+
+/**
+ * Fetch the current Stellar base reserve (in XLM) from Horizon's latest
+ * ledger, cached for an hour.  Falls back to the 2 XLM default when the
+ * network is unreachable — the Max button degrades gracefully instead of
+ * disappearing.
+ *
+ * @returns Base reserve in XLM (e.g. 0.5, 2).
+ * @throws Never.
+ */
+export async function getBaseReserveXLM(): Promise<number> {
+  const now = Date.now();
+  if (
+    cachedBaseReserve !== null &&
+    now - cachedBaseReserveAt < BASE_RESERVE_CACHE_TTL_MS
+  ) {
+    return cachedBaseReserve;
+  }
+  try {
+    const page = await server.ledgers().order("desc").limit(1).call();
+    const raw = page.records?.[0]?.base_reserve_in_stroops;
+    const stroops = raw != null ? parseInt(String(raw), 10) : NaN;
+    if (Number.isFinite(stroops) && stroops > 0) {
+      cachedBaseReserve = stroops / STROOPS_PER_XLM;
+      cachedBaseReserveAt = now;
+      return cachedBaseReserve;
+    }
+  } catch {
+    // Fall through to the default.
+  }
+  return BASE_RESERVE_XLM;
+}
+
+/**
+ * Load a donor account once and return the XLM balance plus its subentry
+ * count, so callers can compute the account's true minimum reserve
+ * ((2 + subentries) × base reserve) — the reserve a Max-button donation
+ * must leave intact.
+ *
+ * @param publicKey - Stellar account public key.
+ * @returns Balance (XLM decimal string) and number of subentries.
+ * @throws When the account does not exist or Horizon is unreachable.
+ */
+export async function getAccountSummary(publicKey: string): Promise<{
+  balance: string;
+  subentries: number;
+}> {
+  try {
+    const account = await server.loadAccount(publicKey);
+    const xlm = account.balances.find((b) => b.asset_type === "native");
+    const subentries = (account as AccountResponseWithSubentries).num_subentries ?? 0;
+    return { balance: xlm ? xlm.balance : "0", subentries };
+  } catch {
+    throw new Error("Account not found or not funded.");
+  }
+}
+
+interface AccountResponseWithSubentries {
+  num_subentries?: number;
+}
+
 /**
  * Fetch a non-native asset balance (e.g., USDC) for an account.
  *
@@ -176,6 +255,98 @@ export async function buildDonationTransaction({
     .setTimeout(60);
   if (memo) builder.addMemo(Memo.text(memo.slice(0, 28)));
   return builder.build();
+}
+
+// ── Transaction preview / simulation (issue #1096, Workstream 5) ─────────────
+
+export interface SimulationResult {
+  /** Destination (project wallet) public key. */
+  destination: string;
+  /** Donation amount in the donor's currency, decimal string. */
+  amount: string;
+  /** "XLM" | "USDC" — the currency being donated. */
+  currency: "XLM" | "USDC";
+  /** Estimated network fee in stroops. */
+  feeStroops: number;
+  /** Estimated network fee as an XLM decimal string. */
+  feeXLM: string;
+  /** Total debited from the wallet (amount + fee) for XLM donations. */
+  totalDebited: string | null;
+  /** Source account sequence number the tx will consume. */
+  sequence: string;
+}
+
+/**
+ * Simulate a donation before prompting the wallet to sign it (no blind
+ * signing).  Builds the exact skeleton transaction the donor would sign
+ * and derives the human-readable summary from it — destination, amount,
+ * estimated fee, and total debited — so the donor reviews the real
+ * parameters, not a hand-typed approximation.
+ *
+ * Classic Stellar payments are deterministic (fee = base fee × operations,
+ * amount = the payment amount), so no Soroban RPC round-trip is required;
+ * the estimation is exact for the fee class the tx will use.
+ *
+ * @param params - Simulation parameters (mirrors buildDonationTransaction).
+ * @returns A SimulationResult safe to render in TransactionPreview.
+ * @throws When the source account cannot be loaded or params are invalid.
+ */
+export async function simulateDonation({
+  fromPublicKey,
+  toPublicKey,
+  amount,
+  currency,
+  memo,
+  asset,
+}: {
+  fromPublicKey: string;
+  toPublicKey: string;
+  amount: string;
+  currency: "XLM" | "USDC";
+  memo?: string;
+  asset?: { code: string; issuer?: string };
+}): Promise<SimulationResult> {
+  const tx = await buildDonationTransaction({
+    fromPublicKey,
+    toPublicKey,
+    amount,
+    memo,
+    asset,
+  });
+
+  const feeStroops = estimateFeeStroops(tx.operations.length);
+  const feeXLM = stroopsToXLM(feeStroops);
+
+  return {
+    destination: toPublicKey,
+    amount,
+    currency,
+    feeStroops,
+    feeXLM,
+    totalDebited:
+      currency === "XLM"
+        ? (parseFloat(amount) + feeStroops / STROOPS_PER_XLM).toFixed(7)
+        : null,
+    sequence: tx.sequence,
+  };
+}
+
+/**
+ * Shorten a Stellar public key for display: "GABC…XYZ".
+ *
+ * @param address - Full public key (G…).
+ * @param head - Characters to keep at the start (default 4).
+ * @param tail - Characters to keep at the end (default 3).
+ * @returns Truncated address, or the input when shorter than head+tail+1.
+ */
+export function shortenAddressForPreview(
+  address: string,
+  head = 4,
+  tail = 3,
+): string {
+  if (!address) return "";
+  if (address.length <= head + tail + 1) return address;
+  return `${address.slice(0, head)}…${address.slice(-tail)}`;
 }
 
 /**
@@ -648,6 +819,9 @@ export function formatTransactionError(err: unknown): string {
   if (blob.includes("bad_auth") || blob.includes("op_bad_auth")) {
     return "Transaction was not authorized. Use Freighter with the client account.";
   }
+  if (blob.includes("tx_too_late") || blob.includes("tx_bad_seq")) {
+    return "The transaction expired while it was being signed. Nothing was sent — please try again.";
+  }
   if (e?.response?.data?.detail && typeof e.response.data.detail === "string") {
     return e.response.data.detail;
   }
@@ -668,6 +842,115 @@ export async function submitTransaction(signedXDR: string) {
     return await server.submitTransaction(tx);
   } catch (err: unknown) {
     throw new Error(formatTransactionError(err));
+  }
+}
+
+// ── Fee estimation & Max-button math (issue #1096, Workstream 1) ─────────────
+
+/** Stellar base fee: 100 stroops per operation. */
+export const BASE_FEE_STROOPS = 100;
+
+/** The Stellar base reserve (2 XLM) kept on every funded account. */
+export const BASE_RESERVE_XLM = 2;
+
+/** 1 XLM = 10,000,000 stroops. */
+export const STROOPS_PER_XLM = 10_000_000;
+
+/**
+ * Estimate the network fee for a transaction, in stroops.
+ * Classic Stellar fees are a multiple of the 100-stroop base fee, one
+ * unit per operation — the skeleton transaction is built with the same
+ * operation list, so this is the fee Horizon will charge.
+ *
+ * @param operationCount - Number of operations in the transaction (>= 1).
+ * @returns Fee in stroops.
+ */
+export function estimateFeeStroops(operationCount = 1): number {
+  return BASE_FEE_STROOPS * Math.max(1, Math.floor(operationCount));
+}
+
+/**
+ * Convert stroops to an XLM decimal string (e.g. 100 → "0.0000100").
+ *
+ * @param stroops - Amount in stroops.
+ * @returns XLM amount as a decimal string.
+ */
+export function stroopsToXLM(stroops: number): string {
+  return (stroops / STROOPS_PER_XLM).toFixed(7);
+}
+
+/**
+ * Compute the maximum safe donation amount for a donor's XLM balance:
+ *
+ *   max = balance − base_reserve − estimated_fee − 1 stroop
+ *
+ * The 1-stroop margin guarantees the resulting transaction never fails
+ * for a dust-size rounding shortfall, per the issue's acceptance criteria.
+ *
+ * @param balanceXLM - Donor's current XLM balance (decimal string or number).
+ * @param baseReserveXLM - Reserve the account must keep (default 2 XLM).
+ * @param feeStroops - Estimated network fee in stroops.
+ * @returns Max donation as an XLM decimal string, or "0" when negative.
+ */
+export function calculateMaxDonation(
+  balanceXLM: string | number,
+  baseReserveXLM = BASE_RESERVE_XLM,
+  feeStroops = estimateFeeStroops(1),
+): string {
+  const balance = typeof balanceXLM === "string" ? parseFloat(balanceXLM) : balanceXLM;
+  if (!Number.isFinite(balance) || balance <= 0) return "0";
+  const feeXLM = feeStroops / STROOPS_PER_XLM;
+  const max = balance - baseReserveXLM - feeXLM - 1 / STROOPS_PER_XLM;
+  return max > 0 ? max.toFixed(7) : "0";
+}
+
+/**
+ * Human-readable fee for UI display: "0.0000100 XLM" from stroops.
+ *
+ * @param feeStroops - Fee in stroops.
+ * @returns Formatted string, e.g. "0.0000100 XLM".
+ */
+export function formatFeeXLM(feeStroops: number): string {
+  return `${stroopsToXLM(feeStroops)} XLM`;
+}
+
+// ── Transaction polling (issue #1096, Workstream 6) ──────────────────────────
+
+/**
+ * Poll Horizon until a submitted transaction is included in a ledger.
+ *
+ * Used after a submission that acknowledged the transaction but did not
+ * return a final result (RPC drop / timeout), so the UI can distinguish
+ * "confirmed" from "unknown" instead of showing a fake error.
+ *
+ * @param hash - Transaction hash (64 hex chars).
+ * @param opts.timeoutMs - Stop polling after this many ms (default 60s).
+ * @param opts.intervalMs - Delay between polls (default 3s).
+ * @param opts.horizonServer - Injectable Horizon server (used by tests).
+ * @returns The transaction record once included.
+ * @throws Error("TIMEOUT") when the tx is not found before timeout.
+ */
+export async function pollTransaction(
+  hash: string,
+  opts: {
+    timeoutMs?: number;
+    intervalMs?: number;
+    horizonServer?: Horizon.Server;
+  } = {},
+) {
+  const { timeoutMs = 60_000, intervalMs = 3_000, horizonServer = server } = opts;
+  const startedAt = Date.now();
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      return await horizonServer.transactions().transaction(hash).call();
+    } catch {
+      // Not included yet (404) — keep polling until the deadline.
+      if (Date.now() - startedAt >= timeoutMs) {
+        throw new Error("TIMEOUT");
+      }
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
   }
 }
 

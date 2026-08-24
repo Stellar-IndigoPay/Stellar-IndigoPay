@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import type { GetServerSideProps, NextPage } from "next";
 import Head from "next/head";
 import Link from "next/link";
@@ -66,6 +66,21 @@ function GoalProgress({ raised, goal }: { raised: number; goal: number }) {
 const DonatePage: NextPage<DonatePageProps> = ({ project, presetAmount }) => {
   const qrRef = useRef<DonationQRCodeHandle>(null);
   const [copied, setCopied] = useState(false);
+
+  // Workstream 7: on client-side route transitions (Next.js), move focus to
+  // the page heading so screen-reader users start at the page content rather
+  // than being silently dropped mid-page.  tabIndex={-1} on the heading keeps
+  // it out of the tab order while making it programmatically focusable.
+  // The focus is deferred past PageTransition's ~150ms enter animation so the
+  // transition container's own focus move (which fires on animation complete)
+  // cannot steal focus away from the heading — the heading is the final target.
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const heading = document.getElementById("donate-page-title");
+      if (heading) heading.focus({ preventScroll: false });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [project?.id]);
 
   // Guard – project not found
   if (!project) {
@@ -394,7 +409,9 @@ const DonatePage: NextPage<DonatePageProps> = ({ project, presetAmount }) => {
           <div className="donate-card__icon">{icon}</div>
           <p className="donate-card__category">{project.category}</p>
 
-          <h1 className="donate-card__title">{project.name}</h1>
+          <h1 id="donate-page-title" tabIndex={-1} className="donate-card__title outline-none">
+            {project.name}
+          </h1>
           <GoalProgress raised={project.raisedXLM} goal={project.goalXLM} />
           {presetAmount && presetAmount > 0 && (
             <p className="donate-card__amount-chip">

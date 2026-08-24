@@ -66,4 +66,54 @@ test.describe("Accessibility", () => {
     const results = await runA11yCheck(page);
     expect(results.violations).toEqual([]);
   });
+
+  // Issue #1096 (WS7): the whole V2 donation flow — wallet picker, amount
+  // form with validation, transaction preview, and post-donation
+  // confirmation — must be WCAG 2 A/AA clean, not just the static pages.
+  test("donation flow (V2): picker, form, preview, and confirmation have no accessibility violations", async ({
+    page,
+  }) => {
+    test.slow();
+    await page.addInitScript(() => {
+      try {
+        window.localStorage.setItem("indigopay-donation-v2", "true");
+      } catch {
+        // about:blank has no origin — re-set after first load below.
+      }
+    });
+    await page.goto("/");
+    await page.evaluate(() =>
+      window.localStorage.setItem("indigopay-donation-v2", "true"),
+    );
+
+    await page.goto(`/projects/${PRIMARY_PROJECT.id}`);
+
+    // Wallet picker / connect state.
+    await page.getByTestId("wallet-connect-button").last().click();
+    await expect(page.getByTestId("donation-amount")).toBeVisible();
+    let results = await runA11yCheck(page);
+    expect(results.violations).toEqual([]);
+
+    // Validation state: an over-balance amount surfaces the inline error.
+    await page.getByTestId("donation-amount").fill("999999999");
+    await expect(page.getByTestId("insufficient-balance-error")).toBeVisible();
+    results = await runA11yCheck(page);
+    expect(results.violations).toEqual([]);
+
+    // Transaction preview.
+    await page.getByTestId("donation-amount").fill("50");
+    await page.getByTestId("donate-button").click();
+    await expect(page.getByTestId("transaction-preview")).toBeVisible();
+    results = await runA11yCheck(page);
+    expect(results.violations).toEqual([]);
+
+    // Post-donation confirmation.
+    await page.getByTestId("preview-confirm-checkbox").click();
+    await page.getByTestId("preview-confirm-button").click();
+    await expect(page.getByTestId("donation-success")).toBeVisible({
+      timeout: 15000,
+    });
+    results = await runA11yCheck(page);
+    expect(results.violations).toEqual([]);
+  });
 });
