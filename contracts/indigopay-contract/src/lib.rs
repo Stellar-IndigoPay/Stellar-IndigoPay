@@ -644,7 +644,35 @@ pub enum DataKey {
     // `pause_contract` / `unpause_contract` are themselves exempt so
     // the admin can always recover from a pause.
     ContractPaused,
-
+    // Pending contract upgrade — hash of the WASM that the admin has
+    // proposed via `propose_upgrade` but not yet executed. Cleared on
+    // `execute_upgrade` (after the timelock) or `cancel_upgrade`.
+    PendingUpgrade,
+    // Ledger sequence at which the pending upgrade becomes executable.
+    // Set together with `PendingUpgrade` and cleared on execute/cancel.
+    UpgradeEffectiveAt,
+    // Time-locked vesting donation schedules. `VestingSchedule(donor, id)`
+    // holds one schedule; `DonorVestingCount(donor)` allocates unique,
+    // monotonically increasing schedule ids per donor.
+    VestingSchedule(Address, u32),
+    DonorVestingCount(Address),
+    // Hash of the last EXECUTED contract upgrade. Set by
+    // `execute_upgrade` after `env.deployer().update_current_contract_wasm`
+    // returns. Used by indexers to confirm which WASM is currently
+    // running at the contract address.
+    LastExecutedUpgrade,
+    // Pending emergency withdrawal request. Keyed by (project_id, token_address)
+    // to support multiple concurrent withdrawals per project (#428).
+    EmergencyWithdrawal(String, Address),
+    // List of tokens with pending emergency withdrawals for a project. Key: project_id -> Vec<Address>
+    EmergencyWithdrawalTokens(String),
+    // Donation refund (#290)
+    RefundRequest(u32),
+    RefundCount,
+    RefundForDonation(u32),
+    DonationCO2Offset(u32),
+    // Minted donation receipt NFTs, keyed by (donor, donation_index).
+    DonationReceiptNFT(Address, u32),
     // Per-project per-token contract-held balance — the canonical ledger
     // for how much of each asset each project has deposited into the
     // contract. Key: (project_id, token_address) → i128.
@@ -721,7 +749,8 @@ pub enum FeatureKey {
     ZkVerificationKey,
     Nullifier(BytesN<32>),
     ZkDonationRecord(u32),
-    // ── Fees ─────────────────────────────────────────────────────────────
+    // Platform fee configuration (#385)
+    /// Fee in basis points (0–500, max 5%).
     PlatformFeeBps,
     PlatformTreasury,
     PlatformFeeRecipients,

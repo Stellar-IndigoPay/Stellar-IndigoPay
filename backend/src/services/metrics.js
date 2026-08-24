@@ -179,6 +179,15 @@ const indexerRunning = new client.Gauge({
   registers: [registry],
 });
 
+// ── Worker shutdown / drain lifecycle ───────────────────────────────────────
+
+const workerDraining = new client.Gauge({
+  name: "worker_draining",
+  help: "1 while a worker is draining (stopped claiming new work, finishing in-flight jobs before exit) after SIGTERM, 0 otherwise. Labelled by worker name.",
+  labelNames: ["worker"],
+  registers: [registry],
+});
+
 
 
 const secretRotationLastTimestamp = new client.Gauge({
@@ -202,6 +211,17 @@ const webhookDeliveriesTotal = new client.Counter({
   registers: [registry],
 });
 
+const dsrExportCompleted = new client.Counter({
+  name: "dsr_export_completed",
+  help: "Total number of completed DSR export requests.",
+  registers: [registry],
+});
+
+const dsrErasureCompleted = new client.Counter({
+  name: "dsr_erasure_completed",
+  help: "Total number of completed DSR erasure requests.",
+  registers: [registry],
+});
 const webhookAttemptsTotal = new client.Counter({
   name: "webhook_attempts_total",
   help: "Number of webhook HTTP attempts, labelled by event_type.",
@@ -346,6 +366,15 @@ const postgresFailoverTotal = new client.Counter({
   name: "indigopay_postgres_failover_total",
   help: "Total number of Postgres failover events, labelled by outcome.",
   labelNames: ["outcome"], // initiated, succeeded, failed
+  registers: [registry],
+});
+
+// ── Redis Sentinel failover metrics ────────────────────────────────────────
+
+const redisSentinelFailoverTotal = new client.Counter({
+  name: "indigopay_redis_sentinel_failover_total",
+  help: "Redis Sentinel failover / reconnection events, labelled by outcome (subscribed|reconnecting|ready).",
+  labelNames: ["outcome"], // subscribed, reconnecting, ready
   registers: [registry],
 });
 
@@ -529,8 +558,11 @@ const metrics = {
   cacheMisses,
   cacheCoalesced,
   queueJobsTotal,
+  dsrExportCompleted,
+  dsrErasureCompleted,
   indexerLagSeconds,
   indexerRunning,
+  workerDraining,
   secretRotationLastTimestamp,
   readinessCheckFailedTotal,
   webhookDeliveriesTotal,
@@ -549,6 +581,7 @@ const metrics = {
   pushSentTotal,
   pushLatencySeconds,
   postgresFailoverTotal,
+  redisSentinelFailoverTotal,
   projectionEventsProcessedTotal,
   projectionLagEvents,
   projectionRebuildDurationSeconds,

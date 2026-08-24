@@ -94,8 +94,8 @@ spec:
       serviceAccountName: postgres-healthcheck-sa
       containers:
         # ── Health-check sidecar (promoted to init-like watcher) ──
-        # Continuously polls pg_isready every 5 s. After 6 consecutive
-        # failures (30 s) it uses the Kubernetes API to create the
+        # Continuously polls pg_isready every 5 s. After 3 consecutive
+        # failures (15 s) it uses the Kubernetes API to create the
         # postgres-failover Job, then exits so Kubernetes restarts it.
         - name: postgres-healthcheck
           image: postgres:16-alpine
@@ -124,8 +124,8 @@ spec:
                   FAIL_COUNT=0
                 else
                   FAIL_COUNT=$((FAIL_COUNT + 1))
-                  echo "$(date -Iseconds)  healthcheck  pg_isready failed ($FAIL_COUNT/6)"
-                  if [ "$FAIL_COUNT" -ge 6 ]; then
+                  echo "$(date -Iseconds)  healthcheck  pg_isready failed ($FAIL_COUNT/3)"
+                  if [ "$FAIL_COUNT" -ge 3 ]; then
                     echo "$(date -Iseconds)  healthcheck  PRIMARY_DOWN — checking for existing failover Jobs..."
 
                     # Guard against duplicate failover Jobs.

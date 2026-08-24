@@ -3,6 +3,7 @@
 jest.mock("../logger", () => ({
   info: jest.fn(),
   error: jest.fn(),
+  warn: jest.fn(),
 }));
 
 jest.mock("./lifecycle", () => ({
@@ -14,6 +15,8 @@ const lifecycle = require("./lifecycle");
 const {
   startManagedWorker,
   stopManagedWorker,
+  createDrainController,
+  getWorkerDrainStates,
 } = require("./workerLifecycle");
 
 describe("worker lifecycle logging", () => {
@@ -99,6 +102,123 @@ describe("worker lifecycle logging", () => {
         err: "drain timed out",
       },
       "Example worker failed to stop",
+    );
+  });
+});
+
+// Issue #931: shared worker drain state machine (running -> draining ->
+// drained), in-flight job tracking, and grace-period-bounded shutdown.
+describe("createDrainController", () => {
+  function deferred() {
+    let resolve;
+    const promise = new Promise((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  test("starts running and not draining", () => {
+    const drain = createDrainController("test_starts_running");
+    expect(drain.getState()).toBe("running");
+    expect(drain.isDraining()).toBe(false);
+    expect(drain.getInFlightCount()).toBe(0);
+  });
+
+  test("trackJob tracks the in-flight count around the job's lifetime", async () => {
+    const drain = createDrainController("test_trackJob_count");
+    const job = deferred();
+
+    const result = drain.trackJob(() => job.promise);
+    // Job hasn't resolved yet — still in flight.
+    expect(drain.getInFlightCount()).toBe(1);
+
+    job.resolve("done");
+    await expect(result).resolves.toBe("done");
+    expect(drain.getInFlightCount()).toBe(0);
+  });
+
+  test("trackJob decrements in-flight count even when the job throws", async () => {
+    const drain = createDrainController("test_trackJob_throws");
+    const err = new Error("job failed");
+
+    await expect(
+      drain.trackJob(() => Promise.reject(err)),
+    ).rejects.toThrow("job failed");
+    expect(drain.getInFlightCount()).toBe(0);
+  });
+
+  test("beginDrain resolves immediately and marks drained when nothing is in flight", async () => {
+    const drain = createDrainController("test_beginDrain_idle");
+    await expect(drain.beginDrain()).resolves.toBe("drained");
+    expect(drain.getState()).toBe("drained");
+  });
+
+  test("beginDrain moves to draining immediately, then waits for the in-flight job to finish before marking drained", async () => {
+    const drain = createDrainController("test_beginDrain_waits");
+    const job = deferred();
+
+    const jobPromise = drain.trackJob(() => job.promise);
+    const drainPromise = drain.beginDrain();
+
+    // Draining starts synchronously, without waiting for the job.
+    expect(drain.getState()).toBe("draining");
+    expect(drain.isDraining()).toBe(true);
+
+    // Finish the in-flight job — beginDrain should now settle.
+    job.resolve("ok");
+    await jobPromise;
+    await expect(drainPromise).resolves.toBe("drained");
+    expect(drain.getState()).toBe("drained");
+  });
+
+  test("beginDrain force-drains after the grace period even if a job never finishes (SIGKILL simulation)", async () => {
+    jest.useFakeTimers();
+    try {
+      const drain = createDrainController("test_beginDrain_grace_expiry", {
+        gracePeriodMs: 5_000,
+      });
+      // A job that never resolves — simulates work that can't be
+      // interrupted safely and doesn't finish before the grace window.
+      const neverSettles = new Promise(() => {});
+      drain.trackJob(() => neverSettles);
+
+      const drainPromise = drain.beginDrain();
+      expect(drain.getState()).toBe("draining");
+
+      await jest.advanceTimersByTimeAsync(5_000);
+
+      await expect(drainPromise).resolves.toBe("drained");
+      expect(drain.getState()).toBe("drained");
+      // The job itself is still "in flight" by the controller's own
+      // bookkeeping — force-draining doesn't cancel it, it just stops
+      // waiting. Recovery (lease expiry / DLQ / at-least-once redelivery)
+      // is the job model's responsibility once the process actually exits.
+      expect(drain.getInFlightCount()).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("getWorkerDrainStates reports state and in-flight count for every registered controller", async () => {
+    const a = createDrainController("test_registry_worker_a");
+    const b = createDrainController("test_registry_worker_b");
+    const job = deferred();
+    a.trackJob(() => job.promise);
+
+    const states = getWorkerDrainStates();
+    expect(states.test_registry_worker_a).toEqual({
+      state: "running",
+      inFlight: 1,
+    });
+    expect(states.test_registry_worker_b).toEqual({
+      state: "running",
+      inFlight: 0,
+    });
+
+    job.resolve();
+    await b.beginDrain();
+    expect(getWorkerDrainStates().test_registry_worker_b.state).toBe(
+      "drained",
     );
   });
 });

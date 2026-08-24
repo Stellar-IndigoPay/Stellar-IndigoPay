@@ -18,6 +18,12 @@
  * string is a pipe-delimited concatenation of field values; `null`/`undefined`
  * are normalized to the empty string so the hash is deterministic across
  * drivers that return null vs undefined.
+ *
+ * Data retention may prune the oldest rows (see auditRetention.js), which
+ * removes the genesis row and would otherwise make `verifyChain` fail. To
+ * keep verification usable after pruning, retention records the oldest
+ * surviving row's `prev_hash` as a local anchor (see recordAnchor) and
+ * `verifyChain` resumes from that anchor instead of genesis.
  */
 
 const crypto = require("crypto");
@@ -108,18 +114,87 @@ async function getPrevHash(client) {
 }
 
 /**
- * Verify the integrity of the entire audit chain.
+ * Anchor helpers.
+ *
+ * Data-retention (auditRetention.js) purges the oldest audit rows to bound
+ * storage growth. Once the genesis row is purged, `verifyChain` can no longer
+ * validate the chain from `prev_hash = '0'`. To keep tamper-evidence useful
+ * across retention, retention records the `prev_hash` of the oldest surviving
+ * row in `audit_chain_anchor` before it purges. `verifyChain` then starts
+ * walking from that anchor instead of from genesis.
+ *
+ * The anchor is a local, periodically-refreshed trust point. On-chain
+ * anchoring is intentionally out of scope (future enhancement).
+ */
+
+/** Key used for the singleton anchor row. */
+const ANCHOR_ID = 1;
+
+/**
+ * Read the current chain anchor, or null when no anchor has been recorded.
+ *
+ * @param {Object} client - pg client / pool with a `.query()` method
+ * @returns {Promise<string|null>}
+ */
+async function getAnchorHash(client) {
+  const result = await client.query(
+    "SELECT anchor_hash FROM audit_chain_anchor WHERE id = $1",
+    [ANCHOR_ID],
+  );
+  if (!result.rows.length) return null;
+  return result.rows[0].anchor_hash || null;
+}
+
+/**
+ * Upsert the chain anchor to `anchorHash` (the expected `prev_hash` of the
+ * oldest surviving audit row).
+ *
+ * @param {Object} client - pg client / pool with a `.query()` method
+ * @param {string} anchorHash
+ * @param {string|null} [anchorRowId] - id of the oldest surviving row
+ * @param {string} [reason]
+ * @returns {Promise<void>}
+ */
+async function recordAnchor(client, anchorHash, anchorRowId = null, reason = "retention") {
+  await client.query(
+    `INSERT INTO audit_chain_anchor (id, anchor_hash, anchor_row_id, anchored_at, reason)
+     VALUES ($1, $2, $3, NOW(), $4)
+     ON CONFLICT (id) DO UPDATE SET
+       anchor_hash = EXCLUDED.anchor_hash,
+       anchor_row_id = EXCLUDED.anchor_row_id,
+       anchored_at = NOW(),
+       reason = EXCLUDED.reason`,
+    [ANCHOR_ID, anchorHash, anchorRowId, reason],
+  );
+}
+
+/**
+ * Remove the chain anchor. Used when retention empties the log so a fresh
+ * genesis chain can be created from `prev_hash = '0'`.
+ *
+ * @param {Object} client - pg client / pool with a `.query()` method
+ * @returns {Promise<void>}
+ */
+async function clearAnchor(client) {
+  await client.query("DELETE FROM audit_chain_anchor WHERE id = $1", [ANCHOR_ID]);
+}
+
+/**
+ * Verify the integrity of the audit chain, honouring any recorded anchor.
  *
  * Walks rows oldest -> newest. For each row, recomputes the expected
  * row_hash from the row's own fields and the *stored* prev_hash, and checks
  * the stored row_hash matches. Also checks that each row's stored prev_hash
- * equals the previous row's actual row_hash (except the genesis row whose
- * prev_hash must be '0' or empty).
+ * equals the previous row's actual row_hash. The starting prev_hash is the
+ * recorded anchor when one exists (the log has been pruned), otherwise the
+ * genesis value '0'.
  *
  * @param {Object} client - pg client / pool with a `.query()` method
- * @returns {Promise<{valid: boolean, firstInvalidId?: string, checked?: number}>}
+ * @returns {Promise<{valid: boolean, firstInvalidId?: string, checked?: number, anchored?: boolean}>}
  */
 async function verifyChain(client) {
+  const anchor = await getAnchorHash(client);
+
   const result = await client.query(
     `SELECT id, actor, action, target_type, target_id, metadata, ip_address, created_at, prev_hash, row_hash
      FROM admin_audit_log
@@ -127,13 +202,13 @@ async function verifyChain(client) {
   );
 
   const rows = result.rows;
-  let prevRowHash = GENESIS_PREV_HASH;
+  let prevRowHash = anchor || GENESIS_PREV_HASH;
 
   for (const row of rows) {
     // 1. The stored prev_hash must point at the previous row's actual hash.
     const expectedPrevHash = prevRowHash;
     if ((row.prev_hash || GENESIS_PREV_HASH) !== expectedPrevHash) {
-      return { valid: false, firstInvalidId: row.id, checked: rows.length };
+      return { valid: false, firstInvalidId: row.id, checked: rows.length, anchored: Boolean(anchor) };
     }
 
     // 2. The stored row_hash must equal a recomputation from the row's fields.
@@ -150,18 +225,22 @@ async function verifyChain(client) {
     });
 
     if (computed !== row.row_hash) {
-      return { valid: false, firstInvalidId: row.id, checked: rows.length };
+      return { valid: false, firstInvalidId: row.id, checked: rows.length, anchored: Boolean(anchor) };
     }
 
     prevRowHash = row.row_hash;
   }
 
-  return { valid: true, checked: rows.length };
+  return { valid: true, checked: rows.length, anchored: Boolean(anchor) };
 }
 
 module.exports = {
   GENESIS_PREV_HASH,
+  canonicalize,
   computeRowHash,
   getPrevHash,
+  getAnchorHash,
+  recordAnchor,
+  clearAnchor,
   verifyChain,
 };
