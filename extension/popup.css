@@ -389,6 +389,41 @@ input[type="number"]:focus {
   display: none !important;
 }
 
+/* API degraded / connecting banner */
+.api-status-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 0.8rem;
+  border: 1px solid transparent;
+}
+
+.api-status-banner.degraded {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: var(--danger-color);
+}
+
+.api-status-banner.connecting {
+  background: rgba(99, 102, 241, 0.12);
+  border-color: rgba(99, 102, 241, 0.35);
+  color: var(--accent-color);
+}
+
+.api-status-text {
+  flex: 1;
+}
+
+.api-status-retry-btn {
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  background: var(--glass-highlight);
+  border-radius: 8px;
+}
+
 .status-message {
   font-size: 0.8rem;
   margin-top: 12px;

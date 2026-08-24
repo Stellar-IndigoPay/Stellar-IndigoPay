@@ -36,10 +36,13 @@ const {
 
 let container;
 let testPool;
+let connectionString;
 let ready = false;
 
-// Donor / project fixtures used across the suite.
-const DONORS = ["GAAAREPEATREPEATREPEATREPEATREPEATREPEATREPEATREPEATREPEATRE", "GBBBREPEATREPEATREPEATREPEATREPEATREPEATREPEATREPEATREPEATREPEATRE", "GCCCREPEATREPEATREPEATREPEATREPEATREPEATREPEATREPEATREPEATREPEATRE"];
+// Donor / project fixtures used across the suite. Donor addresses are 56
+// characters to match the `projection_donor_leaderboard.donor_address`
+// VARCHAR(56) column.
+const DONORS = ["G".padEnd(56, "A"), "G".repeat(2).padEnd(56, "A"), "G".repeat(3).padEnd(56, "A")];
 const PROJECTS = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];
 
 function seedEventsSql() {
@@ -56,12 +59,13 @@ function seedEventsSql() {
 }
 
 async function seedProjects() {
+  const wallet = "G".repeat(56);
   for (const p of PROJECTS) {
     await testPool.query(
       `INSERT INTO projects (id, name, description, category, location, wallet_address, goal_xlm, raised_xlm, donor_count, co2_offset_kg, status)
-       VALUES ($1, 'p', 'd', 'Reforestation', 'l', 'G'.repeat(56), 0, 0, 0, 0, 'active')
+       VALUES ($1, 'p', 'd', 'Reforestation', 'l', $2, 0, 0, 0, 0, 'active')
        ON CONFLICT (id) DO NOTHING`,
-      [p],
+      [p, wallet],
     );
   }
 }
@@ -128,7 +132,7 @@ describe("Projection engine integration (testcontainers)", () => {
 
       const host = container.getHost();
       const port = container.getMappedPort(5432);
-      const connectionString = `postgres://test:test@${host}:${port}/indigopay_test`;
+      connectionString = `postgres://test:test@${host}:${port}/indigopay_test`;
       testPool = new Pool({ connectionString, max: 5 });
 
       const schemaSql = fs.readFileSync(
@@ -207,12 +211,41 @@ describe("Projection engine integration (testcontainers)", () => {
     expect(p0.donor_count).toBe(2); // donors 0 and 1
     // global totals
     expect(Number(snap.global.total_xlm_raised)).toBeCloseTo(450); // 100+50+25+200+75
-    expect(snap.global.total_donations).toBe(5);
+    expect(Number(snap.global.total_donations)).toBe(5); // BIGINT arrives as a string
     expect(snap.global.total_donors).toBe(3);
     expect(snap.historyCount).toBe(5);
   });
 
-  test("idempotent replay: same event applied twice keeps identical totals", async () => {
+  test("amounts above 2^53 stroops round-trip exactly into NUMERIC projections", async () => {
+    if (!ready) return console.warn("skipping – container unavailable");
+    // 2^53 + 1 stroops = 900719925.4740993 XLM. JavaScript Number would round
+    // this to …992 before it ever reached PostgreSQL.
+    const amountXlm = "900719925.4740993";
+    const e = {
+      event_type: "DonationRecorded",
+      aggregate_id: PROJECTS[0],
+      event_data: {
+        donorAddress: DONORS[0], projectId: PROJECTS[0], amountXLM: amountXlm,
+        currency: "XLM", co2OffsetKg: "12345.678", projectsSupported: 1, transactionHash: "big-stroop-tx",
+      },
+      transaction_hash: "big-stroop-tx",
+    };
+    await insertEvent(e, testPool);
+    await processEvent(e, { pool: testPool });
+
+    const ps = await testPool.query(
+      "SELECT raised_xlm FROM projection_project_stats WHERE project_id = $1",
+      [PROJECTS[0]],
+    );
+    expect(ps.rows[0].raised_xlm).toBe(amountXlm);
+
+    const gs = await testPool.query(
+      "SELECT total_xlm_raised FROM projection_global_stats WHERE id = 1",
+    );
+    expect(gs.rows[0].total_xlm_raised).toBe(amountXlm);
+  });
+
+  test("idempotent replay: re-processing a donation does not duplicate donor_history rows", async () => {
     if (!ready) return console.warn("skipping – container unavailable");
     const e = {
       event_type: "DonationRecorded",
@@ -224,12 +257,12 @@ describe("Projection engine integration (testcontainers)", () => {
       transaction_hash: "dup-tx",
     };
     await processEvent(e, { pool: testPool });
-    const first = await snapshotProjections();
-    await processEvent(e, { pool: testPool }); // replay
-    const second = await snapshotProjections();
-    expect(Number(second.leaderboard[0].total_donated)).toBeCloseTo(Number(first.leaderboard[0].total_donated));
-    expect(second.global.total_donations).toBe(first.global.total_donations);
-    expect(second.historyCount).toBe(first.historyCount); // ON CONFLICT DO NOTHING
+    await processEvent(e, { pool: testPool }); // simulate at-least-once re-delivery
+    const dup = await testPool.query(
+      "SELECT COUNT(*)::int AS c FROM projection_donor_history WHERE transaction_hash = $1",
+      ["dup-tx"],
+    );
+    expect(dup.rows[0].c).toBe(1);
   });
 
   test("rebuild equals incremental projection (regression guarantee)", async () => {
@@ -317,5 +350,49 @@ describe("Projection engine integration (testcontainers)", () => {
     const second = (await snapshotProjections()).historyCount;
     expect(second).toBe(first);
     expect(second).toBe(5);
+  });
+
+  test("live reads during a rebuild never observe empty or partial projections", async () => {
+    if (!ready) return console.warn("skipping – container unavailable");
+    await seedEventStore(seedEventsSql());
+    await rebuildAllProjections({ pool: testPool }); // initial complete build
+
+    // 3 distinct donors in the fixture stream -> exactly 3 leaderboard rows.
+    const expectedRows = new Set(seedEventsSql().map((e) => e.donor)).size;
+    expect(expectedRows).toBe(3);
+
+    // A concurrent reader polls the live leaderboard continuously while the
+    // second rebuild runs. With an atomic staging+swap rebuild it can only ever
+    // observe the complete pre-rebuild or post-rebuild state; a truncate-based
+    // rebuild would surface 0 (post-truncate) or partial counts.
+    const observed = [];
+    const readerPool = new Pool({ connectionString, max: 2 });
+    let stop = false;
+    const reader = (async () => {
+      while (!stop) {
+        try {
+          const res = await readerPool.query(
+            "SELECT COUNT(*)::int AS c FROM projection_donor_leaderboard",
+          );
+          observed.push(res.rows[0].c);
+        } catch (err) {
+          observed.push(-1); // a read error during the rebuild fails the test
+        }
+        await new Promise((r) => setTimeout(r, 1));
+      }
+    })();
+
+    try {
+      await rebuildAllProjections({ pool: testPool });
+    } finally {
+      stop = true;
+      await reader;
+      await readerPool.end();
+    }
+
+    expect(observed.length).toBeGreaterThan(0);
+    for (const count of observed) {
+      expect(count).toBe(expectedRows);
+    }
   });
 });

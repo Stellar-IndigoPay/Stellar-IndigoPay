@@ -6,7 +6,7 @@ import DonationQRCode, {
   DonationQRCodeHandle,
 } from "../../components/DonationQRCode";
 import type { DonateProject, DonatePageProps } from "../../utils/types";
-import { formatXLM } from "../../utils/format";
+import { formatXLM, formatNumber } from "../../utils/format";
 
 //Category icons (matches the live site's category set)//
 
@@ -54,8 +54,8 @@ function GoalProgress({ raised, goal }: { raised: number; goal: number }) {
         <div className="goal-progress__bar-fill" style={{ width: `${pct}%` }} />
       </div>
       <p className="goal-progress__label">
-        <strong>{raised.toLocaleString()} XLM</strong> raised of{" "}
-        {goal.toLocaleString()} XLM goal &mdash; <strong>{pct}%</strong>
+        <strong>{formatNumber(raised)} XLM</strong> raised of{" "}
+        {formatNumber(goal)} XLM goal &mdash; <strong>{pct}%</strong>
       </p>
     </div>
   );
