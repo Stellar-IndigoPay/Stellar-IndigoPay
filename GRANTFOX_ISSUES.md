@@ -3318,5 +3318,4 @@ This second issue set targets additional real, verifiable gaps discovered throug
 - **Cross-cutting testing** (#100): chaos engineering fault injection suite
 
 Each issue includes the files/contracts/components to change, expected behavior, edge cases, acceptance criteria, and testing requirements, and each is objectively verifiable through code review, automated tests, CI, benchmarks, or demonstrable project behavior.
-
 To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
