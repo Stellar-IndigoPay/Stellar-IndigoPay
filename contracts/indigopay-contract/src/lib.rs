@@ -923,7 +923,7 @@ pub enum ContractError {
     EscrowFundingFailed = 63,
     EscrowReleaseFailed = 64,
     EscrowClaimFailed = 65,
-    InsufficientContractBalanceForEscrow = 136,
+    InsufficientContractBalanceForEscrow = 138,
     // ── Governance & voting (66–75) ─────────────────────────────────────────
     CannotDelegateToSelf = 66,
     AlreadyDelegatedToThisAddress = 67,
@@ -1006,7 +1006,7 @@ pub enum ContractError {
     ChallengeReasonTooLong = 134,
     SelfChallengeNotAllowed = 135,
     // ── Attestation settlement configuration (136–137) ──────────────────────
-    AttestationContractNotConfigured = 136,
+    AttestationContractNotConfigured = 136, // NOTE: InsufficientContractBalanceForEscrow bumped to 138 to avoid collision
     AttestationContractMismatch = 137,
 }
 // 48 hours × 3600 s / 5 s per ledger = 34 560 ledgers. The minimum delay
@@ -2391,7 +2391,7 @@ fn apply_donation_effects(
         let commitment: BytesN<32> = env.crypto().sha256(&preimage).into();
         env.storage()
             .instance()
-            .set(&DataKey::AnonymousCommitment(dc), &commitment);
+            .set(&FeatureKey::AnonymousCommitment(dc), &commitment);
         anon_address(env)
     } else {
         donor.clone()
@@ -3673,7 +3673,7 @@ impl IndigoPayContract {
         require_not_paused(&env);
         env.storage()
             .instance()
-            .set(&DataKey::AttestationContract, &contract_address);
+            .set(&FeatureKey::AttestationContract, &contract_address);
         env.events()
             .publish((symbol_short!("att_set"), admin), contract_address);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
@@ -3684,7 +3684,7 @@ impl IndigoPayContract {
     pub fn get_attestation_contract(env: Env) -> Address {
         env.storage()
             .instance()
-            .get(&DataKey::AttestationContract)
+            .get(&FeatureKey::AttestationContract)
             .unwrap_or_else(|| {
                 panic_with_error!(&env, ContractError::AttestationContractNotConfigured)
             })
@@ -3784,7 +3784,7 @@ impl IndigoPayContract {
         let registered_attestation_contract: Address = env
             .storage()
             .instance()
-            .get(&DataKey::AttestationContract)
+            .get(&FeatureKey::AttestationContract)
             .unwrap_or_else(|| {
                 panic_with_error!(&env, ContractError::AttestationContractNotConfigured)
             });
@@ -4144,7 +4144,7 @@ impl IndigoPayContract {
             let commitment: BytesN<32> = env.crypto().sha256(&preimage).into();
             env.storage()
                 .instance()
-                .set(&DataKey::AnonymousCommitment(dc), &commitment);
+                .set(&FeatureKey::AnonymousCommitment(dc), &commitment);
             anon_address(&env)
         } else {
             donor.clone()
@@ -5789,7 +5789,7 @@ impl IndigoPayContract {
             let stored_commitment: BytesN<32> = env
                 .storage()
                 .instance()
-                .get(&DataKey::AnonymousCommitment(donation_index))
+                .get(&FeatureKey::AnonymousCommitment(donation_index))
                 .expect("Anonymous commitment not found for this donation");
 
             if candidate != stored_commitment {
