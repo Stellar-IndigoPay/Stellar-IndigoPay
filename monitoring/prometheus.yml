@@ -63,3 +63,28 @@ scrape_configs:
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]
+
+  # ── Synthetic monitor (issue #1144 Part A) ─────────────────────────
+  # Scrapes the HTTP /metrics endpoint exposed by scripts/synthetic-monitor.js
+  # running as a Kubernetes CronJob sidecar or standalone pod.
+  - job_name: synthetic-monitor
+    metrics_path: /metrics
+    scrape_interval: 60s
+    scrape_timeout: 15s
+    static_configs:
+      - targets: ["synthetic-monitor-svc:9091"]
+        labels:
+          service: stellar-indigopay-synthetic
+          env: production
+
+  # ── Business metrics exporter (issue #1144 Part B) ─────────────────
+  # Scrapes the HTTP /metrics endpoint exposed by scripts/business-metrics-exporter.js.
+  - job_name: business-metrics-exporter
+    metrics_path: /metrics
+    scrape_interval: 60s
+    scrape_timeout: 15s
+    static_configs:
+      - targets: ["business-metrics-exporter-svc:9092"]
+        labels:
+          service: stellar-indigopay-business-metrics
+          env: production

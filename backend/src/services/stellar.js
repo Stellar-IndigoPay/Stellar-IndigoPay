@@ -28,6 +28,7 @@ const logger = require("../logger");
 const { Counter } = require("prom-client");
 const { registry } = require("./metrics");
 const { CircuitBreaker } = require("./circuitBreaker");
+const { withSpan } = require("./tracing");
 
 // ---------------------------------------------------------------------------
 // Environment / configuration
@@ -168,13 +169,15 @@ async function withRetry(fn, maxRetries = MAX_RETRIES) {
  * @throws  {Error} When the transaction status is `ERROR` or retries are exhausted.
  */
 async function submitTransaction(signedXDR) {
-  return withRetry(async () => {
-    const result = await rpcServer.sendTransaction(signedXDR);
-    if (result.status === "ERROR") {
-      throw new Error(`Transaction failed: ${result.errorResult}`);
-    }
-    return result;
-  });
+  return withSpan("stellar.submitTransaction", () =>
+    withRetry(async () => {
+      const result = await rpcServer.sendTransaction(signedXDR);
+      if (result.status === "ERROR") {
+        throw new Error(`Transaction failed: ${result.errorResult}`);
+      }
+      return result;
+    }),
+  );
 }
 
 /**
@@ -184,7 +187,9 @@ async function submitTransaction(signedXDR) {
  * @returns {Promise<object>} The simulation result.
  */
 async function simulateTransactionWithRetry(tx) {
-  return withRetry(() => rpcServer.simulateTransaction(tx));
+  return withSpan("stellar.simulateTransaction", () =>
+    withRetry(() => rpcServer.simulateTransaction(tx)),
+  );
 }
 
 // ---------------------------------------------------------------------------

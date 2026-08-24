@@ -10,10 +10,11 @@
  *   - PATCH /api/v1/verification-requests/:id/status
  */
 import { useState, useEffect, useCallback } from "react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/router";
 import Head from "next/head";
 import AdminLayout from "@/components/admin/AdminLayout";
-import VerificationTable from "@/components/admin/VerificationTable";
+const VerificationTable = dynamic(() => import("@/components/admin/VerificationTable"), { loading: () => <div className="animate-pulse text-sm text-gray-500 py-8 text-center">Loading VerificationTable...</div> });
 import VerificationFilters from "@/components/admin/VerificationFilters";
 import {
   adminFetch,

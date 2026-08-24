@@ -3,29 +3,34 @@
  *
  * Bootstrap order (matters):
  *   1. Env validation + dotenv
- *   2. Sentry init (before anything that could throw)
- *   3. Express app + http.Server
- *   4. Sentry request handler (first middleware)
- *   5. pino-http request logger (sets req.id / correlationId)
- *   6. X-Request-Id response header
- *   7. /metrics endpoint (unauth in dev, bearer-token in prod)
- *   8. /api/health (liveness) + /api/readyz (readiness) — no auth, no CSRF
- *   9. /api/csrf-token endpoint
- *  10. Helmet + CORS + JSON parser + cookie-parser
- *  11. CSRF (skipped for the notification routes that need cross-origin POSTs)
- *  12. Rate limiter
- *  13. Per-request metrics middleware (BEFORE route handlers so it captures the full request)
- *  14. /api/docs Swagger UI (dev only)
- *  15. /api/* and /api/v1/* route mounts
- *  16. 404 handler
- *  17. Sentry error handler
- *  18. Custom error handler
+ *   2. OTel tracing init (before anything that produces spans)
+ *   3. Sentry init (before anything that could throw)
+ *   4. Express app + http.Server
+ *   5. Sentry request handler (first middleware)
+ *   6. pino-http request logger (sets req.id / correlationId)
+ *   7. X-Request-Id response header
+ *   8. OTel trace ID ↔ X-Request-Id correlation middleware
+ *   9. /metrics endpoint (unauth in dev, bearer-token in prod)
+ *  10. /api/health (liveness) + /api/readyz (readiness) — no auth, no CSRF
+ *  11. /api/csrf-token endpoint
+ *  12. Helmet + CORS + JSON parser + cookie-parser
+ *  13. CSRF (skipped for the notification routes that need cross-origin POSTs)
+ *  14. Rate limiter
+ *  15. Per-request metrics middleware (BEFORE route handlers so it captures the full request)
+ *  16. /api/docs Swagger UI (dev only)
+ *  17. /api/* and /api/v1/* route mounts
+ *  18. 404 handler
+ *  19. Sentry error handler
+ *  20. Custom error handler
  */
 "use strict";
 
 require("dotenv").config();
 const { startTelemetry } = require("./telemetry-bootstrap");
 startTelemetry();
+
+// ── OpenTelemetry tracing (must init before anything that produces spans) ──
+const { initTracing, traceIdMiddleware, stopTracing } = require("./services/tracing");
 
 // Validate the environment up-front so the process exits cleanly on misconfig
 // rather than failing on the first request that touches a missing var.
@@ -113,7 +118,9 @@ app.use(Sentry.Handlers.tracingHandler());
 // metrics so they can both read req.id.
 app.use(requestLogger);
 app.use(requestId);
-app.use(httpTraceMiddleware);
+// OTel trace ID ↔ X-Request-Id correlation: sets req.id from the active
+// span's trace ID so pino logs and distributed traces share one identifier.
+app.use(traceIdMiddleware);
 app.use(queryRouter);
 
 // /metrics: bearer-token auth in prod, unauth in dev. Mounted before
@@ -302,6 +309,7 @@ const routeMounts = [
   "map",
   "matches",
   "dsr",
+  "audit",
 ];
 
 for (const name of routeMounts) {
@@ -665,6 +673,13 @@ async function startServer() {
     stop: () => Sentry.close(2000),
   });
 
+  await startManagedWorker({
+    name: "otel_tracing",
+    label: "OpenTelemetry tracing",
+    start: () => {},
+    stop: stopTracing,
+  });
+
   let metricsTimer;
   await startManagedWorker({
     name: "db_pool_metrics",
@@ -686,6 +701,9 @@ async function startServer() {
     start: () => dsrQueue.start(),
     stop: () => dsrQueue.stop()
   });
+
+  // ── OpenTelemetry tracing (start AFTER server is ready) ───────────────
+  await initTracing();
 
   server.listen(PORT, () => {
     logger.info(

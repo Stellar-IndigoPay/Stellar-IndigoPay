@@ -233,16 +233,25 @@ jobs:
       - name: Check bundle size budget
         working-directory: frontend
         run: |
-          echo "Checking first-load JS bundle sizes…"
-          # Check route-specific page chunks only (exclude framework bundles like
-          # _app, _document, and _error which contain shared runtime code).
-          # Uses globstar (**) for recursive matching of nested route directories.
-          MAX_SIZE=256000
+          echo "Checking first-load JS bundle sizes..."
+          
+          # Verify bundle-budget.json exists and is valid JSON
+          if [ ! -f bundle-budget.json ]; then
+            echo "::error title=Missing bundle-budget.json::bundle-budget.json not found in frontend directory"
+            exit 1
+          fi
+          
+          # Parse MAX_SIZE with error checking
+          MAX_SIZE=$(jq -r '.maxRouteChunkSize' bundle-budget.json 2>/dev/null)
+          if [ $? -ne 0 ] || [ -z "$MAX_SIZE" ] || [ "$MAX_SIZE" == "null" ]; then
+            echo "::error title=Invalid bundle-budget.json::Failed to parse maxRouteChunkSize from bundle-budget.json"
+            exit 1
+          fi
+          
           EXCEEDED=0
           shopt -s nullglob globstar
           for chunk in .next/static/chunks/pages/**/*.js; do
             NAME=$(basename "$chunk")
-            # Skip framework/app bundles — not individual routes
             case "$NAME" in
               _app-*.js|_document-*.js|_error-*.js) continue ;;
             esac
@@ -253,10 +262,34 @@ jobs:
             fi
           done
           if [ "$EXCEEDED" -gt 0 ]; then
-            echo "::error title=Bundle size budget exceeded::${EXCEEDED} route chunk(s) exceed the 250KB first-load JS budget"
+            echo "::error title=Bundle size budget exceeded::${EXCEEDED} route chunk(s) exceed the ${MAX_SIZE} byte first-load JS budget"
             exit 1
           fi
-          echo "All route chunks within 250KB budget."
+          echo "All route chunks within ${MAX_SIZE} byte budget."
+
+      - name: Deliberate budget breach test
+        working-directory: frontend
+        run: |
+          echo "Testing budget gate by temporarily lowering limit to 1 byte..."
+          MAX_SIZE=1
+          EXCEEDED=0
+          shopt -s nullglob globstar
+          for chunk in .next/static/chunks/pages/**/*.js; do
+            NAME=$(basename "$chunk")
+            case "$NAME" in
+              _app-*.js|_document-*.js|_error-*.js) continue ;;
+            esac
+            SIZE=$(stat -c%s "$chunk" 2>/dev/null || echo 0)
+            if [ "$SIZE" -gt "$MAX_SIZE" ]; then
+              EXCEEDED=$((EXCEEDED + 1))
+            fi
+          done
+          if [ "$EXCEEDED" -gt 0 ]; then
+            echo "Breach test passed: gate correctly caught ${EXCEEDED} violations."
+          else
+            echo "::error title=Breach test failed::Gate failed to catch violations even with 1 byte limit!"
+            exit 1
+          fi
       - name: Budget Check
         if: always()
         uses: ./.github/actions/budget-check

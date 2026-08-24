@@ -30,6 +30,7 @@ const logger = require("../logger");
 const { metrics } = require("./metrics");
 const { injectTraceMetadata, withSpan } = require("../telemetry");
 const { createDrainController } = require("./workerLifecycle");
+const { withSpan } = require("./tracing");
 const {
   computeEventId,
   sign,
@@ -176,60 +177,61 @@ async function enqueueWebhookDelivery({
  * Exposed for the in-memory path used when pg-boss isn't started.
  */
 async function processDelivery(deliveryId, inMemoryOverrides) {
-  const { rows } = await pool.query(
-    `SELECT d.id, d.project_id, d.event_id, d.event_type, d.payload, d.attempts,
+  return withSpan("webhook.processDelivery", async () => {
+    const { rows } = await pool.query(
+      `SELECT d.id, d.project_id, d.event_id, d.event_type, d.payload, d.attempts,
             p.webhook_url, p.webhook_secret
        FROM webhook_deliveries d
        JOIN projects p ON p.id = d.project_id
       WHERE d.id = $1`,
-    [deliveryId],
-  );
-  const row = rows[0];
-  if (!row) {
-    logger.warn(
-      { event: "webhook_delivery_missing", deliveryId },
-      "delivery row vanished",
+      [deliveryId],
     );
-    return;
-  }
-  if (row.status === "delivered") {
-    return; // idempotent skip
-  }
+    const row = rows[0];
+    if (!row) {
+      logger.warn(
+        { event: "webhook_delivery_missing", deliveryId },
+        "delivery row vanished",
+      );
+      return;
+    }
+    if (row.status === "delivered") {
+      return; // idempotent skip
+    }
 
-  const secret =
+    const secret =
     (inMemoryOverrides && inMemoryOverrides.secret) || row.webhook_secret;
-  const url = row.webhook_url;
-  if (!url || !secret) {
-    await markTerminal(
+    const url = row.webhook_url;
+    if (!url || !secret) {
+      await markTerminal(
+        deliveryId,
+        "failed",
+        "missing webhook_url or webhook_secret",
+      );
+      metrics.webhookDeliveriesTotal.inc({ outcome: "skipped" });
+      return;
+    }
+
+    const body = JSON.stringify({
+      id: row.event_id,
+      type: row.event_type,
+      ...row.payload,
+    });
+    const timestamp = Math.floor(Date.now() / 1000);
+    const signature = sign(body, secret, timestamp);
+
+    metrics.webhookAttemptsTotal.inc({ event_type: row.event_type });
+    const result = await postSigned(url, body, {
+      eventId: row.event_id,
+      eventType: row.event_type,
       deliveryId,
-      "failed",
-      "missing webhook_url or webhook_secret",
-    );
-    metrics.webhookDeliveriesTotal.inc({ outcome: "skipped" });
-    return;
-  }
+      timestamp,
+      signature,
+      attempt: row.attempts + 1,
+    });
 
-  const body = JSON.stringify({
-    id: row.event_id,
-    type: row.event_type,
-    ...row.payload,
-  });
-  const timestamp = Math.floor(Date.now() / 1000);
-  const signature = sign(body, secret, timestamp);
-
-  metrics.webhookAttemptsTotal.inc({ event_type: row.event_type });
-  const result = await postSigned(url, body, {
-    eventId: row.event_id,
-    eventType: row.event_type,
-    deliveryId,
-    timestamp,
-    signature,
-    attempt: row.attempts + 1,
-  });
-
-  if (result.ok) {
-    await pool.query(
-      `UPDATE webhook_deliveries
+    if (result.ok) {
+      await pool.query(
+        `UPDATE webhook_deliveries
           SET status='delivered',
               attempts = attempts + 1,
               last_attempt_at = NOW(),
@@ -237,28 +239,28 @@ async function processDelivery(deliveryId, inMemoryOverrides) {
               next_attempt_at = NULL,
               updated_at = NOW()
         WHERE id = $1`,
-      [deliveryId],
-    );
-    metrics.webhookDeliveriesTotal.inc({ outcome: "delivered" });
-    logger.info(
-      {
-        event: "webhook_delivered",
-        deliveryId,
-        projectId: row.project_id,
-        status: result.statusCode,
-      },
-      "Webhook delivered",
-    );
-    return;
-  }
+        [deliveryId],
+      );
+      metrics.webhookDeliveriesTotal.inc({ outcome: "delivered" });
+      logger.info(
+        {
+          event: "webhook_delivered",
+          deliveryId,
+          projectId: row.project_id,
+          status: result.statusCode,
+        },
+        "Webhook delivered",
+      );
+      return;
+    }
 
-  const nextAttempt = row.attempts + 1;
-  const willRetry = nextAttempt < RETRY_DELAYS_SECONDS.length;
-  const nextDelay = willRetry ? RETRY_DELAYS_SECONDS[nextAttempt] : 0;
-  const nextStatus = willRetry ? "pending" : "dlq";
+    const nextAttempt = row.attempts + 1;
+    const willRetry = nextAttempt < RETRY_DELAYS_SECONDS.length;
+    const nextDelay = willRetry ? RETRY_DELAYS_SECONDS[nextAttempt] : 0;
+    const nextStatus = willRetry ? "pending" : "dlq";
 
-  await pool.query(
-    `UPDATE webhook_deliveries
+    await pool.query(
+      `UPDATE webhook_deliveries
         SET attempts = attempts + 1,
             last_attempt_at = NOW(),
             last_error = $2,
@@ -266,69 +268,70 @@ async function processDelivery(deliveryId, inMemoryOverrides) {
             next_attempt_at = $4,
             updated_at = NOW()
       WHERE id = $1`,
-    [
-      deliveryId,
-      result.error,
-      nextStatus,
-      willRetry ? new Date(Date.now() + nextDelay * 1000) : null,
-    ],
-  );
-
-  if (!willRetry) {
-    await pool.query(
-      `INSERT INTO webhook_dlq (id, delivery_id, project_id, event_id, payload, failure_reason, attempts)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
       [
-        crypto.randomUUID(),
         deliveryId,
-        row.project_id,
-        row.event_id,
-        JSON.stringify(row.payload),
         result.error,
-        nextAttempt,
+        nextStatus,
+        willRetry ? new Date(Date.now() + nextDelay * 1000) : null,
       ],
     );
-    metrics.webhookDeliveriesTotal.inc({ outcome: "dlq" });
-  } else {
-    metrics.webhookDeliveriesTotal.inc({ outcome: "retry" });
-    // Reschedule the next attempt with `startAfter` so the delay is
-    // honored even though pg-boss itself isn't doing retries. Without
-    // this, the delivery row would sit at status='pending' forever and
-    // the advertised 6-attempt backoff would never actually fire.
-    if (boss) {
-      try {
-        await boss.send(
-          QUEUE,
-          { deliveryId, secret: inMemoryOverrides ? secret : undefined },
-          {
-            retryLimit: 0,
-            startAfter: new Date(Date.now() + nextDelay * 1000),
-          },
-        );
-      } catch (err) {
-        logger.error(
-          { event: "webhook_reschedule_error", deliveryId, err: err.message },
-          "failed to reschedule retry — row left in pending state",
+
+    if (!willRetry) {
+      await pool.query(
+        `INSERT INTO webhook_dlq (id, delivery_id, project_id, event_id, payload, failure_reason, attempts)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+        [
+          crypto.randomUUID(),
+          deliveryId,
+          row.project_id,
+          row.event_id,
+          JSON.stringify(row.payload),
+          result.error,
+          nextAttempt,
+        ],
+      );
+      metrics.webhookDeliveriesTotal.inc({ outcome: "dlq" });
+    } else {
+      metrics.webhookDeliveriesTotal.inc({ outcome: "retry" });
+      // Reschedule the next attempt with `startAfter` so the delay is
+      // honored even though pg-boss itself isn't doing retries. Without
+      // this, the delivery row would sit at status='pending' forever and
+      // the advertised 6-attempt backoff would never actually fire.
+      if (boss) {
+        try {
+          await boss.send(
+            QUEUE,
+            { deliveryId, secret: inMemoryOverrides ? secret : undefined },
+            {
+              retryLimit: 0,
+              startAfter: new Date(Date.now() + nextDelay * 1000),
+            },
+          );
+        } catch (err) {
+          logger.error(
+            { event: "webhook_reschedule_error", deliveryId, err: err.message },
+            "failed to reschedule retry — row left in pending state",
+          );
+        }
+      } else {
+        logger.warn(
+          { event: "webhook_retry_unavailable", deliveryId },
+          "pg-boss not started; cannot reschedule retry, row left in pending state",
         );
       }
-    } else {
-      logger.warn(
-        { event: "webhook_retry_unavailable", deliveryId },
-        "pg-boss not started; cannot reschedule retry, row left in pending state",
-      );
     }
-  }
-  logger.warn(
-    {
-      event: "webhook_delivery_failed",
-      deliveryId,
-      attempt: nextAttempt,
-      willRetry,
-      err: result.error,
-      statusCode: result.statusCode,
-    },
-    "Webhook delivery failed",
-  );
+    logger.warn(
+      {
+        event: "webhook_delivery_failed",
+        deliveryId,
+        attempt: nextAttempt,
+        willRetry,
+        err: result.error,
+        statusCode: result.statusCode,
+      },
+      "Webhook delivery failed",
+    );
+  });
 }
 
 /**

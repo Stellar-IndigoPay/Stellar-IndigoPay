@@ -10,7 +10,7 @@ explicit and rehearsed, not improvised.
 | ---- | ----------------------- | ---------- | ------------------------------- | ---------------------------------------------------------------------------- |
 | 1    | API + web               | 5 min      | 0                               | Multi-replica deployment + HPA, no in-flight request loss on rolling restart |
 | 1    | Stellar indexer         | 5 min      | 0 (at-rest), 5 min (in-stream)  | Restart from `cursor=now` (in-memory; gap-fill job runs after restart)       |
-| 2    | Postgres                | 2 min      | 5 min                           | WAL archiving to S3 every 5 min; base backup nightly; warm standby with automated failover (30 s detection + 60 s promotion) |
+| 2    | Postgres                | 2 min      | 5 min                           | WAL archiving to S3 every 5 min; base backup nightly; warm standby with automated failover (15 s detection + 60 s promotion, split-brain protected) |
 | 2    | Redis cache             | 1 min      | 0 (cache rebuild on first read) | No persistence; treated as ephemeral                                         |
 | 3    | Push notification queue | 1 hour     | All un-pushed notifications     | pg-boss backed; rows persist in `webhook_deliveries` until ack               |
 
@@ -49,8 +49,8 @@ roadmap.
 ### Database region failure
 
 - **Detection**: postgres-healthcheck sidecar detects primary down
-  within 30 s; Prometheus `PostgresPrimaryUnhealthy` alert fires after
-  2 min.
+  within 15 s (3 consecutive failed `pg_isready` checks); Prometheus
+  `PostgresPrimaryUnhealthy` alert fires after 2 min.
 - **Recovery**: automated failover promotes standby (see
   `k8s/postgres-failover-job.yaml`). Standby becomes writable within
   60 s; backend rolling-restarts and reconnects. If automated failover
@@ -100,12 +100,13 @@ automated failover orchestration:
 │  └─────────────────┘                                              │
 │                                                                    │
 │  ┌─────────────────────────────────────────────────────────────┐ │
-│  │  Automated Failover Pipeline (when primary is down >30 s)   │ │
+│  │  Automated Failover Pipeline (when primary is down >15 s)   │ │
 │  │  1. healthcheck sidecar → creates failover Job via K8s API   │ │
-│  │  2. failover Job → pg_ctl promote on standby                │ │
-│  │  3. Patch Services → redirect postgres-svc to new primary    │ │
-│  │  4. Rolling restart backend → pods reconnect                │ │
-│  │  5. Slack notification → on-call informed                   │ │
+│  │  2. failover Job → acquire split-brain lock (ConfigMap)      │ │
+│  │  3. failover Job → pg_ctl promote on standby                │ │
+│  │  4. Patch Services → redirect postgres-svc to new primary    │ │
+│  │  5. Rolling restart backend → pods reconnect                │ │
+│  │  6. Release lock + Slack notification → on-call informed     │ │
 │  │  RTO: < 2 min   RPO: < 5 min                                │ │
 │  └─────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────┘
@@ -131,8 +132,10 @@ automated failover orchestration:
 4. **Failover Procedure** (see `docs/restore-runbook.md` and `k8s/postgres-failover-job.yaml`):
 
    **Automated** (when `postgres.failover.enabled` is `true`):
-   - The healthcheck sidecar detects primary failure within 30 s
+   - The healthcheck sidecar detects primary failure within 15 s
    - Creates the failover Job automatically
+   - The Job acquires a `postgres-failover-lock` ConfigMap lock before
+     promotion to prevent split-brain (only one Job can promote at a time)
    - Services are re-pointed and backend restarted
    - Total RTO: < 2 min
 

@@ -2,6 +2,19 @@
 
 ### Features
 
+* **monitoring:** synthetic on-chain transaction monitoring + business-level metrics dashboards (closes #1144)
+  - Part A: Add `scripts/synthetic-monitor.js` — proactive 5-minute full-path check (Horizon + Soroban RPC + `sendTransaction` + `getTransaction` confirmation) with Prometheus metrics (`synthetic_donation_success`, `synthetic_donation_duration_seconds`, `synthetic_donation_checks_total`, `synthetic_donation_last_timestamp`)
+  - Part A: Add `.github/workflows/synthetic-monitor.yml` — scheduled GitHub Actions workflow (every 5 min, explicit `contents: read` + `issues: write` permissions); auto-creates GitHub issue on failure
+  - Part A: Add `SyntheticDonationCheckFailing` (page, fires on ≥2 confirmed failures in 15 min), `SyntheticMonitorSilent` (warn), and `SyntheticDonationCheckSlow` (warn) alert rules in `monitoring/alert-rules.yml`
+  - Part A: Add `docs/runbooks/synthetic-monitor-failure.md` with step-by-step incident response
+  - Part B: Add `scripts/business-metrics-exporter.js` — Postgres-backed exporter of 17 business KPIs (donation volume, active donors, retention, conversion, CO₂ offsets, AI cost, webhook reliability, recurring subscriptions); `statement_timeout` on Pool, `topProjectXlm.reset()` before each refresh, Prometheus label escaping
+  - Part B: Add business recording rules group to `monitoring/recording-rules.yml` (16 pre-computed rules in the existing `groups:` list — no duplicate top-level key)
+  - Part B: Add `monitoring/grafana/dashboards/indigopay-business-overview.json` — Business Overview dashboard (7 rows, 28 panels: volume, retention, projects, CO₂, operations, synthetic monitor, exporter health)
+  - Update `monitoring/prometheus.yml` to scrape `synthetic-monitor` (:9091) and `business-metrics-exporter` (:9092) jobs
+  - Update `monitoring/docker-compose.monitoring.yml` to include both new services with network aliases (`synthetic-monitor-svc`, `business-metrics-exporter-svc`) matching Prometheus scrape targets; full `backend/node_modules` mount for pg runtime deps; require `SYNTHETIC_DONOR_SECRET_KEY`
+  - Add `monitoring/grafana/dashboards/provisioner.yml` for automatic Grafana dashboard provisioning
+  - Add `monitoring/tests/synthetic-monitor-alert-test.yml` and `monitoring/tests/business-recording-rules-test.yml` (promtool test suites)
+
 * **contracts:** bounded slash history with ring-buffer eviction for oracle reporter accountability (closes #672)
   - Add `SlashEvent` struct and per-reporter `SlashHistoryMeta` ring buffer to `SimpleOracle`
   - New admin-only `slash_reporter(admin, reporter, reason)` entry point records a timestamped slash event

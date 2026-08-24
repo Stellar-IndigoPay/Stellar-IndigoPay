@@ -369,6 +369,15 @@ const postgresFailoverTotal = new client.Counter({
   registers: [registry],
 });
 
+// ── Redis Sentinel failover metrics ────────────────────────────────────────
+
+const redisSentinelFailoverTotal = new client.Counter({
+  name: "indigopay_redis_sentinel_failover_total",
+  help: "Redis Sentinel failover / reconnection events, labelled by outcome (subscribed|reconnecting|ready).",
+  labelNames: ["outcome"], // subscribed, reconnecting, ready
+  registers: [registry],
+});
+
 // ── Recurring donation scheduler metrics ────────────────────────────────────
 
 const recurringExecutionsTotal = new client.Counter({
@@ -572,6 +581,7 @@ const metrics = {
   pushSentTotal,
   pushLatencySeconds,
   postgresFailoverTotal,
+  redisSentinelFailoverTotal,
   projectionEventsProcessedTotal,
   projectionLagEvents,
   projectionRebuildDurationSeconds,

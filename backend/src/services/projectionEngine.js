@@ -34,6 +34,7 @@
 const pool = require("../db/pool");
 const logger = require("../logger");
 const { registry, metrics } = require("./metrics");
+const { withSpan } = require("./tracing");
 
 const {
   projectionEventsProcessedTotal,
@@ -450,36 +451,38 @@ async function insertEvent(event, db = pool) {
  * @returns {Promise<void>}
  */
 async function processEvent(event, opts = {}) {
-  const db = opts.pool || pool;
-  const client = await db.connect();
-  try {
-    await client.query("BEGIN");
-    for (const name of PROJECTION_NAMES) {
-      try {
-        await projections[name].handler(event, { client, pool: db });
-        projectionEventsProcessedTotal.inc({ projection: name, outcome: "success" });
-      } catch (err) {
-        projectionEventsProcessedTotal.inc({ projection: name, outcome: "error" });
-        logger.error(
-          {
-            event: "projection_handler_error",
-            projection: name,
-            eventType: event.event_type,
-            err: err.message,
-          },
-          "Projection handler failed",
-        );
-        throw err;
+  return withSpan("projectionEngine.processEvent", async () => {
+    const db = opts.pool || pool;
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      for (const name of PROJECTION_NAMES) {
+        try {
+          await projections[name].handler(event, { client, pool: db });
+          projectionEventsProcessedTotal.inc({ projection: name, outcome: "success" });
+        } catch (err) {
+          projectionEventsProcessedTotal.inc({ projection: name, outcome: "error" });
+          logger.error(
+            {
+              event: "projection_handler_error",
+              projection: name,
+              eventType: event.event_type,
+              err: err.message,
+            },
+            "Projection handler failed",
+          );
+          throw err;
+        }
       }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
     }
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
-  refreshLag(db);
+    refreshLag(db);
+  });
 }
 
 /**
@@ -665,54 +668,55 @@ async function swapStagedProjections(client, names = PROJECTION_NAMES) {
  * @returns {Promise<{events:number, durationMs:number}>}
  */
 async function rebuildAllProjections(opts = {}) {
-  const db = opts.pool || pool;
-  const start = Date.now();
-  projectionRebuildInProgress.set(1);
+  return withSpan("projectionEngine.rebuildAll", async () => {
+    const db = opts.pool || pool;
+    const start = Date.now();
+    projectionRebuildInProgress.set(1);
 
-  const client = await db.connect();
-  try {
-    await client.query("BEGIN");
-    await client.query("SELECT pg_advisory_xact_lock($1)", [advisoryLockKey()]);
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock($1)", [advisoryLockKey()]);
 
-    await createStagedProjections(client);
-    await canonicalizeStagedIndexes(client);
+      await createStagedProjections(client);
+      await canonicalizeStagedIndexes(client);
 
-    // Handlers reference the projection tables unqualified, so pointing the
-    // transaction's search_path at the staging schema redirects every read and
-    // write to the staged copies. `donation_events` resolves to `public`.
-    await client.query(`SET LOCAL search_path TO ${STAGE_SCHEMA}, public`);
-    const { rows } = await client.query(
-      `SELECT id, event_type, aggregate_id, event_data, soroban_ledger, transaction_hash, created_at
+      // Handlers reference the projection tables unqualified, so pointing the
+      // transaction's search_path at the staging schema redirects every read and
+      // write to the staged copies. `donation_events` resolves to `public`.
+      await client.query(`SET LOCAL search_path TO ${STAGE_SCHEMA}, public`);
+      const { rows } = await client.query(
+        `SELECT id, event_type, aggregate_id, event_data, soroban_ledger, transaction_hash, created_at
          FROM donation_events ORDER BY id ASC`,
-    );
+      );
 
-    const seenDonors = new Set();
-    for (const raw of rows) {
-      const event = {
-        event_type: raw.event_type,
-        aggregate_id: raw.aggregate_id,
-        event_data:
+      const seenDonors = new Set();
+      for (const raw of rows) {
+        const event = {
+          event_type: raw.event_type,
+          aggregate_id: raw.aggregate_id,
+          event_data:
           typeof raw.event_data === "string"
             ? JSON.parse(raw.event_data)
             : raw.event_data,
-        soroban_ledger: raw.soroban_ledger,
-        transaction_hash: raw.transaction_hash,
-        created_at: raw.created_at,
-      };
-      for (const name of PROJECTION_NAMES) {
-        await projections[name].handler(event, {
-          client,
-          pool: db,
-          bulkProjectionBuild: true,
-          seenDonors,
-        });
+          soroban_ledger: raw.soroban_ledger,
+          transaction_hash: raw.transaction_hash,
+          created_at: raw.created_at,
+        };
+        for (const name of PROJECTION_NAMES) {
+          await projections[name].handler(event, {
+            client,
+            pool: db,
+            bulkProjectionBuild: true,
+            seenDonors,
+          });
+        }
       }
-    }
 
-    // donor_count is finalized from the fully-rebuilt history: one aggregate
-    // per project instead of the per-event recompute used by the live path.
-    await client.query(
-      `UPDATE projection_project_stats AS ps
+      // donor_count is finalized from the fully-rebuilt history: one aggregate
+      // per project instead of the per-event recompute used by the live path.
+      await client.query(
+        `UPDATE projection_project_stats AS ps
           SET donor_count = sub.c
          FROM (
            SELECT project_id, COUNT(DISTINCT donor_address)::int AS c
@@ -720,37 +724,38 @@ async function rebuildAllProjections(opts = {}) {
             GROUP BY project_id
          ) sub
         WHERE ps.project_id = sub.project_id`,
-    );
+      );
 
-    await swapStagedProjections(client);
-    await client.query("COMMIT");
+      await swapStagedProjections(client);
+      await client.query("COMMIT");
 
-    const durationMs = Date.now() - start;
-    projectionRebuildDurationSeconds.observe({ outcome: "success" }, durationMs / 1000);
-    projectionRebuildLastEvents.set(rows.length);
-    projectionLagEvents.set(0);
-    logger.info(
-      {
-        event: "projection_rebuild_complete",
-        events: rows.length,
-        durationMs,
-      },
-      "Projection rebuild complete",
-    );
-    return { events: rows.length, durationMs };
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    const durationMs = Date.now() - start;
-    projectionRebuildDurationSeconds.observe({ outcome: "error" }, durationMs / 1000);
-    logger.error(
-      { event: "projection_rebuild_error", err: err.message, durationMs },
-      "Projection rebuild failed",
-    );
-    throw err;
-  } finally {
-    client.release();
-    projectionRebuildInProgress.set(0);
-  }
+      const durationMs = Date.now() - start;
+      projectionRebuildDurationSeconds.observe({ outcome: "success" }, durationMs / 1000);
+      projectionRebuildLastEvents.set(rows.length);
+      projectionLagEvents.set(0);
+      logger.info(
+        {
+          event: "projection_rebuild_complete",
+          events: rows.length,
+          durationMs,
+        },
+        "Projection rebuild complete",
+      );
+      return { events: rows.length, durationMs };
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      const durationMs = Date.now() - start;
+      projectionRebuildDurationSeconds.observe({ outcome: "error" }, durationMs / 1000);
+      logger.error(
+        { event: "projection_rebuild_error", err: err.message, durationMs },
+        "Projection rebuild failed",
+      );
+      throw err;
+    } finally {
+      client.release();
+      projectionRebuildInProgress.set(0);
+    }
+  });
 }
 
 /**

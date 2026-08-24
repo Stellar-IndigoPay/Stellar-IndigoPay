@@ -39,7 +39,7 @@ rules:
     verbs: ["get", "list", "patch"]
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["get", "list", "patch", "update"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "patch"]
