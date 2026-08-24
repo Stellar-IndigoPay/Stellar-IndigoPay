@@ -900,12 +900,11 @@ impl SimpleOracle {
                             Vec::new(&env),
                         ) {
                         Some(ledger)
-                    } else if let Ok(Ok(ledger)) = env
-                        .try_invoke_contract::<u32, InvokeError>(
-                            &source,
-                            &Symbol::new(&env, "get_last_updated_ledger"),
-                            Vec::new(&env),
-                        ) {
+                    } else if let Ok(Ok(ledger)) = env.try_invoke_contract::<u32, InvokeError>(
+                        &source,
+                        &Symbol::new(&env, "get_last_updated_ledger"),
+                        Vec::new(&env),
+                    ) {
                         Some(ledger)
                     } else {
                         env.storage()
