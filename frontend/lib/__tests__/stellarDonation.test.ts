@@ -14,6 +14,7 @@ const PROJECT = StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 9));
 
 const {
   BASE_FEE_STROOPS,
+  BASE_RESERVE_FALLBACK_XLM,
   BASE_RESERVE_XLM,
   STROOPS_PER_XLM,
   estimateFeeStroops,
@@ -117,6 +118,40 @@ describe("pollTransaction (Workstream 6)", () => {
       }),
     ).rejects.toThrow("TIMEOUT");
   });
+
+  it("rejects with TRANSACTION_FAILED when the tx is included but failed on-chain", async () => {
+    // Included in a ledger with successful: false — the payment failed, so
+    // the caller must never treat this as a confirmed donation (WS6).
+    const handler = jest.fn().mockResolvedValue({
+      id: HASH,
+      successful: false,
+    });
+
+    await expect(
+      pollTransaction(HASH, {
+        horizonServer: fakeServer(handler) as never,
+        intervalMs: 10,
+        timeoutMs: 500,
+      }),
+    ).rejects.toThrow("TRANSACTION_FAILED");
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps polling past a failed record until the tx is included", async () => {
+    // A 404 (not yet included) followed by a successful record.
+    const handler = jest
+      .fn()
+      .mockRejectedValueOnce(new Error("404 not found"))
+      .mockResolvedValueOnce({ id: HASH, successful: true });
+
+    const record = await pollTransaction(HASH, {
+      horizonServer: fakeServer(handler) as never,
+      intervalMs: 10,
+      timeoutMs: 500,
+    });
+
+    expect(record).toEqual({ id: HASH, successful: true });
+  });
 });
 
 describe("getAccountSummary / getBaseReserveXLM (Workstream 1 dynamic reserve)", () => {
@@ -150,7 +185,7 @@ describe("getAccountSummary / getBaseReserveXLM (Workstream 1 dynamic reserve)",
     await expect(getBaseReserveXLM()).resolves.toBe(0.5);
   });
 
-  it("falls back to the default base reserve when Horizon is unreachable", async () => {
+  it("falls back to the protocol base reserve when Horizon is unreachable", async () => {
     jest.spyOn(stellar.server, "ledgers").mockReturnValue({
       order: () => ({
         limit: () => ({
@@ -158,7 +193,9 @@ describe("getAccountSummary / getBaseReserveXLM (Workstream 1 dynamic reserve)",
         }),
       }),
     } as never);
-    await expect(getBaseReserveXLM()).resolves.toBe(BASE_RESERVE_XLM);
+    // The offline fallback is the protocol base reserve (0.5 XLM), which is
+    // distinct from the 2 XLM MINIMUM_BALANCE_XLM used by calculateMaxDonation.
+    await expect(getBaseReserveXLM()).resolves.toBe(BASE_RESERVE_FALLBACK_XLM);
   });
 });
 

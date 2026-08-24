@@ -20,6 +20,7 @@ import { freighterAdapter } from "./freighter";
 import { albedoAdapter } from "./albedo";
 import { xbullAdapter } from "./xbull";
 import { rabetAdapter } from "./rabet";
+import { walletConnectAdapter } from "./walletConnect";
 
 /**
  * All registered wallet adapters, keyed by id.
@@ -30,6 +31,7 @@ const ALL_WALLETS: Record<WalletId, StellarWalletAdapter> = {
   albedo: albedoAdapter,
   xbull: xbullAdapter,
   rabet: rabetAdapter,
+  walletconnect: walletConnectAdapter,
 };
 
 /**
@@ -70,7 +72,7 @@ export function isSupportedWalletId(id: string): id is WalletId {
 /**
  * Resolve the best wallet to use. Priority:
  * 1. Stored wallet preference (from localStorage).
- * 2. First available wallet (Freighter > Albedo > xBull > Rabet).
+ * 2. First available wallet (Freighter > Albedo > xBull > Rabet > WalletConnect).
  * 3. Freighter as the universal fallback.
  */
 export async function resolveDefaultWallet(): Promise<{

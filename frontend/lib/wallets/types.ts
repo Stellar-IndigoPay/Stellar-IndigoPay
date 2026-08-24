@@ -2,8 +2,9 @@
  * lib/wallets/types.ts
  *
  * Wallet adapter interface for the Stellar-IndigoPay multi-wallet layer.
- * Every supported wallet (Freighter, Albedo, xBull, Rabet) implements
- * this interface, so the WalletProvider and UI can treat them uniformly.
+ * Every supported wallet (Freighter, Albedo, xBull, Rabet, WalletConnect)
+ * implements this interface, so the WalletProvider and UI can treat them
+ * uniformly.
  *
  * The adapter is deliberately minimal — only the three operations the
  * dApp actually needs: detect, getPublicKey, and signTransaction.
@@ -52,6 +53,7 @@ export const SUPPORTED_WALLET_IDS = [
   "albedo",
   "xbull",
   "rabet",
+  "walletconnect",
 ] as const;
 
 export type WalletId = (typeof SUPPORTED_WALLET_IDS)[number];

@@ -141,7 +141,11 @@ export async function getBaseReserveXLM(): Promise<number> {
   } catch {
     // Fall through to the default.
   }
-  return BASE_RESERVE_XLM;
+  // The protocol-level base reserve is 0.5 XLM.  This is distinct from the
+  // 2 XLM MINIMUM_BALANCE_XLM default used by calculateMaxDonation, which
+  // is a conservative estimate of the full account minimum (2 + subentries)
+  // reserve when the account's subentry count is unknown.
+  return BASE_RESERVE_FALLBACK_XLM;
 }
 
 /**
@@ -851,7 +855,21 @@ export async function submitTransaction(signedXDR: string) {
 export const BASE_FEE_STROOPS = 100;
 
 /** The Stellar base reserve (2 XLM) kept on every funded account. */
-export const BASE_RESERVE_XLM = 2;
+/**
+ * Conservative minimum account balance (XLM) used as the default in
+ * calculateMaxDonation when the caller has no live reserve data: 2 XLM
+ * approximates (2 + subentries) × base reserve for a typical account.
+ */
+export const MINIMUM_BALANCE_XLM = 2;
+
+/**
+ * Stellar protocol base reserve (XLM) — 0.5 XLM since protocol 14.  Used as
+ * the offline fallback by getBaseReserveXLM when Horizon is unreachable.
+ */
+export const BASE_RESERVE_FALLBACK_XLM = 0.5;
+
+/** @deprecated Use MINIMUM_BALANCE_XLM or BASE_RESERVE_FALLBACK_XLM explicitly. */
+export const BASE_RESERVE_XLM = MINIMUM_BALANCE_XLM;
 
 /** 1 XLM = 10,000,000 stroops. */
 export const STROOPS_PER_XLM = 10_000_000;
@@ -888,13 +906,15 @@ export function stroopsToXLM(stroops: number): string {
  * for a dust-size rounding shortfall, per the issue's acceptance criteria.
  *
  * @param balanceXLM - Donor's current XLM balance (decimal string or number).
- * @param baseReserveXLM - Reserve the account must keep (default 2 XLM).
+ * @param baseReserveXLM - Minimum balance the account must keep (default
+ *   MINIMUM_BALANCE_XLM = 2 XLM — a conservative estimate of the full
+ *   (2 + subentries) × base-reserve requirement).
  * @param feeStroops - Estimated network fee in stroops.
  * @returns Max donation as an XLM decimal string, or "0" when negative.
  */
 export function calculateMaxDonation(
   balanceXLM: string | number,
-  baseReserveXLM = BASE_RESERVE_XLM,
+  baseReserveXLM = MINIMUM_BALANCE_XLM,
   feeStroops = estimateFeeStroops(1),
 ): string {
   const balance = typeof balanceXLM === "string" ? parseFloat(balanceXLM) : balanceXLM;
@@ -927,8 +947,10 @@ export function formatFeeXLM(feeStroops: number): string {
  * @param opts.timeoutMs - Stop polling after this many ms (default 60s).
  * @param opts.intervalMs - Delay between polls (default 3s).
  * @param opts.horizonServer - Injectable Horizon server (used by tests).
- * @returns The transaction record once included.
+ * @returns The transaction record once it is included AND succeeded.
  * @throws Error("TIMEOUT") when the tx is not found before timeout.
+ * @throws Error("TRANSACTION_FAILED") when the tx is included in a ledger
+ *   but the payment failed on-chain (`successful: false`).
  */
 export async function pollTransaction(
   hash: string,
@@ -943,8 +965,19 @@ export async function pollTransaction(
   // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
-      return await horizonServer.transactions().transaction(hash).call();
-    } catch {
+      const record = await horizonServer.transactions().transaction(hash).call();
+      // A record can be included in a ledger yet fail on-chain (e.g. the
+      // payment op errored).  The caller must never treat that as a
+      // confirmed donation — surface it as a distinct failure so the UI can
+      // show an honest state instead of a false success (issue #1096, WS6).
+      if (record && record.successful === false) {
+        throw new Error("TRANSACTION_FAILED");
+      }
+      return record;
+    } catch (err: unknown) {
+      if (err instanceof Error && err.message === "TRANSACTION_FAILED") {
+        throw err;
+      }
       // Not included yet (404) — keep polling until the deadline.
       if (Date.now() - startedAt >= timeoutMs) {
         throw new Error("TIMEOUT");

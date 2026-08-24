@@ -32,7 +32,7 @@ import {
   unfollowProject,
 } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
-import { sanitizeHtml } from "@/lib/sanitize";
+import { sanitizeHtml, escapeHtml } from "@/lib/sanitize";
 import {
   formatXLM,
   formatCO2,
@@ -314,7 +314,7 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
       <html>
         <head>
           <meta charset="utf-8">
-          <title>${sanitizeHtml(project.name)} - Impact Report</title>
+          <title>${escapeHtml(project.name)} - Impact Report</title>
           <style>
             @media print {
               @page { margin: 0.75in; }
@@ -584,15 +584,15 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
           </div>
           
           <div class="project-header">
-            <h2 class="project-title">${project.name}</h2>
+            <h2 class="project-title">${escapeHtml(project.name)}</h2>
             <div class="project-meta">
-              <span>ðŸ“ ${project.location}</span>
+              <span>ðŸ“ ${escapeHtml(project.location)}</span>
               <span>ðŸ“… Report Date: ${reportDate}</span>
             </div>
             <div class="badges">
               ${project.verified ? '<span class="badge badge-verified">âœ“ Verified Project</span>' : ""}
               ${pct >= 100 ? '<span class="badge badge-funded">âœ… Fully Funded</span>' : ""}
-              <span class="badge badge-category">${project.category}</span>
+              <span class="badge badge-category">${escapeHtml(project.category)}</span>
             </div>
           </div>
           
@@ -671,7 +671,7 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
             <p style="margin-bottom: 10px; font-size: 14px; color: #5a7a5a;">
               All donations are sent directly to this Stellar blockchain address:
             </p>
-            <div class="wallet-address">${project.walletAddress}</div>
+            <div class="wallet-address">${escapeHtml(project.walletAddress)}</div>
           </div>
           
           <div class="footer">

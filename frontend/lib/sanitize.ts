@@ -123,3 +123,32 @@ export function safeHref(url: string | null | undefined): string {
   if (!url) return "#";
   return sanitizeUrl(url) ?? "#";
 }
+
+/**
+ * Escape a plain-text string for safe interpolation inside an HTML
+ * template.  Unlike `sanitizeHtml` (which keeps an allowlist of markup),
+ * `escapeHtml` neutralizes every character that could become markup, so it
+ * is the right tool for interpolating plain-text fields (names, locations,
+ * categories, addresses) into a `document.write`-style HTML document.
+ *
+ * @param text - Plain-text user-supplied string.
+ * @returns The text with `& < > " '` escaped, safe for HTML text/attr contexts.
+ */
+export function escapeHtml(text: string | null | undefined): string {
+  return String(text ?? "").replace(/[&<>"']/g, (char) => {
+    switch (char) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      case "'":
+        return "&#39;";
+      default:
+        return char;
+    }
+  });
+}

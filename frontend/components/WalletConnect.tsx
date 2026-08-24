@@ -5,7 +5,7 @@
  * when multiple Stellar wallets are detected, or a single connect
  * button when only one is available.
  *
- * Supported wallets: Freighter, Albedo, xBull, Rabet.
+ * Supported wallets: Freighter, Albedo, xBull, Rabet, WalletConnect.
  */
 import { useState, useEffect } from "react";
 import { trackEvent } from "@/lib/analytics";
@@ -39,6 +39,13 @@ const WalletIcon: Record<string, () => JSX.Element> = {
   rabet: () => (
     <svg className="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+    </svg>
+  ),
+  walletconnect: () => (
+    <svg className="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <circle cx="8" cy="12" r="3" />
+      <circle cx="16" cy="12" r="3" />
+      <path strokeLinecap="round" d="M4 8a8 8 0 0116 0M4 16a8 8 0 0116 0" />
     </svg>
   ),
 };

@@ -8,7 +8,7 @@
  *
  * @jest-environment jsdom
  */
-import { sanitizeHtml, sanitizeUrl, safeHref } from "@/lib/sanitize";
+import { sanitizeHtml, sanitizeUrl, safeHref, escapeHtml } from "@/lib/sanitize";
 
 describe("sanitizeHtml — stored-XSS defense", () => {
   it("strips <script> tags entirely", () => {
@@ -109,5 +109,32 @@ describe("safeHref — React link convenience", () => {
     expect(safeHref("https://example.com/docs.pdf")).toBe(
       "https://example.com/docs.pdf",
     );
+  });
+});
+
+describe("escapeHtml — plain-text interpolation (print report path)", () => {
+  it("escapes characters that could become markup", () => {
+    expect(escapeHtml("<img src=x onerror=alert(1)>")).toBe(
+      "&lt;img src=x onerror=alert(1)&gt;",
+    );
+    expect(escapeHtml("<script>alert(1)</script>")).toBe(
+      "&lt;script&gt;alert(1)&lt;/script&gt;",
+    );
+    expect(escapeHtml('He said "hi" & left <now>')).toBe(
+      "He said &quot;hi&quot; &amp; left &lt;now&gt;",
+    );
+    expect(escapeHtml("it's")).toBe("it&#39;s");
+  });
+
+  it("handles null, undefined, and empty input", () => {
+    expect(escapeHtml(null)).toBe("");
+    expect(escapeHtml(undefined)).toBe("");
+    expect(escapeHtml("")).toBe("");
+  });
+
+  it("is idempotent-safe for already-safe text", () => {
+    expect(escapeHtml("Amazon Reforestation")).toBe("Amazon Reforestation");
+    // Double-escaping is avoided because raw & is always escaped on the way in.
+    expect(escapeHtml(escapeHtml("<b>"))).toBe("&amp;lt;b&amp;gt;");
   });
 });

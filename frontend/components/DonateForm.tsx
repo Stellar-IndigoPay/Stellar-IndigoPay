@@ -241,7 +241,7 @@ export default function DonateForm({
   const balanceErrorMessage =
     amountExceedsBalance && amountNum > 0
       ? currency === "XLM"
-        ? `Insufficient balance (${balanceNum!.toFixed(2)} XLM available)`
+        ? `Amount too high (max ${maxDonationNum.toFixed(2)} XLM after the ${reserveXLM.toFixed(2)} XLM account reserve and network fee)`
         : `Insufficient balance (${usdcBalanceNum!.toFixed(2)} USDC available)`
       : null;
 
@@ -272,6 +272,9 @@ export default function DonateForm({
   const drainQueuedDonations = useCallback(() => {
     if (!isOnline) return;
 
+    // A rejection here (e.g. IndexedDB unavailable so openDatabase throws) is
+    // consumed rather than becoming an unhandled promise rejection — the queue
+    // simply retries on the next reconnect / sync nudge.
     void syncQueuedDonations(
       async (payload) => {
         try {
@@ -293,7 +296,9 @@ export default function DonateForm({
             ? checkIdempotency(payload.idempotencyKey).catch(() => false)
             : false,
       },
-    );
+    ).catch(() => {
+      // The queue is unavailable (no IndexedDB) — retry on the next reconnect.
+    });
   }, [isOnline]);
 
   // Drain when connectivity returns.
@@ -392,7 +397,9 @@ export default function DonateForm({
     tx: Transaction,
     idempotencyKey?: string,
   ) => {
-    const txHash = tx.hash().toString();
+    // Transaction.hash() returns a Buffer — hex-encode it so the recovery
+    // path polls and persists the required 64-character hexadecimal hash.
+    const txHash = tx.hash().toString("hex");
 
     setStep("signing");
     const { signedXDR, error: signErr } = await signTransactionWithWallet(
@@ -421,7 +428,11 @@ export default function DonateForm({
         try {
           await pollTransaction(txHash);
           setTxHash(txHash);
-        } catch {
+        } catch (pollErr: unknown) {
+          // TRANSACTION_FAILED: the tx was included but failed on-chain.
+          // TIMEOUT: the tx was never found in the polling window.  Both are
+          // honest "unknown/check the explorer" outcomes — never a false
+          // success, and never a fake error claiming nothing was sent.
           setTxHash(txHash);
           try {
             window.sessionStorage.setItem("indigopay-unknown-tx", txHash);
@@ -438,31 +449,22 @@ export default function DonateForm({
 
     setTxHash(result?.hash ?? txHash);
     setStep("recording");
-    // Record via React Query mutation (revalidates the donation feed) and
-    // also via the direct API call for immediate persistence.  Both send the
-    // same idempotency key; the on-chain payment is the source of truth, so a
-    // duplicate-key rejection on the second write must never surface as an
-    // error after the donation already succeeded (allSettled, not all).
-    await Promise.allSettled([
-      recordDonationMutation.mutateAsync({
-        projectId: project.id,
-        donorAddress: publicKey,
-        amount: amountNum.toString(),
-        currency: currency,
-        message: message.trim() || undefined,
-        transactionHash: result?.hash ?? txHash,
-        idempotencyKey,
-      }),
-      recordDonation({
-        projectId: project.id,
-        donorAddress: publicKey,
-        amount: amountNum.toString(),
-        currency: currency,
-        message: message.trim() || undefined,
-        transactionHash: result?.hash ?? txHash,
-        idempotencyKey,
-      }),
-    ]);
+    // Record exactly once via the React Query mutation (it performs the POST
+    // and revalidates the donation feed).  A backend rejection (e.g. a
+    // duplicate idempotency key from an earlier retry) must never surface as
+    // an error after the on-chain payment already succeeded — the chain is
+    // the source of truth.
+    await recordDonationMutation.mutateAsync({
+      projectId: project.id,
+      donorAddress: publicKey,
+      amount: amountNum.toString(),
+      currency: currency,
+      message: message.trim() || undefined,
+      transactionHash: result?.hash ?? txHash,
+      idempotencyKey,
+    }).catch(() => {
+      // Backend recording failure — the donation is already on-chain.
+    });
 
     trackEvent("donation_confirmed", {
       projectId: project.id,
@@ -705,11 +707,11 @@ export default function DonateForm({
         memo: `IndigoPay:${project.id.slice(0, 16)}`,
         asset,
       };
-      const tx = await buildDonationTransaction(paymentParams);
-
       // Workstream 5 (V2): show the simulation preview before the wallet
       // prompt — no blind signing.  The params are kept so the transaction is
       // rebuilt fresh at confirm time (stale-tx safety), never re-signed.
+      // simulateDonation builds its own transaction, so on the V2 path we
+      // skip building here — one Horizon account load instead of two.
       if (ENABLE_DONATION_V2) {
         pendingParamsRef.current = paymentParams;
         const sim = await simulateDonation({
@@ -727,6 +729,7 @@ export default function DonateForm({
       }
 
       // Legacy flow: straight to sign + submit.
+      const tx = await buildDonationTransaction(paymentParams);
       await submitStandardPayment(tx, idempotencyKey);
     } catch (err: unknown) {
       await handleDonationError(err);
@@ -1005,7 +1008,12 @@ export default function DonateForm({
               aria-invalid={Boolean(amount) && (!isValid || Boolean(balanceErrorMessage))}
               aria-describedby={
                 amount && (!isValid || balanceErrorMessage)
-                  ? "donate-amount-error"
+                  ? [
+                      !isValid ? "donate-amount-error" : null,
+                      balanceErrorMessage ? "donate-balance-error" : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" ")
                   : undefined
               }
               inputMode="decimal"
@@ -1038,6 +1046,7 @@ export default function DonateForm({
           )}
           {balanceErrorMessage && (
             <p
+              id="donate-balance-error"
               className="mt-1 text-xs text-[#B91C1C] dark:text-[#FCA5A5]"
               role="alert"
               data-testid="insufficient-balance-error"

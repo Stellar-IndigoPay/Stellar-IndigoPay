@@ -43,6 +43,7 @@ import { freighterAdapter } from "@/lib/wallets/freighter";
 import { albedoAdapter } from "@/lib/wallets/albedo";
 import { xbullAdapter } from "@/lib/wallets/xbull";
 import { rabetAdapter } from "@/lib/wallets/rabet";
+import { walletConnectAdapter } from "@/lib/wallets/walletConnect";
 import {
   getAvailableWallets,
   getWalletById,
@@ -58,7 +59,13 @@ function setWindowGlobal(key: string, value: unknown) {
   (window as unknown as Record<string, unknown>)[key] = value;
 }
 function clearWindowGlobals() {
-  for (const key of ["albedo", "xBullSDK", "rabet", "__test_publicKey__"]) {
+  for (const key of [
+    "albedo",
+    "xBullSDK",
+    "rabet",
+    "walletConnect",
+    "__test_publicKey__",
+  ]) {
     delete (window as unknown as Record<string, unknown>)[key];
   }
 }
@@ -176,6 +183,54 @@ describe("Rabet adapter (window.rabet)", () => {
   });
 });
 
+describe("WalletConnect adapter (window.walletConnect)", () => {
+  beforeEach(clearWindowGlobals);
+
+  const stubClient = {
+    connect: jest.fn(async () => ({ publicKey: MOCK_PK })),
+    getPublicKey: jest.fn(async () => MOCK_PK),
+    sign: jest.fn(async () => ({ signedXDR: `wc-${MOCK_XDR}` })),
+  };
+
+  it("detects the injected client", async () => {
+    setWindowGlobal("walletConnect", stubClient);
+    expect(await walletConnectAdapter.isInstalled()).toBe(true);
+
+    clearWindowGlobals();
+    expect(await walletConnectAdapter.isInstalled()).toBe(false);
+  });
+
+  it("pairs (QR connect), returns the key, and signs", async () => {
+    setWindowGlobal("walletConnect", stubClient);
+    expect(await walletConnectAdapter.getPublicKey()).toBe(MOCK_PK);
+    expect(stubClient.connect).toHaveBeenCalled();
+    expect(await walletConnectAdapter.signTransaction(MOCK_XDR, OPTS)).toBe(
+      `wc-${MOCK_XDR}`,
+    );
+    expect(stubClient.sign).toHaveBeenCalledWith({
+      xdr: MOCK_XDR,
+      networkPassphrase: OPTS.networkPassphrase,
+    });
+  });
+
+  it("falls back to getPublicKey when connect returns no address", async () => {
+    setWindowGlobal("walletConnect", {
+      ...stubClient,
+      connect: jest.fn(async () => ({})),
+    });
+    expect(await walletConnectAdapter.getPublicKey()).toBe(MOCK_PK);
+  });
+
+  it("throws a helpful error when not installed", async () => {
+    await expect(walletConnectAdapter.signTransaction(MOCK_XDR, OPTS)).rejects.toThrow(
+      "WalletConnect not installed",
+    );
+    await expect(walletConnectAdapter.getPublicKey()).rejects.toThrow(
+      "WalletConnect not installed",
+    );
+  });
+});
+
 describe("Wallet registry", () => {
   beforeEach(clearWindowGlobals);
 
@@ -190,6 +245,7 @@ describe("Wallet registry", () => {
     expect(getWalletById("albedo")?.id).toBe("albedo");
     expect(getWalletById("xbull")?.id).toBe("xbull");
     expect(getWalletById("rabet")?.id).toBe("rabet");
+    expect(getWalletById("walletconnect")?.id).toBe("walletconnect");
     expect(getWalletById("unknown")).toBeUndefined();
     expect(isSupportedWalletId("freighter")).toBe(true);
     expect(isSupportedWalletId("unknown")).toBe(false);

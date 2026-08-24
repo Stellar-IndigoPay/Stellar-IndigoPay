@@ -190,7 +190,9 @@ describe("DonateForm — Workstream 1 (overview)", () => {
     await waitFor(() => {
       expect(
         screen.getByTestId("insufficient-balance-error"),
-      ).toHaveTextContent("Insufficient balance (95.00 XLM available)");
+      ).toHaveTextContent(
+        "Amount too high (max 98.00 XLM after the 4.00 XLM account reserve and network fee)",
+      );
     });
 
     // Submit is disabled while the amount exceeds the balance.
@@ -214,7 +216,9 @@ describe("DonateForm — Workstream 1 (overview)", () => {
     await waitFor(() => {
       expect(
         screen.getByTestId("insufficient-balance-error"),
-      ).toHaveTextContent("Insufficient balance (100.00 XLM available)");
+      ).toHaveTextContent(
+        "Amount too high (max 98.00 XLM after the 4.00 XLM account reserve and network fee)",
+      );
     });
     expect(screen.getByTestId("donate-button")).toBeDisabled();
   });
@@ -314,14 +318,16 @@ describe("DonateForm — Workstream 5 (transaction preview, V2)", () => {
     await waitFor(() => {
       expect(screen.getByTestId("transaction-preview")).toBeInTheDocument();
     });
-    expect(mockBuildDonationTransaction).toHaveBeenCalledTimes(1); // for simulation
+    // V2 never builds a throwaway tx for the preview (simulateDonation builds
+    // its own internally), so no discarded Horizon account load.
+    expect(mockBuildDonationTransaction).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByTestId("preview-confirm-checkbox"));
     fireEvent.click(screen.getByTestId("preview-confirm-button"));
 
     // Confirm rebuilds with the same params (fresh sequence + 60s window).
     await waitFor(() => {
-      expect(mockBuildDonationTransaction).toHaveBeenCalledTimes(2);
+      expect(mockBuildDonationTransaction).toHaveBeenCalledTimes(1);
     });
   });
 

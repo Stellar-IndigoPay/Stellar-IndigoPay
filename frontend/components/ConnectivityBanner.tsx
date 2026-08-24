@@ -1,8 +1,4 @@
-import { useEffect, useState } from "react";
-import {
-  getQueuedCount,
-  subscribeQueueChanged,
-} from "@/lib/offlineDonationQueue";
+import useQueuedCount from "@/hooks/useQueuedCount";
 
 interface ConnectivityBannerProps {
   isOnline: boolean;
@@ -11,33 +7,9 @@ interface ConnectivityBannerProps {
 export default function ConnectivityBanner({
   isOnline,
 }: ConnectivityBannerProps) {
-  const [queuedCount, setQueuedCount] = useState(0);
-
   // Workstream 2: while offline, surface how many donations are queued so the
-  // donor knows they are safe and will be submitted on reconnect.  Refresh on
-  // queue changes (instant) and periodically (fallback).
-  useEffect(() => {
-    if (isOnline) return;
-    let cancelled = false;
-    const refresh = async () => {
-      try {
-        const count = await getQueuedCount();
-        if (!cancelled) setQueuedCount(count);
-      } catch {
-        // IndexedDB unavailable — badge stays hidden.
-      }
-    };
-    refresh();
-    const unsubscribe = subscribeQueueChanged(() => {
-      void refresh();
-    });
-    const timer = setInterval(refresh, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-      unsubscribe();
-    };
-  }, [isOnline]);
+  // donor knows they are safe and will be submitted on reconnect.
+  const queuedCount = useQueuedCount(isOnline);
 
   if (isOnline) return null;
 

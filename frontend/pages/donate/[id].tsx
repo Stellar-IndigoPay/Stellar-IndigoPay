@@ -409,7 +409,11 @@ const DonatePage: NextPage<DonatePageProps> = ({ project, presetAmount }) => {
           <div className="donate-card__icon">{icon}</div>
           <p className="donate-card__category">{project.category}</p>
 
-          <h1 id="donate-page-title" tabIndex={-1} className="donate-card__title outline-none">
+          <h1
+            id="donate-page-title"
+            tabIndex={-1}
+            className="donate-card__title focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#4F46E5] dark:focus-visible:outline-[#818CF8] rounded"
+          >
             {project.name}
           </h1>
           <GoalProgress raised={project.raisedXLM} goal={project.goalXLM} />

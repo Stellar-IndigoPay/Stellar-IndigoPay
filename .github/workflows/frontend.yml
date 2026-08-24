@@ -386,18 +386,31 @@ jobs:
       - name: Run V2 donation-flow suite (Issue #1096)
         if: matrix.shardIndex == 1
         working-directory: frontend
+        # Separate HTML report directory so the V2 run cannot clear shard 1's
+        # main-suite report (Playwright wipes the default dir per run).
         run: npx playwright test -c playwright.v2.config.ts --reporter=html,list
         env:
           NEXT_PUBLIC_STELLAR_NETWORK: testnet
           NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
           NEXT_PUBLIC_API_URL: http://localhost:4000
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report-v2
+
+      # Issue #1096 (WS3): the production server started above is still
+      # running here, so verify the *deployed* middleware headers — not just
+      # the source text — match the CSP whitelist.
+      - name: Verify deployed CSP headers (Issue #1096)
+        if: matrix.shardIndex == 1
+        working-directory: frontend
+        run: VERIFY_CSP_URL=http://127.0.0.1:3000 node scripts/verify-csp.mjs
 
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: playwright-report
-          path: frontend/playwright-report/
+          path: |
+            frontend/playwright-report/
+            frontend/playwright-report-v2/
           retention-days: 14
       - name: Budget Check
         if: always()

@@ -1,38 +1,11 @@
-import { useEffect, useState } from "react";
-import {
-  getQueuedCount,
-  subscribeQueueChanged,
-} from "@/lib/offlineDonationQueue";
+import useQueuedCount from "@/hooks/useQueuedCount";
 
 interface OfflineFallbackProps {
   isOnline: boolean;
 }
 
 export default function OfflineFallback({ isOnline }: OfflineFallbackProps) {
-  const [queuedCount, setQueuedCount] = useState(0);
-
-  useEffect(() => {
-    if (isOnline) return;
-    let cancelled = false;
-    const refresh = async () => {
-      try {
-        const count = await getQueuedCount();
-        if (!cancelled) setQueuedCount(count);
-      } catch {
-        // IndexedDB unavailable — badge stays hidden.
-      }
-    };
-    refresh();
-    const unsubscribe = subscribeQueueChanged(() => {
-      void refresh();
-    });
-    const timer = setInterval(refresh, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-      unsubscribe();
-    };
-  }, [isOnline]);
+  const queuedCount = useQueuedCount(isOnline);
 
   if (isOnline) return null;
 

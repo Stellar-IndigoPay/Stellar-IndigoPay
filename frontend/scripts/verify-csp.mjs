@@ -6,10 +6,16 @@
  * The issue requires that "the CSP header matches the whitelist on every
  * deployed page (CI-enforced)".  The authoritative policy is generated at
  * runtime by `middleware.ts` (and mirrored statically for non-edge routes in
- * `next.config.mjs`), so this script statically asserts that both sources
- * still contain every required directive.  It runs in GitHub Actions as part
- * of the frontend pipeline, so a regression in the policy fails CI before
- * deploy — no need to fetch a live page.
+ * `next.config.mjs`).  This script therefore checks BOTH layers:
+ *
+ * 1. Static — both sources still contain every required directive, so a
+ *    regression in the policy fails CI before deploy (fast, runs in the lint
+ *    job where no server is available).
+ * 2. Runtime — when `VERIFY_CSP_URL` is set, fetch a real served page and
+ *    assert the actual response headers (CSP, Reporting-Endpoints,
+ *    nosniff, Referrer-Policy) match the whitelist.  This proves the
+ *    *deployed* middleware output, not just the source text.  Wired into the
+ *    e2e job where a production `next start` server is already running.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -39,13 +45,27 @@ const FORBIDDEN = [
   ["middleware.ts", "unsafe-eval"],
 ];
 
+// Directives that must be present in the *served* CSP header.
+const RUNTIME_CSP_DIRECTIVES = [
+  "object-src 'none'",
+  "base-uri 'self'",
+  "frame-ancestors",
+  "default-src 'self'",
+  "require-trusted-types-for 'script'",
+  "trusted-types dompurify",
+];
+
 let failed = false;
+
+function fail(message) {
+  console.error(`✗ ${message}`);
+  failed = true;
+}
 
 for (const [file, directive] of REQUIRED) {
   const source = file === "middleware.ts" ? middleware : nextConfig;
   if (!source.includes(directive)) {
-    console.error(`✗ CSP whitelist violation: ${file} is missing "${directive}"`);
-    failed = true;
+    fail(`${file} is missing "${directive}"`);
   } else {
     console.log(`✓ ${file} contains ${directive}`);
   }
@@ -68,15 +88,79 @@ for (const [file, directive] of FORBIDDEN) {
     }
   });
   if (bad.length > 0) {
-    console.error(
-      `✗ CSP violation: "${directive}" appears outside the dev-only guard:\n${bad
-        .map((l) => `    ${l}`)
-        .join("\n")}`,
-    );
-    failed = true;
+    fail(`"${directive}" appears outside the dev-only guard:\n${bad
+      .map((l) => `    ${l}`)
+      .join("\n")}`);
   } else {
     console.log(`✓ ${directive} only appears inside the dev guard`);
   }
+}
+
+/**
+ * Runtime layer: fetch a served page and assert the deployed middleware
+ * headers.  Only runs when VERIFY_CSP_URL is set (the e2e job starts a
+ * production `next start` server and reuses it here).
+ */
+async function verifyRuntimeHeaders(baseUrl) {
+  const origin = String(baseUrl).replace(/\/+$/, "");
+  let res;
+  try {
+    res = await fetch(`${origin}/`);
+  } catch (err) {
+    fail(`runtime: could not fetch ${origin}/ — ${err instanceof Error ? err.message : err}`);
+    return;
+  }
+
+  const headers = res.headers;
+  const csp =
+    headers.get("content-security-policy") ||
+    headers.get("content-security-policy-report-only") ||
+    "";
+
+  const headerChecks = [
+    ["Content-Security-Policy header present", Boolean(csp)],
+    [
+      "Content-Security-Policy-Report-Only (Trusted Types) header present",
+      Boolean(headers.get("content-security-policy-report-only")),
+    ],
+    ["Reporting-Endpoints header present", Boolean(headers.get("reporting-endpoints"))],
+    [
+      "X-Content-Type-Options: nosniff",
+      (headers.get("x-content-type-options") || "").toLowerCase() === "nosniff",
+    ],
+    [
+      "Referrer-Policy: strict-origin-when-cross-origin",
+      (headers.get("referrer-policy") || "").toLowerCase() ===
+        "strict-origin-when-cross-origin",
+    ],
+  ];
+
+  for (const [label, ok] of headerChecks) {
+    if (ok) {
+      console.log(`✓ runtime ${label}`);
+    } else {
+      fail(`runtime ${label}`);
+    }
+  }
+
+  for (const directive of RUNTIME_CSP_DIRECTIVES) {
+    if (csp.includes(directive)) {
+      console.log(`✓ runtime CSP contains ${directive}`);
+    } else {
+      fail(`runtime CSP is missing "${directive}" (got: ${csp.slice(0, 120)}…)`);
+    }
+  }
+
+  // The issue forbids unsafe-eval in the production policy (dev-only guard).
+  if (csp.includes("unsafe-eval")) {
+    fail("runtime CSP contains unsafe-eval (dev-only token leaked to production)");
+  } else {
+    console.log("✓ runtime CSP has no unsafe-eval");
+  }
+}
+
+if (process.env.VERIFY_CSP_URL) {
+  await verifyRuntimeHeaders(process.env.VERIFY_CSP_URL);
 }
 
 if (failed) {
