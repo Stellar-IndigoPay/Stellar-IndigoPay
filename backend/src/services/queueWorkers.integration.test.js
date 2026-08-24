@@ -156,6 +156,18 @@ describe("Queue workers smoke (compose Postgres)", () => {
         /* ignore */
       }
     }
+    // pg-boss's own `boss.stop({ graceful: true })` resolves as soon as no
+    // worker has an in-flight job — it does NOT wait for each worker's
+    // internal poll loop to notice `stopping` and actually exit (that
+    // teardown happens on an unawaited `setImmediate` poller inside
+    // pg-boss's manager). If that loop is still between iterations when
+    // this test file's Jest environment gets torn down, its next
+    // `require('node:timers/promises')` call throws "You are trying to
+    // `require` a file after the Jest environment has been torn down" —
+    // which then corrupts whichever test happens to run next in this Jest
+    // worker. Outlasting pg-boss's default 2s poll interval here lets that
+    // loop finish exiting while the environment is still alive.
+    await new Promise((resolve) => setTimeout(resolve, 2500));
 
     if (adminPool) {
       try {

@@ -1,0 +1,27 @@
+name: 'Check Wall-Clock Budget'
+description: 'Fails the workflow if it exceeds the specified maximum duration (in seconds).'
+
+inputs:
+  start-time:
+    description: 'The start time of the job in seconds (e.g., from `date +%s`).'
+    required: true
+  max-seconds:
+    description: 'The maximum allowed duration in seconds.'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Evaluate Budget
+      shell: bash
+      run: |
+        NOW=$(date +%s)
+        DURATION=$(( NOW - ${{ inputs.start-time }} ))
+        echo "Job has been running for $DURATION seconds."
+        
+        if [ "$DURATION" -gt "${{ inputs.max-seconds }}" ]; then
+          echo "::error title=Wall-Clock Budget Exceeded::Job took $DURATION seconds, which exceeds the budget of ${{ inputs.max-seconds }} seconds."
+          exit 1
+        else
+          echo "Job is within the budget of ${{ inputs.max-seconds }} seconds."
+        fi

@@ -19,6 +19,7 @@ import {
 import { useTheme } from "../theme";
 import { Stack } from "expo-router";
 import { useAuth } from "../../providers/AuthProvider";
+import { pinnedFetch } from "../../lib/apiClient";
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
 
@@ -81,7 +82,7 @@ export default function NotificationSettingsScreen() {
     }
 
     try {
-      const prefsResp = await fetch(
+      const prefsResp = await pinnedFetch(
         `${API_URL}/api/notifications/preferences?walletAddress=${encodeURIComponent(walletAddress)}`,
       );
       const prefsData = await prefsResp.json();
@@ -122,7 +123,7 @@ export default function NotificationSettingsScreen() {
         body.dnd = updatedDnd;
       }
 
-      await fetch(`${API_URL}/api/notifications/preferences`, {
+      await pinnedFetch(`${API_URL}/api/notifications/preferences`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

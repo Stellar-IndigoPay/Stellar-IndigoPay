@@ -216,6 +216,19 @@ groups:
             There are more than 100 failed jobs in queue '{{ $labels.queue }}' for the last 10 minutes.
             Check the worker logs.
 
+      - alert: WorkerFreshness
+        expr: time() - indigopay_worker_last_heartbeat_timestamp > 300
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Worker freshness alert (>5 min since last heartbeat)"
+          description: |
+            Worker pod has not sent a heartbeat in over 5 minutes.
+            This could indicate a disruption or crash.
+            Runbook: docs/worker-disruption-runbook.md
+
+
       - alert: OracleStale
         expr: time() - indigopay_oracle_price_updated_timestamp > 900
         for: 5m
@@ -264,3 +277,96 @@ groups:
             The last successful secret rotation was {{ $value | humanizeTimestamp }}.
             Rotations are scheduled quarterly (every 91 days). Consider running
             the workflow manually if the automated schedule has been failing.
+
+  - name: stellar-indigopay-gitops-drift
+    interval: 30s
+    rules:
+      - alert: ArgoCDAppOutOfSync
+        expr: argocd_app_info{sync_status="OutOfSync"} == 1
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "ArgoCD application {{ $labels.name }} is OutOfSync"
+          description: |
+            Cluster state has drifted from repository gitops/ manifests for >5m.
+          runbook: docs/runbooks/gitops-argocd-drift.md
+
+      - alert: ArgoCDAppDegraded
+        expr: argocd_app_info{health_status="Degraded"} == 1
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "ArgoCD application {{ $labels.name }} health is Degraded"
+          description: |
+            One or more resources managed by ArgoCD are degraded.
+          runbook: docs/runbooks/gitops-argocd-drift.md
+
+  # ── Synthetic on-chain transaction monitoring (issue #1144 Part A) ──────
+  - name: stellar-indigopay-synthetic-monitoring
+    interval: 30s
+    rules:
+      # Fires when at least 2 fresh failure check completions have been recorded
+      # within the last 15 minutes. Using increase() on the checks counter (rather
+      # than gauge persistence) avoids false positives when a Pushgateway retains
+      # a single stale failure value. The 15m window covers 3 × 5-minute cron runs.
+      - alert: SyntheticDonationCheckFailing
+        expr: |
+          increase(synthetic_donation_checks_total{job="synthetic-monitor",result="failure"}[15m]) >= 2
+        for: 0m
+        labels:
+          severity: page
+          routing: pagerduty
+        annotations:
+          summary: "Synthetic end-to-end donation check has failed at least twice in the last 15 minutes"
+          description: |
+            The synthetic monitor (scripts/synthetic-monitor.js) executed a full
+            donation flow against the Stellar Testnet and recorded 2 or more
+            failures in the last 15 minutes. This indicates a proactive outage:
+            Horizon, the Soroban RPC, or the IndigoPay contract may be unreachable
+            before real donors are affected.
+
+            Check:
+              • Horizon status: https://status.stellar.org
+              • Soroban RPC logs (kubectl logs -n stellar-indigopay -l app=soroban-rpc)
+              • synthetic_donation_duration_seconds for timing clues
+
+            Runbook: docs/runbooks/synthetic-monitor-failure.md
+
+      # Warn when synthetic checks are not being emitted at all (monitor may be down).
+      - alert: SyntheticMonitorSilent
+        expr: |
+          absent(synthetic_donation_last_timestamp{job="synthetic-monitor"})
+            or
+          time() - synthetic_donation_last_timestamp{job="synthetic-monitor"} > 900
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Synthetic monitor has not emitted a heartbeat in >15 minutes"
+          description: |
+            No `synthetic_donation_last_timestamp` metric has been scraped from the
+            synthetic-monitor job in over 15 minutes. The monitor itself may be down.
+
+            Check:
+              • GitHub Actions workflow: .github/workflows/synthetic-monitor.yml
+              • CronJob: kubectl get cronjobs -n stellar-indigopay
+              • Prometheus target health: /targets?job=synthetic-monitor
+
+      # Histogram-based SLO: synthetic check duration should stay below 30s.
+      - alert: SyntheticDonationCheckSlow
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (rate(synthetic_donation_duration_seconds_bucket{job="synthetic-monitor"}[30m]))
+          ) > 30
+        for: 15m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Synthetic donation check p99 duration is above 30s"
+          description: |
+            The synthetic monitor's end-to-end check is taking more than 30 seconds
+            at the 99th percentile. This may indicate slow RPC responses or Horizon
+            degradation. Current p99: {{ $value | humanizeDuration }}.
+
