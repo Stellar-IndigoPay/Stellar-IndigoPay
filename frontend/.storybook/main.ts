@@ -34,6 +34,7 @@ const config: StorybookConfig = {
     config.resolve.alias = {
       ...config.resolve.alias,
       "@": path.resolve(__dirname, ".."),
+      "@shared": path.resolve(__dirname, "../../shared"),
       // Mock Next.js modules that aren't available outside the Next.js runtime
       "next/link": path.resolve(__dirname, "mocks/next-link.tsx"),
       "next/router": path.resolve(__dirname, "mocks/next-router.ts"),
