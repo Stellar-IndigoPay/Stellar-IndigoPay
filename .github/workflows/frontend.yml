@@ -334,7 +334,7 @@ jobs:
           max-seconds: '600'
 
   storybook:
-    name: Storybook Build
+    name: Storybook Build & Test
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -354,9 +354,32 @@ jobs:
         working-directory: frontend
         run: npm ci --legacy-peer-deps
 
+      - name: Install Playwright browsers (with dependencies)
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
       - name: Build Storybook
         working-directory: frontend
         run: npm run build-storybook
+
+      - name: Start Storybook Server
+        working-directory: frontend
+        run: |
+          npx --yes serve -l 6006 storybook-static &
+          for i in $(seq 1 30); do
+            if curl -s -o /dev/null http://127.0.0.1:6006; then
+              echo "Server ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Server failed to start" >&2
+          exit 1
+
+      - name: Run Storybook Tests
+        working-directory: frontend
+        run: npx test-storybook
+
       - name: Budget Check
         if: always()
         uses: ./.github/actions/budget-check

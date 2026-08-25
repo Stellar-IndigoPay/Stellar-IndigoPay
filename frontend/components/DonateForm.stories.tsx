@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, within } from "@storybook/test";
 import React from "react";
 import DonateForm from "./DonateForm";
 import type { ClimateProject } from "@/utils/types";
@@ -58,6 +59,30 @@ export const Default: Story = {
       },
     },
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    
+    // Type in an amount
+    const amountInput = canvas.getByRole("textbox", { name: /amount/i });
+    await userEvent.clear(amountInput);
+    await userEvent.type(amountInput, "25");
+    
+    // Type a message
+    const messageInput = canvas.getByRole("textbox", { name: /message/i });
+    await userEvent.type(messageInput, "Great project!");
+    
+    // Check private message checkbox
+    const privateCheckbox = canvas.getByRole("checkbox", { name: /private message/i });
+    await userEvent.click(privateCheckbox);
+
+    // Assert that the donate button is enabled and has the correct text
+    const donateButton = canvas.getByTestId("donate-button");
+    await expect(donateButton).toBeEnabled();
+    await expect(donateButton).toHaveTextContent(/Donate 25 XLM/i);
+    
+    // Submit the form
+    await userEvent.click(donateButton);
+  }
 };
 
 export const WithPresetAmount: Story = {

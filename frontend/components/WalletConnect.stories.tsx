@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, within } from "@storybook/test";
 import WalletConnect from "./WalletConnect";
 
 const meta: Meta<typeof WalletConnect> = {
@@ -25,4 +26,18 @@ export const Default: Story = {
       },
     },
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    
+    // Attempt to click the first wallet connect button if it exists, otherwise click the Install Freighter link
+    const connectButtons = canvas.queryAllByTestId("wallet-connect-button");
+    if (connectButtons.length > 0) {
+      await userEvent.click(connectButtons[0]);
+    } else {
+      const installLink = canvas.queryByRole("link", { name: /Install Freighter/i });
+      if (installLink) {
+        await expect(installLink).toBeVisible();
+      }
+    }
+  }
 };

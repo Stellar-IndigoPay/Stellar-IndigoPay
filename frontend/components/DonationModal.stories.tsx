@@ -1,4 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, within } from "@storybook/test";
+import React from "react";
 import DonationModal from "./DonationModal";
 import type { ClimateProject } from "@/utils/types";
 
@@ -54,12 +56,24 @@ export const Open: Story = {
       },
     },
   },
+  play: async ({ canvasElement }) => {
+    // The modal renders in the normal flow inside canvasElement in Storybook
+    // unless using React Portals to document.body, which this does not.
+    const canvas = within(document.body);
+    
+    // Check if the modal is open by finding a close button
+    const closeBtn = await canvas.findByRole("button", { name: /Close donation dialog/i });
+    await expect(closeBtn).toBeVisible();
+
+    // Click close
+    await userEvent.click(closeBtn);
+  }
 };
 
 export const Closed: Story = {
   args: {
     project: baseProject,
-    publicKey: "GAMZRJ5EYHRG2KQRA2P4Q3UCXMEDRSJE5H4ML4QJ4SNQ3QFJLKFNCWJ7",
+    publicKey: "GAMGAMZRJ5EYHRG2KQRA2P4Q3UCXMEDRSJE5H4ML4QJ4SNQ3QFJLKFNCWJ7",
     isOpen: false,
     onClose: () => {},
     onSuccess: () => {},

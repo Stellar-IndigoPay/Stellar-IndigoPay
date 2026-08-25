@@ -1,3 +1,4 @@
+import React from "react";
 /**
  * components/DonationTicker.tsx
  * Real-time donation ticker using Horizon SSE.

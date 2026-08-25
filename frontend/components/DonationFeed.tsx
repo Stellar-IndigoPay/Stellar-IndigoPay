@@ -1,3 +1,4 @@
+import React from "react";
 ﻿/**
  * components/DonationFeed.tsx
  * Recent donations for a project â€” live community feed with real-time SSE streaming.
