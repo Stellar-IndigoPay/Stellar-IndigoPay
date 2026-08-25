@@ -58,7 +58,15 @@ function send(
   message: any,
 ): Promise<any> {
   return new Promise((resolve) => {
-    listener(message, {}, (response?: any) => resolve(response));
+    listener(
+      message,
+      // Simulate a content-script sender (has extension id + tab).
+      // isTrustedSender requires either a tab (content script) or a
+      // chrome-extension:// url (extension page) in addition to the
+      // matching extension id.
+      { id: (globalThis as any).chrome?.runtime?.id ?? "test", tab: { id: 1 } },
+      (response?: any) => resolve(response),
+    );
   });
 }
 
