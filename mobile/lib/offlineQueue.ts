@@ -1,4 +1,4 @@
-﻿/**
+/**
  * lib/offlineQueue.ts
  *
  * Offline-first FIFO queue for operations that must be submitted when
@@ -344,3 +344,57 @@ export async function clearQueue(): Promise<void> {
     await AsyncStorage.removeItem(STORAGE_KEY);
   });
 }
+
+import { getConnectivity, onConnectivityChange } from "./connectivity";
+import { Horizon } from "@stellar/stellar-sdk";
+
+let isProcessorRunning = false;
+
+/**
+ * Process the queue items sequentially.
+ * We only process if we have internet reachability.
+ */
+export async function processQueue(): Promise<void> {
+  if (isProcessorRunning) return;
+  
+  const connectivity = await getConnectivity();
+  if (!connectivity.isOnline) return;
+
+  isProcessorRunning = true;
+  
+  try {
+    // Recover any items that were stuck in flight during a crash
+    await recoverInFlightItems();
+
+    const eligible = await getRetryEligible<{ xdr?: string }>();
+    if (eligible.length === 0) return;
+
+    // Use default public network server to submit transactions
+    const server = new Horizon.Server('https://horizon.stellar.org');
+
+    for (const item of eligible) {
+      if (item.type === 'submit_tx' && item.payload?.xdr) {
+        await markInFlight(item.id);
+        
+        try {
+          // Pre-submit check could be used if idempotency key is tracked on the server
+          // Submit to Stellar
+          const tx = await server.submitTransaction(item.payload.xdr as any);
+          await markCompleted(item.id, { hash: tx.hash });
+        } catch (err: any) {
+          const errMsg = err?.response?.data?.extras?.result_codes?.transaction || err.message || 'Unknown error';
+          await markFailed(item.id, errMsg);
+        }
+      }
+    }
+  } finally {
+    isProcessorRunning = false;
+  }
+}
+
+// Automatically register connectivity listener to process the queue when coming online
+onConnectivityChange((state) => {
+  if (state.isOnline) {
+    processQueue().catch(() => {});
+  }
+});
