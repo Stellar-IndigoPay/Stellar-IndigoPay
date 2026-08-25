@@ -40,3 +40,25 @@ jobs:
         with:
           start-time: ${{ env.START_TIME }}
           max-seconds: '900'
+
+  deploy-ota:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    name: EAS OTA Update
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-node-cached
+        with:
+          node-version: "22"
+          working-directory: mobile
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+      - name: Staged Rollout (Staging)
+        run: eas update --branch staging --message "$(git log -1 --oneline)" --non-interactive
+      - name: Promote to Production
+        run: eas update --branch production --message "$(git log -1 --oneline)" --non-interactive
