@@ -2,6 +2,8 @@
 
 const {
   buildMerkleTree,
+  buildMerkleTreeStreaming,
+  buildMerkleTreeStreamingWithProof,
   generateMerkleProof,
   verifyMerkleProof,
 } = require("../services/merkleTree");
@@ -126,5 +128,73 @@ describe("merkleTree.verifyMerkleProof", () => {
     const { leaf, proof } = generateMerkleProof(tree, 0);
     expect(verifyMerkleProof(leaf, proof, root, 0)).toBe(false);
     expect(verifyMerkleProof(leaf, proof, root, 2.5)).toBe(false);
+  });
+});
+
+describe("merkleTree.buildMerkleTreeStreaming", () => {
+  async function* entries(n) {
+    for (let i = 1; i <= n; i += 1) {
+      yield entry(i);
+    }
+  }
+
+  it("produces the same root as buildMerkleTree for the same inputs", async () => {
+    for (const n of [1, 2, 3, 4, 5, 8, 13]) {
+      const regular = buildMerkleTree(Array.from({ length: n }, (_, i) => entry(i + 1)));
+      const streaming = await buildMerkleTreeStreaming(entries(n));
+      expect(streaming.root.equals(regular.root)).toBe(true);
+      expect(streaming.leafCount).toBe(n);
+      expect(streaming.height).toBe(regular.height);
+    }
+  });
+
+  it("rejects an empty iterator", async () => {
+    await expect(buildMerkleTreeStreaming(entries(0))).rejects.toThrow(/without entries/);
+  });
+
+  it("builds a 100,000-entry tree without exceeding 256 MB heap", async () => {
+    const before = process.memoryUsage().heapUsed;
+    const result = await buildMerkleTreeStreaming(entries(100000));
+    const after = process.memoryUsage().heapUsed;
+    expect(result.leafCount).toBe(100000);
+    expect(Buffer.isBuffer(result.root)).toBe(true);
+    // Allow generous slack for the test runner itself; the tree build itself
+    // should stay well under 256 MB.
+    expect(after - before).toBeLessThan(256 * 1024 * 1024);
+  });
+});
+
+describe("merkleTree.buildMerkleTreeStreamingWithProof", () => {
+  async function* entries(n) {
+    for (let i = 1; i <= n; i += 1) {
+      yield entry(i);
+    }
+  }
+
+  it.each([1, 2, 3, 4, 5, 8, 13])(
+    "produces proofs matching buildMerkleTree + generateMerkleProof for a %i-leaf tree",
+    async (count) => {
+      const regularEntries = Array.from({ length: count }, (_, i) => entry(i + 1));
+      const regular = buildMerkleTree(regularEntries);
+      for (let i = 0; i < count; i += 1) {
+        const regularProof = generateMerkleProof(regular.tree, i);
+        const streaming = await buildMerkleTreeStreamingWithProof(entries(count), i);
+
+        expect(streaming.root.equals(regular.root)).toBe(true);
+        expect(streaming.leaf.equals(regularProof.leaf)).toBe(true);
+        expect(streaming.proof.length).toBe(regularProof.proof.length);
+        for (let p = 0; p < streaming.proof.length; p += 1) {
+          expect(streaming.proof[p].position).toBe(regularProof.proof[p].position);
+          expect(streaming.proof[p].hash.equals(regularProof.proof[p].hash)).toBe(true);
+        }
+        // The streaming proof must verify against the regular root.
+        expect(verifyMerkleProof(streaming.leaf, streaming.proof, regular.root, count)).toBe(true);
+      }
+    },
+  );
+
+  it("rejects an out-of-bounds leaf index", async () => {
+    await expect(buildMerkleTreeStreamingWithProof(entries(3), 3)).rejects.toThrow(/out of bounds/);
+    await expect(buildMerkleTreeStreamingWithProof(entries(3), -1)).rejects.toThrow(/out of bounds/);
   });
 });

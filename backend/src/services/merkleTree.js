@@ -171,4 +171,188 @@ function verifyMerkleProof(leaf, proof, root, leafCount) {
   return committedRoot.equals(root);
 }
 
-module.exports = { buildMerkleTree, generateMerkleProof, verifyMerkleProof };
+/**
+ * A simple pinned Buffer pool to reduce GC pressure when building large trees.
+ * Buffers are reused across levels; a buffer is only released back to the pool
+ * once no higher level still references it. This avoids allocating a fresh
+ * Buffer for every internal node during streaming construction.
+ */
+class BufferPool {
+  constructor() {
+    this._free = [];
+    this._pinned = new Set();
+  }
+
+  /**
+   * Acquire a 32-byte buffer from the pool, or allocate a new one if none free.
+   * @returns {Buffer}
+   */
+  acquire() {
+    const buf = this._free.pop();
+    if (buf) {
+      this._pinned.add(buf);
+      return buf;
+    }
+    const fresh = Buffer.allocUnsafe(32);
+    this._pinned.add(fresh);
+    return fresh;
+  }
+
+  /**
+   * Release a buffer back to the pool for reuse.
+   * @param {Buffer} buf
+   */
+  release(buf) {
+    if (this._pinned.delete(buf)) {
+      this._free.push(buf);
+    }
+  }
+}
+
+/**
+ * Compute SHA-256(0x01 || left || right) into the destination buffer.
+ * @param {Buffer} left
+ * @param {Buffer} right
+ * @param {Buffer} dest - 32-byte destination buffer
+ */
+function nodeHashInto(left, right, dest) {
+  const hash = nodeHash(left, right);
+  hash.copy(dest);
+}
+
+/**
+ * Build a Merkle tree from an async iterator of audit-style entries, streaming
+ * level-by-level and discarding lower levels as higher ones are built. This keeps
+ * peak memory bounded to the largest single level (the leaves) rather than the
+ * full tree structure, and reuses pinned Buffers to reduce GC pressure.
+ *
+ * The returned object contains only the root, leafCount, and height — it does NOT
+ * retain the full tree. To generate a proof for a specific leaf, use
+ * {@link buildMerkleTreeStreamingWithProof} which retains only the sibling hashes
+ * needed for that leaf's proof.
+ *
+ * @param {AsyncIterable<{id, prevHash, action, actor, resource, timestamp}>} entryIterator
+ * @returns {Promise<{root: Buffer, leafCount: number, height: number}>}
+ */
+async function buildMerkleTreeStreaming(entryIterator) {
+  const pool = new BufferPool();
+  let leafCount = 0;
+  let level = []; // current level of hashes (Buffers)
+
+  // Phase 1: consume the iterator, computing leaf hashes. We must hold the
+  // leaves (the largest level) to build the tree, but we discard each lower
+  // level as soon as the next is built.
+  for await (const entry of entryIterator) {
+    level.push(leafHash(entry));
+    leafCount += 1;
+  }
+
+  if (leafCount === 0) {
+    throw new Error("Cannot build a Merkle tree without entries");
+  }
+
+  // Phase 2: collapse level-by-level, discarding each lower level as the next
+  // is built. Only the current level is retained in memory at any time.
+  let height = 0;
+  while (level.length > 1) {
+    const nextLevel = [];
+    for (let i = 0; i < level.length; i += 2) {
+      const left = level[i];
+      // Duplicate-and-hash a trailing odd node (same shape as buildMerkleTree).
+      const right = i + 1 < level.length ? level[i + 1] : left;
+      const parent = pool.acquire();
+      nodeHashInto(left, right, parent);
+      nextLevel.push(parent);
+      pool.release(left);
+      if (right !== left) pool.release(right);
+    }
+    level = nextLevel;
+    height += 1;
+  }
+
+  const root = sha256([ROOT_PREFIX, uint32Buffer(leafCount), level[0]]);
+  return { root, leafCount, height };
+}
+
+/**
+ * Build a Merkle tree from an async iterator while retaining only the sibling
+ * hashes needed to generate an inclusion proof for `leafIndex`. This is the
+ * memory-efficient equivalent of {@link buildMerkleTree} + {@link generateMerkleProof}
+ * for large datasets: lower levels are discarded as higher ones are built, and
+ * only the proof siblings are retained.
+ *
+ * @param {AsyncIterable<{id, prevHash, action, actor, resource, timestamp}>} entryIterator
+ * @param {number} leafIndex - index of the leaf to generate a proof for
+ * @returns {Promise<{leaf: Buffer, proof: Array<{position: string, hash: Buffer}>, root: Buffer, leafCount: number, height: number}>}
+ */
+async function buildMerkleTreeStreamingWithProof(entryIterator, leafIndex) {
+  const pool = new BufferPool();
+  let leafCount = 0;
+  let level = [];
+  let targetLeaf = null;
+
+  // Phase 1: consume the iterator, computing leaf hashes.
+  for await (const entry of entryIterator) {
+    const leaf = leafHash(entry);
+    if (leafCount === leafIndex) {
+      targetLeaf = leaf;
+    }
+    level.push(leaf);
+    leafCount += 1;
+  }
+
+  if (leafCount === 0) {
+    throw new Error("Cannot build a Merkle tree without entries");
+  }
+  if (!Number.isInteger(leafIndex) || leafIndex < 0 || leafIndex >= leafCount) {
+    throw new Error("Leaf index out of bounds");
+  }
+
+  // Phase 2: collapse level-by-level, capturing the proof path for the target
+  // leaf and discarding each lower level as the next is built.
+  const proof = [];
+  let index = leafIndex;
+  let height = 0;
+  while (level.length > 1) {
+    const nextLevel = [];
+    for (let i = 0; i < level.length; i += 2) {
+      const left = level[i];
+      const right = i + 1 < level.length ? level[i + 1] : left;
+      const parent = pool.acquire();
+      nodeHashInto(left, right, parent);
+      nextLevel.push(parent);
+      pool.release(left);
+      if (right !== left) pool.release(right);
+
+      // If this pair contains the target leaf's current index, record the sibling.
+      if (i === index || i + 1 === index) {
+        const isRight = i === index;
+        const sibling = isRight ? right : left;
+        proof.push({
+          position: isRight ? "right" : "left",
+          hash: Buffer.from(sibling),
+        });
+      }
+    }
+    level = nextLevel;
+    index = Math.floor(index / 2);
+    height += 1;
+  }
+
+  const root = sha256([ROOT_PREFIX, uint32Buffer(leafCount), level[0]]);
+  return {
+    leaf: targetLeaf,
+    proof,
+    root,
+    leafCount,
+    height,
+  };
+}
+
+module.exports = {
+  buildMerkleTree,
+  buildMerkleTreeStreaming,
+  buildMerkleTreeStreamingWithProof,
+  generateMerkleProof,
+  verifyMerkleProof,
+};

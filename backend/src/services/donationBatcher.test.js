@@ -178,3 +178,104 @@ describe("DonationBatcher", () => {
     expect(new Date(batch.timestamp).getTime()).toBeTruthy();
   });
 });
+
+describe("DonationBatcher backpressure", () => {
+  let mockIo;
+  let batcher;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    mockIo = { emit: jest.fn() };
+  });
+
+  afterEach(() => {
+    jest.clearAllTimers();
+    jest.useRealTimers();
+  });
+
+  test("drops oldest donations beyond maxPendingDonations and increments drop counter", () => {
+    batcher = new DonationBatcher(mockIo, {
+      batchWindowMs: 1000,
+      maxBatchSize: 1000,
+      maxPendingDonations: 5,
+    });
+
+    // Add 8 donations; the 3 oldest should be dropped.
+    for (let i = 0; i < 8; i += 1) {
+      batcher.addDonation({ projectId: `proj-${i}`, donorAddress: `GADR${i}`, amount: "10" });
+    }
+
+    expect(batcher.getPendingCount()).toBe(5);
+    const stats = batcher.getStats();
+    expect(stats.totalDropped).toBe(3);
+    expect(stats.pending).toBe(5);
+
+    // The remaining donations should be the 5 newest.
+    jest.advanceTimersByTime(1100);
+    const batch = mockIo.emit.mock.calls[0][1];
+    expect(batch.donations).toHaveLength(5);
+    expect(batch.donations[0].projectId).toBe("proj-3");
+    expect(batch.donations[4].projectId).toBe("proj-7");
+  });
+
+  test("getStats exposes pending, totalFlushed, and totalDropped", () => {
+    batcher = new DonationBatcher(mockIo, {
+      batchWindowMs: 100,
+      maxBatchSize: 5,
+      maxPendingDonations: 10,
+    });
+
+    batcher.addDonation({ projectId: "proj-1", donorAddress: "GAAA", amount: "10" });
+    expect(batcher.getStats()).toEqual({
+      pending: 1,
+      totalFlushed: 0,
+      totalDropped: 0,
+      adapterConnected: true,
+    });
+
+    jest.advanceTimersByTime(150);
+    expect(batcher.getStats()).toEqual({
+      pending: 0,
+      totalFlushed: 1,
+      totalDropped: 0,
+      adapterConnected: true,
+    });
+  });
+
+  test("pauses accumulation when adapter is disconnected and resumes on reconnect", () => {
+    // Simulate a Socket.IO server with a Redis adapter that emits connect/disconnect.
+    const adapter = { on: jest.fn() };
+    const ioWithAdapter = {
+      emit: jest.fn(),
+      of: () => ({ adapter }),
+    };
+    batcher = new DonationBatcher(ioWithAdapter, {
+      batchWindowMs: 100,
+      maxBatchSize: 5,
+      maxPendingDonations: 10,
+    });
+
+    // Capture the disconnect/connect handlers.
+    const disconnectHandler = adapter.on.mock.calls.find(([evt]) => evt === "disconnect")[1];
+    const connectHandler = adapter.on.mock.calls.find(([evt]) => evt === "connect")[1];
+
+    // Disconnect the adapter.
+    disconnectHandler();
+    expect(batcher.getStats().adapterConnected).toBe(false);
+
+    // Donations added while disconnected should be dropped, not accumulated.
+    batcher.addDonation({ projectId: "proj-1", donorAddress: "GAAA", amount: "10" });
+    expect(batcher.getPendingCount()).toBe(0);
+    expect(batcher.getStats().totalDropped).toBe(1);
+
+    // Reconnect the adapter; accumulation resumes.
+    connectHandler();
+    expect(batcher.getStats().adapterConnected).toBe(true);
+    batcher.addDonation({ projectId: "proj-2", donorAddress: "GBBB", amount: "20" });
+    expect(batcher.getPendingCount()).toBe(1);
+
+    jest.advanceTimersByTime(150);
+    expect(mockIo.emit).not.toHaveBeenCalled();
+    expect(ioWithAdapter.emit).toHaveBeenCalledTimes(1);
+  });
+});
