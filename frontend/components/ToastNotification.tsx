@@ -1,3 +1,4 @@
+import React from "react";
 /**
  * components/ToastNotification.tsx
  * Lightweight toast notifications (no external library).

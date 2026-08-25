@@ -43,6 +43,7 @@
     "react-leaflet": "4.2.1",
     "recharts": "^2.15.4",
     "sonner": "^2.0.7",
+    "tweetnacl-util": "^0.15.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {

@@ -1,3 +1,4 @@
+import React from "react";
 /**
  * components/DonateForm.tsx
  * Donation form for a climate project.
@@ -204,6 +205,7 @@ export default function DonateForm({
     });
     if (!isOk || step !== "idle") return;
     setError(null);
+    setStep("building");
 
     // Generate a unique idempotency key so the backend can safely deduplicate
     // retried donation-recording requests within 24 hours.

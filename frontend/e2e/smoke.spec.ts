@@ -31,8 +31,8 @@ test('performance budget for LCP and INP', async ({ page }) => {
   await page.goto('/');
 
   // Simulate user interaction to trigger INP measurement
-  await page.waitForSelector('text=Explore Projects');
-  await page.click('text=Explore Projects');
+  await page.waitForSelector('text=Browse Projects');
+  await page.click('text=Browse Projects');
   
   // Wait a moment for layout to settle and observers to fire
   await page.waitForTimeout(2000);
