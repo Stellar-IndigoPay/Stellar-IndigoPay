@@ -32,8 +32,11 @@ const HTML_TAG_RE = /<\/?[a-zA-Z][^>]*>/g;
  *   1. strip bidirectional control characters
  *   2. strip zero-width characters
  *   3. normalize Unicode to NFC
- *   4. strip HTML tags
- *   5. collapse whitespace runs
+ *   4. collapse whitespace runs
+ *
+ * HTML tags and over-length values are NOT silently stripped here — they are
+ * rejected by the schema-level `.regex` / `.max` checks so that malicious
+ * content (stored-XSS / homoglyph payloads) can never be persisted.
  *
  * @param {string} value
  * @returns {string}
@@ -44,25 +47,20 @@ function sanitizeString(value) {
     .replace(BIDI_CONTROL_RE, "")
     .replace(ZERO_WIDTH_RE, "")
     .normalize("NFC")
-    .replace(HTML_TAG_RE, "")
     .replace(/\s+/g, " ")
     .trim();
 }
 
 /**
- * Build a Zod transform that sanitizes a string and truncates it to the
- * given maximum length (rather than rejecting).
+ * Build a Zod transform that sanitizes a string (bidi/zero-width/NFC/whitespace
+ * cleanup). Length bounds are enforced by the schema's own `.max()` checks so
+ * over-length input is rejected rather than silently truncated.
  *
- * @param {number} maxLength - Maximum allowed length after sanitization.
+ * @param {number} _maxLength - Reserved for schema-level length documentation.
  * @returns {import("zod").ZodEffects<import("zod").ZodString, string, string>}
  */
-function sanitize(maxLength) {
-  return z
-    .string()
-    .transform((value) => {
-      const cleaned = sanitizeString(value);
-      return cleaned.length > maxLength ? cleaned.slice(0, maxLength) : cleaned;
-    });
+function sanitize(_maxLength) {
+  return z.string().transform((value) => sanitizeString(value));
 }
 
 module.exports = {

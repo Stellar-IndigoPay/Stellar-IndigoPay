@@ -163,7 +163,10 @@ const projectSubmissionSchema = z.object({
   tags: z
     .array(
       sanitize(50).pipe(
-        z.string().min(1, "each tag must be a non-empty string"),
+        z
+          .string()
+          .min(1, "each tag must be a non-empty string")
+          .max(50, "each tag must be at most 50 characters"),
       ),
     )
     .max(10, "tags must contain at most 10 entries")
