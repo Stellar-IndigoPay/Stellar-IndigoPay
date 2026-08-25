@@ -278,4 +278,31 @@ describe("DonationBatcher backpressure", () => {
     expect(mockIo.emit).not.toHaveBeenCalled();
     expect(ioWithAdapter.emit).toHaveBeenCalledTimes(1);
   });
+
+  test("flush() does not emit when adapter is disconnected and drops pending donations", () => {
+    const adapter = { on: jest.fn() };
+    const ioWithAdapter = {
+      emit: jest.fn(),
+      of: () => ({ adapter }),
+    };
+    batcher = new DonationBatcher(ioWithAdapter, {
+      batchWindowMs: 100,
+      maxBatchSize: 5,
+      maxPendingDonations: 10,
+    });
+
+    const disconnectHandler = adapter.on.mock.calls.find(([evt]) => evt === "disconnect")[1];
+
+    // Accumulate donations while connected.
+    batcher.addDonation({ projectId: "proj-1", donorAddress: "GAAA", amount: "10" });
+    batcher.addDonation({ projectId: "proj-2", donorAddress: "GBBB", amount: "20" });
+    expect(batcher.getPendingCount()).toBe(2);
+
+    // Disconnect, then flush: pending donations should be dropped, not emitted.
+    disconnectHandler();
+    batcher.flush();
+    expect(ioWithAdapter.emit).not.toHaveBeenCalled();
+    expect(batcher.getPendingCount()).toBe(0);
+    expect(batcher.getStats().totalDropped).toBe(2);
+  });
 });

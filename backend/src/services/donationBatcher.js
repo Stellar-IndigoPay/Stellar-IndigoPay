@@ -162,6 +162,16 @@ class DonationBatcher {
       return;
     }
 
+    // Graceful degradation: if the Socket.IO Redis adapter is disconnected,
+    // do not emit the batch. Drop the pending donations (they cannot be
+    // delivered) and record the drop so operators can see the loss.
+    if (!this.adapterConnected) {
+      this.totalDropped += this.donations.length;
+      donationBatcherDropTotal.inc(this.donations.length);
+      this.donations = [];
+      return;
+    }
+
     const batch = {
       donations: this.donations,
       batchId: uuid(),
