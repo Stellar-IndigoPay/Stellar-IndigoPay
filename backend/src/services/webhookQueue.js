@@ -30,6 +30,7 @@ const logger = require("../logger");
 const { metrics } = require("./metrics");
 const { createDrainController } = require("./workerLifecycle");
 const { withSpan } = require("./tracing");
+const { ConsistentHashRing } = require("./consistentHash");
 const {
   computeEventId,
   sign,
@@ -41,6 +42,72 @@ const RETRY_DELAYS_SECONDS = [30, 120, 600, 1800, 7200, 21600]; // 6 attempts
 const TIMEOUT_MS = 10_000;
 const USER_AGENT = "Stellar-IndigoPay-Webhook/1.0";
 const DRAIN_TIMEOUT_MS = 15_000;
+
+// ── Consistent-hash sharding ──────────────────────────────────────────────
+// Pin every delivery for a given receiver (endpoint) to a single worker so
+// that, when the backend scales to multiple instances, the same endpoint's
+// deliveries are never processed concurrently (which would otherwise risk
+// duplicate or out-of-order delivery). The ring is keyed by the project id
+// (one project maps to one webhook endpoint) and the resulting node name is
+// used as pg-boss's `singletonKey`, which serialises jobs sharing that key.
+const WORKER_COUNT = Number.parseInt(
+  process.env.WEBHOOK_WORKER_COUNT || "2",
+  10,
+);
+const WORKER_NODES = Array.from(
+  { length: WORKER_COUNT },
+  (_, i) => `webhook-worker-${i}`,
+);
+const hashRing = new ConsistentHashRing(WORKER_NODES);
+
+/**
+ * Return the stable worker node responsible for a receiver (endpoint).
+ * Falls back to the first worker when the ring is empty (shouldn't happen).
+ * @param {string} endpointKey - stable identifier for the endpoint (project id).
+ * @returns {string} worker node name
+ */
+function endpointWorkerKey(endpointKey) {
+  return hashRing.getNode(endpointKey) || WORKER_NODES[0];
+}
+
+// ── Jittered exponential backoff ──────────────────────────────────────────
+// delay = min(base * 2^attempt, maxDelay) * (0.5 + random() * 0.5) (full
+// jitter). Spreading retries across the backoff window avoids thundering
+// herds when many donors hit the same recovering receiver simultaneously.
+const BACKOFF_BASE_SECONDS = 30;
+const BACKOFF_MAX_SECONDS = 21600; // 6h
+const MAX_ATTEMPTS = RETRY_DELAYS_SECONDS.length; // 6 attempts
+const ENDPOINT_RETRY_BUDGET = 6; // max attempts per endpoint per window
+const ENDPOINT_RETRY_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * Compute a jittered backoff delay (seconds) for the given attempt index.
+ * @param {number} attempt - 0-based attempt index.
+ * @returns {number} delay in seconds
+ */
+function computeBackoffDelay(attempt) {
+  const base = Math.min(
+    BACKOFF_BASE_SECONDS * Math.pow(2, attempt),
+    BACKOFF_MAX_SECONDS,
+  );
+  return base * (0.5 + Math.random() * 0.5);
+}
+
+/**
+ * Check whether an endpoint has exhausted its per-window retry budget.
+ * @param {string} projectId - project owning the endpoint.
+ * @returns {Promise<boolean>} true if the budget is exceeded.
+ */
+async function isEndpointBudgetExceeded(projectId) {
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS cnt
+       FROM webhook_deliveries
+      WHERE project_id = $1
+        AND last_attempt_at >= NOW() - ($2 * interval '1 millisecond')`,
+    [projectId, ENDPOINT_RETRY_WINDOW_MS],
+  );
+  return (rows[0] && rows[0].cnt) >= ENDPOINT_RETRY_BUDGET;
+}
 
 let boss = null;
 const drain = createDrainController("webhook_dispatcher", {
@@ -69,9 +136,10 @@ async function start() {
   await boss.work(
     QUEUE,
     {
-      teamSize: 2,
+      teamSize: WORKER_COUNT,
       teamConcurrency: 1,
       retryLimit: RETRY_DELAYS_SECONDS.length,
+      retryBackoff: true,
     },
     async ([job]) =>
       drain.trackJob(async () => {
@@ -159,7 +227,11 @@ async function enqueueWebhookDelivery({
   // (see processDelivery) so the worker doesn't auto-retry on throw —
   // instead, on failure we reschedule a new job with `startAfter` set to
   // the appropriate backoff.
-  await boss.send(QUEUE, { deliveryId, secret }, { retryLimit: 0 });
+  await boss.send(
+    QUEUE,
+    { deliveryId, secret },
+    { retryLimit: 0, singletonKey: endpointWorkerKey(projectId) },
+  );
 
   if (!wasInserted) {
     logger.info(
@@ -253,8 +325,15 @@ async function processDelivery(deliveryId, inMemoryOverrides) {
     }
 
     const nextAttempt = row.attempts + 1;
-    const willRetry = nextAttempt < RETRY_DELAYS_SECONDS.length;
-    const nextDelay = willRetry ? RETRY_DELAYS_SECONDS[nextAttempt] : 0;
+    // Per-endpoint retry budget: if the endpoint has already consumed its
+    // window budget, DLQ instead of retrying so a single failing endpoint
+    // cannot consume all retry capacity.
+    const endpointBudgetExceeded = await isEndpointBudgetExceeded(
+      row.project_id,
+    );
+    const willRetry =
+      nextAttempt < MAX_ATTEMPTS && !endpointBudgetExceeded;
+    const nextDelay = willRetry ? computeBackoffDelay(nextAttempt) : 0;
     const nextStatus = willRetry ? "pending" : "dlq";
 
     await pool.query(
@@ -291,6 +370,8 @@ async function processDelivery(deliveryId, inMemoryOverrides) {
       metrics.webhookDeliveriesTotal.inc({ outcome: "dlq" });
     } else {
       metrics.webhookDeliveriesTotal.inc({ outcome: "retry" });
+      metrics.webhookRetryCount.inc({ event_type: row.event_type });
+      metrics.webhookJitterSeconds.observe(nextDelay);
       // Reschedule the next attempt with `startAfter` so the delay is
       // honored even though pg-boss itself isn't doing retries. Without
       // this, the delivery row would sit at status='pending' forever and
@@ -302,6 +383,7 @@ async function processDelivery(deliveryId, inMemoryOverrides) {
             { deliveryId, secret: inMemoryOverrides ? secret : undefined },
             {
               retryLimit: 0,
+              singletonKey: endpointWorkerKey(row.project_id),
               startAfter: new Date(Date.now() + nextDelay * 1000),
             },
           );
@@ -449,4 +531,10 @@ module.exports = {
   DEFAULT_REPLAY_WINDOW_SECONDS,
   // Test-only: introspect drain state without a real SIGTERM.
   _drain: drain,
+  // Test-only: backoff / sharding helpers.
+  computeBackoffDelay,
+  endpointWorkerKey,
+  isEndpointBudgetExceeded,
+  MAX_ATTEMPTS,
+  ENDPOINT_RETRY_BUDGET,
 };

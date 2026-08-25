@@ -19,7 +19,8 @@
       "bundleIdentifier": "com.stellarindigopay.app",
       "associatedDomains": [
         "applinks:indigopay.example.com",
-        "webcredentials:indigopay.example.com"
+        "webcredentials:indigopay.example.com",
+        "applinks:stellarindigopay.com"
       ],
       "infoPlist": {
         "CFBundleURLTypes": [
@@ -54,6 +55,16 @@
             {
               "scheme": "https",
               "host": "indigopay.example.com",
+              "pathPrefix": "/project/"
+            },
+            {
+              "scheme": "https",
+              "host": "stellarindigopay.com",
+              "pathPrefix": "/donate/"
+            },
+            {
+              "scheme": "https",
+              "host": "stellarindigopay.com",
               "pathPrefix": "/project/"
             }
           ],

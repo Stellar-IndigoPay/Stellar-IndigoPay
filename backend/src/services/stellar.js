@@ -425,7 +425,78 @@ async function getOnChainUsdcToken() {
   return null;
 }
 
+
+/**
+ * Submit a transaction and automatically fee-bump if it stalls.
+ *
+ * @param {Transaction} transaction - The signed transaction object
+ * @param {Keypair} keypair - The keypair to sign the fee bump
+ * @param {object} options
+ * @returns {Promise<object>} The final transaction result
+ */
+async function submitWithFeeBump(transaction, keypair, options = {}) {
+  let attempt = 0;
+  const maxAttempts = 3;
+  
+  let currentTx = transaction;
+  let innerTx = transaction;
+
+  while (attempt <= maxAttempts) {
+    let hash;
+    const isSoroban = innerTx.operations.some(op => op.type === "invokeHostFunction");
+    try {
+      if (isSoroban) {
+        const res = await submitTransaction(currentTx.toXDR());
+        hash = res.hash || currentTx.hash().toString('hex'); // submitTransaction returns hash in some versions
+      } else {
+        const res = await server.submitTransaction(currentTx);
+        hash = res.hash;
+      }
+    } catch (err) {
+      if (!isRetryable(err)) throw err;
+    }
+    
+    // Use transaction hash if not extracted
+    if (!hash) hash = currentTx.hash().toString('hex');
+
+    let included = false;
+    let pollSuccess = null;
+    let start = Date.now();
+    const pollTime = (attempt === maxAttempts) ? 60000 : 30000;
+    
+    while (Date.now() - start < pollTime) {
+      try {
+        const res = await server.transactions().transaction(hash).call();
+        if (res.successful) {
+          return res;
+        }
+      } catch (err) {
+        // 404 means keep polling
+      }
+      await new Promise(r => setTimeout(r, 3000));
+    }
+    
+    attempt++;
+    if (attempt <= maxAttempts) {
+      let currentFee = parseInt(currentTx.fee) * 2;
+      if (isNaN(currentFee)) currentFee = 200000;
+      
+      const feeBumpTx = TransactionBuilder.buildFeeBumpTransaction(
+        keypair.publicKey(),
+        currentFee.toString(),
+        innerTx,
+        NETWORK_PASSPHRASE
+      );
+      feeBumpTx.sign(keypair);
+      currentTx = feeBumpTx;
+    }
+  }
+  
+  throw new Error("Transaction stalled after fee bumps");
+}
+
 module.exports = {
+  submitWithFeeBump,
   server,
   rpcServer,
   CONTRACT_ID,

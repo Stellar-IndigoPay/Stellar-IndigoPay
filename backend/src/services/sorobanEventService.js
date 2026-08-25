@@ -34,6 +34,7 @@ const {
 } = require("./stellar");
 const { xdr, scValToNative } = require("@stellar/stellar-sdk");
 const pool = require("../db/pool");
+const crypto = require("crypto");
 const logger = require("../logger");
 const { registry } = require("./metrics");
 const { Counter, Gauge } = require("prom-client");
@@ -272,12 +273,25 @@ async function cleanupOldProcessedEvents() {
 async function loadCursor() {
   try {
     const result = await pool.query(
-      "SELECT value FROM indexer_state WHERE key = 'soroban_event_cursor'",
+      "SELECT value, cursor_hash FROM indexer_state WHERE key = 'soroban_event_cursor'",
     );
     if (result.rows.length > 0 && result.rows[0].value) {
-      return result.rows[0].value;
+      const cursor = result.rows[0].value;
+      const storedHash = result.rows[0].cursor_hash;
+
+      if (storedHash) {
+        const expectedHash = crypto.createHash("sha256").update(String(cursor)).digest("hex");
+        if (storedHash !== expectedHash) {
+          throw new Error(`Checkpoint corruption detected: hash mismatch for cursor ${cursor}`);
+        }
+      }
+
+      return cursor;
     }
   } catch (err) {
+    if (err.message.includes("Checkpoint corruption detected")) {
+      throw err;
+    }
     logger.error(
       { event: "soroban_events_cursor_load_error", err: err.message },
       "Failed to load cursor from indexer_state",
@@ -294,11 +308,12 @@ async function loadCursor() {
 async function saveCursor(cursor, client) {
   const db = client || pool;
   try {
+    const hash = crypto.createHash('sha256').update(String(cursor)).digest('hex');
     await db.query(
-      `INSERT INTO indexer_state (key, value, updated_at)
-       VALUES ('soroban_event_cursor', $1, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
-      [cursor],
+      `INSERT INTO indexer_state (key, value, cursor_hash, updated_at)
+       VALUES ('soroban_event_cursor', $1, $2, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = $1, cursor_hash = $2, updated_at = NOW()`,
+      [cursor, hash],
     );
   } catch (err) {
     logger.error(
@@ -1584,7 +1599,60 @@ async function rescan(fromCursor) {
   return { message: "Rescan initiated — check logs for results" };
 }
 
+
+async function rescanRange({ fromLedger, toLedger }) {
+  let startLedger = fromLedger;
+  let hasMore = true;
+  let cursor = null; // We can use pagination if we want, but startLedger sets the initial bounds.
+  // We can just loop and fetch events
+  while (hasMore) {
+    const request = {
+      filters: [{ type: "contract", contractIds: [CONTRACT_ID] }],
+      limit: 50,
+      startLedger
+    };
+    if (cursor) {
+      request.cursor = cursor;
+      delete request.startLedger;
+    }
+
+    const response = await withRetry(() => rpcServer.getEvents(request));
+    if (!response || !response.events || response.events.length === 0) {
+      hasMore = false;
+      break;
+    }
+    
+    for (const evt of response.events) {
+      if (toLedger && evt.ledger > toLedger) {
+        hasMore = false;
+        break;
+      }
+      
+      const eventType = extractEventType(evt);
+      const handler = HANDLERS[eventType] || handleOtherEvent;
+      
+      // Check deduplication
+      const isDuplicate = await isEventProcessed(evt.pagingToken, pool);
+      if (!isDuplicate) {
+        try {
+          const topics = extractTopics(evt);
+          const value = extractValue(evt);
+          await handler(evt, topics, value);
+          await markEventProcessed(evt.pagingToken, eventType, evt.ledger, evt.txHash, pool);
+        } catch (err) {
+          logger.error({ err: err.message, eventType }, "Error processing backfill event");
+        }
+      }
+    }
+    
+    if (response.events.length > 0) {
+      cursor = response.events[response.events.length - 1].pagingToken;
+    }
+  }
+}
+
 module.exports = {
+  rescanRange,
   start,
   stop,
   getStatus,
