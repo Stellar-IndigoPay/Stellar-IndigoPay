@@ -87,8 +87,8 @@ describe("analytics module", () => {
       expect(mockInit).toHaveBeenCalledTimes(1);
       
       consent.setConsent("denied");
-      expect(mockOptOut).toHaveBeenCalledWith({ clear_persistence: true });
-      expect(mockReset).toHaveBeenCalledWith(true);
+      expect(mockOptOut).toHaveBeenCalledWith();
+      expect(mockReset).toHaveBeenCalledWith();
     });
 
     it("opts in and inits if consent changes to granted mid-session", () => {

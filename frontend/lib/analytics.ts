@@ -44,8 +44,8 @@ export function initAnalytics() {
       }
     } else if (newConsent === "denied") {
       if (isInitialized) {
-        posthog.opt_out_capturing({ clear_persistence: true });
-        posthog.reset(true);
+        posthog.opt_out_capturing();
+        posthog.reset();
       }
     }
   });

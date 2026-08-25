@@ -1,9 +1,8 @@
-import Layout from "@/components/Layout";
 import PageMeta from "@/components/PageMeta";
 
 export default function DataInventory() {
   return (
-    <Layout>
+    <div className="min-h-screen bg-[#FAFAFE] dark:bg-[#0A0A1A] font-body text-[#0F172A] dark:text-[#E2E8F0] pb-20">
       <PageMeta title="Data Inventory | IndigoPay" description="Our data collection practices and inventory." />
       <div className="max-w-4xl mx-auto py-12 px-4 sm:px-6 lg:px-8 font-body">
         <h1 className="text-3xl font-bold mb-6">Data Collection Inventory</h1>
@@ -50,6 +49,6 @@ export default function DataInventory() {
           If you decline, we do not initialize our analytics tools, no data is sent, and any previous in-memory sessions are cleared. We treat inaccessible storage (e.g., private browsing) as a denial by default.
         </p>
       </div>
-    </Layout>
+    </div>
   );
 }
