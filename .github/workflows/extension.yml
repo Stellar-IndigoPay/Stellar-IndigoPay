@@ -18,11 +18,12 @@ jobs:
       run:
         working-directory: extension
     steps:
-      - name: Start Timer
-        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Start Timer
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
 
       - name: Derive version
         id: version
