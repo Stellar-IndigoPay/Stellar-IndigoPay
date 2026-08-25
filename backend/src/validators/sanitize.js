@@ -22,7 +22,7 @@ const BIDI_CONTROL_RE =
   /[\u200E\u200F\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069\u061C]/g;
 
 // Zero-width characters that can be used for homoglyph / confusable attacks.
-const ZERO_WIDTH_RE = /[\u200B\u200C\u200D\uFEFF]/g;
+const ZERO_WIDTH_RE = /(?:\u200B|\u200C|\u200D|\uFEFF)/g;
 
 // HTML/XML tags (including self-closing and with attributes).
 const HTML_TAG_RE = /<\/?[a-zA-Z][^>]*>/g;
