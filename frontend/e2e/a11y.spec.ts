@@ -60,7 +60,7 @@ test.describe("Accessibility", () => {
 
   test("dashboard has no accessibility violations", async ({ page }) => {
     await page.goto("/dashboard");
-    await page.getByTestId("wallet-connect-button").click();
+    await page.getByTestId("wallet-connect-button").first().click();
     await expect(page.getByTestId("donation-history")).toBeVisible();
 
     const results = await runA11yCheck(page);

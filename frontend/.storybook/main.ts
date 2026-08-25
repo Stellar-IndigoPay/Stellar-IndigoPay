@@ -45,7 +45,12 @@ const config: StorybookConfig = {
         __dirname,
         "MockWalletProvider.tsx",
       ),
+      // Fix dual-package hazard for react-query
+      "@tanstack/react-query": path.resolve(__dirname, "../node_modules/@tanstack/react-query"),
     };
+
+    config.esbuild = config.esbuild || {};
+    config.esbuild.jsx = "automatic";
 
     return config;
   },

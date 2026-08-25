@@ -128,6 +128,15 @@ export async function mockApi(page: Page) {
     });
   });
 
+  // Oracle Price
+  await page.route("**/api/*/price", (route: Route) => {
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ success: true, xlmUsdPrice: 0.1 }),
+    });
+  });
+
   // Projects list
   await page.route(/\/api\/v1\/projects(\?|$)/, (route: Route) => {
     return route.fulfill({

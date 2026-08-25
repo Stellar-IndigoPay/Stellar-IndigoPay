@@ -4,7 +4,10 @@ import { ThemeProvider } from "../lib/theme";
 import { I18nProvider } from "../lib/i18n";
 import { PriceProvider } from "../lib/priceContext";
 import { WalletProvider } from "./MockWalletProvider";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import "../styles/globals.css";
+
+const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
 function ThemeDecorator({ children, context }: { children: React.ReactNode; context: any }) {
   const theme = context.globals.theme || "light";
@@ -53,19 +56,23 @@ const preview: Preview = {
     },
   },
   decorators: [
-    (Story, context) => (
-      <ThemeProvider>
-        <I18nProvider>
-          <PriceProvider>
-            <WalletProvider>
-              <ThemeDecorator context={context}>
-                <Story />
-              </ThemeDecorator>
-            </WalletProvider>
-          </PriceProvider>
-        </I18nProvider>
-      </ThemeProvider>
-    ),
+    (Story, context) => {
+      return (
+        <QueryClientProvider client={queryClient}>
+          <ThemeProvider>
+            <I18nProvider>
+              <PriceProvider>
+                <WalletProvider>
+                  <ThemeDecorator context={context}>
+                    <Story />
+                  </ThemeDecorator>
+                </WalletProvider>
+              </PriceProvider>
+            </I18nProvider>
+          </ThemeProvider>
+        </QueryClientProvider>
+      );
+    },
   ],
 };
 

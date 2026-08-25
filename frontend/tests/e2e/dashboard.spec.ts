@@ -13,10 +13,10 @@ test("wallet connect and display user stats on dashboard", async ({ page }) => {
   await expect(page.locator("h1")).toContainText("My Impact");
 
   // 2. Verify WalletConnect prompt is displayed when wallet is not connected
-  await expect(page.locator('[data-testid="wallet-connect-button"]')).toBeVisible();
+  await expect(page.locator('[data-testid="wallet-connect-button"]').first()).toBeVisible();
 
   // 3. Connect Freighter wallet
-  await page.click('[data-testid="wallet-connect-button"]');
+  await page.locator('[data-testid="wallet-connect-button"]').first().click();
 
   // 4. Verify wallet address is displayed on the dashboard
   await expect(page.locator('[data-testid="wallet-address"]')).toBeVisible();

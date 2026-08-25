@@ -425,28 +425,16 @@ export default function DonateForm({
       setTxHash(result.hash);
 
       setStep("recording");
-      // Record via React Query mutation (revalidates the donation feed) and
-      // also via the direct API call for immediate persistence.
-      await Promise.all([
-        recordDonationMutation.mutateAsync({
-          projectId: project.id,
-          donorAddress: publicKey,
-          amount: amountNum.toString(),
-          currency: currency,
-          message: message.trim() || undefined,
-          transactionHash: result.hash,
-          idempotencyKey,
-        }),
-        recordDonation({
-          projectId: project.id,
-          donorAddress: publicKey,
-          amount: amountNum.toString(),
-          currency: currency,
-          message: message.trim() || undefined,
-          transactionHash: result.hash,
-          idempotencyKey,
-        }),
-      ]);
+      // Record via React Query mutation (revalidates the donation feed)
+      await recordDonationMutation.mutateAsync({
+        projectId: project.id,
+        donorAddress: publicKey,
+        amount: amountNum.toString(),
+        currency: currency,
+        message: message.trim() || undefined,
+        transactionHash: result.hash,
+        idempotencyKey,
+      });
 
       trackEvent("donation_confirmed", {
         projectId: project.id,

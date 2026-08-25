@@ -17,7 +17,7 @@ export async function mockBackendAPI(
   page: Page,
   state: MockBackendState,
 ): Promise<MockBackendState> {
-  await page.route("**/api/v1/**", async (route) => {
+  await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
@@ -32,6 +32,14 @@ export async function mockBackendAPI(
 
     if (path === "/api/v1/csrf-token" && method === "GET") {
       return json({ success: true, csrfToken: "e2e-test-csrf-token" });
+    }
+
+    if (path === "/api/oracle/price" && method === "GET") {
+      return json({ success: true, xlmUsdPrice: 0.1 });
+    }
+
+    if (path === "/api/v1/oracle/price" && method === "GET") {
+      return json({ success: true, xlmUsdPrice: 0.1 });
     }
 
     if (path === "/api/v1/projects/featured" && method === "GET") {
