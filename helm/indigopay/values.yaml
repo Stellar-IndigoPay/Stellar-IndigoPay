@@ -51,8 +51,8 @@ postgres:
     primaryPort: 5432
   # ── Automated Failover ────────────────────────────────────────────
   # When enabled, a healthcheck sidecar runs in the primary pod and
-  # automatically triggers the postgres-failover Job after 30 s of
-  # continuous pg_isready failures. Requires the failover RBAC
+  # automatically triggers the postgres-failover Job after 15 s
+  # (3 consecutive pg_isready failures). Requires the failover RBAC
   # manifests (postgres-failover-rbac.yaml).
   # Also deploys the postgres-failover-script ConfigMap and the
   # postgres-failover Job template.

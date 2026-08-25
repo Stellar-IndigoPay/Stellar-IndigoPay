@@ -1,0 +1,64 @@
+name: Chaos Nightly
+
+# Chaos-engineering suite (issue #1147 Part B). Runs every night against the
+# real backend resilience code with live fault injection:
+#   - Redis crash during a donation spike        (scenario 01)
+#   - PostgreSQL failover during donation        (scenario 02)
+#   - Horizon 503 during donations + keeper      (scenario 03)
+#   - Soroban RPC timeout during submission      (scenario 04)
+# Results are uploaded as an artifact and written to the job summary.
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # nightly 03:00 UTC
+  workflow_dispatch:
+
+jobs:
+  chaos:
+    name: Chaos Engineering Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build backend test image (cached)
+        uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./backend/Dockerfile.test
+          load: true
+          tags: indigopay-backend-test:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run chaos suite
+        run: bash test/chaos/run-chaos.sh
+        env:
+          # Shrink the image-build step inside the script: the image is
+          # already built above.
+          CHAOS_SKIP_BUILD: "1"
+
+      - name: Upload chaos results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-summary
+          path: .chaos-run/
+          if-no-files-found: warn
+
+      - name: Write job summary
+        if: always()
+        run: |
+          if [ -f .chaos-run/summary.json ]; then
+            echo "## Chaos suite results" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat .chaos-run/summary.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## Chaos suite results" >> "$GITHUB_STEP_SUMMARY"
+            echo "No summary produced — suite did not complete." >> "$GITHUB_STEP_SUMMARY"
+          fi

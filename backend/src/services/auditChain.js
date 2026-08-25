@@ -236,6 +236,7 @@ async function verifyChain(client) {
 
 module.exports = {
   GENESIS_PREV_HASH,
+  canonicalize,
   computeRowHash,
   getPrevHash,
   getAnchorHash,

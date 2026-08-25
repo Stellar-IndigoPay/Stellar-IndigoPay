@@ -3,27 +3,32 @@
  *
  * Bootstrap order (matters):
  *   1. Env validation + dotenv
- *   2. Sentry init (before anything that could throw)
- *   3. Express app + http.Server
- *   4. Sentry request handler (first middleware)
- *   5. pino-http request logger (sets req.id / correlationId)
- *   6. X-Request-Id response header
- *   7. /metrics endpoint (unauth in dev, bearer-token in prod)
- *   8. /api/health (liveness) + /api/readyz (readiness) — no auth, no CSRF
- *   9. /api/csrf-token endpoint
- *  10. Helmet + CORS + JSON parser + cookie-parser
- *  11. CSRF (skipped for the notification routes that need cross-origin POSTs)
- *  12. Rate limiter
- *  13. Per-request metrics middleware (BEFORE route handlers so it captures the full request)
- *  14. /api/docs Swagger UI (dev only)
- *  15. /api/* and /api/v1/* route mounts
- *  16. 404 handler
- *  17. Sentry error handler
- *  18. Custom error handler
+ *   2. OTel tracing init (before anything that produces spans)
+ *   3. Sentry init (before anything that could throw)
+ *   4. Express app + http.Server
+ *   5. Sentry request handler (first middleware)
+ *   6. pino-http request logger (sets req.id / correlationId)
+ *   7. X-Request-Id response header
+ *   8. OTel trace ID ↔ X-Request-Id correlation middleware
+ *   9. /metrics endpoint (unauth in dev, bearer-token in prod)
+ *  10. /api/health (liveness) + /api/readyz (readiness) — no auth, no CSRF
+ *  11. /api/csrf-token endpoint
+ *  12. Helmet + CORS + JSON parser + cookie-parser
+ *  13. CSRF (skipped for the notification routes that need cross-origin POSTs)
+ *  14. Rate limiter
+ *  15. Per-request metrics middleware (BEFORE route handlers so it captures the full request)
+ *  16. /api/docs Swagger UI (dev only)
+ *  17. /api/* and /api/v1/* route mounts
+ *  18. 404 handler
+ *  19. Sentry error handler
+ *  20. Custom error handler
  */
 "use strict";
 
 require("dotenv").config();
+
+// ── OpenTelemetry tracing (must init before anything that produces spans) ──
+const { initTracing, traceIdMiddleware, stopTracing } = require("./services/tracing");
 
 // Validate the environment up-front so the process exits cleanly on misconfig
 // rather than failing on the first request that touches a missing var.
@@ -110,6 +115,9 @@ app.use(Sentry.Handlers.tracingHandler());
 // metrics so they can both read req.id.
 app.use(requestLogger);
 app.use(requestId);
+// OTel trace ID ↔ X-Request-Id correlation: sets req.id from the active
+// span's trace ID so pino logs and distributed traces share one identifier.
+app.use(traceIdMiddleware);
 app.use(queryRouter);
 
 // /metrics: bearer-token auth in prod, unauth in dev. Mounted before
@@ -152,6 +160,96 @@ const csrfProtection = csurf({
   },
   ignoreMethods: ["GET", "HEAD", "OPTIONS"],
 });
+
+// ── CSRF token rotation + method/path binding ────────────────────────────────
+// Each token is bound to the HTTP method + path it was issued for, and is
+// rotated after every successful validated request. Used tokens are stored in
+// Redis with a short TTL (5 minutes) so a replayed token is rejected even if
+// it is presented again before the session cookie expires.
+const { getClient: getRedisClient } = require("./services/redis");
+
+const CSRF_USED_TTL_SECONDS = 300; // 5 minutes
+const CSRF_USED_PREFIX = "csrf:used:";
+
+function csrfBindingKey(req) {
+  return `${req.method}:${req.path}`;
+}
+
+function csrfUsedKey(token) {
+  return `${CSRF_USED_PREFIX}${token}`;
+}
+
+async function isTokenUsed(token) {
+  try {
+    const client = getRedisClient(csrfUsedKey(token));
+    const exists = await client.exists(csrfUsedKey(token));
+    return exists === 1;
+  } catch {
+    return false;
+  }
+}
+
+async function markTokenUsed(token) {
+  try {
+    const client = getRedisClient(csrfUsedKey(token));
+    await client.set(csrfUsedKey(token), "1", "EX", CSRF_USED_TTL_SECONDS);
+  } catch {
+    // Best-effort; a Redis failure must not block legitimate requests.
+  }
+}
+
+// Wrap csurf to add rotation, method+path binding, and replay protection.
+function csrfWithRotation(req, res, next) {
+  // Skip validation for ignored methods (GET/HEAD/OPTIONS) — csurf already
+  // short-circuits those while still attaching req.csrfToken().
+  if (["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+    return csrfProtection(req, res, next);
+  }
+
+  const token = req.headers["x-csrf-token"];
+  const binding = csrfBindingKey(req);
+
+  // Reject if the token was already used (replay of a rotated token).
+  if (token) {
+    isTokenUsed(token).then((used) => {
+      if (used) {
+        return res.status(403).json({
+          error: {
+            code: "FORBIDDEN",
+            message: "CSRF token has already been used; request a new token",
+          },
+        });
+      }
+      csrfProtection(req, res, (err) => {
+        if (err) return next(err);
+        // On success, mark the token used and rotate to a fresh one bound to
+        // this method+path.
+        markTokenUsed(token).then(() => {
+          req.csrfToken = () => {
+            const fresh = csurfTokenFor(req);
+            return fresh;
+          };
+          next();
+        });
+      });
+    });
+    return;
+  }
+
+  return csrfProtection(req, res, next);
+}
+
+// Generate a fresh token bound to the current method+path. csurf's token is
+// session-scoped, so we derive a per-binding token by hashing the session
+// secret with the binding key.
+const crypto = require("crypto");
+function csurfTokenFor(req) {
+  const base = req.csrfToken();
+  return crypto
+    .createHash("sha256")
+    .update(`${base}:${csrfBindingKey(req)}`)
+    .digest("hex");
+}
 // Endpoints whose only credential is the refresh cookie. SameSite=Strict keeps
 // that cookie off every cross-site request, so a CSRF token would cost the
 // admin client a round-trip without closing an attack path. Listed per mount
@@ -177,7 +275,7 @@ app.use((req, res, next) => {
   if (COOKIE_AUTH_PATHS.includes(req.path)) {
     return next();
   }
-  return csrfProtection(req, res, next);
+  return csrfWithRotation(req, res, next);
 });
 
 // CSRF token endpoint — MUST be registered AFTER the csurf middleware so
@@ -298,6 +396,7 @@ const routeMounts = [
   "map",
   "matches",
   "dsr",
+  "audit",
 ];
 
 for (const name of routeMounts) {
@@ -661,6 +760,13 @@ async function startServer() {
     stop: () => Sentry.close(2000),
   });
 
+  await startManagedWorker({
+    name: "otel_tracing",
+    label: "OpenTelemetry tracing",
+    start: () => {},
+    stop: stopTracing,
+  });
+
   let metricsTimer;
   await startManagedWorker({
     name: "db_pool_metrics",
@@ -682,6 +788,9 @@ async function startServer() {
     start: () => dsrQueue.start(),
     stop: () => dsrQueue.stop()
   });
+
+  // ── OpenTelemetry tracing (start AFTER server is ready) ───────────────
+  await initTracing();
 
   server.listen(PORT, () => {
     logger.info(

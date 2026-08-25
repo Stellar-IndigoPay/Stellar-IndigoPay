@@ -1,0 +1,100 @@
+# docker-compose.chaos.yml
+#
+# Chaos-engineering topology for the nightly chaos suite (issue #1147 Part B).
+#
+# Postgres + Redis mirror the production backing services. `chaos-stub` is a
+# zero-dependency HTTP stub that impersonates Stellar Horizon (REST) and the
+# Soroban RPC endpoint (JSON-RPC) with programmable fault injection
+# (HTTP 503 / delayed-timeout), so the suite exercises the REAL backend
+# resilience code (redis cache degradation, pg-pool recovery, tx-hash
+# idempotency, withRetry backoff, circuit breaker) without touching the real
+# network.
+#
+# The `backend` container runs `test/chaos/driver.js` as its main process:
+#   - Scenarios 01/02 coordinate with the host (`test/chaos/run-chaos.sh`)
+#     through marker files in the shared `./.chaos-run` bind mount so the
+#     host can `docker compose stop/start redis|postgres` mid-scenario.
+#   - Scenarios 03/04 inject faults through the stub's admin API themselves.
+#
+# Run:  bash test/chaos/run-chaos.sh   (builds the backend image if missing)
+#
+# The backend image (indigopay-backend-test:ci) is the same one built for
+# `ci.yml` — see backend/Dockerfile.test.
+
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: stellar_indigopay_chaos
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d stellar_indigopay_chaos"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  chaos-stub:
+    image: node:22-alpine
+    volumes:
+      - ./test/chaos:/chaos:ro
+    command: ["node", "/chaos/stub/server.js"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8000/__chaos/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  backend:
+    image: indigopay-backend-test:ci
+    environment:
+      NODE_ENV: test
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/stellar_indigopay_chaos
+      REDIS_URL: redis://redis:6379
+      STELLAR_NETWORK: testnet
+      # Point Horizon at the fault-injecting stub. SOROBAN_RPC_URL stays
+      # https: the app's rpc.Server refuses plain http (allowHttp isn't
+      # passed), and the driver uses its own stub-bound client for the
+      # Soroban RPC resilience assertions.
+      HORIZON_URL: http://chaos-stub:8000/horizon
+      SOROBAN_RPC_URL: https://soroban-testnet.stellar.org
+      ALLOWED_ORIGINS: http://localhost:3000
+      NODE_PATH: /app/node_modules
+      # Keeper credentials so the recurring-keeper scenario reaches the
+      # Horizon loadAccount stage (the keeper never submits on-chain work
+      # against the stub; see test/chaos/README.md).
+      KEEPER_SECRET: SDUGUCJBKKTDAPZIS3S7DR4XJJM3M5TAHAD6BYTH7ABWYVYMMMRISGJN
+      CONTRACT_ID: CADQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQP5KR
+      CHAOS_RUN_DIR: /chaos-run
+      CHAOS_STUB_URL: http://chaos-stub:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chaos-stub:
+        condition: service_healthy
+    # The backend image only ships ./backend, so mount the app source (same
+    # as docker-compose.test.yml) plus the chaos suite and the shared marker
+    # directory used for host-injected faults.
+    #
+    # Both /app/src (where `npm run db:migrate` resolves migrations from
+    # WORKDIR /app) and /backend/src (where the driver requires the app
+    # modules) are mounted from the SAME checked-out ./backend/src, so the
+    # migrations and the code under test always come from one revision.
+    volumes:
+      - ./backend/src:/app/src:ro
+      - ./backend/src:/backend/src:ro
+      - ./test/chaos:/chaos:ro
+      - ./.chaos-run:/chaos-run
+    command: sh -c "npm run db:migrate && node /chaos/driver.js"
