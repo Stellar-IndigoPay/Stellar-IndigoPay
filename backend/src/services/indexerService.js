@@ -22,6 +22,7 @@
 
 const { server: stellarServer } = require("./stellar");
 const pool = require("../db/pool");
+const crypto = require("crypto");
 const { handleDonation, setUsdcToXlmRate } = require("./indexerDonationHandler");
 const { enqueue: enqueueDLQ } = require("./indexerDLQWorker");
 const logger = require("../logger");
@@ -98,12 +99,14 @@ async function readCursor() {
  * @returns {Promise<void>}
  */
 async function updateCursor(client, ledger) {
+  const hash = crypto.createHash('sha256').update(String(ledger)).digest('hex');
   await client.query(
     `UPDATE indexer_state
      SET last_processed_ledger = GREATEST(last_processed_ledger, $1),
+         cursor_hash = $2,
          last_processed_at = NOW()
      WHERE key = 'primary'`,
-    [ledger],
+    [ledger, hash],
   );
 }
 
@@ -504,7 +507,14 @@ async function stop() {
   reconnectAttempt = 0;
 }
 
+
+async function rescanRange({ fromLedger, toLedger }) {
+  const { runBackfill } = require("./indexerBackfill");
+  return runBackfill({ fromLedger, toLedger, force: true });
+}
+
 module.exports = {
+  rescanRange,
   startIndexer,
   getStatus,
   stop,

@@ -34,6 +34,7 @@ const {
 } = require("./stellar");
 const { xdr, scValToNative } = require("@stellar/stellar-sdk");
 const pool = require("../db/pool");
+const crypto = require("crypto");
 const logger = require("../logger");
 const { registry } = require("./metrics");
 const { Counter, Gauge } = require("prom-client");
@@ -294,11 +295,12 @@ async function loadCursor() {
 async function saveCursor(cursor, client) {
   const db = client || pool;
   try {
+    const hash = crypto.createHash('sha256').update(String(cursor)).digest('hex');
     await db.query(
-      `INSERT INTO indexer_state (key, value, updated_at)
-       VALUES ('soroban_event_cursor', $1, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
-      [cursor],
+      `INSERT INTO indexer_state (key, value, cursor_hash, updated_at)
+       VALUES ('soroban_event_cursor', $1, $2, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = $1, cursor_hash = $2, updated_at = NOW()`,
+      [cursor, hash],
     );
   } catch (err) {
     logger.error(
@@ -1584,7 +1586,60 @@ async function rescan(fromCursor) {
   return { message: "Rescan initiated — check logs for results" };
 }
 
+
+async function rescanRange({ fromLedger, toLedger }) {
+  let startLedger = fromLedger;
+  let hasMore = true;
+  let cursor = null; // We can use pagination if we want, but startLedger sets the initial bounds.
+  // We can just loop and fetch events
+  while (hasMore) {
+    const request = {
+      filters: [{ type: "contract", contractIds: [CONTRACT_ID] }],
+      limit: 50,
+      startLedger
+    };
+    if (cursor) {
+      request.cursor = cursor;
+      delete request.startLedger;
+    }
+
+    const response = await withRetry(() => rpcServer.getEvents(request));
+    if (!response || !response.events || response.events.length === 0) {
+      hasMore = false;
+      break;
+    }
+    
+    for (const evt of response.events) {
+      if (toLedger && evt.ledger > toLedger) {
+        hasMore = false;
+        break;
+      }
+      
+      const eventType = extractEventType(evt);
+      const handler = HANDLERS[eventType] || handleOtherEvent;
+      
+      // Check deduplication
+      const isDuplicate = await isEventProcessed(evt.pagingToken, pool);
+      if (!isDuplicate) {
+        try {
+          const topics = extractTopics(evt);
+          const value = extractValue(evt);
+          await handler(evt, topics, value);
+          await markEventProcessed(evt.pagingToken, eventType, evt.ledger, evt.txHash, pool);
+        } catch (err) {
+          logger.error({ err: err.message, eventType }, "Error processing backfill event");
+        }
+      }
+    }
+    
+    if (response.events.length > 0) {
+      cursor = response.events[response.events.length - 1].pagingToken;
+    }
+  }
+}
+
 module.exports = {
+  rescanRange,
   start,
   stop,
   getStatus,
