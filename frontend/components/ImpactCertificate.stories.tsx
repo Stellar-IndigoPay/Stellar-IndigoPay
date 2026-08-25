@@ -1,3 +1,4 @@
+import React from "react";
 import type { Meta, StoryObj } from "@storybook/react";
 import ImpactCertificate from "./ImpactCertificate";
 import type { BadgeTier } from "@/utils/types";
