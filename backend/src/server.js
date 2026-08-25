@@ -398,6 +398,7 @@ const routeMounts = [
   "matches",
   "dsr",
   "audit",
+  "webhooks",
 ];
 
 for (const name of routeMounts) {

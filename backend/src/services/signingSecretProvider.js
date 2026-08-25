@@ -27,6 +27,12 @@ const SIGNER_CONFIG = Object.freeze({
     legacyEnvVar: "KEEPER_SECRET",
     jsonKeys: ["RECURRING_SIGNER_SECRET", "recurring_signer_secret", "KEEPER_SECRET"],
   },
+  webhookSigning: {
+    displayName: "webhook signing secret",
+    fileEnvVars: ["WEBHOOK_SIGNING_SECRET_FILE", "MANAGED_SIGNER_SECRETS_FILE"],
+    legacyEnvVar: "WEBHOOK_SIGNING_SECRET",
+    jsonKeys: ["WEBHOOK_SIGNING_SECRET", "webhook_signing_secret"],
+  },
 });
 
 function isLocalRuntime(env = process.env) {
@@ -49,6 +55,49 @@ async function readFileSecret(filePath, config) {
     }
   }
   return "";
+}
+
+/**
+ * Read multi-version secrets from a JSON file.
+ * Returns an object with current, previous, and next secrets.
+ *
+ * @param {string} filePath path to JSON file
+ * @param {object} config signer configuration
+ * @returns {Promise<{current: string, previous: string|null, next: string|null, keyId: string}>}
+ */
+async function readMultiVersionSecrets(filePath, config) {
+  const raw = await fs.readFile(path.resolve(filePath), "utf8");
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { current: "", previous: null, next: null, keyId: "v1" };
+  }
+
+  if (!filePath.endsWith(".json")) {
+    // Single secret file - treat as current only
+    return { current: trimmed, previous: null, next: null, keyId: "v1" };
+  }
+
+  const parsed = JSON.parse(trimmed);
+
+  // Try to find multi-version structure first
+  if (parsed.webhook_signing && typeof parsed.webhook_signing === "object") {
+    const webhook = parsed.webhook_signing;
+    return {
+      current: webhook.current || "",
+      previous: webhook.previous || null,
+      next: webhook.next || null,
+      keyId: webhook.keyId || "v1",
+    };
+  }
+
+  // Fallback to single secret format
+  for (const key of config.jsonKeys) {
+    if (typeof parsed[key] === "string" && parsed[key].trim()) {
+      return { current: parsed[key].trim(), previous: null, next: null, keyId: "v1" };
+    }
+  }
+
+  return { current: "", previous: null, next: null, keyId: "v1" };
 }
 
 async function getSigningSecret(role, options = {}) {
@@ -219,6 +268,42 @@ function registeredSecretNames() {
   return SECRET_NAMES.filter((name) => hasCurrent(name) || envOrNull(`${name}_NEXT`) || envOrNull(`${name}_PREVIOUS`));
 }
 
+/**
+ * Get multi-version signing secrets for webhook signing.
+ * Returns current, previous, and next secrets for dual-version signing.
+ *
+ * @param {object} options optional overrides
+ * @returns {Promise<{current: string, previous: string|null, next: string|null, keyId: string}>}
+ */
+async function getMultiVersionSigningSecrets(options = {}) {
+  const env = options.env || process.env;
+  const config = SIGNER_CONFIG.webhookSigning;
+
+  for (const fileEnvVar of config.fileEnvVars) {
+    const filePath = env[fileEnvVar];
+    if (!filePath) continue;
+    const secrets = await readMultiVersionSecrets(filePath, config);
+    if (!secrets.current) {
+      throw new Error(`${fileEnvVar} did not contain ${config.displayName} material`);
+    }
+    return secrets;
+  }
+
+  if (isLocalRuntime(env) && env[config.legacyEnvVar]) {
+    return {
+      current: env[config.legacyEnvVar].trim(),
+      previous: null,
+      next: null,
+      keyId: "v1",
+    };
+  }
+
+  throw new Error(
+    `${config.displayName} must be loaded from a managed secret file (` +
+      `${config.fileEnvVars.join(" or ")}); direct ${config.legacyEnvVar} env loading is only allowed in test/development`,
+  );
+}
+
 module.exports = {
   SIGNER_CONFIG,
   getSigningSecret,
@@ -228,4 +313,5 @@ module.exports = {
   getRenderedStatus,
   registeredSecretNames,
   keyIdFor,
+  getMultiVersionSigningSecrets,
 };

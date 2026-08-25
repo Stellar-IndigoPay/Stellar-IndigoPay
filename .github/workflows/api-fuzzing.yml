@@ -1,0 +1,180 @@
+# .github/workflows/api-fuzzing.yml
+#
+# OpenAPI-Conformance Fuzz Testing
+#
+# Runs automated fuzz testing of the API to ensure:
+# 1. All responses conform to the OpenAPI response schema
+# 2. No 5xx errors occur for invalid input (should be 4xx)
+# 3. Edge cases in request parsing, parameter validation, and error recovery are tested
+#
+# Schedule: Nightly at 03:00 UTC
+# Also runs on PR with a fast subset (100 iterations)
+
+name: API Fuzz Testing
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    - cron: "0 3 * * *"  # Daily at 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "Number of fuzz iterations per endpoint"
+        required: false
+        type: number
+        default: 100
+
+env:
+  NODE_VERSION: "22"
+  FUZZ_ITERATIONS_PR: 100
+  FUZZ_ITERATIONS_NIGHTLY: 10000
+
+jobs:
+  fuzz-test:
+    name: "API Fuzz Testing"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: npm ci
+
+      - name: Run database migrations
+        working-directory: ./backend
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/indigopay_test
+        run: |
+          docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=indigopay_test postgres:15
+          sleep 5
+          npm run db:migrate
+
+      - name: Determine fuzz iterations
+        id: iterations
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ITERATIONS=${{ github.event.inputs.iterations || env.FUZZ_ITERATIONS_NIGHTLY }}
+            echo "Running full fuzz test with $ITERATIONS iterations"
+          else
+            ITERATIONS=${{ env.FUZZ_ITERATIONS_PR }}
+            echo "Running fast fuzz test with $ITERATIONS iterations"
+          fi
+          echo "iterations=$ITERATIONS" >> $GITHUB_OUTPUT
+
+      - name: Run fuzz tests
+        working-directory: ./backend
+        env:
+          FUZZ_ITERATIONS: ${{ steps.iterations.outputs.iterations }}
+          NODE_ENV: test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/indigopay_test
+        run: |
+          npm run test:fuzz
+        continue-on-error: true  # Don't fail the workflow, but report results
+
+      - name: Upload fuzz test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-test-results
+          path: |
+            backend/coverage/
+            backend/test-results/
+          retention-days: 7
+
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let comment = '## 🔬 API Fuzz Test Results\n\n';
+
+            try {
+              // Try to read test results if available
+              const resultsPath = 'backend/test-results/fuzz-results.json';
+              if (fs.existsSync(resultsPath)) {
+                const results = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
+                comment += `- **Total endpoints tested:** ${results.totalEndpoints}\n`;
+                comment += `- **Total iterations:** ${results.totalIterations}\n`;
+                comment += `- **Errors found:** ${results.errors.length}\n\n`;
+
+                if (results.errors.length > 0) {
+                  comment += '### ❌ Issues Found\n\n';
+                  const errorTypes = {};
+                  for (const error of results.errors) {
+                    errorTypes[error.type] = (errorTypes[error.type] || 0) + 1;
+                  }
+                  for (const [type, count] of Object.entries(errorTypes)) {
+                    comment += `- ${type}: ${count}\n`;
+                  }
+                } else {
+                  comment += '### ✅ No Issues Found\n\n';
+                }
+              } else {
+                comment += 'Test results file not found. Check the workflow logs for details.\n';
+              }
+            } catch (err) {
+              comment += `Error reading results: ${err.message}\n`;
+            }
+
+            comment += `\n**Workflow:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n`;
+
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.startsWith('## 🔬 API Fuzz Test Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment,
+              });
+            }
+
+      - name: Create issue on critical errors
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = '🚨 API Fuzz Testing Failed - Critical Errors Detected';
+            const body = `**Workflow:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n` +
+              `**Time:** ${new Date().toISOString()}\n\n` +
+              `The API fuzz testing detected critical errors (5xx errors or request failures).\n\n` +
+              `Investigate immediately — this indicates the API is not handling malformed input correctly.`;
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['bug', 'security', 'api', 'oncall'],
+            });

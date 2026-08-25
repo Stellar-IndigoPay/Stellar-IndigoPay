@@ -46,6 +46,34 @@ jobs:
           start-time: ${{ env.START_TIME }}
           max-seconds: "900"
 
+  fuzz-test:
+    name: API Fuzz Test (Fast)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'pull_request'
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-node-cached
+        with:
+          node-version: "22"
+          working-directory: backend
+      - run: npm ci
+      - name: Run fast fuzz test
+        env:
+          FUZZ_ITERATIONS: 10
+          NODE_ENV: test
+        run: npm run test:fuzz || true  # Don't fail PR, but report results
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-test-results
+          path: backend/coverage/
+          retention-days: 3
+
   mobile:
     name: Mobile (jest)
     runs-on: ubuntu-latest

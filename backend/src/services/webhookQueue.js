@@ -36,6 +36,7 @@ const {
   sign,
   DEFAULT_REPLAY_WINDOW_SECONDS,
 } = require("../lib/webhookSign");
+const { getMultiVersionSigningSecrets } = require("./signingSecretProvider");
 
 const QUEUE = "webhook-deliveries";
 const RETRY_DELAYS_SECONDS = [30, 120, 600, 1800, 7200, 21600]; // 6 attempts
@@ -287,7 +288,26 @@ async function processDelivery(deliveryId, inMemoryOverrides) {
       ...row.payload,
     });
     const timestamp = Math.floor(Date.now() / 1000);
-    const signature = sign(body, secret, timestamp);
+
+    // Try to get multi-version secrets for dual-version signing
+    let signature;
+    try {
+      const multiVersionSecrets = await getMultiVersionSigningSecrets();
+      signature = sign(
+        body,
+        multiVersionSecrets.current,
+        timestamp,
+        multiVersionSecrets.previous,
+        multiVersionSecrets.keyId,
+      );
+    } catch (err) {
+      // Fallback to single-secret signing if multi-version not available
+      logger.warn(
+        { event: "webhook_multi_version_fallback", err: err.message },
+        "Falling back to single-secret signing",
+      );
+      signature = sign(body, secret, timestamp);
+    }
 
     metrics.webhookAttemptsTotal.inc({ event_type: row.event_type });
     const result = await postSigned(url, body, {
