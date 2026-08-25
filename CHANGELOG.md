@@ -314,6 +314,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **contracts:** fix escrow freelancer reputation corruption on dispute resolution by making reputation crediting outcome-aware and crediting only funds received by freelancer
+- **contracts:** eliminate milestone payout rounding-dust by paying the exact remainder on the final milestone release and compute exact residual in compute_remaining_funds (closes #736)
 - **ci,extension:** stop tracking the generated `greenpay-extension.zip` in git, generate it from source in CI, and verify the packaged artifact is reproducible across two builds (closes #696)
 - **contracts:** prevent challenge and refund flows from reversing the same donation twice; invalid finalization attempts now return structured errors instead of underflowing accounting.
 - **frontend:** pin locale (`en-US`) and timezone (`UTC`) for date/number formatting helpers (`formatDate`, `formatDateTime`, `formatTime`, `formatMonthYear`, `formatNumber`) and replace raw `Intl.*`/`toLocaleString` calls in SSR-rendered components, making server/client output deterministic and eliminating hydration mismatches (closes #652)

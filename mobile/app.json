@@ -11,7 +11,9 @@
       "resizeMode": "contain",
       "backgroundColor": "#227239"
     },
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.stellarindigopay.app",
@@ -22,7 +24,10 @@
       "infoPlist": {
         "CFBundleURLTypes": [
           {
-            "CFBundleURLSchemes": ["indigopay", "web+stellar"]
+            "CFBundleURLSchemes": [
+              "indigopay",
+              "web+stellar"
+            ]
           }
         ]
       }
@@ -38,7 +43,9 @@
           "action": "VIEW",
           "autoVerify": true,
           "data": [
-            { "scheme": "indigopay" },
+            {
+              "scheme": "indigopay"
+            },
             {
               "scheme": "web+stellar",
               "host": "pay",
@@ -50,7 +57,10 @@
               "pathPrefix": "/project/"
             }
           ],
-          "category": ["BROWSABLE", "DEFAULT"]
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
         }
       ]
     },
@@ -68,7 +78,18 @@
         }
       ]
     ],
-    "scheme": "indigopay"
+    "scheme": "indigopay",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/00000000-0000-0000-0000-000000000000",
+      "codeSigningCertificate": "./certs/certificate.pem",
+      "codeSigningMetadata": {
+        "keyid": "main",
+        "alg": "rsa-v1_5-sha256"
+      }
+    }
   },
   "extra": {
     "scheme": "indigopay"
