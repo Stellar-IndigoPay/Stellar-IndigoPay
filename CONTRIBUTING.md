@@ -150,3 +150,16 @@ We use Sentry to capture unhandled exceptions and performance traces.
 Quick test (backend): throw an error in any route and confirm it appears in your Sentry project within ~30s.
 
 If you don't have a Sentry project, create one at https://sentry.io and copy the DSN into the env files above.
+
+## Visual Regression Testing
+
+We use Playwright for visual regression testing across all critical pages in both light and dark modes.
+
+### Baseline Update Process
+
+If you make an intentional design change that causes visual tests to fail in CI, you must update the baselines:
+
+1. Go to the "Actions" tab in GitHub and select the "Frontend Visual Regression" workflow.
+2. Click "Run workflow".
+3. Check the "Update baselines" checkbox and run it against your branch.
+4. The workflow will run with `--update-snapshots` and commit the new baseline images back to your branch automatically.

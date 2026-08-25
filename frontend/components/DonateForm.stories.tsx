@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react";
 import React from "react";
 import DonateForm from "./DonateForm";
 import type { ClimateProject } from "@/utils/types";
+import { within, userEvent, expect } from "@storybook/test";
 
 const MOCK_WALLET_ADDRESS =
   "GAMZRJ5EYHRG2KQRA2P4Q3UCXMEDRSJE5H4ML4QJ4SNQ3QFJLKFNCWJ7";
@@ -57,6 +58,15 @@ export const Default: Story = {
           "Standard donation form in idle state with XLM currency, preset amount buttons, custom input, and message field.",
       },
     },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const amountInput = canvas.getByPlaceholderText(/100/i);
+    await userEvent.type(amountInput, "500");
+    const messageInput = canvas.getByPlaceholderText(/Leave a message/i);
+    await userEvent.type(messageInput, "Great project!");
+    const submitButton = canvas.getByRole("button", { name: /Donate 500 XLM/i });
+    await expect(submitButton).toBeInTheDocument();
   },
 };
 

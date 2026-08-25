@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import WalletConnect from "./WalletConnect";
+import { within, userEvent, expect } from "@storybook/test";
 
 const meta: Meta<typeof WalletConnect> = {
   title: "Components/WalletConnect",
@@ -24,5 +25,11 @@ export const Default: Story = {
           "Wallet connection card with multi-wallet support. Auto-detects installed Stellar wallets (Freighter, Albedo, xBull, Rabet) and shows a picker when multiple are available. Falls back to an install prompt when none are detected.",
       },
     },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const button = canvas.getByRole("button", { name: /Connect Wallet/i });
+    await expect(button).toBeInTheDocument();
+    await userEvent.click(button);
   },
 };

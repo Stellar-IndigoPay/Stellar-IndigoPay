@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import DonationModal from "./DonationModal";
 import type { ClimateProject } from "@/utils/types";
+import { within, userEvent, expect } from "@storybook/test";
 
 const baseProject: ClimateProject = {
   id: "proj-001",
@@ -53,6 +54,13 @@ export const Open: Story = {
           "The donation modal in its open state — semi-transparent backdrop, the donation form with close button, and focus trapped within the modal for accessibility.",
       },
     },
+  },
+  play: async ({ canvasElement }) => {
+    // The modal renders in a portal or fixed overlay, so we might need document.body instead of canvasElement if it's portal'd, but here it's just rendered directly.
+    const canvas = within(canvasElement.parentElement || canvasElement);
+    const closeBtn = canvas.getByRole("button", { name: /Close donation dialog/i });
+    await expect(closeBtn).toBeInTheDocument();
+    await userEvent.click(closeBtn);
   },
 };
 

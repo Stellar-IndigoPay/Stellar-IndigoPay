@@ -1,0 +1,102 @@
+name: Frontend Visual Regression
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      update_snapshots:
+        description: 'Update baselines'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  visual:
+    name: Playwright Visual Regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-node-cached
+        with:
+          node-version: "22"
+          working-directory: frontend
+          legacy-peer-deps: 'true'
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache-e2e
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: Install Playwright browsers (with dependencies)
+        if: steps.playwright-cache-e2e.outputs.cache-hit != 'true'
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Playwright system dependencies (if cached)
+        if: steps.playwright-cache-e2e.outputs.cache-hit == 'true'
+        working-directory: frontend
+        run: npx playwright install-deps chromium
+
+      - name: Build frontend for E2E
+        working-directory: frontend
+        run: npm run build
+        env:
+          NEXT_PUBLIC_STELLAR_NETWORK: testnet
+          NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
+          NEXT_PUBLIC_API_URL: http://localhost:4000
+          
+      - name: Start Next.js server
+        working-directory: frontend
+        run: |
+          E2E_TESTING=true \
+          NEXT_PUBLIC_STELLAR_NETWORK=testnet \
+          NEXT_PUBLIC_HORIZON_URL=https://horizon-testnet.stellar.org \
+          NEXT_PUBLIC_API_URL=http://localhost:4000 \
+          npm run start &
+          for i in $(seq 1 30); do
+            if curl -s -o /dev/null http://127.0.0.1:3000; then
+              echo "Server ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Server failed to start" >&2
+          exit 1
+          
+      - name: Run Playwright tests
+        working-directory: frontend
+        run: |
+          if [ "${{ github.event.inputs.update_snapshots }}" = "true" ]; then
+            npm run test:e2e -- --reporter=html,list --grep "Visual regression" --update-snapshots
+          else
+            npm run test:e2e -- --reporter=html,list --grep "Visual regression"
+          fi
+        env:
+          NEXT_PUBLIC_STELLAR_NETWORK: testnet
+          NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
+          NEXT_PUBLIC_API_URL: http://localhost:4000
+
+      - name: Upload new baselines
+        if: github.event.inputs.update_snapshots == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: new-baselines
+          path: frontend/e2e/visual.spec.ts-snapshots/
+          retention-days: 7
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-visual-report
+          path: frontend/playwright-report/
+          retention-days: 14

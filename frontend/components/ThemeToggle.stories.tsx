@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import ThemeToggle from "./ThemeToggle";
+import { within, userEvent, expect } from "@storybook/test";
 
 const meta: Meta<typeof ThemeToggle> = {
   title: "Components/ThemeToggle",
@@ -17,4 +18,11 @@ const meta: Meta<typeof ThemeToggle> = {
 export default meta;
 type Story = StoryObj<typeof ThemeToggle>;
 
-export const Default: Story = {};
+export const Default: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const button = canvas.getByRole("button");
+    await expect(button).toBeInTheDocument();
+    await userEvent.click(button);
+  },
+};
