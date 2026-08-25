@@ -135,6 +135,38 @@
     border-radius: 9999px;
   }
 
+  /* ── ProjectMap cluster badge — numbered circle shown when nearby projects
+        are grouped at low zoom. Mirrors the marker's focusable-button pattern. */
+  .indigopay-cluster-btn {
+    background: linear-gradient(135deg, #4F46E5, #7C3AED);
+    border: 2px solid rgba(255, 255, 255, 0.9);
+    border-radius: 9999px;
+    color: #fff;
+    font-weight: 700;
+    font-size: 13px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+    transition: transform 0.15s ease;
+    line-height: 1;
+  }
+  .indigopay-cluster-btn:hover {
+    transform: scale(1.1);
+  }
+  .indigopay-cluster-btn:focus {
+    outline: none;
+  }
+  .indigopay-cluster-btn:focus-visible {
+    outline: 3px solid var(--primary-light, #818cf8);
+    outline-offset: 2px;
+    border-radius: 9999px;
+  }
+
   /* Respect users who have reduced-motion enabled in their OS settings. */
   @media (prefers-reduced-motion: reduce) {
     *,

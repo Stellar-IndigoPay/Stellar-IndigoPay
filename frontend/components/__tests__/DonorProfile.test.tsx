@@ -1,5 +1,5 @@
 import React from "react";
-import { render, act } from "@testing-library/react";
+import { render, act, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import DonorProfilePage from "../../pages/donors/[publicKey]";
 import { useRouter } from "next/router";
@@ -89,6 +89,14 @@ describe("DonorProfile Component", () => {
       await act(async () => {
         component = render(<DonorProfilePage />, { wrapper: Wrapper });
       });
+
+      // The page only renders its full content once both queries resolve.
+      // The shared QueryClient can make that settle synchronously on some
+      // tiers but asynchronously on the first, so wait for the loaded state
+      // (an <h1>) instead of snapshotting a loading skeleton.
+      await waitFor(() =>
+        expect(component!.container.querySelector("h1")).toBeTruthy(),
+      );
 
       expect(component!.container).toMatchSnapshot();
     },
