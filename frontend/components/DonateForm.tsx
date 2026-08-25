@@ -28,6 +28,7 @@ import { queueDonation, syncQueuedDonations } from "@/lib/offlineDonationQueue";
 import { formatXLM, formatCO2, formatUSDEquivalent } from "@/utils/format";
 import { trackEvent } from "@/lib/analytics";
 import { safeRandomUUID } from "@/utils/uuid";
+import { encryptMessage } from "@/lib/encryption";
 import { usePriceContext } from "@/lib/priceContext";
 import { PriceStaleIndicator } from "@/components/PriceStaleIndicator";
 import type { ClimateProject } from "@/utils/types";
@@ -68,6 +69,7 @@ export default function DonateForm({
 }: DonateFormProps) {
   const [amount, setAmount] = useState("");
   const [message, setMessage] = useState("");
+  const [isPrivateMessage, setIsPrivateMessage] = useState(false);
   const [currency, setCurrency] = useState<"XLM" | "USDC">("XLM");
   const [isRecurring, setIsRecurring] = useState<boolean>(false);
   const [frequency, setFrequency] = useState<"weekly" | "monthly" | "quarterly">("monthly");
@@ -205,9 +207,18 @@ export default function DonateForm({
     if (!isOk || step !== "idle") return;
     setError(null);
 
+
     // Generate a unique idempotency key so the backend can safely deduplicate
     // retried donation-recording requests within 24 hours.
     const idempotencyKey = safeRandomUUID();
+
+    let finalMessage = message.trim();
+    let isEncrypted = false;
+    if (finalMessage && isPrivateMessage) {
+      finalMessage = encryptMessage(finalMessage, project.walletAddress);
+      isEncrypted = true;
+    }
+
 
     if (!isOnline) {
       await queueDonation({
@@ -215,7 +226,8 @@ export default function DonateForm({
         donorAddress: publicKey,
         amount: amountNum.toString(),
         currency,
-        message: message.trim() || undefined,
+        message: finalMessage || undefined,
+          encrypted: isEncrypted,
         idempotencyKey,
       });
       setStep("success");
@@ -364,7 +376,8 @@ export default function DonateForm({
           donorAddress: publicKey,
           amount: amountNum.toString(),
           currency: currency,
-          message: message.trim() || undefined,
+          message: finalMessage || undefined,
+          encrypted: isEncrypted,
           transactionHash: result.hash,
           idempotencyKey,
         });
@@ -431,7 +444,8 @@ export default function DonateForm({
           donorAddress: publicKey,
           amount: amountNum.toString(),
           currency: currency,
-          message: message.trim() || undefined,
+          message: finalMessage || undefined,
+          encrypted: isEncrypted,
           transactionHash: result.hash,
           idempotencyKey,
         }),
@@ -440,7 +454,8 @@ export default function DonateForm({
           donorAddress: publicKey,
           amount: amountNum.toString(),
           currency: currency,
-          message: message.trim() || undefined,
+          message: finalMessage || undefined,
+          encrypted: isEncrypted,
           transactionHash: result.hash,
           idempotencyKey,
         }),
@@ -463,7 +478,8 @@ export default function DonateForm({
           donorAddress: publicKey,
           amount: amountNum.toString(),
           currency,
-          message: message.trim() || undefined,
+          message: finalMessage || undefined,
+          encrypted: isEncrypted,
           idempotencyKey,
         });
         setError("The donation could not be submitted right now, so it was queued for automatic retry.");
@@ -672,7 +688,7 @@ export default function DonateForm({
             )}
         </div>
 
-        {/* Message */}
+                {/* Message */}
         <div>
           <FormField
             name="message"
@@ -692,6 +708,18 @@ export default function DonateForm({
               className="input-field"
             />
           </FormField>
+          
+          <label className="flex items-center gap-2 mt-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={isPrivateMessage}
+              onChange={(e) => setIsPrivateMessage(e.target.checked)}
+              className="w-4 h-4 rounded text-[#4F46E5] focus:ring-[#4F46E5] border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800"
+            />
+            <span className="text-sm font-medium text-[#0F172A] dark:text-[#E2E8F0]">
+              Private message
+            </span>
+          </label>
         </div>
 
 
