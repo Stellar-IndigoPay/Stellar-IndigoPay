@@ -61,13 +61,39 @@ fi
 log_info "Database backup completed successfully"
 log_info "Backup file size: $(du -h "$BACKUP_PATH" | cut -f1)"
 
+# Generate row-level checksums for key tables
+log_info "Generating row-level checksums for data integrity verification..."
+CHECKSUM_FILE="${BACKUP_DIR}/checksums_${TIMESTAMP}.json"
+
+# Export password if provided
+if [ -n "$DB_PASSWORD" ]; then
+    export PGPASSWORD="$DB_PASSWORD"
+fi
+
+# Generate checksums for key tables
+node scripts/generate-backup-checksums.js \
+    --host "$DB_HOST" \
+    --port "$DB_PORT" \
+    --user "$DB_USER" \
+    --database "$DB_NAME" \
+    --output "$CHECKSUM_FILE"
+
+if [ $? -eq 0 ]; then
+    log_info "Checksums generated successfully: $CHECKSUM_FILE"
+else
+    log_error "Failed to generate checksums"
+    exit 1
+fi
+
 # Upload to cloud storage
 case "$STORAGE_TYPE" in
     s3)
         upload_to_s3
+        upload_checksums_to_s3
         ;;
     gcs)
         upload_to_gcs
+        upload_checksums_to_gcs
         ;;
     *)
         log_error "Unknown storage type: $STORAGE_TYPE"
@@ -110,6 +136,34 @@ upload_to_s3() {
     fi
 }
 
+upload_checksums_to_s3() {
+    if [ -z "$S3_BUCKET" ]; then
+        log_error "S3_BUCKET environment variable is not set"
+        return 1
+    fi
+
+    if [ ! -f "$CHECKSUM_FILE" ]; then
+        log_error "Checksum file not found: $CHECKSUM_FILE"
+        return 1
+    fi
+
+    log_info "Uploading checksums to S3..."
+    
+    CHECKSUM_FILENAME=$(basename "$CHECKSUM_FILE")
+    REMOTE_CHECKSUM_PATH="s3://${S3_BUCKET}/${S3_PREFIX}${CHECKSUM_FILENAME}"
+    
+    if aws s3 cp "$CHECKSUM_FILE" "$REMOTE_CHECKSUM_PATH" \
+        --sse AES256 \
+        --storage-class STANDARD_IA \
+        --metadata "backup-date=${TIMESTAMP},database=${DB_NAME},type=checksums"; then
+        log_info "Successfully uploaded checksums to $REMOTE_CHECKSUM_PATH"
+        return 0
+    else
+        log_error "Failed to upload checksums to S3"
+        return 1
+    fi
+}
+
 upload_to_gcs() {
     if [ -z "$GCS_BUCKET" ]; then
         log_error "GCS_BUCKET environment variable is not set"
@@ -137,6 +191,41 @@ upload_to_gcs() {
         return 0
     else
         log_error "Failed to upload backup to GCS"
+        return 1
+    fi
+}
+
+upload_checksums_to_gcs() {
+    if [ -z "$GCS_BUCKET" ]; then
+        log_error "GCS_BUCKET environment variable is not set"
+        return 1
+    fi
+
+    if [ ! -f "$CHECKSUM_FILE" ]; then
+        log_error "Checksum file not found: $CHECKSUM_FILE"
+        return 1
+    fi
+
+    log_info "Uploading checksums to GCS..."
+
+    # Validate gsutil is installed
+    if ! command -v gsutil &> /dev/null; then
+        log_error "gsutil (Google Cloud SDK) is not installed"
+        return 1
+    fi
+
+    CHECKSUM_FILENAME=$(basename "$CHECKSUM_FILE")
+    REMOTE_CHECKSUM_PATH="gs://${GCS_BUCKET}/${GCS_PREFIX}${CHECKSUM_FILENAME}"
+    
+    if gsutil -h "Content-Type:application/json" \
+        -h "x-goog-meta-backup-date:${TIMESTAMP}" \
+        -h "x-goog-meta-database:${DB_NAME}" \
+        -h "x-goog-meta-type:checksums" \
+        cp "$CHECKSUM_FILE" "$REMOTE_CHECKSUM_PATH"; then
+        log_info "Successfully uploaded checksums to $REMOTE_CHECKSUM_PATH"
+        return 0
+    else
+        log_error "Failed to upload checksums to GCS"
         return 1
     fi
 }

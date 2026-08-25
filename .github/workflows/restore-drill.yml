@@ -56,7 +56,7 @@ jobs:
             sleep 2
           done
 
-      - name: Download latest backup
+      - name: Download latest backup and checksums
         env:
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
         run: |
@@ -69,6 +69,10 @@ jobs:
           echo "Restoring from $LATEST"
           aws s3 cp "s3://${S3_BUCKET}/${LATEST}" /tmp/backup.sql.gz
           gunzip -f /tmp/backup.sql.gz
+          
+          # Download corresponding checksums file
+          CHECKSUM_FILE=$(echo "$LATEST" | sed 's/\.sql\.gz/.json/')
+          aws s3 cp "s3://${S3_BUCKET}/backups/checksums_${CHECKSUM_FILE}" /tmp/checksums.json || echo "No checksums file found"
 
       - name: Restore backup
         env:
@@ -92,6 +96,23 @@ jobs:
             fi
             echo "  ${T}: ${COUNT} rows ✅"
           done
+
+      - name: Verify restore integrity with checksums
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          if [ -f "/tmp/checksums.json" ]; then
+            echo "Running row-level checksum verification..."
+            node scripts/verify-restore-checksums.js \
+              --host localhost \
+              --port 5433 \
+              --user postgres \
+              --database stellar_indigopay_drill \
+              --checksums /tmp/checksums.json
+          else
+            echo "No checksums file available, skipping verification"
+          fi
 
       - name: Tear down ephemeral postgres
         if: always()
