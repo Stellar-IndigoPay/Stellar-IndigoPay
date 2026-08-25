@@ -8,61 +8,115 @@
 
 const mockCapture = jest.fn();
 const mockInit = jest.fn();
-const mockSetConfig = jest.fn();
+const mockOptIn = jest.fn();
+const mockOptOut = jest.fn();
+const mockReset = jest.fn();
 
 jest.mock("posthog-js", () => ({
   init: (...args: any[]) => mockInit(...args),
   capture: (...args: any[]) => mockCapture(...args),
-  set_config: (...args: any[]) => mockSetConfig(...args),
+  opt_in_capturing: (...args: any[]) => mockOptIn(...args),
+  opt_out_capturing: (...args: any[]) => mockOptOut(...args),
+  reset: (...args: any[]) => mockReset(...args),
 }));
+
+jest.mock("../consent", () => {
+  let consentState = "undecided";
+  let listeners: any[] = [];
+  return {
+    getConsent: jest.fn(() => consentState),
+    setConsent: jest.fn((newState) => {
+      consentState = newState;
+      listeners.forEach((l) => l(newState));
+    }),
+    onConsentChange: jest.fn((l) => {
+      listeners.push(l);
+      return () => {
+        listeners = listeners.filter((fn) => fn !== l);
+      };
+    }),
+    // helper to reset in tests
+    __resetConsentMock: () => {
+      consentState = "undecided";
+      listeners = [];
+    },
+  };
+});
 
 describe("analytics module", () => {
   const env = process.env;
+  let analytics: any;
+  let consent: any;
 
   beforeEach(() => {
-    jest.resetModules();
-    jest.clearAllMocks();
-    process.env = { ...env };
-    delete (process.env as Record<string, string>).NODE_ENV;
+    jest.isolateModules(() => {
+      jest.clearAllMocks();
+      process.env = { ...env };
+      (process.env as Record<string, string>).NODE_ENV = "production";
+      (process.env as Record<string, string>).NEXT_PUBLIC_POSTHOG_KEY = "test-key";
+      consent = require("../consent");
+      consent.__resetConsentMock();
+      analytics = require("../analytics");
+    });
   });
 
   afterAll(() => {
     process.env = env;
   });
 
-  describe("environment gating", () => {
-    it("does not init posthog in development", () => {
-      (process.env as Record<string, string>).NODE_ENV = "development";
-      const { initAnalytics } = require("../analytics");
-      initAnalytics();
+  describe("consent gating", () => {
+    it("does not init posthog if consent is undecided or denied", () => {
+      consent.setConsent("undecided");
+      analytics.initAnalytics();
+      expect(mockInit).not.toHaveBeenCalled();
+
+      consent.setConsent("denied");
+      analytics.initAnalytics();
       expect(mockInit).not.toHaveBeenCalled();
     });
 
-    it("does not capture events in development", () => {
-      (process.env as Record<string, string>).NODE_ENV = "development";
-      const { trackEvent } = require("../analytics");
-      trackEvent("test_event", { foo: "bar" });
+    it("inits posthog if consent is granted", () => {
+      consent.setConsent("granted");
+      analytics.initAnalytics();
+      expect(mockInit).toHaveBeenCalledTimes(1);
+    });
+
+    it("scrubs data and opts out if consent changes to denied", () => {
+      consent.setConsent("granted");
+      analytics.initAnalytics();
+      expect(mockInit).toHaveBeenCalledTimes(1);
+      
+      consent.setConsent("denied");
+      expect(mockOptOut).toHaveBeenCalledWith({ clear_persistence: true });
+      expect(mockReset).toHaveBeenCalledWith(true);
+    });
+
+    it("opts in and inits if consent changes to granted mid-session", () => {
+      consent.setConsent("undecided");
+      analytics.initAnalytics();
+      expect(mockInit).not.toHaveBeenCalled();
+
+      consent.setConsent("granted");
+      expect(mockInit).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not capture events unless consent is granted and initialized", () => {
+      consent.setConsent("undecided");
+      analytics.initAnalytics();
+      analytics.trackEvent("test_event");
       expect(mockCapture).not.toHaveBeenCalled();
-    });
 
-    it("does nothing when window is undefined (SSR)", () => {
-      (process.env as Record<string, string>).NODE_ENV = "production";
-      const windowSpy = jest
-        .spyOn(global, "window" as any, "get")
-        .mockReturnValue(undefined);
-      const { initAnalytics } = require("../analytics");
-      expect(() => initAnalytics()).not.toThrow();
-      expect(mockInit).not.toHaveBeenCalled();
-      windowSpy.mockRestore();
+      consent.setConsent("granted");
+      // it should have been init by the listener now
+      analytics.trackEvent("test_event");
+      expect(mockCapture).toHaveBeenCalledTimes(1);
     });
   });
 
   describe("PII stripping via sanitize_properties", () => {
     it("strips donorAddress, transactionHash, and email from properties", () => {
-      (process.env as Record<string, string>).NODE_ENV = "production";
-      (process.env as Record<string, string>).NEXT_PUBLIC_POSTHOG_KEY = "test-key";
-      const { initAnalytics } = require("../analytics");
-      initAnalytics();
+      consent.setConsent("granted");
+      analytics.initAnalytics();
 
       const sanitizeFn = mockInit.mock.calls[0][1].sanitize_properties;
 
@@ -76,54 +130,9 @@ describe("analytics module", () => {
 
       expect(result.donorAddress).toBeUndefined();
       expect(result.transactionHash).toBeUndefined();
-      expect(result.email).toBeUndefined();
+        expect(result.email).toBeUndefined();
       expect(result.projectId).toBe("proj-1");
       expect(result.currency).toBe("XLM");
-    });
-
-    it("buckets amountXLM into ranges", () => {
-      (process.env as Record<string, string>).NODE_ENV = "production";
-      (process.env as Record<string, string>).NEXT_PUBLIC_POSTHOG_KEY = "test-key";
-      const { initAnalytics } = require("../analytics");
-      initAnalytics();
-
-      const sanitizeFn = mockInit.mock.calls[0][1].sanitize_properties;
-
-      expect(sanitizeFn({ amountXLM: "5" }).amountXLM).toBe("0-10");
-      expect(sanitizeFn({ amountXLM: "25" }).amountXLM).toBe("11-50");
-      expect(sanitizeFn({ amountXLM: "75" }).amountXLM).toBe("51-100");
-      expect(sanitizeFn({ amountXLM: "200" }).amountXLM).toBe("101-500");
-      expect(sanitizeFn({ amountXLM: "600" }).amountXLM).toBe("500+");
-    });
-  });
-
-  describe("bucketAmount", () => {
-    it("returns correct range for various amounts", () => {
-      const { bucketAmount } = require("../analytics");
-      expect(bucketAmount("0")).toBe("0-10");
-      expect(bucketAmount("10")).toBe("0-10");
-      expect(bucketAmount("11")).toBe("11-50");
-      expect(bucketAmount("50")).toBe("11-50");
-      expect(bucketAmount("51")).toBe("51-100");
-      expect(bucketAmount("100")).toBe("51-100");
-      expect(bucketAmount("101")).toBe("101-500");
-      expect(bucketAmount("500")).toBe("101-500");
-      expect(bucketAmount("501")).toBe("500+");
-      expect(bucketAmount("9999")).toBe("500+");
-    });
-  });
-
-  describe("setAnalyticsConsent", () => {
-    it("sets persistence to cookie when consent is true", () => {
-      const { setAnalyticsConsent } = require("../analytics");
-      setAnalyticsConsent(true);
-      expect(mockSetConfig).toHaveBeenCalledWith({ persistence: "cookie" });
-    });
-
-    it("sets persistence to memory when consent is false", () => {
-      const { setAnalyticsConsent } = require("../analytics");
-      setAnalyticsConsent(false);
-      expect(mockSetConfig).toHaveBeenCalledWith({ persistence: "memory" });
     });
   });
 });

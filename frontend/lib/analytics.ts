@@ -1,6 +1,10 @@
 import posthog from "posthog-js";
+import { getConsent, onConsentChange } from "./consent";
 
-export function initAnalytics() {
+let isInitialized = false;
+
+function doInit() {
+  if (isInitialized) return;
   if (typeof window === "undefined") return;
   if (process.env.NODE_ENV !== "production" || !process.env.NEXT_PUBLIC_POSTHOG_KEY) return;
 
@@ -8,7 +12,7 @@ export function initAnalytics() {
     api_host:
       process.env.NEXT_PUBLIC_POSTHOG_HOST || "https://app.posthog.com",
     capture_pageview: false,
-    persistence: "memory",
+    persistence: "localStorage",
     sanitize_properties: (properties) => {
       const sanitized = { ...properties };
       delete sanitized.donorAddress;
@@ -19,6 +23,31 @@ export function initAnalytics() {
       }
       return sanitized;
     },
+  });
+  isInitialized = true;
+}
+
+export function initAnalytics() {
+  if (typeof window === "undefined") return;
+
+  const currentConsent = getConsent();
+  if (currentConsent === "granted") {
+    doInit();
+  }
+
+  // Handle mid-session consent changes
+  onConsentChange((newConsent) => {
+    if (newConsent === "granted") {
+      doInit();
+      if (isInitialized) {
+        posthog.opt_in_capturing();
+      }
+    } else if (newConsent === "denied") {
+      if (isInitialized) {
+        posthog.opt_out_capturing({ clear_persistence: true });
+        posthog.reset(true);
+      }
+    }
   });
 }
 
@@ -36,15 +65,16 @@ export function trackEvent(
   properties?: Record<string, any>,
 ) {
   if (process.env.NODE_ENV !== "production") return;
+  if (getConsent() !== "granted") return;
+  if (!isInitialized) return;
+  
   posthog.capture(name, properties);
 }
 
 export function setAnalyticsConsent(hasConsented: boolean) {
-  if (hasConsented) {
-    posthog.set_config({ persistence: "cookie" });
-  } else {
-    posthog.set_config({ persistence: "memory" });
-  }
+  import("./consent").then(({ setConsent }) => {
+    setConsent(hasConsented ? "granted" : "denied");
+  });
 }
 
 export { bucketAmount };
