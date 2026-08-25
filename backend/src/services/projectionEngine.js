@@ -42,6 +42,7 @@ const {
   projectionRebuildDurationSeconds,
   projectionRebuildLastEvents,
   projectionRebuildInProgress,
+  projectionAutoCatchupRuns,
 } = metrics;
 
 // 1 XLM = 10^7 stroops (matches the contract's `STROOP` constant), and the
