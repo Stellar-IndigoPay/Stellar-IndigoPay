@@ -30,29 +30,25 @@ const config: StorybookConfig = {
     autodocs: "tag",
   },
   async viteFinal(config) {
-    config.resolve = config.resolve || {};
-    config.resolve.alias = {
-      ...config.resolve.alias,
-      "@": path.resolve(__dirname, ".."),
-      // Mock Next.js modules that aren't available outside the Next.js runtime
-      "next/link": path.resolve(__dirname, "mocks/next-link.tsx"),
-      "next/router": path.resolve(__dirname, "mocks/next-router.ts"),
-      "next/image": path.resolve(__dirname, "mocks/next-image.tsx"),
-      // Redirect WalletProvider to the mock so components don't try to
-      // connect to the real Freighter browser extension. Monkey-patching
-      // ESM exports does not work, so we use a Vite alias instead.
-      "@/lib/WalletProvider": path.resolve(
-        __dirname,
-        "MockWalletProvider.tsx",
-      ),
-      // Fix dual-package hazard for react-query
-      "@tanstack/react-query": path.resolve(__dirname, "../node_modules/@tanstack/react-query"),
-    };
-
-    config.esbuild = config.esbuild || {};
-    config.esbuild.jsx = "automatic";
-
-    return config;
+    const { mergeConfig } = await import("vite");
+    return mergeConfig(config, {
+      esbuild: {
+        jsx: "automatic",
+      },
+      resolve: {
+        alias: {
+          "@/": path.resolve(__dirname, "..") + "/",
+          "next/link": path.resolve(__dirname, "mocks/next-link.tsx"),
+          "next/router": path.resolve(__dirname, "mocks/next-router.ts"),
+          "next/image": path.resolve(__dirname, "mocks/next-image.tsx"),
+          "@/lib/WalletProvider": path.resolve(
+            __dirname,
+            "MockWalletProvider.tsx"
+          ),
+          "@tanstack/react-query": path.resolve(__dirname, "../node_modules/@tanstack/react-query"),
+        },
+      },
+    });
   },
 };
 
