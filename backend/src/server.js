@@ -40,7 +40,7 @@ const Tracing = require("@sentry/tracing");
 const express = require("express");
 const helmet = require("helmet");
 const cookieParser = require("cookie-parser");
-const csurf = require("csurf");
+const { createCsrfProtection } = require("./middleware/csrf");
 const { redisRateLimiter } = require("./middleware/rateLimiter");
 const { socketAuth } = require("./middleware/socketAuth");
 const http = require("http");
@@ -151,15 +151,7 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: "20kb" }));
 app.use(cookieParser());
 
-const csrfProtection = csurf({
-  cookie: {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "none",
-    path: "/",
-  },
-  ignoreMethods: ["GET", "HEAD", "OPTIONS"],
-});
+const csrfProtection = createCsrfProtection();
 // Endpoints whose only credential is the refresh cookie. SameSite=Strict keeps
 // that cookie off every cross-site request, so a CSRF token would cost the
 // admin client a round-trip without closing an attack path. Listed per mount

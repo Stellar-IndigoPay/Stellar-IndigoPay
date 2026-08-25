@@ -19,6 +19,7 @@
 "use strict";
 
 const { z } = require("zod");
+const { sanitize } = require("./sanitize");
 
 // ── Regex constants ──────────────────────────────────────────────────────────
 const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
@@ -92,67 +93,61 @@ const documentSchema = z.object({
       (val) => /^https?:\/\//i.test(val) || /^\/api\/uploads\//i.test(val),
       "document.url must be an http(s) URL or a local /api/uploads URL",
     ),
-  name: z
-    .string()
-    .min(1, "document.name must be at least 1 character")
-    .max(200, "document.name must be at most 200 characters"),
+  name: sanitize(200).pipe(
+    z.string().min(1, "document.name must be at least 1 character"),
+  ),
   size: z.number().int().nonnegative("document.size must be >= 0").optional(),
-  contentType: z.string().optional(),
-  backend: z.string().optional(),
+  contentType: sanitize(200).optional(),
+  backend: sanitize(200).optional(),
 });
 
 // ── Profile schema ─────────────────────────────────────────────────────────
 
 const profileSchema = z.object({
-  displayName: z
-    .string()
-    .min(2, "Display name must be between 2 and 30 characters")
-    .max(30, "Display name must be between 2 and 30 characters")
-    .regex(/^[a-zA-Z0-9_ ]+$/, "Only letters, numbers, underscores, and spaces allowed")
+  displayName: sanitize(30)
+    .pipe(
+      z
+        .string()
+        .min(2, "Display name must be between 2 and 30 characters")
+        .regex(/^[a-zA-Z0-9_ ]+$/, "Only letters, numbers, underscores, and spaces allowed"),
+    )
     .optional()
     .or(z.literal("")),
-  bio: z
-    .string()
-    .max(300, "Bio must be at most 300 characters")
-    .optional()
-    .or(z.literal("")),
+  bio: sanitize(300).optional().or(z.literal("")),
 });
 
 // ── Project submission schema ───────────────────────────────────────────────
 
 const projectSubmissionSchema = z.object({
-  name: z
-    .string()
-    .min(3, "name must be between 3 and 120 characters")
-    .max(120, "name must be between 3 and 120 characters"),
+  name: sanitize(120).pipe(
+    z.string().min(3, "name must be between 3 and 120 characters"),
+  ),
   category: z.enum(PROJECT_CATEGORIES, {
     errorMap: () => ({
       message: `category must be one of: ${PROJECT_CATEGORIES.join(", ")}`,
     }),
   }),
-  description: z
-    .string()
-    .min(10, "description must be between 10 and 5000 characters")
-    .max(5000, "description must be between 10 and 5000 characters"),
-  location: z
-    .string()
-    .min(2, "location must be between 2 and 200 characters")
-    .max(200, "location must be between 2 and 200 characters"),
+  description: sanitize(5000).pipe(
+    z.string().min(10, "description must be between 10 and 5000 characters"),
+  ),
+  location: sanitize(200).pipe(
+    z.string().min(2, "location must be between 2 and 200 characters"),
+  ),
   goalXLM: positiveNumberString,
   walletAddress: stellarAddress,
   organization: z.object({
-    name: z.string().min(1, "Organization name is required"),
+    name: sanitize(200).pipe(z.string().min(1, "Organization name is required")),
     website: z
       .string()
       .url("Organization website must be a valid URL")
       .optional()
       .or(z.literal("")),
-    country: z.string().optional(),
+    country: sanitize(80).optional(),
     contactEmail: z.string().email("Contact email must be a valid email"),
   }),
   co2Methodology: z.object({
-    name: z.string().min(1, "Methodology name is required"),
-    verificationBody: z.string().optional(),
+    name: sanitize(200).pipe(z.string().min(1, "Methodology name is required")),
+    verificationBody: sanitize(200).optional(),
     annualTonnesCO2: positiveNumberString,
     documentUrl: z
       .string()
@@ -160,18 +155,16 @@ const projectSubmissionSchema = z.object({
       .optional()
       .or(z.literal("")),
   }),
-  impactMetrics: z.array(z.string()).optional().default([]),
+  impactMetrics: z.array(sanitize(200)).optional().default([]),
   // Tags are stored as a Postgres TEXT[] and feed full-text search, so both
   // the array length and each entry's length are bounded to prevent database
   // and search-index bloat. `.trim()` runs before the length checks, so
   // whitespace-only tags are rejected as empty.
   tags: z
     .array(
-      z
-        .string()
-        .trim()
-        .min(1, "each tag must be a non-empty string")
-        .max(50, "each tag must be at most 50 characters"),
+      sanitize(50).pipe(
+        z.string().min(1, "each tag must be a non-empty string"),
+      ),
     )
     .max(10, "tags must contain at most 10 entries")
     .optional()
@@ -179,11 +172,9 @@ const projectSubmissionSchema = z.object({
 });
 
 const campaignSchema = z.object({
-  title: z
-    .string()
-    .trim()
-    .min(3, "title must be between 3 and 120 characters")
-    .max(120, "title must be between 3 and 120 characters"),
+  title: sanitize(120).pipe(
+    z.string().min(3, "title must be between 3 and 120 characters"),
+  ),
   goalXLM: positiveNumberString,
   deadline: z
     .string()
@@ -195,12 +186,7 @@ const campaignSchema = z.object({
       const deadlineDate = new Date(value);
       return deadlineDate.getTime() > Date.now();
     }, "deadline must be in the future"),
-  description: z
-    .string()
-    .trim()
-    .max(500, "description must be 500 characters or fewer")
-    .optional()
-    .or(z.literal("")),
+  description: sanitize(500).optional().or(z.literal("")),
 });
 
 // ── Donation request schema ─────────────────────────────────────────────────
