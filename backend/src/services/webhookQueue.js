@@ -30,6 +30,7 @@ const logger = require("../logger");
 const { metrics } = require("./metrics");
 const { createDrainController } = require("./workerLifecycle");
 const { withSpan } = require("./tracing");
+const { ConsistentHashRing } = require("./consistentHash");
 const {
   computeEventId,
   sign,
@@ -42,10 +43,93 @@ const TIMEOUT_MS = 10_000;
 const USER_AGENT = "Stellar-IndigoPay-Webhook/1.0";
 const DRAIN_TIMEOUT_MS = 15_000;
 
+// ── Consistent-hash sharding ────────────────────────────────────────────────
+// Pin each receiver (endpoint URL) to a single worker so deliveries for the
+// same endpoint are never processed concurrently by multiple workers (which
+// could cause duplicate or out-of-order delivery). In a single-instance
+// deployment WORKER_COUNT defaults to 1 and every job is handled locally,
+// preserving the existing behaviour. In a multi-instance deployment each
+// instance sets WEBHOOK_WORKER_ID to its 0-based index and
+// WEBHOOK_WORKER_COUNT to the total number of instances; the ring then
+// routes each endpoint to exactly one instance.
+const WORKER_COUNT = Math.max(
+  1,
+  parseInt(process.env.WEBHOOK_WORKER_COUNT || "1", 10) || 1,
+);
+const WORKER_ID = process.env.WEBHOOK_WORKER_ID || "0";
+
+// ── Jittered backoff ────────────────────────────────────────────────────────
+// Full-jitter backoff: delay = min(base * 2^attempt, maxDelay) * (0.5 + random()*0.5).
+// Randomising the delay spreads retries across the backoff window so a
+// recovering receiver is not immediately re-overwhelmed by a thundering herd.
+const RETRY_BASE_SECONDS = 30;
+const RETRY_MAX_SECONDS = 21600; // 6h cap
+const MAX_ATTEMPTS = 6;
+
+// Per-endpoint retry budget: cap the number of retries issued for a single
+// endpoint within a rolling window so one failing endpoint cannot consume all
+// retry capacity. When the budget is exhausted the delivery is dead-lettered.
+const ENDPOINT_RETRY_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const MAX_ENDPOINT_RETRIES = 6;
+
 let boss = null;
+let workerRing = null;
+const endpointRetryCounts = new Map(); // url -> { count, windowStart }
 const drain = createDrainController("webhook_dispatcher", {
   gracePeriodMs: DRAIN_TIMEOUT_MS,
 });
+
+function getWorkerRing() {
+  if (!workerRing) {
+    workerRing = new ConsistentHashRing(
+      Array.from({ length: WORKER_COUNT }, (_, i) => `worker-${i}`),
+    );
+  }
+  return workerRing;
+}
+
+/**
+ * Compute the jittered backoff delay (seconds) for a given 0-based attempt.
+ * delay = min(base * 2^attempt, maxDelay) * (0.5 + random() * 0.5)
+ */
+function computeBackoffDelay(attempt) {
+  const base = Math.min(
+    RETRY_BASE_SECONDS * Math.pow(2, attempt),
+    RETRY_MAX_SECONDS,
+  );
+  const jitter = 0.5 + Math.random() * 0.5;
+  return base * jitter;
+}
+
+/**
+ * Check whether the endpoint still has retry budget within the current
+ * rolling window. Returns true if a retry is allowed, false if the budget
+ * is exhausted (caller should DLQ instead).
+ */
+function endpointHasRetryBudget(url) {
+  const now = Date.now();
+  const entry = endpointRetryCounts.get(url);
+  if (!entry || now - entry.windowStart >= ENDPOINT_RETRY_WINDOW_MS) {
+    endpointRetryCounts.set(url, { count: 0, windowStart: now });
+    return true;
+  }
+  return entry.count < MAX_ENDPOINT_RETRIES;
+}
+
+/**
+ * Record a retry against the endpoint's budget. Returns true if the budget
+ * is still available after recording, false if it has been exhausted.
+ */
+function recordEndpointRetry(url) {
+  const now = Date.now();
+  const entry = endpointRetryCounts.get(url);
+  if (!entry || now - entry.windowStart >= ENDPOINT_RETRY_WINDOW_MS) {
+    endpointRetryCounts.set(url, { count: 1, windowStart: now });
+    return 1 < MAX_ENDPOINT_RETRIES;
+  }
+  entry.count += 1;
+  return entry.count < MAX_ENDPOINT_RETRIES;
+}
 
 /**
  * Start the worker. Idempotent — safe to call more than once.
@@ -75,13 +159,19 @@ async function start() {
     },
     async ([job]) =>
       drain.trackJob(async () => {
-        const { deliveryId } = job.data || {};
+        const { deliveryId, workerId } = job.data || {};
         if (!deliveryId) {
           // Defensive: malformed job. Don't retry.
           logger.error(
             { event: "webhook_delivery_malformed", jobId: job.id },
             "missing deliveryId",
           );
+          return;
+        }
+        // Consistent-hash sharding: only the worker pinned to this endpoint
+        // may process the job. In single-instance mode WORKER_ID is "0" and
+        // the ring has a single node, so every job matches (backward compat).
+        if (workerId && workerId !== WORKER_ID) {
           return;
         }
         await processDelivery(deliveryId);
@@ -100,6 +190,7 @@ async function enqueueWebhookDelivery({
   eventType,
   payload,
   secret,
+  webhookUrl,
 }) {
   const eventId = computeEventId({
     projectId,

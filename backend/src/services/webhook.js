@@ -117,6 +117,7 @@ async function checkAndDeliverMilestones(projectId) {
           eventType: "milestone.reached",
           payload,
           secret: project.webhook_secret,
+          webhookUrl: project.webhook_url,
         }).catch((err) => {
           logger.error(
             { event: "webhook_enqueue_error", projectId, err: err.message },
