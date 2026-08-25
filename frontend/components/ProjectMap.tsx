@@ -30,7 +30,7 @@
  */
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   MapContainer,
   Marker,
@@ -219,12 +219,18 @@ function ClusterLayer({ projects }: { projects: ClimateProject[] }) {
     setClusters(computeClusters(index, map));
   }, [index, map]);
 
-  // Recompute the visible markers whenever the map moves, zooms, or the
-  // project list changes.
+  // Recompute the visible markers whenever the map moves or zooms.
   useMapEvents({
     moveend: refresh,
     zoomend: refresh,
   });
+
+  // Also recompute when the project list changes: `index` is rebuilt from
+  // the new `projects` prop, so the previously cached cluster viewport would
+  // otherwise render stale markers until the user pans or zooms.
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
   const handleClusterZoom = useCallback(
     (cluster: ClusterView) => {

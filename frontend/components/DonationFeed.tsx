@@ -351,7 +351,11 @@ export default function DonationFeed({
         style={{ maxHeight: FEED_MAX_HEIGHT }}
         data-testid="donation-feed-scroll"
       >
+        {/* role="presentation": the sizing wrapper sits between
+            role="list" and the rows; a generic-role element in between would
+            break the ARIA list/listitem ownership relationship. */}
         <div
+          role="presentation"
           style={{
             height: rowVirtualizer.getTotalSize(),
             position: "relative",
