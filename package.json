@@ -16,6 +16,7 @@
     "husky": "^9.1.6",
     "js-yaml": "^5.4.0",
     "lint-staged": "^15.2.10",
+    "pg": "^8.20.0",
     "prettier": "^3.3.3",
     "typescript": "^5.4.5"
   },

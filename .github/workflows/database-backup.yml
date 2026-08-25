@@ -76,6 +76,14 @@ jobs:
           path: /tmp/backups/stellar_indigopay_backup_*.sql.gz
           retention-days: 7
 
+      - name: Upload checksums as artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-checksums
+          path: /tmp/backups/checksums_*.json
+          retention-days: 30
+
       - name: Backup status check
         if: failure()
         run: |

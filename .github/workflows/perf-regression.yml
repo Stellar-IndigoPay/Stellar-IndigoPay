@@ -1,0 +1,177 @@
+name: Performance Regression Detection
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  perf-regression:
+    name: Performance Regression Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install k6
+        run: |
+          gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+      - name: Download baseline artifact from main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get the latest successful workflow run from main branch
+          RUN_ID=$(gh run list \
+            --repo ${{ github.repository }} \
+            --branch main \
+            --workflow ci.yml \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')
+          
+          if [ -n "$RUN_ID" ]; then
+            echo "Found baseline run: $RUN_ID"
+            gh run download \
+              --repo ${{ github.repository }} \
+              $RUN_ID \
+              --name load-test-metrics-summary \
+              --dir /tmp/baseline
+          else
+            echo "No successful CI run found on main branch"
+          fi
+        continue-on-error: true
+
+      - name: Check if baseline exists
+        id: check-baseline
+        run: |
+          if [ -f "/tmp/baseline/metrics-summary.json" ]; then
+            echo "baseline_exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Baseline found from main branch"
+          else
+            echo "baseline_exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️ No baseline found - will establish new baseline"
+          fi
+
+      - name: Start backend services
+        run: |
+          docker compose -f docker-compose.test.yml up -d
+          # Wait for backend to be ready
+          timeout 60 bash -c 'until curl -fs http://localhost:4000/health > /dev/null; do sleep 2; done'
+
+      - name: Run load test on PR (100 VUs, 60s)
+        run: |
+          k6 run --out json=/tmp/pr-load-test-results.json scripts/load-test.js
+        env:
+          BASE_URL: http://localhost:4000
+
+      - name: Stop backend services
+        if: always()
+        run: docker compose -f docker-compose.test.yml down
+
+      - name: Extract PR metrics
+        run: |
+          node scripts/extract-load-test-metrics.js /tmp/pr-load-test-results.json > /tmp/pr-metrics-summary.json
+
+      - name: Compare with baseline
+        if: steps.check-baseline.outputs.baseline_exists == 'true'
+        id: compare
+        run: |
+          node scripts/compare-perf-metrics.js \
+            /tmp/baseline/metrics-summary.json \
+            /tmp/pr-metrics-summary.json \
+            ${{ vars.LATENCY_REGRESSION_THRESHOLD_PCT || 20 }} \
+            > /tmp/comparison-result.json
+        env:
+          LATENCY_REGRESSION_THRESHOLD_PCT: ${{ vars.LATENCY_REGRESSION_THRESHOLD_PCT || 20 }}
+
+      - name: Post PR comment with comparison results
+        if: always() && steps.check-baseline.outputs.baseline_exists == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const comparisonResult = JSON.parse(fs.readFileSync('/tmp/comparison-result.json', 'utf8'));
+            
+            const threshold = process.env.LATENCY_REGRESSION_THRESHOLD_PCT || 20;
+            const hasRegression = comparisonResult.regression_detected;
+            
+            let comment = `## 🚀 Performance Regression Report\n\n`;
+            comment += `**Threshold:** ${threshold}% degradation triggers warning\n\n`;
+            
+            comment += `### Endpoint Comparison\n\n`;
+            comment += `| Metric | Baseline (ms) | Current (ms) | Change | Status |\n`;
+            comment += `|--------|---------------|--------------|--------|--------|\n`;
+            
+            for (const [metric, data] of Object.entries(comparisonResult.metrics)) {
+              const status = data.change_pct > threshold ? '⚠️' : '✅';
+              comment += `| ${metric} | ${data.baseline.toFixed(2)} | ${data.current.toFixed(2)} | ${data.change_pct > 0 ? '+' : ''}${data.change_pct.toFixed(1)}% | ${status} |\n`;
+            }
+            
+            if (hasRegression) {
+              comment += `\n### ⚠️ Performance Regression Detected\n\n`;
+              comment += `This PR introduces performance degradation exceeding the ${threshold}% threshold.\n`;
+              comment += `Please review the changes and consider optimization before merging.\n\n`;
+              comment += `> This is a warning comment and does not block the PR.\n`;
+            } else {
+              comment += `\n### ✅ No Performance Regression\n\n`;
+              comment += `Performance is within acceptable thresholds.\n`;
+            }
+            
+            comment += `\n---\n`;
+            comment += `*Generated by performance regression detection workflow*\n`;
+            
+            // Find existing comment to update or create new one
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('Performance Regression Report')
+            );
+            
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment
+              });
+            }
+        env:
+          LATENCY_REGRESSION_THRESHOLD_PCT: ${{ vars.LATENCY_REGRESSION_THRESHOLD_PCT || 20 }}
+
+      - name: Establish new baseline (if none exists)
+        if: steps.check-baseline.outputs.baseline_exists == 'false'
+        run: |
+          echo "No baseline found - this PR will establish the new baseline after merge to main"
+          echo "Current PR metrics saved for reference:"
+          cat /tmp/pr-metrics-summary.json
