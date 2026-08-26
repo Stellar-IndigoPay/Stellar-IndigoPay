@@ -63,6 +63,11 @@ services:
       # which resolves js-yaml from the backend image's node_modules. NODE_PATH
       # lets that mounted module find /app/node_modules (see volumes below).
       NODE_PATH: /app/node_modules
+      # Property-based tests (backend/test/properties) run as part of `npm
+      # test`. Fixed base seed + iteration count keep CI runs deterministic;
+      # failures print the seed for local replay (see the README in that dir).
+      PROPERTY_SEED: "1337"
+      PROPERTY_ITERATIONS: "120"
     depends_on:
       postgres:
         condition: service_healthy

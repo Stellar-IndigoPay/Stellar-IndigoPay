@@ -34,6 +34,7 @@ const STARTED_SERVICES = [
   "database_pool",
   "redis",
   "sentry",
+  "otel_tracing",
   "db_pool_metrics",
   "turrets_server",
 ];

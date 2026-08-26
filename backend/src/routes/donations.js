@@ -17,13 +17,14 @@ const {
   donationSchema,
   stellarAddress,
   uuid: uuidValidator,
+  UUID_RE,
 } = require("../validators/schemas");
 const { mapDonationRow } = require("../services/store");
 const { invalidateCache } = require("../middleware/cache");
 const { enqueueProfileUpdate } = require("../services/profileQueue");
 const { enqueueImpactRecalc } = require("../services/impactQueue");
 const { enqueuePushNotification } = require("../services/pushQueue");
-const { server } = require("../services/stellar");
+const { getTransaction } = require("../services/stellar");
 const oracleService = require("../services/oracleService");
 const { generateReceiptPdf, hashReceiptContent, signReceipt } = require("../services/receiptGenerator");
 const { invalidateProjectRelatedCache } = require("../services/cacheManager");
@@ -127,7 +128,7 @@ async function recordDonation(req, res, next) {
     // Prevents a caller from inflating raised_xlm with a fake or unconfirmed tx hash.
     let onChainTx;
     try {
-      onChainTx = await server.getTransaction(transactionHash);
+      onChainTx = await getTransaction(transactionHash);
     } catch {
       throw new AppError("TX_NOT_FOUND");
     }
@@ -544,6 +545,40 @@ router.get(
     }
   }
 );
+
+// GET /api/donations/check-idempotency/:key - returns whether an idempotency
+// key was already processed (donation recorded) within the 24h window.
+// Used by the frontend offline queue (issue #1096, Workstream 2) to skip
+// re-submitting a donation another tab / background sync already recorded,
+// guaranteeing zero duplicate donation records.
+// Registered before GET /:id so the literal path segment wins over :id.
+router.get("/check-idempotency/:key", async (req, res, next) => {
+  try {
+    const { key } = req.params;
+    if (!UUID_RE.test(key)) {
+      throw new AppError("VALIDATION_ERROR", {
+        field: "key",
+        message: "Invalid idempotency key",
+      });
+    }
+    const result = await pool.query(
+      "SELECT response_status FROM idempotency_keys WHERE key = $1 AND expires_at > NOW()",
+      [key]
+    );
+    const exists = result.rows.length > 0;
+    return res.json({
+      success: true,
+      data: {
+        exists,
+        // A stored row with a real response (not the "processing" placeholder)
+        // means the donation was fully recorded.
+        status: exists ? result.rows[0].response_status : null,
+      },
+    });
+  } catch (e) {
+    next(e);
+  }
+});
 
 // GET /api/donations/:id - single donation fetch endpoint
 router.get("/:id", async (req, res, next) => {

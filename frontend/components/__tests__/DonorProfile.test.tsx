@@ -1,5 +1,5 @@
 import React from "react";
-import { render, act } from "@testing-library/react";
+import { render, act, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import DonorProfilePage from "../../pages/donors/[publicKey]";
 import { useRouter } from "next/router";
@@ -27,16 +27,20 @@ const mockDonations = [
 ];
 
 describe("DonorProfile Component", () => {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
+  function makeClient() {
+    return new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+  }
 
-  function Wrapper({ children }: { children: React.ReactNode }) {
-    return (
-      <QueryClientProvider client={queryClient}>
-        {children}
-      </QueryClientProvider>
-    );
+  function Wrapper({
+    client,
+    children,
+  }: {
+    client: QueryClient;
+    children: React.ReactNode;
+  }) {
+    return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
   }
 
   beforeEach(() => {
@@ -85,10 +89,25 @@ describe("DonorProfile Component", () => {
         createdAt: "2023-01-01T00:00:00.000Z",
       });
 
+      // A fresh QueryClient per case keeps each badge tier from reusing the
+      // previous case's cached profile (the cache is keyed only on the
+      // public key, so the shared client made every tier render tier #1's
+      // data and flipped the skeleton/loaded snapshot under CI load).
+      const client = makeClient();
       let component;
       await act(async () => {
-        component = render(<DonorProfilePage />, { wrapper: Wrapper });
+        component = render(<DonorProfilePage />, {
+          wrapper: ({ children }) => (
+            <Wrapper client={client}>{children}</Wrapper>
+          ),
+        });
       });
+
+      // The profile query resolves asynchronously (TanStack Query notifies
+      // on a timer, so it never flushes inside the render act above); await
+      // the loaded state before snapshotting. findBy* wraps itself in act,
+      // so the re-render is flushed without an extra explicit act.
+      await screen.findByText("Test Donor");
 
       expect(component!.container).toMatchSnapshot();
     },

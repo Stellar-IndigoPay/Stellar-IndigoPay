@@ -43,6 +43,16 @@ const envSchema = z.object({
   ANTHROPIC_API_KEY: z.string().optional().default(""),
   REDIS_URL: z.string().optional().default("redis://localhost:6379"),
 
+  // ── Redis Sentinel failover ─────────────────────────────────────────────
+  // Comma-separated Sentinel `host:port` addresses. When set together with
+  // REDIS_SENTINEL_MASTER_NAME, the backend connects to Redis via Sentinel
+  // and auto-reconnects to the promoted master on failover. When unset,
+  // falls back to REDIS_URL / REDIS_URLS (single-instance / sharded).
+  // Example: REDIS_SENTINELS=sentinel-0:26379,sentinel-1:26379,sentinel-2:26379
+  REDIS_SENTINELS: z.string().optional().default(""),
+  REDIS_SENTINEL_MASTER_NAME: z.string().optional().default(""),
+  REDIS_SENTINEL_PASSWORD: z.string().optional().default(""),
+
   // ── Distributed rate limiting (multi-Redis sharding) ─────────────────────
   // Comma-separated Redis URLs for consistent-hashing-based sharding.
   // When set, rate-limit keys are distributed across the listed instances.

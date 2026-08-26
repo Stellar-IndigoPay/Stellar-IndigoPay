@@ -10,10 +10,15 @@ const mockCapture = jest.fn();
 const mockInit = jest.fn();
 const mockSetConfig = jest.fn();
 
-jest.mock("posthog-js", () => ({
+const mockPostHog = {
   init: (...args: any[]) => mockInit(...args),
   capture: (...args: any[]) => mockCapture(...args),
   set_config: (...args: any[]) => mockSetConfig(...args),
+};
+
+jest.mock("posthog-js", () => ({
+  __esModule: true,
+  default: mockPostHog,
 }));
 
 describe("analytics module", () => {
@@ -31,10 +36,10 @@ describe("analytics module", () => {
   });
 
   describe("environment gating", () => {
-    it("does not init posthog in development", () => {
+    it("does not init posthog in development", async () => {
       (process.env as Record<string, string>).NODE_ENV = "development";
       const { initAnalytics } = require("../analytics");
-      initAnalytics();
+      await initAnalytics();
       expect(mockInit).not.toHaveBeenCalled();
     });
 
@@ -45,24 +50,24 @@ describe("analytics module", () => {
       expect(mockCapture).not.toHaveBeenCalled();
     });
 
-    it("does nothing when window is undefined (SSR)", () => {
+    it("does nothing when window is undefined (SSR)", async () => {
       (process.env as Record<string, string>).NODE_ENV = "production";
       const windowSpy = jest
         .spyOn(global, "window" as any, "get")
         .mockReturnValue(undefined);
       const { initAnalytics } = require("../analytics");
-      expect(() => initAnalytics()).not.toThrow();
+      await expect(initAnalytics()).resolves.not.toThrow();
       expect(mockInit).not.toHaveBeenCalled();
       windowSpy.mockRestore();
     });
   });
 
   describe("PII stripping via sanitize_properties", () => {
-    it("strips donorAddress, transactionHash, and email from properties", () => {
+    it("strips donorAddress, transactionHash, and email from properties", async () => {
       (process.env as Record<string, string>).NODE_ENV = "production";
       (process.env as Record<string, string>).NEXT_PUBLIC_POSTHOG_KEY = "test-key";
       const { initAnalytics } = require("../analytics");
-      initAnalytics();
+      await initAnalytics();
 
       const sanitizeFn = mockInit.mock.calls[0][1].sanitize_properties;
 
@@ -81,11 +86,11 @@ describe("analytics module", () => {
       expect(result.currency).toBe("XLM");
     });
 
-    it("buckets amountXLM into ranges", () => {
+    it("buckets amountXLM into ranges", async () => {
       (process.env as Record<string, string>).NODE_ENV = "production";
       (process.env as Record<string, string>).NEXT_PUBLIC_POSTHOG_KEY = "test-key";
       const { initAnalytics } = require("../analytics");
-      initAnalytics();
+      await initAnalytics();
 
       const sanitizeFn = mockInit.mock.calls[0][1].sanitize_properties;
 
@@ -114,14 +119,20 @@ describe("analytics module", () => {
   });
 
   describe("setAnalyticsConsent", () => {
-    it("sets persistence to cookie when consent is true", () => {
-      const { setAnalyticsConsent } = require("../analytics");
+    it("sets persistence to cookie when consent is true", async () => {
+      (process.env as Record<string, string>).NODE_ENV = "production";
+      (process.env as Record<string, string>).NEXT_PUBLIC_POSTHOG_KEY = "test-key";
+      const { setAnalyticsConsent, initAnalytics } = require("../analytics");
+      await initAnalytics();
       setAnalyticsConsent(true);
       expect(mockSetConfig).toHaveBeenCalledWith({ persistence: "cookie" });
     });
 
-    it("sets persistence to memory when consent is false", () => {
-      const { setAnalyticsConsent } = require("../analytics");
+    it("sets persistence to memory when consent is false", async () => {
+      (process.env as Record<string, string>).NODE_ENV = "production";
+      (process.env as Record<string, string>).NEXT_PUBLIC_POSTHOG_KEY = "test-key";
+      const { setAnalyticsConsent, initAnalytics } = require("../analytics");
+      await initAnalytics();
       setAnalyticsConsent(false);
       expect(mockSetConfig).toHaveBeenCalledWith({ persistence: "memory" });
     });

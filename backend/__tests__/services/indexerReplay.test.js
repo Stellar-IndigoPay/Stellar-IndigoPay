@@ -127,14 +127,29 @@ describe("Indexer Pipeline Replay Determinism", () => {
   async function getDatabaseState() {
     const client = await pool.connect();
     try {
+      // Scope queries to the fixture's known IDs so parallel CI workers
+      // running other tests with different project_ids / donors don't leak
+      // rows into the determinism comparison.
+      const fixtureProjectId = "11111111-1111-1111-1111-111111111111";
+      const fixtureDonor = "GBDONORAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABC";
+
       const donations = (await tableExists(client, "donations"))
-        ? (await client.query("SELECT * FROM donations ORDER BY id")).rows
+        ? (await client.query(
+          "SELECT * FROM donations WHERE project_id = $1 ORDER BY id",
+          [fixtureProjectId],
+        )).rows
         : [];
       const profiles = (await tableExists(client, "profiles"))
-        ? (await client.query("SELECT * FROM profiles ORDER BY public_key")).rows
+        ? (await client.query(
+          "SELECT * FROM profiles WHERE public_key = $1 ORDER BY public_key",
+          [fixtureDonor],
+        )).rows
         : [];
       const projects = (await tableExists(client, "projects"))
-        ? (await client.query("SELECT * FROM projects ORDER BY id")).rows
+        ? (await client.query(
+          "SELECT * FROM projects WHERE id = $1 ORDER BY id",
+          [fixtureProjectId],
+        )).rows
         : [];
       const dlq = (await tableExists(client, "soroban_event_dlq"))
         ? (await client.query("SELECT * FROM soroban_event_dlq ORDER BY id")).rows

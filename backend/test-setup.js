@@ -7,3 +7,5 @@ globalThis.setTimeout = setTimeout;
 globalThis.clearTimeout = clearTimeout;
 globalThis.setInterval = setInterval;
 globalThis.clearInterval = clearInterval;
+global.File = class File {};
+const crypto = require('crypto'); global.crypto = global.crypto || crypto;
