@@ -97,6 +97,9 @@
     "wait-on": "^8.0.5",
     "whatwg-fetch": "^3.6.20"
   },
+  "optionalDependencies": {
+    "@rollup/rollup-linux-x64-gnu": "^4.62.2"
+  },
   "overrides": {
     "axe-core": "4.10.0",
     "@sentry/nextjs": {
