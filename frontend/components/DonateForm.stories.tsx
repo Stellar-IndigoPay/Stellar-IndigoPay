@@ -61,7 +61,7 @@ export const Default: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    const amountInput = canvas.getByPlaceholderText(/100/i);
+    const amountInput = canvas.getByTestId("donation-amount");
     await userEvent.type(amountInput, "500");
     const messageInput = canvas.getByPlaceholderText(/Leave a message/i);
     await userEvent.type(messageInput, "Great project!");

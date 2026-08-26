@@ -29,7 +29,7 @@ export const Default: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    const button = canvas.getByRole("button", { name: /Connect Wallet/i });
+    const button = await canvas.findByTestId("wallet-connect-button");
     await expect(button).toBeInTheDocument();
     await userEvent.click(button);
   },
