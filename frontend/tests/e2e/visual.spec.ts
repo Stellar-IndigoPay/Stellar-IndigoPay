@@ -1,8 +1,8 @@
 import { test, expect } from "@playwright/test";
-import { mockFreighterWallet } from "./mocks/wallet";
-import { mockBackendAPI, type MockBackendState } from "./mocks/api";
-import { mockHorizonAPI } from "./mocks/horizon";
-import { FIXTURE_PROJECTS, PRIMARY_PROJECT } from "./fixtures/projects";
+import { mockFreighterWallet } from "../../e2e/mocks/wallet";
+import { mockBackendAPI, type MockBackendState } from "../../e2e/mocks/api";
+import { mockHorizonAPI } from "../../e2e/mocks/horizon";
+import { FIXTURE_PROJECTS, PRIMARY_PROJECT } from "../../e2e/fixtures/projects";
 
 // Visual diffing is only meaningful against one rendering engine — running it
 // across Chromium/Firefox/WebKit would just compare each browser's own font
