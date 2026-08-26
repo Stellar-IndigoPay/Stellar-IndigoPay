@@ -1,4 +1,4 @@
-import { useState, useEffect, memo } from "react";
+import { useState, useEffect, memo, useRef } from "react";
 import Link from "next/link";
 import { formatXLM } from "@/utils/format";
 
@@ -16,6 +16,35 @@ interface Props {
 
 const LiveDonationTicker = memo(function LiveDonationTicker({ donations }: Props) {
   const [tickerIndex, setTickerIndex] = useState(0);
+  // Workstream 7: a dedicated sr-only live region announces *new* donations
+  // ("New donation: 150 XLM to …"), debounced to at most one announcement per
+  // 3 seconds. The visible ticker's rotation must NOT be re-announced — it is
+  // the same content cycling, and re-announcing it every 3.5s would drown out
+  // genuinely new donations for screen-reader users.
+  const [announcement, setAnnouncement] = useState<string | null>(null);
+  const lastAnnouncedIdRef = useRef<string | null>(null);
+  const lastAnnouncedAtRef = useRef<number>(0);
+
+  useEffect(() => {
+    // The feed is not guaranteed to be ordered, so pick the newest by
+    // createdAt rather than assuming index 0.
+    const newest = donations.reduce<Donation | null>((max, d) => {
+      if (!max) return d;
+      return new Date(d.createdAt) > new Date(max.createdAt) ? d : max;
+    }, null);
+    if (!newest || newest.id === lastAnnouncedIdRef.current) return;
+
+    // Debounce: at most one announcement per 3 seconds.
+    const now = Date.now();
+    if (now - lastAnnouncedAtRef.current < 3000) return;
+    lastAnnouncedIdRef.current = newest.id;
+    lastAnnouncedAtRef.current = now;
+    setAnnouncement(
+      `New donation: ${formatXLM(newest.amountXLM)} to ${newest.projectName}`,
+    );
+    const timer = window.setTimeout(() => setAnnouncement(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [donations]);
 
   useEffect(() => {
     if (donations.length <= 1) return;
@@ -45,6 +74,10 @@ const LiveDonationTicker = memo(function LiveDonationTicker({ donations }: Props
       role="region"
       aria-label="Live donation ticker"
     >
+      {/* Workstream 7: debounced announcements of NEW donations only. */}
+      <span className="sr-only" aria-live="polite" data-testid="ticker-announcement">
+        {announcement}
+      </span>
       <div className="max-w-6xl mx-auto flex items-center gap-3 text-sm text-white font-body">
         <span className="inline-flex items-center gap-2 text-[11px] uppercase tracking-widest text-[#818CF8] font-bold">
           <span
@@ -53,8 +86,8 @@ const LiveDonationTicker = memo(function LiveDonationTicker({ donations }: Props
           />
           Live donations
         </span>
-        <p key={item.id} className="animate-fade-in-up" aria-live="polite">
-          <span className="sr-only">A new donation: </span>
+        <p key={item.id} className="animate-fade-in-up">
+          <span className="sr-only">Latest donation: </span>
           just donated <strong>{formatXLM(item.amountXLM)}</strong> to{" "}
           <Link
             href={`/projects/${item.projectId}`}

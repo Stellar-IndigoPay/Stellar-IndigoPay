@@ -172,6 +172,61 @@ exports[`DonorProfile Component matches snapshot for badge tier: EarthGuardian 1
         class="card"
       >
         <h2
+          class="label mb-3"
+        >
+          Earned Badges
+        </h2>
+        <div
+          class="flex flex-wrap gap-2"
+        >
+          <div
+            class="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border bg-blue-50 text-blue-700 border-blue-200"
+            title="Earth Guardian — earned Jan 1, 2023"
+          >
+            <span
+              aria-label="Earth Guardian"
+              class="text-base leading-none"
+              role="img"
+            >
+              🌍
+            </span>
+            Earth Guardian
+          </div>
+        </div>
+      </div>
+      <div
+        class="card"
+      >
+        <h2
+          class="label mb-1"
+        >
+          Claim your Impact NFT
+        </h2>
+        <p
+          class="text-sm text-[#5a7a5a] font-body mb-4"
+        >
+          Mint an on-chain
+           
+          <span
+            class="font-semibold text-blue-700"
+          >
+            🌍
+             
+            Earth Guardian
+          </span>
+           
+          Impact NFT for your contributions.
+        </p>
+        <button
+          class="btn-primary text-sm"
+        >
+          🔗 Connect Freighter to claim
+        </button>
+      </div>
+      <div
+        class="card"
+      >
+        <h2
           class="label mb-1"
         >
           Recent Donations
@@ -395,6 +450,61 @@ exports[`DonorProfile Component matches snapshot for badge tier: Forest 1`] = `
             Jan 1, 2023
           </p>
         </div>
+      </div>
+      <div
+        class="card"
+      >
+        <h2
+          class="label mb-3"
+        >
+          Earned Badges
+        </h2>
+        <div
+          class="flex flex-wrap gap-2"
+        >
+          <div
+            class="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border bg-teal-50 text-teal-700 border-teal-200"
+            title="Forest — earned Jan 1, 2023"
+          >
+            <span
+              aria-label="Forest"
+              class="text-base leading-none"
+              role="img"
+            >
+              🌲
+            </span>
+            Forest
+          </div>
+        </div>
+      </div>
+      <div
+        class="card"
+      >
+        <h2
+          class="label mb-1"
+        >
+          Claim your Impact NFT
+        </h2>
+        <p
+          class="text-sm text-[#5a7a5a] font-body mb-4"
+        >
+          Mint an on-chain
+           
+          <span
+            class="font-semibold text-teal-700"
+          >
+            🌲
+             
+            Forest
+          </span>
+           
+          Impact NFT for your contributions.
+        </p>
+        <button
+          class="btn-primary text-sm"
+        >
+          🔗 Connect Freighter to claim
+        </button>
       </div>
       <div
         class="card"
@@ -856,6 +966,61 @@ exports[`DonorProfile Component matches snapshot for badge tier: Seedling 1`] = 
         class="card"
       >
         <h2
+          class="label mb-3"
+        >
+          Earned Badges
+        </h2>
+        <div
+          class="flex flex-wrap gap-2"
+        >
+          <div
+            class="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border bg-emerald-50 text-emerald-700 border-emerald-200"
+            title="Seedling — earned Jan 1, 2023"
+          >
+            <span
+              aria-label="Seedling"
+              class="text-base leading-none"
+              role="img"
+            >
+              🌱
+            </span>
+            Seedling
+          </div>
+        </div>
+      </div>
+      <div
+        class="card"
+      >
+        <h2
+          class="label mb-1"
+        >
+          Claim your Impact NFT
+        </h2>
+        <p
+          class="text-sm text-[#5a7a5a] font-body mb-4"
+        >
+          Mint an on-chain
+           
+          <span
+            class="font-semibold text-emerald-700"
+          >
+            🌱
+             
+            Seedling
+          </span>
+           
+          Impact NFT for your contributions.
+        </p>
+        <button
+          class="btn-primary text-sm"
+        >
+          🔗 Connect Freighter to claim
+        </button>
+      </div>
+      <div
+        class="card"
+      >
+        <h2
           class="label mb-1"
         >
           Recent Donations
@@ -1079,6 +1244,61 @@ exports[`DonorProfile Component matches snapshot for badge tier: Tree 1`] = `
             Jan 1, 2023
           </p>
         </div>
+      </div>
+      <div
+        class="card"
+      >
+        <h2
+          class="label mb-3"
+        >
+          Earned Badges
+        </h2>
+        <div
+          class="flex flex-wrap gap-2"
+        >
+          <div
+            class="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border bg-green-50 text-green-700 border-green-200"
+            title="Tree — earned Jan 1, 2023"
+          >
+            <span
+              aria-label="Tree"
+              class="text-base leading-none"
+              role="img"
+            >
+              🌳
+            </span>
+            Tree
+          </div>
+        </div>
+      </div>
+      <div
+        class="card"
+      >
+        <h2
+          class="label mb-1"
+        >
+          Claim your Impact NFT
+        </h2>
+        <p
+          class="text-sm text-[#5a7a5a] font-body mb-4"
+        >
+          Mint an on-chain
+           
+          <span
+            class="font-semibold text-green-700"
+          >
+            🌳
+             
+            Tree
+          </span>
+           
+          Impact NFT for your contributions.
+        </p>
+        <button
+          class="btn-primary text-sm"
+        >
+          🔗 Connect Freighter to claim
+        </button>
       </div>
       <div
         class="card"

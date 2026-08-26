@@ -9,6 +9,7 @@ import {
   isAllowed,
 } from "@stellar/freighter-api";
 import { NETWORK_PASSPHRASE } from "./stellar";
+import { resolveDefaultWallet } from "./wallets";
 
 export async function isFreighterInstalled(): Promise<boolean> {
   if (typeof window !== "undefined" && (window as any).__test_publicKey__) {
@@ -84,11 +85,35 @@ export async function signTransactionWithWallet(
   if (typeof window !== "undefined" && (window as any).__test_publicKey__) {
     return { signedXDR: xdr, error: null };
   }
+
+  // Workstream 4: signing is wallet-agnostic. The DonateForm signs through
+  // whichever adapter the donor connected with (Freighter, Albedo, xBull, or
+  // WalletConnect) — resolved from the persisted selection, falling back to
+  // detection — rather than being hard-coded to the Freighter extension.
+  const network =
+    process.env.NEXT_PUBLIC_STELLAR_NETWORK === "mainnet"
+      ? "MAINNET"
+      : "TESTNET";
+
   try {
-    const network =
-      process.env.NEXT_PUBLIC_STELLAR_NETWORK === "mainnet"
-        ? "MAINNET"
-        : "TESTNET";
+    const resolved = await resolveDefaultWallet();
+    if (resolved) {
+      const signedXDR = await resolved.adapter.signTransaction(xdr, {
+        networkPassphrase: NETWORK_PASSPHRASE,
+        network,
+      });
+      return { signedXDR: signedXDR || null, error: null };
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("User declined") || msg.includes("rejected"))
+      return { signedXDR: null, error: "Transaction rejected." };
+    return { signedXDR: null, error: `Signing failed: ${msg}` };
+  }
+
+  // Fallback: no adapter resolved (e.g. Freighter connected before the
+  // adapter registry existed) — sign via the legacy Freighter path.
+  try {
     const result: any = await signTransaction(xdr, {
       networkPassphrase: NETWORK_PASSPHRASE,
       network,
