@@ -98,7 +98,10 @@
     "whatwg-fetch": "^3.6.20"
   },
   "optionalDependencies": {
-    "@rollup/rollup-linux-x64-gnu": "^4.62.2"
+    "@rollup/rollup-linux-x64-gnu": "^4.62.2",
+    "@swc/core": "^1.16.1",
+    "@swc/core-linux-x64-gnu": "^1.16.1",
+    "@swc/core-linux-x64-musl": "^1.16.1"
   },
   "overrides": {
     "axe-core": "4.10.0",
