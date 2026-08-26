@@ -484,12 +484,12 @@ export const getServerSideProps: GetServerSideProps<DonatePageProps> = async (
   // Fetch project from the IndigoPay backend API
   if (process.env.E2E_TESTING === "true") {
     const { FIXTURE_PROJECTS } = require("../../e2e/fixtures/projects");
-    const p = FIXTURE_PROJECTS.find((p: any) => p.id === id);
+    const p = FIXTURE_PROJECTS.find((p: DonateProject) => p.id === id);
     if (p) {
-      const project = {
+      const project: DonateProject = {
         ...p,
-        goal: p.goal ? Number(p.goal) : p.goal,
-        amountRaised: p.amountRaised ? Number(p.amountRaised) : p.amountRaised,
+        goalXLM: p.goalXLM ? Number(p.goalXLM) : 0,
+        raisedXLM: p.raisedXLM ? Number(p.raisedXLM) : 0,
       };
       return { props: { project, presetAmount } };
     }

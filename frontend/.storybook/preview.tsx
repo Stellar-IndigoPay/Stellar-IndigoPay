@@ -67,7 +67,7 @@ const preview: Preview = {
             retry: false,
           },
         },
-      }), []);
+      }), [context.id]);
       return (
       <QueryClientProvider client={qc}>
         <ThemeProvider>
