@@ -896,7 +896,7 @@ pub enum ContractError {
     EscrowFundingFailed = 63,
     EscrowReleaseFailed = 64,
     EscrowClaimFailed = 65,
-    InsufficientContractBalanceForEscrow = 136,
+    InsufficientContractBalanceForEscrow = 138,
     // ── Governance & voting (66–75) ─────────────────────────────────────────
     CannotDelegateToSelf = 66,
     AlreadyDelegatedToThisAddress = 67,

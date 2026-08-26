@@ -12,12 +12,15 @@ const mockOptIn = jest.fn();
 const mockOptOut = jest.fn();
 const mockReset = jest.fn();
 
-jest.mock("posthog-js", () => ({
+const mockPostHog = {
   init: (...args: any[]) => mockInit(...args),
   capture: (...args: any[]) => mockCapture(...args),
-  opt_in_capturing: (...args: any[]) => mockOptIn(...args),
-  opt_out_capturing: (...args: any[]) => mockOptOut(...args),
-  reset: (...args: any[]) => mockReset(...args),
+  set_config: (...args: any[]) => mockSetConfig(...args),
+};
+
+jest.mock("posthog-js", () => ({
+  __esModule: true,
+  default: mockPostHog,
 }));
 
 jest.mock("../consent", () => {
@@ -64,14 +67,11 @@ describe("analytics module", () => {
     process.env = env;
   });
 
-  describe("consent gating", () => {
-    it("does not init posthog if consent is undecided or denied", () => {
-      consent.setConsent("undecided");
-      analytics.initAnalytics();
-      expect(mockInit).not.toHaveBeenCalled();
-
-      consent.setConsent("denied");
-      analytics.initAnalytics();
+  describe("environment gating", () => {
+    it("does not init posthog in development", async () => {
+      (process.env as Record<string, string>).NODE_ENV = "development";
+      const { initAnalytics } = require("../analytics");
+      await initAnalytics();
       expect(mockInit).not.toHaveBeenCalled();
     });
 
@@ -100,6 +100,21 @@ describe("analytics module", () => {
       expect(mockInit).toHaveBeenCalledTimes(1);
     });
 
+    it("does nothing when window is undefined (SSR)", async () => {
+      (process.env as Record<string, string>).NODE_ENV = "production";
+      const windowSpy = jest
+        .spyOn(global, "window" as any, "get")
+        .mockReturnValue(undefined);
+      const { initAnalytics } = require("../analytics");
+      await expect(initAnalytics()).resolves.not.toThrow();
+      expect(mockInit).not.toHaveBeenCalled();
+
+      consent.setConsent("granted");
+      expect(mockInit).not.toHaveBeenCalled();
+      
+      windowSpy.mockRestore();
+    });
+
     it("does not capture events unless consent is granted and initialized", () => {
       consent.setConsent("undecided");
       analytics.initAnalytics();
@@ -114,9 +129,11 @@ describe("analytics module", () => {
   });
 
   describe("PII stripping via sanitize_properties", () => {
-    it("strips donorAddress, transactionHash, and email from properties", () => {
-      consent.setConsent("granted");
-      analytics.initAnalytics();
+    it("strips donorAddress, transactionHash, and email from properties", async () => {
+      (process.env as Record<string, string>).NODE_ENV = "production";
+      (process.env as Record<string, string>).NEXT_PUBLIC_POSTHOG_KEY = "test-key";
+      const { initAnalytics } = require("../analytics");
+      await initAnalytics();
 
       const sanitizeFn = mockInit.mock.calls[0][1].sanitize_properties;
 
@@ -133,6 +150,57 @@ describe("analytics module", () => {
         expect(result.email).toBeUndefined();
       expect(result.projectId).toBe("proj-1");
       expect(result.currency).toBe("XLM");
+    });
+
+    it("buckets amountXLM into ranges", async () => {
+      (process.env as Record<string, string>).NODE_ENV = "production";
+      (process.env as Record<string, string>).NEXT_PUBLIC_POSTHOG_KEY = "test-key";
+      const { initAnalytics } = require("../analytics");
+      await initAnalytics();
+
+      const sanitizeFn = mockInit.mock.calls[0][1].sanitize_properties;
+
+      expect(sanitizeFn({ amountXLM: "5" }).amountXLM).toBe("0-10");
+      expect(sanitizeFn({ amountXLM: "25" }).amountXLM).toBe("11-50");
+      expect(sanitizeFn({ amountXLM: "75" }).amountXLM).toBe("51-100");
+      expect(sanitizeFn({ amountXLM: "200" }).amountXLM).toBe("101-500");
+      expect(sanitizeFn({ amountXLM: "600" }).amountXLM).toBe("500+");
+    });
+  });
+
+  describe("bucketAmount", () => {
+    it("returns correct range for various amounts", () => {
+      const { bucketAmount } = require("../analytics");
+      expect(bucketAmount("0")).toBe("0-10");
+      expect(bucketAmount("10")).toBe("0-10");
+      expect(bucketAmount("11")).toBe("11-50");
+      expect(bucketAmount("50")).toBe("11-50");
+      expect(bucketAmount("51")).toBe("51-100");
+      expect(bucketAmount("100")).toBe("51-100");
+      expect(bucketAmount("101")).toBe("101-500");
+      expect(bucketAmount("500")).toBe("101-500");
+      expect(bucketAmount("501")).toBe("500+");
+      expect(bucketAmount("9999")).toBe("500+");
+    });
+  });
+
+  describe("setAnalyticsConsent", () => {
+    it("sets persistence to cookie when consent is true", async () => {
+      (process.env as Record<string, string>).NODE_ENV = "production";
+      (process.env as Record<string, string>).NEXT_PUBLIC_POSTHOG_KEY = "test-key";
+      const { setAnalyticsConsent, initAnalytics } = require("../analytics");
+      await initAnalytics();
+      setAnalyticsConsent(true);
+      expect(mockSetConfig).toHaveBeenCalledWith({ persistence: "cookie" });
+    });
+
+    it("sets persistence to memory when consent is false", async () => {
+      (process.env as Record<string, string>).NODE_ENV = "production";
+      (process.env as Record<string, string>).NEXT_PUBLIC_POSTHOG_KEY = "test-key";
+      const { setAnalyticsConsent, initAnalytics } = require("../analytics");
+      await initAnalytics();
+      setAnalyticsConsent(false);
+      expect(mockSetConfig).toHaveBeenCalledWith({ persistence: "memory" });
     });
   });
 });

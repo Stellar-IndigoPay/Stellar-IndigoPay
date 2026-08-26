@@ -237,6 +237,20 @@ const webhookAttemptDurationSeconds = new client.Histogram({
   registers: [registry],
 });
 
+const webhookRetryCount = new client.Counter({
+  name: "webhook_retry_count",
+  help: "Number of webhook retries scheduled, labelled by event_type.",
+  labelNames: ["event_type"],
+  registers: [registry],
+});
+
+const webhookJitterSeconds = new client.Histogram({
+  name: "webhook_jitter_seconds",
+  help: "Jittered backoff delay in seconds applied to webhook retries.",
+  buckets: [30, 60, 120, 300, 600, 1800, 3600, 7200, 21600],
+  registers: [registry],
+});
+
 const aiSummaryTokensTotal = new client.Counter({
   name: "ai_summary_tokens_total",
   help: "Anthropic tokens consumed by the AI summary feature, labelled by model and direction (input|output|cache_read|cache_write).",
@@ -366,6 +380,15 @@ const postgresFailoverTotal = new client.Counter({
   name: "indigopay_postgres_failover_total",
   help: "Total number of Postgres failover events, labelled by outcome.",
   labelNames: ["outcome"], // initiated, succeeded, failed
+  registers: [registry],
+});
+
+// ── Redis Sentinel failover metrics ────────────────────────────────────────
+
+const redisSentinelFailoverTotal = new client.Counter({
+  name: "indigopay_redis_sentinel_failover_total",
+  help: "Redis Sentinel failover / reconnection events, labelled by outcome (subscribed|reconnecting|ready).",
+  labelNames: ["outcome"], // subscribed, reconnecting, ready
   registers: [registry],
 });
 
@@ -559,6 +582,8 @@ const metrics = {
   webhookDeliveriesTotal,
   webhookAttemptsTotal,
   webhookAttemptDurationSeconds,
+  webhookRetryCount,
+  webhookJitterSeconds,
   aiSummaryTokensTotal,
   aiSummaryCostUsdTotal,
   aiSummaryLatencySeconds,
@@ -572,6 +597,7 @@ const metrics = {
   pushSentTotal,
   pushLatencySeconds,
   postgresFailoverTotal,
+  redisSentinelFailoverTotal,
   projectionEventsProcessedTotal,
   projectionLagEvents,
   projectionRebuildDurationSeconds,

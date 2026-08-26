@@ -16,9 +16,10 @@
  */
 
 import { useState, useEffect, useCallback } from "react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/router";
 import Head from "next/head";
-import DonateForm from "@/components/DonateForm";
+const DonateForm = dynamic(() => import("@/components/DonateForm"), { loading: () => <div className="animate-pulse p-4 border rounded-xl bg-gray-50 h-64 flex items-center justify-center text-sm text-gray-500">Loading donation form...</div> });
 import WalletConnect from "@/components/WalletConnect";
 import { fetchProject } from "@/lib/api";
 import { formatXLM, formatCO2, formatNumber, progressPercent } from "@/utils/format";

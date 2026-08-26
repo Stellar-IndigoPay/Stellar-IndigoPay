@@ -1,14 +1,15 @@
-import posthog from "posthog-js";
-import { getConsent, onConsentChange } from "./consent";
+import type { PostHog } from "posthog-js";
 
-let isInitialized = false;
+let posthogInstance: PostHog | null = null;
 
-function doInit() {
-  if (isInitialized) return;
+export async function initAnalytics() {
   if (typeof window === "undefined") return;
   if (process.env.NODE_ENV !== "production" || !process.env.NEXT_PUBLIC_POSTHOG_KEY) return;
 
-  posthog.init(process.env.NEXT_PUBLIC_POSTHOG_KEY || "", {
+  const posthogModule = await import("posthog-js");
+  posthogInstance = posthogModule.default as unknown as PostHog;
+
+  posthogInstance.init(process.env.NEXT_PUBLIC_POSTHOG_KEY || "", {
     api_host:
       process.env.NEXT_PUBLIC_POSTHOG_HOST || "https://app.posthog.com",
     capture_pageview: false,
@@ -65,16 +66,19 @@ export function trackEvent(
   properties?: Record<string, any>,
 ) {
   if (process.env.NODE_ENV !== "production") return;
-  if (getConsent() !== "granted") return;
-  if (!isInitialized) return;
-  
-  posthog.capture(name, properties);
+  if (posthogInstance) {
+    posthogInstance.capture(name, properties);
+  }
 }
 
 export function setAnalyticsConsent(hasConsented: boolean) {
-  import("./consent").then(({ setConsent }) => {
-    setConsent(hasConsented ? "granted" : "denied");
-  });
+  if (posthogInstance) {
+    if (hasConsented) {
+      posthogInstance.set_config({ persistence: "cookie" });
+    } else {
+      posthogInstance.set_config({ persistence: "memory" });
+    }
+  }
 }
 
 export { bucketAmount };

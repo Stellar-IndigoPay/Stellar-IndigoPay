@@ -2,12 +2,13 @@
  * pages/projects/[id].tsx â€” Single project detail + donate
  */
 import { useState, useEffect, useMemo } from "react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/router";
 import Image from "next/image";
 import type { GetServerSideProps } from "next";
 import PageMeta from "@/components/PageMeta";
 import Link from "next/link";
-import DonateForm from "@/components/DonateForm";
+const DonateForm = dynamic(() => import("@/components/DonateForm"), { loading: () => <div className="animate-pulse p-4 border rounded-xl bg-gray-50 h-64 flex items-center justify-center text-sm text-gray-500">Loading donation form...</div> });
 import DonationFeed from "@/components/DonationFeed";
 import ProjectProgressBar from "@/components/ProjectProgressBar";
 import ProjectDetailSkeleton from "@/components/ProjectDetailSkeleton";

@@ -23,7 +23,7 @@ const { invalidateCache } = require("../middleware/cache");
 const { enqueueProfileUpdate } = require("../services/profileQueue");
 const { enqueueImpactRecalc } = require("../services/impactQueue");
 const { enqueuePushNotification } = require("../services/pushQueue");
-const { server } = require("../services/stellar");
+const { getTransaction } = require("../services/stellar");
 const oracleService = require("../services/oracleService");
 const { generateReceiptPdf, hashReceiptContent, signReceipt } = require("../services/receiptGenerator");
 const { invalidateProjectRelatedCache } = require("../services/cacheManager");
@@ -127,7 +127,7 @@ async function recordDonation(req, res, next) {
     // Prevents a caller from inflating raised_xlm with a fake or unconfirmed tx hash.
     let onChainTx;
     try {
-      onChainTx = await server.getTransaction(transactionHash);
+      onChainTx = await getTransaction(transactionHash);
     } catch {
       throw new AppError("TX_NOT_FOUND");
     }
