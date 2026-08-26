@@ -58,22 +58,29 @@ jest.mock("@stellar/stellar-sdk", () => {
         build: jest.fn().mockReturnValue(mockTx),
       }),
     },
+    Networks: {
+      TESTNET: "testnet",
+      PUBLIC: "public",
+    },
   };
 });
 
 // Mock stellar service
-jest.mock("../../src/services/stellar", () => ({
-  CONTRACT_ID: "test-contract-id",
-  NETWORK_PASSPHRASE: "test-passphrase",
-  submitTransaction: jest.fn(),
-  simulateTransactionWithRetry: jest.fn(),
-  server: {
-    loadAccount: jest.fn(),
-  },
-}));
+jest.mock("../../src/services/stellar", () => {
+  return {
+    CONTRACT_ID: "test-contract-id",
+    NETWORK_PASSPHRASE: "test-passphrase",
+    submitTransaction: jest.fn(),
+    submitWithFeeBump: jest.fn().mockResolvedValue({ hash: "mock-hash", successful: true }),
+    simulateTransactionWithRetry: jest.fn(),
+    server: {
+      loadAccount: jest.fn(),
+    },
+  };
+});
 
 const pool = require("../../src/db/pool");
-const { submitTransaction, simulateTransactionWithRetry, server } = require("../../src/services/stellar");
+const { submitTransaction, submitWithFeeBump, simulateTransactionWithRetry, server } = require("../../src/services/stellar");
 const { TransactionBuilder } = require("@stellar/stellar-sdk");
 const { metrics } = require("../../src/services/metrics");
 const recurringKeeper = require("../../src/services/recurringKeeper");
@@ -152,7 +159,7 @@ describe("recurringKeeper Service", () => {
       .mockResolvedValueOnce(account(100))
       .mockResolvedValueOnce(account(100));
     simulateTransactionWithRetry.mockResolvedValueOnce({ error: null, result: { retval: {} } });
-    submitTransaction.mockResolvedValueOnce({ hash: "tx-hash-1" });
+    submitWithFeeBump.mockResolvedValueOnce({ hash: "tx-hash-1" });
 
     // Trigger cycle
     await recurringKeeper.runKeeperCycle();
@@ -161,7 +168,7 @@ describe("recurringKeeper Service", () => {
     expect(pool.query).toHaveBeenCalled();
     expect(server.loadAccount).toHaveBeenCalledWith("GKEYPAIR");
     expect(simulateTransactionWithRetry).toHaveBeenCalled();
-    expect(submitTransaction).toHaveBeenCalledWith("mock-xdr");
+    expect(submitWithFeeBump).toHaveBeenCalledWith(expect.anything(), expect.anything());
     expect(builtAccounts().map((a) => a.sequenceNumber())).toEqual([100]);
     expect(metrics.recurringPending.set).toHaveBeenCalledWith(1);
     expect(metrics.recurringExecutionsTotal.inc).toHaveBeenCalledWith({ status: "success" });
@@ -180,13 +187,13 @@ describe("recurringKeeper Service", () => {
       .mockResolvedValueOnce(account(100))
       .mockResolvedValueOnce(account(103));
     simulateTransactionWithRetry.mockResolvedValue({ error: null, result: { retval: {} } });
-    submitTransaction.mockResolvedValue({ hash: "tx-hash" });
+    submitWithFeeBump.mockResolvedValue({ hash: "tx-hash" });
 
     await recurringKeeper.runKeeperCycle();
 
     // One load up front + one per schedule; never reuses a stale snapshot.
     expect(server.loadAccount).toHaveBeenCalledTimes(3);
-    expect(submitTransaction).toHaveBeenCalledTimes(2);
+    expect(submitWithFeeBump).toHaveBeenCalledTimes(2);
     expect(builtAccounts().map((a) => a.sequenceNumber())).toEqual([100, 103]);
     expect(metrics.recurringExecutionsTotal.inc).toHaveBeenCalledWith({ status: "success" });
   });
@@ -203,13 +210,13 @@ describe("recurringKeeper Service", () => {
     simulateTransactionWithRetry.mockResolvedValue({ error: null, result: { retval: {} } });
     // First submission fails (e.g. tx_bad_seq from an external bump); the
     // second must still run against a reloaded, current sequence.
-    submitTransaction
+    submitWithFeeBump
       .mockRejectedValueOnce(new Error("Transaction failed: tx_bad_seq"))
       .mockResolvedValueOnce({ hash: "tx-hash-2" });
 
     await recurringKeeper.runKeeperCycle();
 
-    expect(submitTransaction).toHaveBeenCalledTimes(2);
+    expect(submitWithFeeBump).toHaveBeenCalledTimes(2);
     expect(builtAccounts().map((a) => a.sequenceNumber())).toEqual([100, 101]);
     expect(metrics.recurringExecutionsTotal.inc).toHaveBeenCalledWith({ status: "failed" });
     expect(metrics.recurringExecutionsTotal.inc).toHaveBeenCalledWith({ status: "success" });
@@ -229,7 +236,7 @@ describe("recurringKeeper Service", () => {
 
     await recurringKeeper.runKeeperCycle();
 
-    expect(submitTransaction).not.toHaveBeenCalled();
+    expect(submitWithFeeBump).not.toHaveBeenCalled();
     expect(metrics.recurringExecutionsTotal.inc).toHaveBeenCalledWith({ status: "failed" });
   });
 });

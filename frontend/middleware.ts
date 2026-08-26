@@ -80,12 +80,31 @@ export function buildCsp(isWidget: boolean): string {
   return directives.join("; ");
 }
 
+/**
+ * Trusted Types report-only policy (issue #1096, Workstream 3): DOM XSS
+ * sinks (innerHTML, dangerouslySetInnerHTML) are required to go through a
+ * Trusted Type policy.  Report-only first — enforcement would break
+ * third-party scripts, so violations are watched via the shared
+ * /api/csp-report endpoint.  Exported so the whitelist is unit-testable
+ * (CI-enforced).
+ */
+export function buildTrustedTypesReportOnlyCsp(): string {
+  return "require-trusted-types-for 'script'; trusted-types dompurify; report-uri /api/csp-report; report-to csp-endpoint";
+}
+
 export function middleware(request: NextRequest) {
   const isWidget = request.nextUrl.pathname.startsWith("/widget/");
   const csp = buildCsp(isWidget);
 
   const response = NextResponse.next();
   response.headers.set("Content-Security-Policy", csp);
+
+  // Trusted Types report-only (issue #1096, Workstream 3).
+  response.headers.set(
+    "Content-Security-Policy-Report-Only",
+    buildTrustedTypesReportOnlyCsp(),
+  );
+
   // Define the named endpoint referenced by the CSP `report-to` directive.
   response.headers.set("Reporting-Endpoints", 'csp-endpoint="/api/csp-report"');
 

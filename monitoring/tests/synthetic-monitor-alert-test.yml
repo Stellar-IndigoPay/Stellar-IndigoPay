@@ -1,0 +1,136 @@
+# monitoring/tests/synthetic-monitor-alert-test.yml
+#
+# promtool test rules for the synthetic monitoring alert rules
+# added in monitoring/alert-rules.yml (issue #1144 Part A).
+#
+# Run with:
+#   promtool test rules monitoring/tests/synthetic-monitor-alert-test.yml
+
+rule_files:
+  - ../alert-rules.yml
+
+evaluation_interval: 30s
+
+tests:
+  # ═══════════════════════════════════════════════════════════════════
+  # SyntheticDonationCheckFailing
+  # Condition: increase(synthetic_donation_checks_total{result="failure"}[15m]) >= 2
+  # for: 0m  (fires immediately when the condition is true)
+  # ═══════════════════════════════════════════════════════════════════
+
+  # FIRES: 2 failure increments within 15 minutes (5-min cron spacing)
+  - name: synthetic-check-two-failures-fires
+    interval: 5m
+    input_series:
+      - series: 'synthetic_donation_checks_total{job="synthetic-monitor",result="failure"}'
+        # Counter starts at 0, increments by 1 at t=5m and t=10m → 2 failures in 15m window
+        values: '0 1 2'
+    alert_rule_test:
+      - alertname: SyntheticDonationCheckFailing
+        eval_time: 10m
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              routing: pagerduty
+              job: synthetic-monitor
+              result: failure
+            exp_annotations:
+              summary: "Synthetic end-to-end donation check has failed at least twice in the last 15 minutes"
+
+  # DOES NOT FIRE: only one failure recorded (counter went from 0 → 1)
+  - name: synthetic-check-one-failure-no-fire
+    interval: 5m
+    input_series:
+      - series: 'synthetic_donation_checks_total{job="synthetic-monitor",result="failure"}'
+        values: '0 1 1'
+    alert_rule_test:
+      - alertname: SyntheticDonationCheckFailing
+        eval_time: 10m
+        exp_alerts: []
+
+  # DOES NOT FIRE: only success checks recorded
+  - name: synthetic-check-all-passing-no-fire
+    interval: 5m
+    input_series:
+      - series: 'synthetic_donation_checks_total{job="synthetic-monitor",result="success"}'
+        values: '0 1 2 3'
+    alert_rule_test:
+      - alertname: SyntheticDonationCheckFailing
+        eval_time: 15m
+        exp_alerts: []
+
+  # ═══════════════════════════════════════════════════════════════════
+  # SyntheticMonitorSilent — fires when metric is absent for >5m
+  # ═══════════════════════════════════════════════════════════════════
+
+  # FIRES: no synthetic_donation_last_timestamp metric at all (absent() branch)
+  - name: synthetic-monitor-absent-fires
+    interval: 30s
+    input_series: []
+    alert_rule_test:
+      # 6m = 1m warmup + 5m for
+      - alertname: SyntheticMonitorSilent
+        eval_time: 6m
+        exp_alerts:
+          - exp_labels:
+              severity: warn
+            exp_annotations:
+              summary: "Synthetic monitor has not emitted a heartbeat in >15 minutes"
+
+  # DOES NOT FIRE: a recent timestamp series exists (absent() returns nothing)
+  - name: synthetic-monitor-present-no-fire
+    interval: 30s
+    input_series:
+      - series: 'synthetic_donation_last_timestamp{job="synthetic-monitor"}'
+        # Provide a non-zero value so absent() returns empty
+        values: '1700000000+30x30'
+    alert_rule_test:
+      - alertname: SyntheticMonitorSilent
+        eval_time: 6m
+        exp_alerts: []
+
+  # ═══════════════════════════════════════════════════════════════════
+  # SyntheticDonationCheckSlow — for: 15m, p99 > 30s
+  # ═══════════════════════════════════════════════════════════════════
+
+  # FIRES: all checks take 45s (all observations land in le="+Inf" only)
+  - name: synthetic-check-slow-fires
+    interval: 30s
+    input_series:
+      - series: 'synthetic_donation_duration_seconds_bucket{job="synthetic-monitor",le="10"}'
+        values: '0+0x50'
+      - series: 'synthetic_donation_duration_seconds_bucket{job="synthetic-monitor",le="20"}'
+        values: '0+0x50'
+      - series: 'synthetic_donation_duration_seconds_bucket{job="synthetic-monitor",le="30"}'
+        values: '0+0x50'
+      - series: 'synthetic_donation_duration_seconds_bucket{job="synthetic-monitor",le="60"}'
+        values: '0+1x50'
+      - series: 'synthetic_donation_duration_seconds_bucket{job="synthetic-monitor",le="+Inf"}'
+        values: '0+1x50'
+    alert_rule_test:
+      - alertname: SyntheticDonationCheckSlow
+        eval_time: 17m
+        exp_alerts:
+          - exp_labels:
+              severity: warn
+            exp_annotations:
+              summary: "Synthetic donation check p99 duration is above 30s"
+
+  # DOES NOT FIRE: all checks are fast (all under 10s)
+  - name: synthetic-check-fast-no-fire
+    interval: 30s
+    input_series:
+      - series: 'synthetic_donation_duration_seconds_bucket{job="synthetic-monitor",le="10"}'
+        values: '0+1x50'
+      - series: 'synthetic_donation_duration_seconds_bucket{job="synthetic-monitor",le="20"}'
+        values: '0+1x50'
+      - series: 'synthetic_donation_duration_seconds_bucket{job="synthetic-monitor",le="30"}'
+        values: '0+1x50'
+      - series: 'synthetic_donation_duration_seconds_bucket{job="synthetic-monitor",le="60"}'
+        values: '0+1x50'
+      - series: 'synthetic_donation_duration_seconds_bucket{job="synthetic-monitor",le="+Inf"}'
+        values: '0+1x50'
+    alert_rule_test:
+      - alertname: SyntheticDonationCheckSlow
+        eval_time: 17m
+        exp_alerts: []

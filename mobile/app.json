@@ -11,18 +11,24 @@
       "resizeMode": "contain",
       "backgroundColor": "#227239"
     },
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.stellarindigopay.app",
       "associatedDomains": [
         "applinks:indigopay.example.com",
-        "webcredentials:indigopay.example.com"
+        "webcredentials:indigopay.example.com",
+        "applinks:stellarindigopay.com"
       ],
       "infoPlist": {
         "CFBundleURLTypes": [
           {
-            "CFBundleURLSchemes": ["indigopay", "web+stellar"]
+            "CFBundleURLSchemes": [
+              "indigopay",
+              "web+stellar"
+            ]
           }
         ]
       }
@@ -38,7 +44,9 @@
           "action": "VIEW",
           "autoVerify": true,
           "data": [
-            { "scheme": "indigopay" },
+            {
+              "scheme": "indigopay"
+            },
             {
               "scheme": "web+stellar",
               "host": "pay",
@@ -48,9 +56,22 @@
               "scheme": "https",
               "host": "indigopay.example.com",
               "pathPrefix": "/project/"
+            },
+            {
+              "scheme": "https",
+              "host": "stellarindigopay.com",
+              "pathPrefix": "/donate/"
+            },
+            {
+              "scheme": "https",
+              "host": "stellarindigopay.com",
+              "pathPrefix": "/project/"
             }
           ],
-          "category": ["BROWSABLE", "DEFAULT"]
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
         }
       ]
     },
@@ -68,7 +89,18 @@
         }
       ]
     ],
-    "scheme": "indigopay"
+    "scheme": "indigopay",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/00000000-0000-0000-0000-000000000000",
+      "codeSigningCertificate": "./certs/certificate.pem",
+      "codeSigningMetadata": {
+        "keyid": "main",
+        "alg": "rsa-v1_5-sha256"
+      }
+    }
   },
   "extra": {
     "scheme": "indigopay"

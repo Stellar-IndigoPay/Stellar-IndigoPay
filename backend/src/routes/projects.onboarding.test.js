@@ -14,8 +14,9 @@ jest.mock("../services/redis", () => ({
 jest.mock("../services/stellar", () => ({
   getOnChainProject: jest.fn().mockResolvedValue(null),
   getProjectDonationEvents: jest.fn().mockResolvedValue([]),
+  getTransaction: jest.fn(),
   CONTRACT_ID: "test-contract-id",
-  server: { loadAccount: jest.fn(), getTransaction: jest.fn() },
+  server: { loadAccount: jest.fn() },
   NETWORK_PASSPHRASE: "Test SDF Network ; September 2015",
 }));
 

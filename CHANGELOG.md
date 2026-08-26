@@ -2,6 +2,28 @@
 
 ### Features
 
+* **backend:** admin session management endpoints + email/password login with TOTP MFA (closes #1123)
+  - New `backend/src/routes/admin/sessions.js`: `GET /api/admin/sessions` lists active sessions (flagging the caller's), `DELETE /api/admin/sessions/:family` revokes one session family, and `DELETE /api/admin/sessions` revokes every session except the one identified by the refresh cookie
+  - New `admins` table (migration 032) with bcrypt `password_hash`, base32 `mfa_secret`, and `mfa_enabled`; `POST /api/admin/auth/login` authenticates by email + password
+  - `POST /api/admin/auth/mfa/setup` generates a TOTP secret with otpauth URL + QR code; `POST /api/admin/auth/mfa/verify` enables MFA after the first code verifies
+  - MFA logins are two-leg: the password leg returns a short-lived `mfa-challenge` token that is exchanged (with the TOTP code) at the same endpoint, so the password is never re-sent; `adminRequired` rejects `mfa-challenge` tokens outright
+  - Existing `X-Admin-Key` header auth and the env-credential `/api/admin/login` path are unchanged
+  - Session endpoints moved from `admin.js` into the new router; the old `POST /api/admin/sessions/:id/revoke` is replaced by `DELETE /api/admin/sessions/:family`
+  - New tests: 25 admin auth/session tests covering list/revoke acceptance criteria, MFA setup-verify roundtrip, and challenge-token rejection (62 total in `admin.test.js`)
+
+* **monitoring:** synthetic on-chain transaction monitoring + business-level metrics dashboards (closes #1144)
+  - Part A: Add `scripts/synthetic-monitor.js` — proactive 5-minute full-path check (Horizon + Soroban RPC + `sendTransaction` + `getTransaction` confirmation) with Prometheus metrics (`synthetic_donation_success`, `synthetic_donation_duration_seconds`, `synthetic_donation_checks_total`, `synthetic_donation_last_timestamp`)
+  - Part A: Add `.github/workflows/synthetic-monitor.yml` — scheduled GitHub Actions workflow (every 5 min, explicit `contents: read` + `issues: write` permissions); auto-creates GitHub issue on failure
+  - Part A: Add `SyntheticDonationCheckFailing` (page, fires on ≥2 confirmed failures in 15 min), `SyntheticMonitorSilent` (warn), and `SyntheticDonationCheckSlow` (warn) alert rules in `monitoring/alert-rules.yml`
+  - Part A: Add `docs/runbooks/synthetic-monitor-failure.md` with step-by-step incident response
+  - Part B: Add `scripts/business-metrics-exporter.js` — Postgres-backed exporter of 17 business KPIs (donation volume, active donors, retention, conversion, CO₂ offsets, AI cost, webhook reliability, recurring subscriptions); `statement_timeout` on Pool, `topProjectXlm.reset()` before each refresh, Prometheus label escaping
+  - Part B: Add business recording rules group to `monitoring/recording-rules.yml` (16 pre-computed rules in the existing `groups:` list — no duplicate top-level key)
+  - Part B: Add `monitoring/grafana/dashboards/indigopay-business-overview.json` — Business Overview dashboard (7 rows, 28 panels: volume, retention, projects, CO₂, operations, synthetic monitor, exporter health)
+  - Update `monitoring/prometheus.yml` to scrape `synthetic-monitor` (:9091) and `business-metrics-exporter` (:9092) jobs
+  - Update `monitoring/docker-compose.monitoring.yml` to include both new services with network aliases (`synthetic-monitor-svc`, `business-metrics-exporter-svc`) matching Prometheus scrape targets; full `backend/node_modules` mount for pg runtime deps; require `SYNTHETIC_DONOR_SECRET_KEY`
+  - Add `monitoring/grafana/dashboards/provisioner.yml` for automatic Grafana dashboard provisioning
+  - Add `monitoring/tests/synthetic-monitor-alert-test.yml` and `monitoring/tests/business-recording-rules-test.yml` (promtool test suites)
+
 * **contracts:** bounded slash history with ring-buffer eviction for oracle reporter accountability (closes #672)
   - Add `SlashEvent` struct and per-reporter `SlashHistoryMeta` ring buffer to `SimpleOracle`
   - New admin-only `slash_reporter(admin, reporter, reason)` entry point records a timestamped slash event
@@ -300,6 +322,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **contracts:** eliminate milestone payout rounding-dust by paying the exact remainder on the final milestone release and compute exact residual in compute_remaining_funds (closes #736)
 - **ci,extension:** stop tracking the generated `greenpay-extension.zip` in git, generate it from source in CI, and verify the packaged artifact is reproducible across two builds (closes #696)
 - **contracts:** prevent challenge and refund flows from reversing the same donation twice; invalid finalization attempts now return structured errors instead of underflowing accounting.
 - **frontend:** pin locale (`en-US`) and timezone (`UTC`) for date/number formatting helpers (`formatDate`, `formatDateTime`, `formatTime`, `formatMonthYear`, `formatNumber`) and replace raw `Intl.*`/`toLocaleString` calls in SSR-rendered components, making server/client output deterministic and eliminating hydration mismatches (closes #652)

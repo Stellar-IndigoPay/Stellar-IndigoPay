@@ -25,6 +25,8 @@ services:
       - "9090:9090"
     depends_on:
       - alertmanager
+    networks:
+      - monitoring
 
   grafana:
     image: grafana/grafana:11.2.0
@@ -42,6 +44,8 @@ services:
       - "3001:3000"
     depends_on:
       - prometheus
+    networks:
+      - monitoring
 
   alertmanager:
     image: prom/alertmanager:v0.27.0
@@ -53,6 +57,74 @@ services:
       - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
     ports:
       - "9093:9093"
+    networks:
+      - monitoring
+
+  # ── Synthetic monitor (issue #1144 Part A) ─────────────────────────────
+  # Runs a synthetic end-to-end donation check every 5 minutes and exposes
+  # Prometheus metrics at :9091/metrics.
+  #
+  # SYNTHETIC_DONOR_SECRET_KEY must be set — no auto-generation is performed.
+  # Generate once: stellar keys generate --network testnet
+  # Fund:          curl "https://friendbot.stellar.org?addr=<PUBLIC_KEY>"
+  # Store:         export SYNTHETIC_DONOR_SECRET_KEY=sXXX…  (or .env file)
+  synthetic-monitor:
+    image: node:22-alpine
+    container_name: stellar-indigopay-synthetic-monitor
+    restart: unless-stopped
+    working_dir: /app
+    command: ["node", "scripts/synthetic-monitor.js"]
+    environment:
+      # Required — see comment above.
+      SYNTHETIC_SECRET_KEY: ${SYNTHETIC_DONOR_SECRET_KEY:?SYNTHETIC_DONOR_SECRET_KEY must be set}
+      CONTRACT_ID: ${CONTRACT_ID:-CCG3QSD7FWTZ5W7NG2N7UDYWYVXF3I2NY5JGT3QPTZ6KHOIKUHMMJ6BT}
+      STELLAR_NETWORK: ${STELLAR_NETWORK:-testnet}
+      HORIZON_URL: ${HORIZON_URL:-https://horizon-testnet.stellar.org}
+      SOROBAN_RPC_URL: ${SOROBAN_RPC_URL:-https://soroban-testnet.stellar.org}
+      SYNTHETIC_PROJECT_ID: ${SYNTHETIC_PROJECT_ID:-project-001}
+      SYNTHETIC_AMOUNT_STROOPS: "100000"
+      METRICS_PORT: "9091"
+      NODE_PATH: /app/backend/node_modules
+    volumes:
+      - ../scripts/synthetic-monitor.js:/app/scripts/synthetic-monitor.js:ro
+      - ../backend/node_modules:/app/backend/node_modules:ro
+    ports:
+      - "9091:9091"
+    networks:
+      monitoring:
+        aliases:
+          # Alias matches the scrape target in prometheus.yml
+          - synthetic-monitor-svc
+
+  # ── Business metrics exporter (issue #1144 Part B) ────────────────────
+  # Queries Postgres for business KPIs and exposes them at :9092/metrics.
+  business-metrics-exporter:
+    image: node:22-alpine
+    container_name: stellar-indigopay-business-metrics
+    restart: unless-stopped
+    working_dir: /app
+    command: ["node", "scripts/business-metrics-exporter.js"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://indigopay:indigopay@postgres:5432/indigopay}
+      METRICS_PORT: "9092"
+      REFRESH_INTERVAL_MS: "60000"
+    volumes:
+      - ../scripts/business-metrics-exporter.js:/app/scripts/business-metrics-exporter.js:ro
+      # Mount the full backend node_modules so pg and all its runtime
+      # dependencies (pg-pool, pg-protocol, pg-types, pg-connection-string,
+      # pgpass) are resolvable by Node.
+      - ../backend/node_modules:/app/node_modules:ro
+    ports:
+      - "9092:9092"
+    networks:
+      monitoring:
+        aliases:
+          # Alias matches the scrape target in prometheus.yml
+          - business-metrics-exporter-svc
+
+networks:
+  monitoring:
+    driver: bridge
 
 volumes:
   prometheus-data:
