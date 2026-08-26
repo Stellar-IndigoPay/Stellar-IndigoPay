@@ -1,39 +1,34 @@
 import { useState, useEffect } from "react";
-import { setAnalyticsConsent } from "@/lib/analytics";
+import { getConsent, setConsent, onConsentChange, ConsentState } from "@/lib/consent";
 
 export default function CookieConsent() {
-  const [consent, setConsent] = useState<boolean | null>(null);
+  const [consent, setConsentState] = useState<ConsentState>("undecided");
 
   useEffect(() => {
-    const stored = localStorage.getItem("cookie-consent");
-    if (stored === "true") {
-      setConsent(true);
-      setAnalyticsConsent(true);
-    } else if (stored === "false") {
-      setConsent(false);
-    }
+    // Initial state
+    setConsentState(getConsent());
+
+    // Listen to external changes (e.g. from settings)
+    const unsubscribe = onConsentChange(setConsentState);
+    return unsubscribe;
   }, []);
 
   const acceptCookies = () => {
-    localStorage.setItem("cookie-consent", "true");
-    setConsent(true);
-    setAnalyticsConsent(true);
+    setConsent("granted");
   };
 
   const declineCookies = () => {
-    localStorage.setItem("cookie-consent", "false");
-    setConsent(false);
-    setAnalyticsConsent(false);
+    setConsent("denied");
   };
 
-  if (consent !== null) return null;
+  if (consent !== "undecided") return null;
 
   return (
     <div className="fixed bottom-0 left-0 right-0 z-50 bg-white dark:bg-[#14142D] border-t border-[rgba(99,102,241,0.15)] dark:border-[rgba(129,140,248,0.20)] p-4 shadow-2xl animate-slide-up">
       <div className="max-w-4xl mx-auto flex flex-col sm:flex-row items-center gap-4">
         <p className="text-sm text-[#475569] dark:text-[#94A3B8] flex-1 font-body">
-          We use cookies to understand how you use IndigoPay and improve the
-          platform. No personal data is collected.
+          We use cookies and analytics to understand how you use IndigoPay and improve the
+          platform. View our <a href="/docs/data-inventory" className="underline text-[#4F46E5] dark:text-[#818CF8]">Data Inventory</a> to see what we collect. No personal data is stored without consent.
         </p>
         <div className="flex gap-3 flex-shrink-0">
           <button

@@ -13,7 +13,7 @@ export async function initAnalytics() {
     api_host:
       process.env.NEXT_PUBLIC_POSTHOG_HOST || "https://app.posthog.com",
     capture_pageview: false,
-    persistence: "memory",
+    persistence: "localStorage",
     sanitize_properties: (properties) => {
       const sanitized = { ...properties };
       delete sanitized.donorAddress;
@@ -24,6 +24,31 @@ export async function initAnalytics() {
       }
       return sanitized;
     },
+  });
+  isInitialized = true;
+}
+
+export function initAnalytics() {
+  if (typeof window === "undefined") return;
+
+  const currentConsent = getConsent();
+  if (currentConsent === "granted") {
+    doInit();
+  }
+
+  // Handle mid-session consent changes
+  onConsentChange((newConsent) => {
+    if (newConsent === "granted") {
+      doInit();
+      if (isInitialized) {
+        posthog.opt_in_capturing();
+      }
+    } else if (newConsent === "denied") {
+      if (isInitialized) {
+        posthog.opt_out_capturing();
+        posthog.reset();
+      }
+    }
   });
 }
 
