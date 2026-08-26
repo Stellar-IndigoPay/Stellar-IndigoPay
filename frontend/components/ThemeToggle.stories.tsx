@@ -22,7 +22,7 @@ type Story = StoryObj<typeof ThemeToggle>;
 export const Default: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    const toggle = canvas.getByRole("button");
+    const toggle = await canvas.findByRole("button");
     await expect(toggle).toBeVisible();
     await userEvent.click(toggle);
   }

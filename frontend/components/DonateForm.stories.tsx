@@ -63,7 +63,7 @@ export const Default: Story = {
     const canvas = within(canvasElement);
     
     // Type in an amount
-    const amountInput = canvas.getByRole("textbox", { name: /amount/i });
+    const amountInput = canvas.getByTestId("donation-amount");
     await userEvent.clear(amountInput);
     await userEvent.type(amountInput, "25");
     
