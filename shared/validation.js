@@ -322,7 +322,7 @@ function createDonationSchema({ network = "testnet", sanitize } = {}) {
     transactionHash,
     amountXLM: amountString({ field: "Amount" }),
     currency: enumField(currencies, "Currency").optional().default("XLM"),
-    message: boundedText({ field: "Message", max: RULES.MESSAGE_MAX_LEN, sanitize }),
+    message: boundedText({ field: "Message", max: RULES.MESSAGE_MAX_LEN, sanitize, truncate: false }),
     anonymous: z.boolean().optional().default(false),
   });
 }
