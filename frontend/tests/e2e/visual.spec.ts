@@ -82,7 +82,7 @@ for (const theme of THEMES) {
 
     test("dashboard snapshot", async ({ page }) => {
       await page.goto("/dashboard");
-      await page.getByTestId("wallet-connect-button").click();
+      await page.getByTestId("wallet-connect-button").first().click();
       await expect(page.getByTestId("donation-history")).toBeVisible();
       await expect(page).toHaveScreenshot(`dashboard-${theme}.png`, {
         fullPage: true,

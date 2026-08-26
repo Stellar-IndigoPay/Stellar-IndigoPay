@@ -482,6 +482,13 @@ export const getServerSideProps: GetServerSideProps<DonatePageProps> = async (
       : null;
 
   // Fetch project from the IndigoPay backend API
+  if (process.env.E2E_TESTING === "true") {
+    const { FIXTURE_PROJECTS } = require("../../e2e/fixtures/projects");
+    const p = FIXTURE_PROJECTS.find((p: any) => p.id === id);
+    if (p) {
+      return { props: { project: p, presetAmount } };
+    }
+  }
   const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
   try {
