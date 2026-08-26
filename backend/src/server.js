@@ -556,7 +556,7 @@ const io = new Server(server, {
   cors: {
     origin: origins,
     methods: ["GET", "POST"],
-    credentials: false,
+    credentials: true,
   },
 });
 // Realtime events carry donor-identifying data: refuse every connection that
