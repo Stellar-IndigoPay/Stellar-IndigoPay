@@ -2,6 +2,7 @@
  * @jest-environment jsdom
  */
 import { render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import ProjectDetail from "@/pages/projects/[id]";
 import type { ClimateProject } from "@/utils/types";
 
@@ -15,6 +16,20 @@ jest.mock("next/router", () => ({
     push: mockPush,
   }),
 }));
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: { retry: false },
+  },
+});
+
+const renderWithProviders = (ui: React.ReactElement) => {
+  return render(
+    <QueryClientProvider client={queryClient}>
+      {ui}
+    </QueryClientProvider>
+  );
+};
 
 // Mock API functions
 const mockFetchProject = jest.fn();
@@ -80,7 +95,7 @@ describe("Active Matches Banner in Project Detail Page", () => {
     ];
     mockFetchProjectMatches.mockResolvedValue(mockMatches);
 
-    render(<ProjectDetail />);
+    renderWithProviders(<ProjectDetail />);
 
     // Wait for async load to finish and state to update
     await waitFor(() => {
@@ -94,7 +109,7 @@ describe("Active Matches Banner in Project Detail Page", () => {
   test("does not render banner when no matches exist", async () => {
     mockFetchProjectMatches.mockResolvedValue([]);
 
-    render(<ProjectDetail />);
+    renderWithProviders(<ProjectDetail />);
 
     await waitFor(() => {
       expect(screen.queryByText(/Amazon Conservation/i)).toBeTruthy();
@@ -121,7 +136,7 @@ describe("Active Matches Banner in Project Detail Page", () => {
     ];
     mockFetchProjectMatches.mockResolvedValue(mockMatches);
 
-    render(<ProjectDetail />);
+    renderWithProviders(<ProjectDetail />);
 
     await waitFor(() => {
       expect(screen.queryByText(/Amazon Conservation/i)).toBeTruthy();
@@ -148,7 +163,7 @@ describe("Active Matches Banner in Project Detail Page", () => {
     ];
     mockFetchProjectMatches.mockResolvedValue(mockMatches);
 
-    render(<ProjectDetail />);
+    renderWithProviders(<ProjectDetail />);
 
     await waitFor(() => {
       expect(screen.queryByText(/Amazon Conservation/i)).toBeTruthy();

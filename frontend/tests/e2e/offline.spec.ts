@@ -17,6 +17,14 @@ test.describe('Offline to Online flow', () => {
       });
     });
 
+    await page.route('**/api/projects/1/updates*', async (route) => {
+      await route.fulfill({ status: 200, json: { success: true, updates: [] } });
+    });
+
+    await page.route('**/api/projects/1/matches*', async (route) => {
+      await route.fulfill({ status: 200, json: { success: true, matches: [] } });
+    });
+
     await page.route('**/api/projects/1/donations*', async (route) => {
       await route.fulfill({
         status: 200,
