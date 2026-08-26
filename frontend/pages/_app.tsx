@@ -77,6 +77,7 @@ export default function App({ Component, pageProps }: AppProps) {
     if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
     navigator.serviceWorker.register("/sw.js").catch(() => undefined);
   }, []);
+
   return (
     <ErrorBoundary>
       <PersistQueryClientProvider

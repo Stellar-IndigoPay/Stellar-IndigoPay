@@ -72,6 +72,7 @@ const MOCK_PROJECT: ClimateProject = {
 
 describe("Active Matches Banner in Project Detail Page", () => {
   beforeEach(() => {
+    queryClient.clear();
     jest.clearAllMocks();
     mockFetchProject.mockResolvedValue(MOCK_PROJECT);
     mockFetchProjectUpdates.mockResolvedValue([]);

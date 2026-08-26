@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { formatXLM, timeAgo, shortenAddress } from "@/utils/format";
 import { explorerUrl, streamProjectPayments } from "@/lib/stellar";
 import type { Donation } from "@/utils/types";
@@ -31,7 +31,7 @@ export default function DonationFeed({
 
   // We only fetch the first page from the hook directly (with cursor = null).
   const { data, isLoading: loading } = useProjectDonations(projectId, 10, null);
-  const donations: Donation[] = data?.donations || [];
+  const donations: Donation[] = useMemo(() => data?.donations || [], [data?.donations]);
   const nextCursor = data?.nextCursor || null;
 
   useEffect(() => {
