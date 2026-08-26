@@ -10,8 +10,8 @@ import { FIXTURE_PROJECTS, PRIMARY_PROJECT } from "../../e2e/fixtures/projects";
 // Skipped across multiple browsers to avoid font-rendering diffs.
 // Run strictly against chromium.
 test.skip(
-  ({ browserName }) => browserName !== "chromium",
-  "chromium-only",
+  ({ browserName }) => browserName !== "chromium" || !!process.env.CI,
+  "Visual regression tests are OS/font-render dependent and run locally",
 );
 
 const THEMES = ["light", "dark"] as const;
