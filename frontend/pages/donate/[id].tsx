@@ -486,7 +486,12 @@ export const getServerSideProps: GetServerSideProps<DonatePageProps> = async (
     const { FIXTURE_PROJECTS } = require("../../e2e/fixtures/projects");
     const p = FIXTURE_PROJECTS.find((p: any) => p.id === id);
     if (p) {
-      return { props: { project: p, presetAmount } };
+      const project = {
+        ...p,
+        goal: p.goal ? Number(p.goal) : p.goal,
+        amountRaised: p.amountRaised ? Number(p.amountRaised) : p.amountRaised,
+      };
+      return { props: { project, presetAmount } };
     }
   }
   const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";

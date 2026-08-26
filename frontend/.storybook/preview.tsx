@@ -12,13 +12,6 @@ if (typeof window !== "undefined") {
     "GAMZRJ5EYHRG2KQRA2P4Q3UCXMEDRSJE5H4ML4QJ4SNQ3QFJLKFNCWJ7";
 }
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      retry: false,
-    },
-  },
-});
 
 function ThemeDecorator({ children, context }: { children: React.ReactNode; context: any }) {
   const theme = context.globals.theme || "light";
@@ -67,8 +60,16 @@ const preview: Preview = {
     },
   },
   decorators: [
-    (Story, context) => (
-      <QueryClientProvider client={queryClient}>
+    (Story, context) => {
+      const qc = React.useMemo(() => new QueryClient({
+        defaultOptions: {
+          queries: {
+            retry: false,
+          },
+        },
+      }), []);
+      return (
+      <QueryClientProvider client={qc}>
         <ThemeProvider>
           <I18nProvider>
             <PriceProvider>
@@ -81,7 +82,7 @@ const preview: Preview = {
           </I18nProvider>
         </ThemeProvider>
       </QueryClientProvider>
-    ),
+    )},
   ],
 };
 

@@ -25,5 +25,6 @@ export const Default: Story = {
     const button = await canvas.findByRole("button");
     await expect(button).toBeInTheDocument();
     await userEvent.click(button);
+    await expect(document.documentElement).toHaveClass("dark");
   },
 };
