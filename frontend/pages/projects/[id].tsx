@@ -21,16 +21,11 @@ import MonthlyGivingSetup from "@/components/MonthlyGivingSetup";
 import DescriptionAccordion from "@/components/DescriptionAccordion";
 import WalletAddressQRCode from "@/components/WalletAddressQRCode";
 import {
-  fetchProject,
-  fetchProjectUpdates,
   subscribeToProject,
   fetchSubscriberCount,
   createProjectCampaign,
-  fetchProjectMatches,
   generateProjectSummary,
   toggleUpdateLike,
-  followProject,
-  unfollowProject,
 } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 import { sanitizeHtml, escapeHtml } from "@/lib/sanitize";
@@ -62,6 +57,8 @@ import type {
 import { trackEvent } from "@/lib/analytics";
 import { useWishlist } from "@/hooks/useWishlist";
 import { QueryErrorFallback } from "@/components/QueryErrorFallback";
+import { useProject, useProjectUpdates, useProjectMatches, useFollowProject, useUnfollowProject } from "@/hooks/queries";
+import { useQueryClient } from "@tanstack/react-query";
 
 interface ProjectDetailProps {
   ogProject?: {
@@ -74,56 +71,31 @@ interface ProjectDetailProps {
 }
 
 export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
+  const queryClient = useQueryClient();
   const router = useRouter();
   const { id } = router.query;
   const { t } = useI18n();
 
   const [publicKey, setPublicKey] = useState<string | null>(null);
-  const [project, setProject] = useState<ClimateProject | null>(null);
-  const [updates, setUpdates] = useState<ProjectUpdate[]>([]);
-  const [loadError, setLoadError] = useState<unknown>(null);
-  const [isRetrying, setIsRetrying] = useState(false);
-  const [retryCount, setRetryCount] = useState(0);
-  const [updateLikes, setUpdateLikes] = useState<
-    Record<string, { liked: boolean; likeCount: number }>
-  >({});
-  const [loading, setLoading] = useState(true);
-  const [refreshKey, setRefreshKey] = useState(0);
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">(
-    "idle",
-  );
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
   const [shareState, setShareState] = useState<"idle" | "copied">("idle");
   const [shareCount, setShareCount] = useState<number>(0);
   const [calcAmount, setCalcAmount] = useState<string>("50");
-  const [subState, setSubState] = useState<
-    "idle" | "loading" | "success" | "error"
-  >("idle");
+  const [subState, setSubState] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [subError, setSubError] = useState<string | null>(null);
   const [subscriberCount, setSubscriberCount] = useState<number | null>(null);
   const [showMonthlySetup, setShowMonthlySetup] = useState(false);
   const [subEmail, setSubEmail] = useState("");
   const [countdownNow, setCountdownNow] = useState(Date.now());
-  const [campaignForm, setCampaignForm] = useState({
-    title: "",
-    goalXLM: "",
-    deadline: "",
-    description: "",
-  });
-  const [campaignState, setCampaignState] = useState<
-    "idle" | "saving" | "success" | "error"
-  >("idle");
+  const [campaignForm, setCampaignForm] = useState({ title: "", goalXLM: "", deadline: "", description: "" });
+  const [campaignState, setCampaignState] = useState<"idle" | "saving" | "success" | "error">("idle");
   const [campaignError, setCampaignError] = useState<string | null>(null);
   const [discussion, setDiscussion] = useState<ProjectDiscussionMessage[]>([]);
   const [discussionLoading, setDiscussionLoading] = useState(false);
-  const [matches, setMatches] = useState<any[]>([]);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const [aiSummaryState, setAiSummaryState] = useState<
-    "idle" | "loading" | "error"
-  >("idle");
+  const [aiSummaryState, setAiSummaryState] = useState<"idle" | "loading" | "error">("idle");
   const [aiSummaryError, setAiSummaryError] = useState<string | null>(null);
-  const [isFollowing, setIsFollowing] = useState(false);
-  const [followCount, setFollowCount] = useState(0);
-  const [followLoading, setFollowLoading] = useState(false);
+  const [updateLikes, setUpdateLikes] = useState<Record<string, { liked: boolean; likeCount: number }>>({});
 
   const { toggleWishlist, isInWishlist } = useWishlist();
   const prefillAmount =
@@ -137,62 +109,27 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
       ? router.query.replyMemo
       : undefined;
 
-  useEffect(() => {
-    if (!id) return;
-    setLoadError(null);
-    Promise.all([
-      fetchProject(id as string, publicKey ?? undefined),
-      fetchProjectUpdates(id as string),
-      fetchProjectMatches(id as string),
-    ])
-      .then(([p, u, m]) => {
-        setProject(p);
-        setUpdates(u);
-        setMatches(m);
-        // Seed follow state from the server response so the button is correct
-        // on initial load without a separate round-trip.
-        setIsFollowing(p.isFollowing ?? false);
-        setFollowCount(p.followCount ?? 0);
-      })
-      .catch((err) => setLoadError(err))
-      .finally(() => setLoading(false));
-  }, [id, publicKey]);
 
-  // Filter matches to only show active, non-expired, and non-exhausted pools
-  const activeMatches = useMemo(
-    () =>
-      matches.filter(
-        (m: any) =>
-          m.status === "active" &&
-          new Date(m.expiresAt) > new Date() &&
-          parseFloat(m.remainingXLM) > 0,
-      ),
-    [matches],
-  );
+  const { data: project, isLoading: projectLoading, isError: projectError, refetch: refetchProject } = useProject(id as string, publicKey || undefined);
+  const { data: updates = [], isLoading: updatesLoading, isError: updatesError, refetch: refetchUpdates } = useProjectUpdates(id as string);
+  const { data: matches = [], isLoading: matchesLoading, isError: matchesError, refetch: refetchMatches } = useProjectMatches(id as string);
+  const followProjectMutation = useFollowProject();
+  const unfollowProjectMutation = useUnfollowProject();
+
+  const loading = projectLoading || updatesLoading || matchesLoading;
+  const loadError = projectError || updatesError || matchesError;
+  const isRetrying = false;
+  
+  const isFollowing = project?.isFollowing ?? false;
+  const followCount = project?.followCount ?? 0;
+  const activeMatches = matches.filter((m: any) => m.status === "active" && new Date(m.expiresAt) > new Date() && parseFloat(m.remainingXLM) > 0);
+
+  const followLoading = followProjectMutation.isPending || unfollowProjectMutation.isPending;
 
   const handleRetryLoad = () => {
-    if (isRetrying || !id) return;
-    setRetryCount((c) => c + 1);
-    setIsRetrying(true);
-    setLoadError(null);
-    setLoading(true);
-    Promise.all([
-      fetchProject(id as string, publicKey ?? undefined),
-      fetchProjectUpdates(id as string),
-      fetchProjectMatches(id as string),
-    ])
-      .then(([p, u, m]) => {
-        setProject(p);
-        setUpdates(u);
-        setMatches(m);
-        setIsFollowing(p.isFollowing ?? false);
-        setFollowCount(p.followCount ?? 0);
-      })
-      .catch((err) => setLoadError(err))
-      .finally(() => {
-        setLoading(false);
-        setIsRetrying(false);
-      });
+    refetchProject();
+    refetchUpdates();
+    refetchMatches();
   };
 
   useEffect(() => {
@@ -251,17 +188,14 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
 
   const handleToggleFollow = async () => {
     if (!publicKey || !project || followLoading) return;
-    setFollowLoading(true);
     try {
-      const result = isFollowing
-        ? await unfollowProject(project.id, publicKey)
-        : await followProject(project.id, publicKey);
-      setIsFollowing(result.isFollowing);
-      setFollowCount(result.followCount);
+      if (isFollowing) {
+        await unfollowProjectMutation.mutateAsync({ projectId: project.id, walletAddress: publicKey });
+      } else {
+        await followProjectMutation.mutateAsync({ projectId: project.id, walletAddress: publicKey });
+      }
     } catch {
-      // silently fail â€” button will revert on next load
-    } finally {
-      setFollowLoading(false);
+      // silently fail
     }
   };
 
@@ -732,8 +666,7 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
     setCampaignError(null);
     try {
       await createProjectCampaign(project.id, campaignForm);
-      const updatedProject = await fetchProject(project.id);
-      setProject(updatedProject);
+      refetchProject();
       setCampaignForm({
         title: "",
         goalXLM: "",
@@ -784,7 +717,6 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
           error={loadError}
           onRetry={handleRetryLoad}
           isRetrying={isRetrying}
-          retryCount={retryCount}
           title="Couldn't load this project"
         />
       </div>
@@ -1292,7 +1224,7 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
                           project.id,
                           publicKey,
                         );
-                        setProject({ ...project, ...result });
+                        queryClient.setQueryData(["project", project.id], { ...project, ...result });
                         setAiSummaryState("idle");
                       } catch (err: unknown) {
                         const msg =
@@ -1660,7 +1592,6 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
             <DonationFeed
               projectId={project.id}
               walletAddress={project.walletAddress}
-              refreshKey={refreshKey}
               onNewDonation={(d) => {
                 setToasts((prev) => [
                   ...prev,
@@ -1849,9 +1780,8 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
                       );
                     }
                   }
-                  setRefreshKey((k) => k + 1);
-                  setTimeout(
-                    () => fetchProject(project.id).then(setProject),
+                                    setTimeout(
+                    () => refetchProject(),
                     2000,
                   );
                 }}

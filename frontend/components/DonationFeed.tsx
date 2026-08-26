@@ -1,14 +1,11 @@
-﻿/**
- * components/DonationFeed.tsx
- * Recent donations for a project â€” live community feed with real-time SSE streaming.
- */
 import { useState, useEffect, useRef, useCallback } from "react";
-import { fetchProjectDonations } from "@/lib/api";
 import { formatXLM, timeAgo, shortenAddress } from "@/utils/format";
 import { explorerUrl, streamProjectPayments } from "@/lib/stellar";
 import type { Donation } from "@/utils/types";
 import { SkeletonList } from "./Skeleton";
 import EmptyState from "./EmptyState";
+import { useQueryClient } from "@tanstack/react-query";
+import { useProjectDonations, queryKeys } from "@/hooks/queries";
 
 interface DonationFeedProps {
   projectId: string;
@@ -24,30 +21,24 @@ export function DonationFeedSkeleton({ rows = 3 }: { rows?: number }) {
 export default function DonationFeed({
   projectId,
   walletAddress,
-  refreshKey = 0,
+  refreshKey,
   onNewDonation,
 }: DonationFeedProps) {
-  const [donations, setDonations] = useState<Donation[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
   const [loadingMore, setLoadingMore] = useState(false);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [newIds, setNewIds] = useState<Set<string>>(new Set());
   const latestIdRef = useRef<string | null>(null);
 
-  // Load initial donation data from the backend API
+  // We only fetch the first page from the hook directly (with cursor = null).
+  const { data, isLoading: loading } = useProjectDonations(projectId, 10, null);
+  const donations: Donation[] = data?.donations || [];
+  const nextCursor = data?.nextCursor || null;
+
   useEffect(() => {
-    setLoading(true);
-    fetchProjectDonations(projectId, 10)
-      .then(({ donations: data, nextCursor: cursor }) => {
-        setDonations(data);
-        setNextCursor(cursor);
-        if (data.length > 0) {
-          latestIdRef.current = data[0].id;
-        }
-      })
-      .catch(console.error)
-      .finally(() => setLoading(false));
-  }, [projectId, refreshKey]);
+    if (donations.length > 0 && !latestIdRef.current) {
+      latestIdRef.current = donations[0].id;
+    }
+  }, [donations]);
 
   // Handle incoming SSE payment
   const handleNewPayment = useCallback(
@@ -70,9 +61,17 @@ export default function DonationFeed({
         createdAt: payment.createdAt,
       };
 
-      setDonations((prev) => {
-        if (prev.some((d) => d.id === newDonation.id)) return prev;
-        return [newDonation, ...prev];
+      queryClient.setQueryData(queryKeys.projectDonations(projectId, null), (old: any) => {
+        if (!old) return old;
+        if (old.donations.some((d: Donation) => d.id === newDonation.id || d.transactionHash === payment.transactionHash && d.transactionHash !== 'pending')) return old;
+        
+        // Remove optimistic donation if any matches
+        let newDonations = old.donations.filter((d: Donation) => !(d.id.startsWith('opt-') && d.donorAddress === newDonation.donorAddress && d.amountXLM === newDonation.amountXLM));
+
+        return {
+          ...old,
+          donations: [newDonation, ...newDonations],
+        };
       });
 
       setNewIds((prev) => new Set(prev).add(payment.id));
@@ -88,7 +87,7 @@ export default function DonationFeed({
 
       latestIdRef.current = payment.id;
     },
-    [projectId, onNewDonation],
+    [projectId, onNewDonation, queryClient],
   );
 
   // Start SSE stream once initial data is loaded
@@ -111,10 +110,17 @@ export default function DonationFeed({
     if (!nextCursor || loadingMore) return;
     setLoadingMore(true);
     try {
+      const { fetchProjectDonations } = await import("@/lib/api");
       const { donations: newDonations, nextCursor: cursor } =
         await fetchProjectDonations(projectId, 10, nextCursor);
-      setDonations((prev) => [...prev, ...newDonations]);
-      setNextCursor(cursor);
+      
+      queryClient.setQueryData(queryKeys.projectDonations(projectId, null), (old: any) => {
+        if (!old) return old;
+        return {
+          donations: [...old.donations, ...newDonations],
+          nextCursor: cursor,
+        };
+      });
     } catch (error) {
       console.error(error);
     } finally {
@@ -131,7 +137,7 @@ export default function DonationFeed({
         {walletAddress && (
           <div className="flex items-center gap-2 mb-3 text-xs text-[#4F46E5] dark:text-[#818CF8] font-body">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            Listening for live donationsâ€¦
+            Listening for live donations…
           </div>
         )}
         <EmptyState
@@ -152,12 +158,9 @@ export default function DonationFeed({
             className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"
             aria-hidden="true"
           />
-          Live â€” new donations appear automatically
+          Live — new donations appear automatically
         </div>
       )}
-      {/* Hidden aggregate live region so each new donation is announced. The
-          key changes when a new donation lands so the message is re-read even
-          when only a single live region is present. */}
       <p
         key={donations[0]?.id ?? "empty"}
         className="sr-only"
@@ -178,7 +181,7 @@ export default function DonationFeed({
         <div
           key={d.id}
           className={`flex items-start gap-3 p-3 rounded-xl bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)] hover:bg-[rgba(99,102,241,0.08)] dark:hover:bg-[rgba(129,140,248,0.10)] transition-all duration-500 ${
-            newIds.has(d.id)
+            newIds.has(d.id) || d.id.startsWith('opt-')
               ? "animate-slide-in ring-2 ring-emerald-400/50 bg-emerald-50"
               : ""
           }`}
@@ -187,7 +190,7 @@ export default function DonationFeed({
             className="w-9 h-9 rounded-full bg-[rgba(99,102,241,0.10)] dark:bg-[rgba(129,140,248,0.12)] flex items-center justify-center flex-shrink-0 text-base"
             aria-hidden="true"
           >
-            {newIds.has(d.id) ? "âœ¨" : "ðŸŒ±"}
+            {newIds.has(d.id) || d.id.startsWith('opt-') ? "✨" : "🌱"}
           </div>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
@@ -195,7 +198,6 @@ export default function DonationFeed({
                 {d.anonymous || !d.donorAddress
                   ? "Anonymous"
                   : shortenAddress(d.donorAddress, 5)}
-                {d.donorAddress ? shortenAddress(d.donorAddress, 5) : "Anonymous"}
               </span>
               <span className="font-mono font-bold text-[#4F46E5] dark:text-[#818CF8] text-sm">
                 {d.currency === "USDC"
@@ -207,7 +209,7 @@ export default function DonationFeed({
                   Matched!
                 </span>
               )}
-              {newIds.has(d.id) && (
+              {(newIds.has(d.id) || d.id.startsWith('opt-')) && (
                 <span className="text-xs bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-body font-semibold">
                   NEW
                 </span>
@@ -220,16 +222,18 @@ export default function DonationFeed({
             )}
             <div className="flex items-center gap-2 mt-1">
               <span className="text-xs text-[#64748B] dark:text-[#94A3B8] font-body">
-                {timeAgo(d.createdAt)}
+                {d.id.startsWith('opt-') ? 'Sending...' : timeAgo(d.createdAt)}
               </span>
-              <a
-                href={explorerUrl(d.transactionHash)}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-[#4F46E5] dark:text-[#818CF8] hover:text-[#6366F1] transition-colors font-body"
-              >
-                View tx â†—
-              </a>
+              {d.transactionHash && d.transactionHash !== 'pending' && d.transactionHash !== 'queued-offline' && (
+                <a
+                  href={explorerUrl(d.transactionHash)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-[#4F46E5] dark:text-[#818CF8] hover:text-[#6366F1] transition-colors font-body"
+                >
+                  View tx ↗
+                </a>
+              )}
             </div>
           </div>
         </div>
@@ -262,4 +266,3 @@ export default function DonationFeed({
     </div>
   );
 }
-

@@ -1,11 +1,5 @@
 /**
  * hooks/queries.ts — React Query hooks for server-state management
- *
- * Central query and mutation hooks for donor history, leaderboard,
- * global stats, impact stats, and donation recording. Replaces the
- * manual useEffect + useState pattern with @tanstack/react-query for
- * automatic background refetching, request deduplication, cache
- * invalidation, and optimistic UI updates.
  */
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -18,30 +12,36 @@ import {
   recordDonation,
   followProject,
   unfollowProject,
+  fetchProjects,
+  fetchProject,
+  fetchProjectUpdates,
+  fetchProjectMatches,
+  fetchProjectDonations,
 } from "@/lib/api";
+import { getXLMBalance } from "@/lib/stellar";
+import { getDueMonthlySubscriptionsForDonor } from "@/lib/monthlyGiving";
 
 // ── Query key factories ──────────────────────────────────────────────────────
 
 export const queryKeys = {
-  donorHistory: (publicKey: string | null) =>
-    ["donorHistory", publicKey] as const,
-  donorProfile: (publicKey: string | null) =>
-    ["donorProfile", publicKey] as const,
-  leaderboard: (limit = 20, period?: string) =>
-    ["leaderboard", { limit, period }] as const,
+  donorHistory: (publicKey: string | null) => ["donorHistory", publicKey] as const,
+  donorProfile: (publicKey: string | null) => ["donorProfile", publicKey] as const,
+  leaderboard: (limit = 20, period?: string) => ["leaderboard", { limit, period }] as const,
   globalStats: () => ["globalStats"] as const,
-  impactDonor: (publicKey: string | null) =>
-    ["impactDonor", publicKey] as const,
+  impactDonor: (publicKey: string | null) => ["impactDonor", publicKey] as const,
   impactGlobal: () => ["impactGlobal"] as const,
+  projects: () => ["projects"] as const,
+  project: (id: string) => ["project", id] as const,
+  projectUpdates: (id: string) => ["projectUpdates", id] as const,
+  projectMatches: (id: string) => ["projectMatches", id] as const,
+  projectDonations: (id: string, cursor?: string | null) => ["projectDonations", id, cursor] as const,
+  balance: (publicKey: string | null) => ["balance", publicKey] as const,
+  pendingRating: (publicKey: string | null) => ["pendingRating", publicKey] as const,
+  dueSubscriptions: (publicKey: string | null) => ["dueSubscriptions", publicKey] as const,
 };
 
 // ── Query hooks ──────────────────────────────────────────────────────────────
 
-/**
- * Fetch donation history for a donor.
- * Disabled when publicKey is null (wallet not connected).
- * Stale time: 60s — donor history changes less frequently.
- */
 export function useDonorHistory(publicKey: string | null) {
   return useQuery({
     queryKey: queryKeys.donorHistory(publicKey),
@@ -51,11 +51,6 @@ export function useDonorHistory(publicKey: string | null) {
   });
 }
 
-/**
- * Fetch a donor profile by public key.
- * Disabled when publicKey is null.
- * Stale time: 60s — profiles are rarely updated.
- */
 export function useDonorProfile(publicKey: string | null) {
   return useQuery({
     queryKey: queryKeys.donorProfile(publicKey),
@@ -65,10 +60,6 @@ export function useDonorProfile(publicKey: string | null) {
   });
 }
 
-/**
- * Fetch the leaderboard with optional limit and period.
- * Stale time: 30s — leaderboard changes more often.
- */
 export function useLeaderboard(limit = 20, period?: string) {
   return useQuery({
     queryKey: queryKeys.leaderboard(limit, period),
@@ -77,10 +68,6 @@ export function useLeaderboard(limit = 20, period?: string) {
   });
 }
 
-/**
- * Fetch global platform statistics.
- * Stale time: 5min — global stats are relatively stable.
- */
 export function useGlobalStats() {
   return useQuery({
     queryKey: queryKeys.globalStats(),
@@ -89,11 +76,6 @@ export function useGlobalStats() {
   });
 }
 
-/**
- * Fetch donor-level impact statistics.
- * Disabled when publicKey is null.
- * Stale time: 60s.
- */
 export function useImpactDonor(publicKey: string | null) {
   return useQuery({
     queryKey: queryKeys.impactDonor(publicKey),
@@ -103,10 +85,6 @@ export function useImpactDonor(publicKey: string | null) {
   });
 }
 
-/**
- * Fetch global impact statistics.
- * Stale time: 5min.
- */
 export function useImpactGlobal() {
   return useQuery({
     queryKey: queryKeys.impactGlobal(),
@@ -115,21 +93,124 @@ export function useImpactGlobal() {
   });
 }
 
+export function useProjects() {
+  return useQuery({
+    queryKey: queryKeys.projects(),
+    queryFn: () => fetchProjects(),
+    staleTime: 30_000,
+  });
+}
+
+export function useProject(id: string | null, publicKey?: string) {
+  return useQuery({
+    queryKey: queryKeys.project(id!),
+    queryFn: () => fetchProject(id!, publicKey),
+    enabled: !!id,
+    staleTime: 30_000,
+  });
+}
+
+export function useProjectUpdates(id: string | null) {
+  return useQuery({
+    queryKey: queryKeys.projectUpdates(id!),
+    queryFn: () => fetchProjectUpdates(id!),
+    enabled: !!id,
+    staleTime: 30_000,
+  });
+}
+
+export function useProjectMatches(id: string | null) {
+  return useQuery({
+    queryKey: queryKeys.projectMatches(id!),
+    queryFn: () => fetchProjectMatches(id!),
+    enabled: !!id,
+    staleTime: 30_000,
+  });
+}
+
+export function useProjectDonations(id: string | null, limit = 10, cursor?: string | null) {
+  return useQuery({
+    queryKey: queryKeys.projectDonations(id!, cursor),
+    queryFn: () => fetchProjectDonations(id!, limit, cursor || undefined),
+    enabled: !!id,
+    staleTime: 30_000,
+  });
+}
+
+export function useBalance(publicKey: string | null) {
+  return useQuery({
+    queryKey: queryKeys.balance(publicKey),
+    queryFn: () => getXLMBalance(publicKey!),
+    enabled: !!publicKey,
+    staleTime: 30_000,
+  });
+}
+
+export function usePendingRating(publicKey: string | null) {
+  return useQuery({
+    queryKey: queryKeys.pendingRating(publicKey),
+    queryFn: () => fetch(`${process.env.NEXT_PUBLIC_API_URL || ""}/api/v1/ratings/pending?donorAddress=${publicKey}`).then(r => r.json()).then(res => res?.success && res.data ? res.data : null),
+    enabled: !!publicKey,
+    staleTime: 30_000,
+  });
+}
+
+export function useDueSubscriptions(publicKey: string | null) {
+  return useQuery({
+    queryKey: queryKeys.dueSubscriptions(publicKey),
+    queryFn: () => getDueMonthlySubscriptionsForDonor(publicKey!),
+    enabled: !!publicKey,
+    staleTime: 30_000,
+  });
+}
+
 // ── Mutation hooks ───────────────────────────────────────────────────────────
 
-/**
- * Record a donation after an on-chain transaction succeeds.
- * On success, invalidates:
- *  - donorHistory for the donating address
- *  - donorProfile for the donating address
- *  - leaderboard (all periods)
- *  - globalStats
- *  - impactDonor for the donating address
- */
 export function useRecordDonation() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: recordDonation,
+    onMutate: async (variables) => {
+      // Optimistic update
+      const donor = variables.donorAddress;
+      const projectId = variables.projectId;
+
+      // Cancel any outgoing refetches so they don't overwrite our optimistic update
+      await queryClient.cancelQueries({ queryKey: queryKeys.projectDonations(projectId, null) });
+
+      // Snapshot the previous value
+      const previousDonations = queryClient.getQueryData(queryKeys.projectDonations(projectId, null));
+
+      // Optimistically update to the new value
+      queryClient.setQueryData(queryKeys.projectDonations(projectId, null), (old: any) => {
+        const newDonation = {
+          id: `opt-${Date.now()}`,
+          projectId,
+          donorAddress: donor,
+          amountXLM: variables.amountXLM,
+          amount: variables.amountXLM,
+          currency: 'XLM',
+          transactionHash: variables.transactionHash || 'pending',
+          createdAt: new Date().toISOString(),
+          anonymous: (variables as any).anonymous || false,
+          message: variables.message || '',
+        };
+        if (!old) {
+          return { donations: [newDonation], nextCursor: null };
+        }
+        return {
+          ...old,
+          donations: [newDonation, ...old.donations],
+        };
+      });
+
+      return { previousDonations, projectId };
+    },
+    onError: (err, variables, context: any) => {
+      if (context?.previousDonations) {
+        queryClient.setQueryData(queryKeys.projectDonations(context.projectId, null), context.previousDonations);
+      }
+    },
     onSuccess: (_data, variables) => {
       const donor = variables.donorAddress;
       queryClient.invalidateQueries({ queryKey: queryKeys.donorHistory(donor) });
@@ -139,13 +220,12 @@ export function useRecordDonation() {
       queryClient.invalidateQueries({ queryKey: queryKeys.impactDonor(donor) });
       queryClient.invalidateQueries({ queryKey: queryKeys.impactGlobal() });
     },
+    onSettled: (_data, _error, variables) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.projectDonations(variables.projectId, null) });
+    },
   });
 }
 
-/**
- * Follow a project.
- * On success, invalidates the project query so the follow count updates.
- */
 export function useFollowProject() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -158,16 +238,12 @@ export function useFollowProject() {
     }) => followProject(projectId, walletAddress),
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({
-        queryKey: ["project", variables.projectId],
+        queryKey: queryKeys.project(variables.projectId),
       });
     },
   });
 }
 
-/**
- * Unfollow a project.
- * On success, invalidates the project query so the follow count updates.
- */
 export function useUnfollowProject() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -180,7 +256,7 @@ export function useUnfollowProject() {
     }) => unfollowProject(projectId, walletAddress),
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({
-        queryKey: ["project", variables.projectId],
+        queryKey: queryKeys.project(variables.projectId),
       });
     },
   });

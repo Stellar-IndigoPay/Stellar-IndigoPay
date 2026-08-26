@@ -11,16 +11,20 @@ import ProjectRating from "@/components/ProjectRating";
 import Tabs from "@/components/Tabs";
 import RecurringDonationsTab from "@/components/RecurringDonationsTab";
 import EmptyState from "@/components/EmptyState";
-import { fetchProfile, fetchDonorHistory, fetchProjects } from "@/lib/api";
+import { fetchProfile, fetchDonorHistory } from "@/lib/api";
 import {
   getDueMonthlySubscriptionsForDonor,
   type OnChainSubscription,
 } from "@/lib/monthlyGiving";
-import { getXLMBalance, getFriendBotFunding, NETWORK } from "@/lib/stellar";
+import { getFriendBotFunding, NETWORK } from "@/lib/stellar";
 import {
   useDonorHistory,
   useDonorProfile,
   useImpactDonor,
+  useProjects,
+  useBalance,
+  usePendingRating,
+  useDueSubscriptions,
 } from "@/hooks/queries";
 import {
   formatXLM,
@@ -37,26 +41,19 @@ import type {
   MonthlySubscription,
 } from "@/utils/types";
 import { useWishlist } from "@/hooks/useWishlist";
+import { useQueryClient } from "@tanstack/react-query";
 import { QueryErrorFallback } from "@/components/QueryErrorFallback";
 export default function Dashboard() {
+  const queryClient = useQueryClient();
   const [publicKey, setPublicKey] = useState<string | null>(null);
-  const [balance, setBalance] = useState<string | null>(null);
   const [isUnfunded, setIsUnfunded] = useState(false);
-  const [allProjects, setAllProjects] = useState<ClimateProject[]>([]);
   const [savedProjects, setSavedProjects] = useState<ClimateProject[]>([]);
   const [friendbotState, setFriendbotState] = useState<
     "idle" | "loading" | "success" | "error"
   >("idle");
   const [friendbotError, setFrienbotError] = useState<string | null>(null);
-  const [dueSubscriptions, setDueSubscriptions] = useState<
-    OnChainSubscription[]
-  >([]);
   const { wishlist } = useWishlist();
   const [showCertificate, setShowCertificate] = useState(false);
-  const [pendingRating, setPendingRating] = useState<{
-    id: string;
-    name: string;
-  } | null>(null);
 
   // React Query hooks for server-state data
   const {
@@ -96,53 +93,24 @@ export default function Dashboard() {
     refetchImpact();
   };
 
-  // Fetch projects (not part of React Query yet — out of scope for this issue)
-  useEffect(() => {
-    if (!publicKey) return;
-    fetchProjects()
-      .then((projects) => {
-        setAllProjects(projects);
-        setSavedProjects(
-          projects.filter((proj) => wishlist.includes(proj.id)),
-        );
-      })
-      .catch(() => {});
-  }, [publicKey, wishlist]);
+  const { data: allProjects = [] } = useProjects();
+  const { data: balance = null, isError: balanceError } = useBalance(publicKey);
+  const { data: pendingRating = null } = usePendingRating(publicKey);
+  const { data: dueSubscriptions = [] } = useDueSubscriptions(publicKey);
 
-  // Fetch XLM balance from Stellar (not part of React Query)
   useEffect(() => {
-    if (!publicKey) return;
-    getXLMBalance(publicKey)
-      .then((b) => {
-        setBalance(b);
-        setIsUnfunded(false);
-      })
-      .catch(() => {
-        setIsUnfunded(true);
-        setBalance(null);
-      });
-  }, [publicKey]);
+    if (balance === null && balanceError) {
+      setIsUnfunded(true);
+    } else if (balance !== null) {
+      setIsUnfunded(false);
+    }
+  }, [balance, balanceError]);
 
-  // Fetch pending rating
   useEffect(() => {
-    if (!publicKey) return;
-    fetch(
-      `${process.env.NEXT_PUBLIC_API_URL || ""}/api/v1/ratings/pending?donorAddress=${publicKey}`,
-    )
-      .then((r) => r.json())
-      .then((res) => {
-        if (res?.success && res.data) {
-          setPendingRating(res.data);
-        }
-      })
-      .catch(() => {});
-  }, [publicKey]);
-
-  // Due monthly subscriptions
-  useEffect(() => {
-    if (!publicKey) return;
-    getDueMonthlySubscriptionsForDonor(publicKey).then(setDueSubscriptions);
-  }, [publicKey]);
+    if (allProjects.length) {
+      setSavedProjects(allProjects.filter((proj) => wishlist.includes(proj.id)));
+    }
+  }, [allProjects, wishlist]);
 
   const donationsList = donations ?? [];
   const streak = calculateStreak(donationsList);
@@ -153,7 +121,7 @@ export default function Dashboard() {
     setFrienbotError(null);
     try {
       const newBalance = await getFriendBotFunding(publicKey);
-      setBalance(newBalance);
+      queryClient.setQueryData(["balance", publicKey], newBalance);
       setIsUnfunded(false);
       setFriendbotState("success");
     } catch (err: unknown) {
@@ -261,8 +229,8 @@ export default function Dashboard() {
               projectId={pendingRating.id}
               projectName={pendingRating.name}
               donorAddress={publicKey}
-              onSuccess={() => setPendingRating(null)}
-              onCancel={() => setPendingRating(null)}
+              onSuccess={() => queryClient.setQueryData(["pendingRating", publicKey], null)}
+              onCancel={() => queryClient.setQueryData(["pendingRating", publicKey], null)}
             />
           )}
 
