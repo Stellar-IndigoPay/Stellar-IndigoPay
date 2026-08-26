@@ -1,5 +1,5 @@
 /**
- * app/projects/[id].tsx
+ * app/projects/[projectId].tsx
  * Project detail screen
  *
  * Changes for issue #399:
@@ -145,7 +145,7 @@ const toastStyles = StyleSheet.create({
 export default function ProjectDetailScreen() {
   const { colors } = useTheme();
   const router = useRouter();
-  const { id } = useLocalSearchParams();
+  const { projectId } = useLocalSearchParams();
 
   const [project, setProject] = useState<ClimateProject | null>(null);
   const [loading, setLoading] = useState(true);
@@ -156,8 +156,8 @@ export default function ProjectDetailScreen() {
 
   useEffect(() => {
     let active = true;
-    if (id) {
-      loadProject(id as string);
+    if (projectId) {
+      loadProject(projectId as string);
       initializeNotifications();
       markNotificationsSeen().then(() => {
         if (active) {
@@ -168,7 +168,7 @@ export default function ProjectDetailScreen() {
     return () => {
       active = false;
     };
-  }, [id]);
+  }, [projectId]);
 
   // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -192,7 +192,7 @@ export default function ProjectDetailScreen() {
       const token = await getPushToken();
       if (token) {
         setPushToken(token);
-        checkFollowStatus(id as string, token);
+        checkFollowStatus(projectId as string, token);
       }
     } catch {
       // Non-critical — the screen still works without push

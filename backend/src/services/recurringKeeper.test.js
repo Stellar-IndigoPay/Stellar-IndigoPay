@@ -24,6 +24,7 @@ jest.mock("./stellar", () => ({
   NETWORK_PASSPHRASE: "Test SDF Network ; September 2015",
   server: { loadAccount: jest.fn() },
   submitTransaction: jest.fn(),
+  submitWithFeeBump: jest.fn().mockResolvedValue({ hash: "mock-hash", successful: true }),
   simulateTransactionWithRetry: jest.fn(),
 }));
 

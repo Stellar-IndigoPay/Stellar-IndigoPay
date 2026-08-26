@@ -1,5 +1,5 @@
 /**
- * app/donate/[id].tsx
+ * app/donate/[projectId].tsx
  *
  * Donate screen with project selector, amount input, biometric-protected
  * transaction submission.
@@ -62,9 +62,9 @@ type StatusKind = "success" | "error" | "info" | null;
 
 export default function DonateScreen() {
   const { colors } = useTheme();
-  const { id, prefillAmount, prefillMemo } = useLocalSearchParams<{
-    id?: string;
-    prefillAmount?: string;
+  const { projectId, amount: prefillAmount, prefillMemo } = useLocalSearchParams<{
+    projectId?: string;
+    amount?: string;
     prefillMemo?: string;
   }>();
   const { isOnline } = useConnectivity();
@@ -81,7 +81,7 @@ export default function DonateScreen() {
   const [projects, setProjects] = useState<ClimateProject[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<
     string | undefined
-  >(id as string | undefined);
+  >(projectId as string | undefined);
   const [amount, setAmount] = useState("1");
   const [message, setMessage] = useState("");
   const [secretKey, setSecretKey] = useState("");
@@ -93,7 +93,7 @@ export default function DonateScreen() {
 
   useEffect(() => {
     loadProjects();
-  }, [id]);
+  }, [projectId]);
 
   // Scan-to-donate prefill (issue #84): the scan screen passes the amount
   // and memo parsed from the QR code as route params so the donor lands
@@ -119,7 +119,7 @@ export default function DonateScreen() {
         ? res.data.data
         : [];
       setProjects(list);
-      const initialProjectId = (id as string | undefined) || list[0]?.id;
+      const initialProjectId = (projectId as string | undefined) || list[0]?.id;
       setSelectedProjectId(initialProjectId);
     } catch (error) {
       console.error("Error loading projects:", error);

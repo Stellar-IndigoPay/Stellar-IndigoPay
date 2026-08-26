@@ -254,20 +254,29 @@ fn compute_proportional_payout(
 
 /// Sum the payout of every unreleased milestone using checked arithmetic.
 ///
-/// `err` is the structured error surfaced on overflow, so the dispute and
-/// refund paths can report distinct codes.
+/// When all milestones are released the contract holds nothing; return 0
+/// directly to avoid deriving a residual from truncated percentage sums.
+/// Otherwise compute `job.amount – Σ(truncated proportions of released
+/// milestones)`.
 fn compute_remaining_funds(env: &Env, job: &Job, err: EscrowError) -> i128 {
-    let mut remaining_amount: i128 = 0;
+    // Fast path: every milestone has been paid out — nothing remains.
+    if job.milestones.iter().all(|m| m.released) {
+        return 0;
+    }
+
+    let mut already_released: i128 = 0;
     for milestone in job.milestones.iter() {
-        if !milestone.released {
+        if milestone.released {
             let proportion = milestone.percentage as i128;
             let payout = compute_proportional_payout(env, job.amount, proportion, err);
-            remaining_amount = remaining_amount
+            already_released = already_released
                 .checked_add(payout)
                 .unwrap_or_else(|| panic_with_error!(env, err));
         }
     }
-    remaining_amount
+    job.amount
+        .checked_sub(already_released)
+        .unwrap_or_else(|| panic_with_error!(env, err))
 }
 
 fn read_reputation(env: &Env, freelancer: &Address) -> FreelancerReputation {
@@ -653,12 +662,33 @@ impl EscrowContract {
         }
 
         let proportion = milestone.percentage as i128;
-        let release_amount = compute_proportional_payout(
-            &env,
-            job.amount,
-            proportion,
-            EscrowError::ReleaseAmountCalculationFailed,
-        );
+        let mut already_released: i128 = 0;
+        for m in job.milestones.iter() {
+            if m.released {
+                let p = compute_proportional_payout(
+                    &env,
+                    job.amount,
+                    m.percentage as i128,
+                    EscrowError::ReleaseAmountCalculationFailed,
+                );
+                already_released = already_released.checked_add(p).unwrap_or_else(|| {
+                    panic_with_error!(&env, EscrowError::ReleaseAmountCalculationFailed)
+                });
+            }
+        }
+        let unreleased_count = job.milestones.iter().filter(|m| !m.released).count();
+        let release_amount = if unreleased_count == 1 {
+            job.amount.checked_sub(already_released).unwrap_or_else(|| {
+                panic_with_error!(&env, EscrowError::ReleaseAmountCalculationFailed)
+            })
+        } else {
+            compute_proportional_payout(
+                &env,
+                job.amount,
+                proportion,
+                EscrowError::ReleaseAmountCalculationFailed,
+            )
+        };
 
         // ── Effects: rebuild the milestone vector, recompute status,
         //    and persist state BEFORE the external token movement (CEI ordering).
@@ -970,12 +1000,33 @@ impl EscrowContract {
         }
 
         let proportion = milestone.percentage as i128;
-        let release_amount = compute_proportional_payout(
-            &env,
-            job.amount,
-            proportion,
-            EscrowError::ReleaseAmountCalculationFailed,
-        );
+        let mut already_released: i128 = 0;
+        for m in job.milestones.iter() {
+            if m.released {
+                let p = compute_proportional_payout(
+                    &env,
+                    job.amount,
+                    m.percentage as i128,
+                    EscrowError::ReleaseAmountCalculationFailed,
+                );
+                already_released = already_released.checked_add(p).unwrap_or_else(|| {
+                    panic_with_error!(&env, EscrowError::ReleaseAmountCalculationFailed)
+                });
+            }
+        }
+        let unreleased_count = job.milestones.iter().filter(|m| !m.released).count();
+        let release_amount = if unreleased_count == 1 {
+            job.amount.checked_sub(already_released).unwrap_or_else(|| {
+                panic_with_error!(&env, EscrowError::ReleaseAmountCalculationFailed)
+            })
+        } else {
+            compute_proportional_payout(
+                &env,
+                job.amount,
+                proportion,
+                EscrowError::ReleaseAmountCalculationFailed,
+            )
+        };
 
         milestone.disputed = false;
         milestone.released = true;
@@ -1084,12 +1135,33 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::MilestoneAlreadyReleased);
         }
         let proportion = milestone.percentage as i128;
-        let release_amount = compute_proportional_payout(
-            &env,
-            job.amount,
-            proportion,
-            EscrowError::ClaimAmountCalculationFailed,
-        );
+        let mut already_released: i128 = 0;
+        for m in job.milestones.iter() {
+            if m.released {
+                let p = compute_proportional_payout(
+                    &env,
+                    job.amount,
+                    m.percentage as i128,
+                    EscrowError::ClaimAmountCalculationFailed,
+                );
+                already_released = already_released.checked_add(p).unwrap_or_else(|| {
+                    panic_with_error!(&env, EscrowError::ClaimAmountCalculationFailed)
+                });
+            }
+        }
+        let unreleased_count = job.milestones.iter().filter(|m| !m.released).count();
+        let release_amount = if unreleased_count == 1 {
+            job.amount.checked_sub(already_released).unwrap_or_else(|| {
+                panic_with_error!(&env, EscrowError::ClaimAmountCalculationFailed)
+            })
+        } else {
+            compute_proportional_payout(
+                &env,
+                job.amount,
+                proportion,
+                EscrowError::ClaimAmountCalculationFailed,
+            )
+        };
 
         // ── Effects: mark milestone released and update status BEFORE
         //    the external token transfer (CEI ordering).
@@ -1227,6 +1299,18 @@ impl EscrowContract {
 
     pub fn get_job(env: Env, job_id: String) -> Option<Job> {
         env.storage().instance().get(&DataKey::Job(job_id))
+    }
+
+    /// Read-only helper: returns `job.amount – Σ already_released`, i.e. the
+    /// exact number of stroops the contract still holds for this job.
+    /// Returns `None` if the job does not exist.
+    pub fn get_remaining_funds(env: Env, job_id: String) -> Option<i128> {
+        let job: Job = env.storage().instance().get(&DataKey::Job(job_id))?;
+        Some(compute_remaining_funds(
+            &env,
+            &job,
+            EscrowError::RefundAmountCalculationFailed,
+        ))
     }
 
     pub fn get_job_count(env: Env) -> u32 {

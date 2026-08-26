@@ -49,10 +49,11 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "patch"]
-  # Update ConfigMap with new primary host
+  # Update ConfigMap with new primary host + split-brain lock
+  # (create/delete on the postgres-failover-lock ConfigMap)
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["get", "list", "patch", "update"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
   # Rolling restart backend Deployment
   - apiGroups: ["apps"]
     resources: ["deployments"]

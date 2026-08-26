@@ -9,7 +9,7 @@ jest.mock("../middleware/rateLimiter", () => ({
 }));
 
 jest.mock("../services/stellar", () => ({
-  server: { getTransaction: jest.fn().mockResolvedValue({ successful: true }) },
+  getTransaction: jest.fn().mockResolvedValue({ successful: true }),
 }));
 
 jest.mock("../services/oracleService", () => ({

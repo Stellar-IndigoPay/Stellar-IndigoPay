@@ -18,7 +18,7 @@ import axios from "axios";
 // ── Router / Expo mocks ────────────────────────────────────────────────────────
 jest.mock("expo-router", () => ({
   useRouter: () => ({ push: jest.fn() }),
-  useLocalSearchParams: () => ({ id: "proj-1" }),
+  useLocalSearchParams: () => ({ projectId: "proj-1" }),
 }));
 
 jest.mock("expo-status-bar", () => ({ StatusBar: () => null }));
@@ -66,7 +66,7 @@ function mockFollowsResponse(follows: object[] = []) {
 }
 
 import { ThemeProvider } from "../app/theme";
-import ProjectDetailScreen from "../app/projects/[id]";
+import ProjectDetailScreen from "../app/project/[projectId]";
 
 /** Wrap in ThemeProvider so useTheme() doesn't throw. */
 function renderWithTheme(ui: React.ReactElement) {

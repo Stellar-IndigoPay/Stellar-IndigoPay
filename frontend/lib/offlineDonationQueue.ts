@@ -6,6 +6,7 @@ export interface DonationQueuePayload {
   amount: string;
   currency: "XLM" | "USDC";
   message?: string;
+  encrypted?: boolean;
   transactionHash?: string;
   idempotencyKey?: string;
   sourceAsset?: string;

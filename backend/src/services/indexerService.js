@@ -22,6 +22,7 @@
 
 const { server: stellarServer } = require("./stellar");
 const pool = require("../db/pool");
+const crypto = require("crypto");
 const { handleDonation, setUsdcToXlmRate } = require("./indexerDonationHandler");
 const { enqueue: enqueueDLQ } = require("./indexerDLQWorker");
 const logger = require("../logger");
@@ -78,10 +79,25 @@ const USDC_ASSET_CODE = "USDC";
 async function readCursor() {
   try {
     const result = await pool.query(
-      "SELECT last_processed_ledger FROM indexer_state WHERE key = 'primary'",
+      "SELECT last_processed_ledger, cursor_hash FROM indexer_state WHERE key = 'primary'",
     );
-    return result.rows[0]?.last_processed_ledger || 0;
+    if (!result.rows[0]) return 0;
+
+    const ledger = result.rows[0].last_processed_ledger;
+    const storedHash = result.rows[0].cursor_hash;
+
+    if (storedHash) {
+      const expectedHash = crypto.createHash("sha256").update(String(ledger)).digest("hex");
+      if (storedHash !== expectedHash) {
+        throw new Error(`Checkpoint corruption detected: hash mismatch for ledger ${ledger}`);
+      }
+    }
+
+    return ledger || 0;
   } catch (err) {
+    if (err.message.includes("Checkpoint corruption detected")) {
+      throw err;
+    }
     logger.warn(
       { event: "indexer_cursor_read_error", err: err.message },
       "Cannot read cursor from DB, starting from 0",
@@ -98,12 +114,14 @@ async function readCursor() {
  * @returns {Promise<void>}
  */
 async function updateCursor(client, ledger) {
+  const hash = crypto.createHash('sha256').update(String(ledger)).digest('hex');
   await client.query(
     `UPDATE indexer_state
      SET last_processed_ledger = GREATEST(last_processed_ledger, $1),
+         cursor_hash = $2,
          last_processed_at = NOW()
      WHERE key = 'primary'`,
-    [ledger],
+    [ledger, hash],
   );
 }
 
@@ -504,7 +522,14 @@ async function stop() {
   reconnectAttempt = 0;
 }
 
+
+async function rescanRange({ fromLedger, toLedger }) {
+  const { runBackfill } = require("./indexerBackfill");
+  return runBackfill({ fromLedger, toLedger, force: true });
+}
+
 module.exports = {
+  rescanRange,
   startIndexer,
   getStatus,
   stop,
