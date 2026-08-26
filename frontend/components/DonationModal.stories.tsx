@@ -1,3 +1,4 @@
+import React from "react";
 import type { Meta, StoryObj } from "@storybook/react";
 import DonationModal from "./DonationModal";
 import type { ClimateProject } from "@/utils/types";

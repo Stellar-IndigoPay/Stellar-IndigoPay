@@ -1,3 +1,4 @@
+import React from "react";
 import type { Meta, StoryObj } from "@storybook/react";
 import ProjectCard from "./ProjectCard";
 import type { ClimateProject } from "@/utils/types";

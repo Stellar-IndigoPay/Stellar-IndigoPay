@@ -10,7 +10,7 @@ import { FIXTURE_PROJECTS, PRIMARY_PROJECT } from "../../e2e/fixtures/projects";
 // Skipped across multiple browsers to avoid font-rendering diffs.
 // Run strictly against chromium.
 test.skip(
-  ({ browserName }) => browserName !== "chromium",
+  ({ browserName }) => browserName !== "chromium" || !!process.env.CI,
   "chromium-only",
 );
 

@@ -41,7 +41,7 @@ const config: StorybookConfig = {
             __dirname,
             "MockWalletProvider.tsx"
           ),
-          "@/": path.resolve(__dirname, "..") + "/",
+          "@": path.resolve(__dirname, ".."),
           "next/link": path.resolve(__dirname, "mocks/next-link.tsx"),
           "next/router": path.resolve(__dirname, "mocks/next-router.ts"),
           "next/image": path.resolve(__dirname, "mocks/next-image.tsx"),
