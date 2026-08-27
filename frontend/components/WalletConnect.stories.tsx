@@ -29,7 +29,7 @@ export const Default: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    const link = await canvas.findByRole("link", { name: /Install Freighter/i });
+    const link = await canvas.findByRole("link", { name: /Get Freighter/i });
     await expect(link).toBeInTheDocument();
   },
 };
