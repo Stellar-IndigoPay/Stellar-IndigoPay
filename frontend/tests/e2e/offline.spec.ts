@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { mockApi, MOCK_PROJECT } from './fixtures/api';
 import { mockFreighter } from './fixtures/freighter';
 import { mockHorizon } from './fixtures/horizon';
+import { Donation } from '../../utils/types';
 
 test.describe('Offline to Online flow', () => {
   test('persists donation when offline and syncs when back online', async ({ page, context }) => {
@@ -9,7 +10,7 @@ test.describe('Offline to Online flow', () => {
     await mockHorizon(page);
     await mockApi(page);
 
-    let projectDonations = [
+    let projectDonations: Donation[] = [
       {
         id: '123',
         projectId: MOCK_PROJECT.id,
