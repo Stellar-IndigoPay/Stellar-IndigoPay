@@ -30,6 +30,7 @@ import { toast } from "sonner";
 import { recordDonation, checkIdempotency } from "@/lib/api";
 import { syncQueuedDonations } from "@/lib/offlineDonationQueue";
 import useOnlineStatus from "@/hooks/useOnlineStatus";
+import { queryClient } from "@/lib/queryClient";
 
 /** Message posted by public/sw.js's Background Sync handler. */
 const SW_SYNC_MESSAGE = "indigopay-queue-sync";
@@ -108,6 +109,7 @@ export default function useOfflineQueueSync(): void {
         }
         if (result.submitted > 0) {
           void notifyDonationSubmitted(result.submitted);
+          void queryClient.invalidateQueries();
         }
       })
       .catch(() => {
