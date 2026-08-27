@@ -29,8 +29,7 @@ export const Default: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    const button = await canvas.findByTestId("wallet-connect-button");
-    await expect(button).toBeInTheDocument();
-    await userEvent.click(button);
+    const link = await canvas.findByRole("link", { name: /Install Freighter/i });
+    await expect(link).toBeInTheDocument();
   },
 };

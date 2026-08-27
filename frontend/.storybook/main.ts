@@ -32,7 +32,8 @@ const config: StorybookConfig = {
   async viteFinal(config) {
     const { mergeConfig } = await import("vite");
     return mergeConfig(config, {
-      esbuild: {
+      esbuild: config.esbuild === false ? false : {
+        ...(typeof config.esbuild === 'object' ? config.esbuild : {}),
         jsx: "automatic",
       },
       resolve: {

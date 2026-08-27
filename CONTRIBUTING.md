@@ -162,4 +162,4 @@ If you make an intentional design change that causes visual tests to fail in CI,
 1. Go to the "Actions" tab in GitHub and select the "Frontend Visual Regression" workflow.
 2. Click "Run workflow".
 3. Check the "Update baselines" checkbox and run it against your branch.
-4. The workflow will run with `--update-snapshots` and commit the new baseline images back to your branch automatically.
+4. The workflow will run with `--update-snapshots` and output the new baseline images as a GitHub artifact. Download the artifact, extract it into `frontend/tests/e2e/visual.spec.ts-snapshots/`, and commit the changes manually to your branch.

@@ -61,13 +61,22 @@ const preview: Preview = {
   },
   decorators: [
     (Story, context) => {
-      const qc = React.useMemo(() => new QueryClient({
-        defaultOptions: {
-          queries: {
-            retry: false,
+      const qc = React.useMemo(() => {
+        const client = new QueryClient({
+          defaultOptions: {
+            queries: {
+              retry: false,
+            },
           },
-        },
-      }), [context.id]);
+        });
+        client.clear();
+        return client;
+      }, [context.id]);
+      
+      React.useEffect(() => {
+        return () => qc.clear();
+      }, [qc]);
+      
       return (
       <QueryClientProvider client={qc}>
         <ThemeProvider>

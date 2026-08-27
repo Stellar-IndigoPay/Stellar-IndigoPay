@@ -21,8 +21,15 @@ function parseOrigins(value) {
 
 function getAllowedOrigins(value = process.env.ALLOWED_ORIGINS) {
   const configuredOrigins = parseOrigins(value);
-  const origins =
-    configuredOrigins.length > 0 ? configuredOrigins : DEFAULT_ALLOWED_ORIGINS;
+  
+  let origins = configuredOrigins;
+  if (origins.length === 0) {
+    if (process.env.NODE_ENV === "production") {
+      origins = [];
+    } else {
+      origins = DEFAULT_ALLOWED_ORIGINS;
+    }
+  }
 
   return [...new Set(origins)];
 }
