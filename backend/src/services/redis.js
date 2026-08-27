@@ -316,6 +316,99 @@ function shardCount() {
   return clients.length;
 }
 
+// ── Donor-auth nonce namespace (issue #1102) ───────────────────────────────
+// Two keys per nonce, both with the same TTL as the challenge window:
+//   donorAuth:nonce:{nonce}     — issued marker (created by /api/auth/challenge)
+//   donorAuth:consumed:{nonce}  — single-use claim marker (SET NX)
+// The consumed marker makes a nonce single-use inside its window; once the
+// issued marker expires, the nonce can never be replayed again.
+const DONOR_NONCE_NS = "donorAuth:nonce";
+const DONOR_CONSUMED_NS = "donorAuth:consumed";
+
+/**
+ * Redis key under which a freshly issued donor-auth nonce is stored.
+ * @param {string} nonce - 32-byte hex nonce
+ * @returns {string}
+ */
+function donorNonceKey(nonce) {
+  return `${DONOR_NONCE_NS}:${nonce}`;
+}
+
+/**
+ * Redis key under which a consumed donor-auth nonce is stored (single-use).
+ * @param {string} nonce - 32-byte hex nonce
+ * @returns {string}
+ */
+function donorConsumedKey(nonce) {
+  return `${DONOR_CONSUMED_NS}:${nonce}`;
+}
+
+/**
+ * Persist a freshly-issued donor-auth nonce marker with the challenge TTL.
+ *
+ * @param {string} nonce - 32-byte hex nonce
+ * @param {number} ttlMs - nonce validity window in milliseconds
+ * @returns {Promise<boolean>} true when the marker was stored, false on
+ *   storage failure (the caller fails closed).
+ */
+async function storeDonorNonce(nonce, ttlMs) {
+  try {
+    const c = getClient(donorNonceKey(nonce));
+    const ttlSeconds = Math.max(1, Math.ceil(ttlMs / 1000));
+    await c.set(donorNonceKey(nonce), "1", "EX", ttlSeconds);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Atomically claim a donor-auth nonce for single use.
+ *
+ * Uses `SET … NX EX` so only the first request can claim a given nonce within
+ * its TTL window; every later attempt is a replay.
+ *
+ * @param {string} nonce - 32-byte hex nonce
+ * @param {number} ttlMs - nonce validity window in milliseconds
+ * @returns {Promise<"ok"|"consumed"|"error">} "ok" when this call claimed
+ *   the nonce, "consumed" when the nonce was already used (replay), "error"
+ *   when the check could not be performed (caller fails closed).
+ */
+async function claimDonorNonce(nonce, ttlMs) {
+  try {
+    const c = getClient(donorConsumedKey(nonce));
+    const ttlSeconds = Math.max(1, Math.ceil(ttlMs / 1000));
+    const result = await c.set(
+      donorConsumedKey(nonce),
+      "1",
+      "EX",
+      ttlSeconds,
+      "NX",
+    );
+    return result === "OK" ? "ok" : "consumed";
+  } catch {
+    return "error";
+  }
+}
+
+/**
+ * Check whether a donor-auth nonce was actually issued by the server and has
+ * not yet expired.
+ *
+ * @param {string} nonce - 32-byte hex nonce
+ * @returns {Promise<boolean|null>} true when issued & unexpired, false when
+ *   unknown/expired, null when the check could not be performed.
+ */
+async function donorNonceIssued(nonce) {
+  try {
+    const c = getClient(donorNonceKey(nonce));
+    const value = await c.get(donorNonceKey(nonce));
+    return value !== null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Test-only: reset internal state so tests can re-initialise with
  * different environment variables.
@@ -328,4 +421,19 @@ function _reset() {
   _initialised = false;
 }
 
-module.exports = { getClient, get, set, deletePattern, initRedis, shardCount, parseSentinels, sentinelOptions, _reset };
+module.exports = {
+  getClient,
+  get,
+  set,
+  deletePattern,
+  initRedis,
+  shardCount,
+  parseSentinels,
+  sentinelOptions,
+  storeDonorNonce,
+  claimDonorNonce,
+  donorNonceIssued,
+  donorNonceKey,
+  donorConsumedKey,
+  _reset,
+};

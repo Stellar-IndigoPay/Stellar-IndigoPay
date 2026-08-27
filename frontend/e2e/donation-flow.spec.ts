@@ -35,8 +35,11 @@ test.describe("Donation flow", () => {
 
     // 2. Connect wallet from the hero CTA.
     await click(page.getByTestId("start-donating-button"), testInfo);
-    await expect(page.getByTestId("wallet-connect-button").first()).toBeVisible();
-    await click(page.getByTestId("wallet-connect-button").first(), testInfo);
+    const freighterBtn = page.locator(
+      '[data-testid="wallet-connect-button"][data-wallet-id="freighter"]',
+    );
+    await expect(freighterBtn.first()).toBeVisible();
+    await click(freighterBtn.first(), testInfo);
     await expect(page.getByTestId("browse-projects-link")).toBeVisible();
     await page.waitForTimeout(500);
 
@@ -54,7 +57,7 @@ test.describe("Donation flow", () => {
 
     // 5. Connect wallet again (each page tracks its own connection state)
     // and donate.
-    await click(page.getByTestId("wallet-connect-button").last(), testInfo);
+    await click(freighterBtn.last(), testInfo);
     await expect(page.getByTestId("donation-amount")).toBeVisible();
     await page.getByTestId("donation-amount").fill("50");
     await click(page.getByTestId("donate-button"), testInfo);
@@ -73,7 +76,7 @@ test.describe("Donation flow", () => {
     } catch (e) {
       await page.goto("/dashboard");
     }
-    await click(page.getByTestId("wallet-connect-button").first(), testInfo);
+    await click(freighterBtn.first(), testInfo);
     await expect(page.getByTestId("wallet-address")).toBeVisible();
     await expect(page.getByTestId("donation-history")).toBeVisible();
     await expect(page.getByTestId("donation-history")).not.toContainText(
@@ -85,7 +88,10 @@ test.describe("Donation flow", () => {
     page,
   }, testInfo) => {
     await page.goto(`/projects/${PRIMARY_PROJECT.id}`);
-    await click(page.getByTestId("wallet-connect-button").last(), testInfo);
+    const freighterBtn = page.locator(
+      '[data-testid="wallet-connect-button"][data-wallet-id="freighter"]',
+    );
+    await click(freighterBtn.last(), testInfo);
     await expect(page.getByTestId("donation-amount")).toBeVisible();
 
     await page.getByTestId("donation-amount").fill("0");
@@ -97,7 +103,10 @@ test.describe("Donation flow", () => {
     page,
   }, testInfo) => {
     await page.goto(`/projects/${PRIMARY_PROJECT.id}`);
-    await click(page.getByTestId("wallet-connect-button").last(), testInfo);
+    const freighterBtn = page.locator(
+      '[data-testid="wallet-connect-button"][data-wallet-id="freighter"]',
+    );
+    await click(freighterBtn.last(), testInfo);
     await page.getByTestId("donation-amount").fill("25");
     await click(page.getByTestId("donate-button"), testInfo);
 

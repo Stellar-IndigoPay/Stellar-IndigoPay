@@ -295,7 +295,7 @@ export function parseDeepLinkUrl(url: string): string | null {
     const [segment, param] = path.replace(/^\//, "").split("/");
     if (!param) return null;
     if (segment === "project") {
-      return `/projects/${param}`;
+      return `/project/${param}`;
     } else if (segment === "donate") {
       return `/donate/${param}`;
     }
@@ -317,7 +317,7 @@ export function navigateToNotification(
     return;
   }
 
-  const { type, projectId, donorAddress, url } = data;
+  const { type, projectId, donorAddress, url, screen, params } = data;
 
   if (url && typeof url === "string") {
     if (url.startsWith("indigopay://")) {
@@ -334,12 +334,35 @@ export function navigateToNotification(
     }
   }
 
+  if (screen) {
+    const pId = params?.projectId || params?.id || projectId;
+    switch (screen) {
+      case "donate":
+        push(pId ? `/donate/${pId}` : "/");
+        return;
+      case "project":
+      case "projects":
+        push(pId ? `/project/${pId}` : "/");
+        return;
+      case "leaderboard":
+        push("/leaderboard");
+        return;
+      case "impact":
+        push("/impact");
+        return;
+      case "profile":
+        const addr = params?.donorAddress || donorAddress;
+        push(addr ? `/profile/${addr}` : "/");
+        return;
+    }
+  }
+
   switch (type) {
     case "donation_receipt":
       if (donorAddress) {
         push(`/profile/${donorAddress}`);
       } else if (projectId) {
-        push(`/projects/${projectId}`);
+        push(`/project/${projectId}`);
       } else {
         push("/");
       }
@@ -347,7 +370,7 @@ export function navigateToNotification(
     case "project_update":
     case "milestone_reached":
       if (projectId) {
-        push(`/projects/${projectId}`);
+        push(`/project/${projectId}`);
       } else {
         push("/");
       }

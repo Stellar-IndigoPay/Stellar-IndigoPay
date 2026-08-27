@@ -93,10 +93,34 @@ self.addEventListener("fetch", (event) => {
   );
 });
 
+// Background Sync for the offline donation queue (Issue #1096, WS2).
+//
+// The queue itself lives in IndexedDB (lib/offlineDonationQueue.ts) and is
+// drained by the page's sync routine, which needs the wired processor and
+// idempotency pre-check. This handler's job is to wake that routine up when
+// connectivity returns:
+//
+//  * If a page is open, post a nudge — the page listens for
+//    "indigopay-queue-sync" and runs syncQueuedDonations() with the
+//    cross-tab drain lease and server idempotency pre-check intact.
+//  * If no page is open, re-register the tag so the browser retries the
+//    sync once a page is available. The queue is durable in IndexedDB, so
+//    nothing is lost in the meantime — it is also drained on page load and
+//    on the window "online" event.
 self.addEventListener("sync", (event) => {
-  if (event.tag === "donation-queue") {
-    event.waitUntil(
-      self.registration.sync.register("donation-queue"),
-    );
-  }
+  if (event.tag !== "donation-queue") return;
+
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then((clients) => {
+        if (clients.length === 0) {
+          // No open page to run the drain — retry once one is available.
+          return self.registration.sync.register("donation-queue");
+        }
+        clients.forEach((client) =>
+          client.postMessage("indigopay-queue-sync"),
+        );
+      }),
+  );
 });

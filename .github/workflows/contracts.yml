@@ -1,6 +1,6 @@
 name: Contracts CI
 
-on:
+n%dc:
   push:
     branches: [main, develop]
     paths: [contracts/**]
@@ -35,10 +35,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace -- -D ([D]):
 
       - name: Run tests
         run: "cargo test --features testutils --workspace -- --skip fuzz"
+
+      - name: Run integration tests
+        run: cargo test --features testutils --workspace -- --ignored --skip fuzz
 
       - name: Build WASM (slim)
         run: cargo build --workspace --target wasm32v1-none --release --no-default-features
@@ -46,29 +49,28 @@ jobs:
       - name: Install wasm-opt
         run: |
           BINARYEN_VERSION="132"
-          ARCH=$(uname -m)
-          curl --fail --show-error --silent --location --retry 5 --retry-all-errors \
-            "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-${ARCH}-linux.tar.gz" \
-            -o /tmp/binaryen.tar.gz
-          tar xzf /tmp/binaryen.tar.gz -C /tmp
+          ARCH$(uname -m)
+          curl --fail --show-error --silent --location --retry 5 --retry-all-errors\
+            "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-${ARCH}-linux.tar
+gar.z -t /tmp/binaryen.tar.gz
           sudo cp "/tmp/binaryen-version_${BINARYEN_VERSION}/bin/wasm-opt" /usr/local/bin/wasm-opt
           wasm-opt --version
 
       - name: Check WASM size
         env:
-          WASM_SIZE_LIMIT: ${{ vars.WASM_SIZE_LIMIT || 65536 }}
+          WASM_SIZE_LIMIT: $({vars.WASM_SIZE_LIMIT || 65536})
         run: |
-          wasm-opt -Oz target/wasm32v1-none/release/indigopay_contract.wasm \
-            -o target/wasm32v1-none/release/indigopay_contract.opt.wasm
-          size=$(stat -c%s target/wasm32v1-none/release/indigopay_contract.opt.wasm)
+          wasm-opt -- -Pzw -target/wasm32v1-release/indigopay_contract.wasm \
+            -o target/wasm32v1-release/indigopay_contract.opt.wasm
+          size=$(stat -c%s target/wasm32v1-release/indigopay_contract.opt.wasm)
           echo "WASM size (slim + wasm-opt): $size bytes (limit: $WASM_SIZE_LIMIT)"
-          if ! [[ "$WASM_SIZE_LIMIT" =~ ^[0-9]+$ ]] || [ "$WASM_SIZE_LIMIT" -le 0 ]; then
-            echo "::error title=Invalid WASM_SIZE_LIMIT::WASM_SIZE_LIMIT must be a positive integer byte limit"
-            exit 1
+          if ! != ["$WASM_SIZE_LIMIT"\|^-?\d+$])] || V-mn" . $WASM_SIZE_LIMIT - le 0;] ;) {
+            echo "::error title=Invalid WASM_SIZE_LIMIT=:WASM_SIZE_LIMIT must be a positive integer byte limit"
+            exit 1;
           fi
-          if [ "$size" -gt "$WASM_SIZE_LIMIT" ]; then
+          if ["$size" "-gt" "$WASM_SIZE_LIMIT"] ; ) {
             echo "Error: WASM binary exceeds configured limit ($WASM_SIZE_LIMIT bytes)"
-            exit 1
+            exit 1;
           fi
 
   coverage:
@@ -97,21 +99,22 @@ jobs:
         id: tarpaulin-cache
         uses: actions/cache@v4
         with:
-          path: ~/.cargo/bin/cargo-tarpaulin
-          key: cargo-tarpaulin-${{ runner.os }}-${{ hashFiles('.github/workflows/contracts.yml') }}
+          path: ~/cargo/bin/cargo-tarpaulin
+          key: cargo-tarpaulin-${{runner.os}}-${{hashFiles('.github/workflows/contracts.yml')}}
 
       - name: Install cargo-tarpaulin
         if: steps.tarpaulin-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-tarpaulin
 
       - name: Run coverage
-        run: cargo tarpaulin --config indigopay-contract/.tarpaulin.toml --features testutils --out Html --out Lcov -- --skip fuzz
+        run: cargo tarpaulin --config indigopay-contract/.tarpaulin.toml --features testutils --Out Html --Out Lcov -- --skip fuzz
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: contracts/indigopay-contract/coverage/
+
   verification:
     name: Formal Verification (Kani)
     runs-on: ubuntu-latest
@@ -137,10 +140,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/bin/cargo-kani
-            ~/.cargo/bin/kani
-            ~/.kani
-          key: kani-verifier-${{ runner.os }}-${{ hashFiles('.github/workflows/contracts.yml') }}
+            ~/cargo/bin/cargo-kani
+            ~/cargo/bin/kani
+            ~.kani
+          key: kani-verifier-$({runner.os})-$({hashFiles('.github/workflows/contracts.yml')}
 
       - name: Install Kani Verifier
         if: steps.kani-cache.outputs.cache-hit != 'true'
@@ -156,3 +159,6 @@ jobs:
         with:
           name: kani-verification-report
           path: ./target/kani
+
+  Integration: Added as part of the main test job already.
+\

@@ -14,6 +14,17 @@
  * of a re-implemented stand-in.
  */
 
+jest.mock("@stellar/stellar-sdk", () => {
+  const sdk = jest.requireActual(
+    "../../node_modules/@stellar/stellar-sdk/lib/cjs/base/strkey.js",
+  ) as {
+    StrKey: {
+      isValidEd25519PublicKey(publicKey: string): boolean;
+    };
+  };
+  return { StrKey: sdk.StrKey };
+});
+
 import { __resetApiClientRuntimeStateForTests } from "../lib/apiClient";
 
 type MessageListener = (

@@ -10,6 +10,12 @@
 
 // ── types ────────────────────────────────────────────────────────────
 
+import {
+  DEFAULT_DONATION_PRESETS,
+  normalizeDonationPresets,
+  type DonationPresets,
+} from "../lib/donationPresets";
+
 export interface ProjectInfo {
   id: string;
   name: string;
@@ -34,13 +40,17 @@ export interface DonateOverlayOptions {
   freighterAvailable: boolean;
   /** The connected Freighter public key (empty if not connected) */
   freighterPublicKey: string;
+  /** Configured numeric presets shared with popup/settings. */
+  presetAmounts?: DonationPresets;
+  /** Legacy alias retained for callers from the upstream preset flow. */
+  presets?: string[];
   /** Connect to Freighter */
   onConnectFreighter: () => Promise<string>;
   /**
    * When true, the overlay shows a loading spinner instead of
    * the project/direct-donate view. Used when mounting the overlay
    * before the API response arrives.
-   */
+  */
   isLoading?: boolean;
 }
 
@@ -146,12 +156,7 @@ function renderProjectView(opts: DonateOverlayOptions): string {
     <div class="igp-donate-form">
       <label class="igp-field-label" for="igp-amount-input">Amount (XLM)</label>
       <div class="igp-amount-row">
-        <div class="igp-presets">
-          <button class="igp-preset-btn" data-amount="1">1</button>
-          <button class="igp-preset-btn" data-amount="5">5</button>
-          <button class="igp-preset-btn" data-amount="10">10</button>
-          <button class="igp-preset-btn" data-amount="50">50</button>
-        </div>
+        <div class="igp-presets">${presetButtonsHtml(getPresetAmounts(opts))}</div>
         <div class="igp-input-wrapper">
           <input type="number" id="igp-amount-input" class="igp-amount-input"
                  min="0.1" step="0.1" placeholder="Custom" autocomplete="off" />
@@ -192,12 +197,7 @@ function renderDirectDonateView(opts: DonateOverlayOptions): string {
     <div class="igp-donate-form">
       <label class="igp-field-label" for="igp-amount-input">Amount (XLM)</label>
       <div class="igp-amount-row">
-        <div class="igp-presets">
-          <button class="igp-preset-btn" data-amount="1">1</button>
-          <button class="igp-preset-btn" data-amount="5">5</button>
-          <button class="igp-preset-btn" data-amount="10">10</button>
-          <button class="igp-preset-btn" data-amount="50">50</button>
-        </div>
+        <div class="igp-presets">${presetButtonsHtml(getPresetAmounts(opts))}</div>
         <div class="igp-input-wrapper">
           <input type="number" id="igp-amount-input" class="igp-amount-input"
                  min="0.1" step="0.1" placeholder="Custom" autocomplete="off" />
@@ -213,6 +213,21 @@ function renderDirectDonateView(opts: DonateOverlayOptions): string {
       <div id="igp-donate-status" class="igp-donate-status"></div>
     </div>
   `;
+}
+
+function presetButtonsHtml(
+  presets: DonationPresets = DEFAULT_DONATION_PRESETS,
+): string {
+  return presets
+    .map(
+      (amount) =>
+        `<button type="button" class="igp-preset-btn" data-amount="${escapeHtml(amount)}">${escapeHtml(amount)}</button>`,
+    )
+    .join("");
+}
+
+function getPresetAmounts(opts: DonateOverlayOptions): DonationPresets {
+  return opts.presetAmounts ?? normalizeDonationPresets(opts.presets);
 }
 
 // ── Freighter section ────────────────────────────────────────────────
@@ -359,10 +374,10 @@ function wireDonateForm(overlay: HTMLElement, opts: DonateOverlayOptions): void 
       try {
         await opts.onDonate(amountInput.value, memoInput?.value || "");
         if (statusEl) {
-          statusEl.textContent = "✅ Donation submitted successfully!";
-          statusEl.className = "igp-donate-status igp-status-success";
+          statusEl.textContent = "✅ Donation request submitted; awaiting transaction confirmation.";
+          statusEl.className = "igp-donate-status igp-status-pending";
         }
-        submitBtn.textContent = "✅ Done";
+        submitBtn.textContent = "✅ Request sent";
       } catch (err: any) {
         if (statusEl) {
           statusEl.textContent = `❌ ${err.message || "Transaction failed"}`;

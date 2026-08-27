@@ -5,7 +5,7 @@ jest.mock("../middleware/rateLimiter", () => ({
   createRateLimiter: () => (req, res, next) => next(),
 }));
 jest.mock("../services/stellar", () => ({
-  server: { getTransaction: jest.fn().mockResolvedValue({ successful: true }) },
+  getTransaction: jest.fn().mockResolvedValue({ successful: true }),
 }));
 
 jest.mock("../services/matchQueue", () => ({
