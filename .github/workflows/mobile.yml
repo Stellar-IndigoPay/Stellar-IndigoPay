@@ -56,10 +56,12 @@ jobs:
           node-version: "22"
           working-directory: mobile
       - uses: expo/expo-github-action@v8
+        if: ${{ secrets.EXPO_TOKEN != '' }}
         with:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
       - name: Staged Rollout (Staging)
+        if: ${{ secrets.EXPO_TOKEN != '' }}
         run: eas update --branch staging --message "$(git log -1 --oneline)" --non-interactive
 
   promote-ota:
@@ -76,8 +78,10 @@ jobs:
           node-version: "22"
           working-directory: mobile
       - uses: expo/expo-github-action@v8
+        if: ${{ secrets.EXPO_TOKEN != '' }}
         with:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
       - name: Promote to Production
+        if: ${{ secrets.EXPO_TOKEN != '' }}
         run: eas update --branch production --message "Production Promotion" --non-interactive

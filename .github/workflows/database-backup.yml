@@ -21,7 +21,7 @@ jobs:
       - run: exit 0
 
   backup-database:
-    if: github.event_name != 'push'
+    if: github.event_name != 'push' && secrets.DB_HOST != ''
     name: Backup PostgreSQL Database
     runs-on: ubuntu-latest
     env:
