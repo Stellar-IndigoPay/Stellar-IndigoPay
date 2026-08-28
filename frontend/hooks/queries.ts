@@ -11,6 +11,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchDonorHistory,
   fetchLeaderboard,
+  fetchLeaderboardGrowth,
   fetchGlobalStats,
   fetchProfile,
   fetchImpactDonor,
@@ -29,6 +30,8 @@ export const queryKeys = {
     ["donorProfile", publicKey] as const,
   leaderboard: (limit = 20, period?: string) =>
     ["leaderboard", { limit, period }] as const,
+  leaderboardGrowth: (period: string) =>
+    ["leaderboardGrowth", { period }] as const,
   globalStats: () => ["globalStats"] as const,
   impactDonor: (publicKey: string | null) =>
     ["impactDonor", publicKey] as const,
@@ -74,6 +77,18 @@ export function useLeaderboard(limit = 20, period?: string) {
     queryKey: queryKeys.leaderboard(limit, period),
     queryFn: () => fetchLeaderboard(limit, period),
     staleTime: 30_000,
+  });
+}
+
+/**
+ * Fetch weekly donation volume for the leaderboard growth chart.
+ * Stale time: 2min — chart data is moderately stable.
+ */
+export function useLeaderboardGrowth(period: "month" | "year" | "all" = "month") {
+  return useQuery({
+    queryKey: queryKeys.leaderboardGrowth(period),
+    queryFn: () => fetchLeaderboardGrowth(period),
+    staleTime: 2 * 60_000,
   });
 }
 

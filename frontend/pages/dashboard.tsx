@@ -38,6 +38,7 @@ import type {
 } from "@/utils/types";
 import { useWishlist } from "@/hooks/useWishlist";
 import { QueryErrorFallback } from "@/components/QueryErrorFallback";
+import DashboardSkeleton from "@/components/DashboardSkeleton";
 export default function Dashboard() {
   const [publicKey, setPublicKey] = useState<string | null>(null);
   const [balance, setBalance] = useState<string | null>(null);
@@ -186,6 +187,8 @@ export default function Dashboard() {
         <WalletConnect onConnect={setPublicKey} />
       </div>
     );
+
+  if (loading) return <DashboardSkeleton />;
 
   const totalDonated = profile?.totalDonatedXLM || "0";
   const co2Estimate = impact

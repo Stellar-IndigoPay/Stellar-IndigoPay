@@ -1,16 +1,47 @@
 /**
  * pages/leaderboard.tsx — Top donors ranked by total XLM given
  */
-import { useState, useEffect } from "react";
+import { useEffect } from "react";
 import { useRouter } from "next/router";
+import dynamic from "next/dynamic";
 import LeaderboardTable from "@/components/LeaderboardTable";
 import LeaderboardSkeleton from "@/components/LeaderboardSkeleton";
 import Link from "next/link";
 import PageMeta from "@/components/PageMeta";
 import { trackEvent } from "@/lib/analytics";
 import { useI18n } from "@/lib/i18n";
+import { useLeaderboardGrowth } from "@/hooks/queries";
+import { SkeletonBox } from "@/components/Skeleton";
+
+const DonationGrowthChartNoSSR = dynamic(
+  () => import("@/components/DonationGrowthChart"),
+  { ssr: false },
+);
 
 type Period = "all" | "month" | "year";
+
+/** Inner component so the hook only runs after router.isReady */
+function DonationGrowthChartSection({ period }: { period: Period }) {
+  const { data, isLoading } = useLeaderboardGrowth(period);
+
+  if (isLoading) {
+    return <SkeletonBox className="h-48 rounded-xl w-full" palette="indigo" />;
+  }
+
+  if (!data || data.length === 0) {
+    return (
+      <p className="text-sm text-[#64748B] dark:text-[#94A3B8] font-body text-center py-8">
+        No donation data for this period yet.
+      </p>
+    );
+  }
+
+  return (
+    <div className="h-48">
+      <DonationGrowthChartNoSSR data={data} />
+    </div>
+  );
+}
 
 export default function LeaderboardPage() {
   const { t } = useI18n();
@@ -113,6 +144,17 @@ export default function LeaderboardPage() {
 
       {/* Table */}
       <LeaderboardTable limit={50} period={period} />
+
+      {/* Donation growth chart */}
+      <div className="card mt-8">
+        <h2 className="font-display text-lg font-bold text-[#0F172A] dark:text-[#E2E8F0] mb-1">
+          Donation Trend
+        </h2>
+        <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-body mb-4">
+          Weekly donation volume for the selected period
+        </p>
+        <DonationGrowthChartSection period={period} />
+      </div>
 
       <div className="mt-10 text-center">
         <p className="text-[#475569] dark:text-[#94A3B8] text-sm mb-4 font-body">

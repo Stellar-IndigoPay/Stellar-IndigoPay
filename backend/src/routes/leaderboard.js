@@ -87,6 +87,55 @@ router.get("/", cacheResponse(60, (req) => `cache:v1:leaderboard:${require("cryp
 });
 
 /**
+ * GET /api/leaderboard/growth
+ * Returns weekly donation volume for the given period, used by the
+ * DonationGrowthChart on the leaderboard page.
+ *
+ * Query params:
+ *   - period: "month" (default) | "year" | "all"
+ *
+ * Response: { success: true, data: Array<{ week: string; totalXLM: number }> }
+ */
+router.get(
+  "/growth",
+  cacheResponse(60, (req) => `cache:v1:leaderboard:growth:${req.query.period || "month"}`),
+  async (req, res, next) => {
+    try {
+      const period = req.query.period || "month";
+
+      let interval;
+      if (period === "month") {
+        interval = "30 days";
+      } else if (period === "year") {
+        interval = "1 year";
+      } else {
+        // "all" — cap at 2 years so the chart remains readable
+        interval = "2 years";
+      }
+
+      const result = await pool.query(
+        `SELECT
+           TO_CHAR(DATE_TRUNC('week', created_at), 'YYYY-MM-DD') AS week,
+           COALESCE(SUM(amount_xlm), 0)                           AS "totalXLM"
+         FROM donations
+         WHERE created_at >= NOW() - INTERVAL '${interval}'
+         GROUP BY DATE_TRUNC('week', created_at)
+         ORDER BY DATE_TRUNC('week', created_at) ASC`,
+      );
+
+      const data = result.rows.map((r) => ({
+        week: r.week,
+        totalXLM: Number(parseFloat(r.totalXLM).toFixed(2)),
+      }));
+
+      res.json({ success: true, data });
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+
+/**
  * GET /api/leaderboard/history
  * Returns the monthly leaderboard snapshots, grouped by month descending.
  * Query params:

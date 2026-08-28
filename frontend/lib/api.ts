@@ -522,6 +522,22 @@ export async function fetchLeaderboard(limit = 20, period?: string) {
   return data.data;
 }
 
+/**
+ * Fetch weekly donation volume for the leaderboard growth chart.
+ *
+ * @param period - "month" | "year" | "all" (default: "month")
+ * @returns Weekly buckets with XLM totals.
+ */
+export async function fetchLeaderboardGrowth(
+  period: "month" | "year" | "all" = "month",
+) {
+  const { data } = await api.get<{
+    success: boolean;
+    data: Array<{ week: string; totalXLM: number }>;
+  }>("/api/leaderboard/growth", { params: { period } });
+  return data.data;
+}
+
 // ── Jobs (escrow) ───────────────────────────────────────────────────────────
 /**
  * Fetch all escrow jobs.
