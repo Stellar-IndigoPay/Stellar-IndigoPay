@@ -157,3 +157,22 @@ groups:
       - record: business:synthetic:success_rate_1h
         expr: |
           avg_over_time(synthetic_donation_success{job="synthetic-monitor"}[1h])
+
+  - name: indigopay-canary-recording
+    interval: 30s
+    rules:
+      - record: backend:canary:requests_rate_10m
+        expr: sum by (pod_template_hash, rollouts_pod_template_hash) (rate(http_requests_total{job="stellar-indigopay-backend"}[10m]))
+
+      - record: backend:canary:errors_5xx_rate_10m
+        expr: sum by (pod_template_hash, rollouts_pod_template_hash) (rate(http_requests_total{job="stellar-indigopay-backend",status_code=~"5.."}[10m]))
+
+      - record: backend:canary:error_rate_10m
+        expr: |
+          backend:canary:errors_5xx_rate_10m
+          /
+          (backend:canary:requests_rate_10m > 0)
+
+      - record: backend:canary:p95_latency_10m
+        expr: |
+          histogram_quantile(0.95, sum by (le, pod_template_hash, rollouts_pod_template_hash) (rate(http_request_duration_seconds_bucket{job="stellar-indigopay-backend"}[10m])))

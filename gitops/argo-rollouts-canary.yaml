@@ -1,41 +1,3 @@
-# gitops/argo-rollouts-canary.yaml
-#
-# Argo Rollouts STEPPED canary strategy for the backend. Replaces the
-# `Deployment` in k8s/backend.yaml with a `Rollout` that performs a
-# stepped rollout via pod replacement (20% → 50% → 100% of new-revision
-# pods, with 5-min analysis pauses between steps).
-#
-# IMPORTANT — this is Argo Rollouts' BASIC canary mode (no trafficRouting).
-# Both `canaryService` and `stableService` point at the same `backend-svc`,
-# which is the correct and supported configuration for pod-replacement
-# canaries: Argo Rollouts only REQUIRES two distinct Services when a
-# `trafficRouting` block is present (Istio/NGINX/ALB/Ambassador traffic split).
-# The controller flips pod weights between the stable and canary ReplicaSets,
-# and the analysis (backend-canary-analysis) compares the two revisions via
-# the backend `version` metric label. For real traffic-split canary (e.g. 5%
-# of user traffic to the new revision), add a `trafficRouting` block AND two
-# distinct canary/stable Services — Istio, NGINX, ALB, or Ambassador. The
-# bottom of this file has an Istio example commented out.
-#
-# Each new release:
-#   1. Deploys 20% of pods with the new revision.
-#   2. Watches the canary metrics for 5 minutes; aborts on regression.
-#   3. Graduates to 50%, then 100%, with a 5-minute pause between
-#      steps.
-#   4. On full rollout, scales down the old revision.
-#
-# Prerequisite: install argo-rollouts in the cluster.
-#   kubectl create namespace argo-rollouts
-#   kubectl apply -n argo-rollouts -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
-#
-# Migration: when you adopt this, delete the existing Deployment
-# `backend` (the Rollout takes over the same selector). The Service
-# continues to select `app: backend`; no service change is required.
-#
-# Switch the Deployment→Rollout via:
-#   kubectl apply -f gitops/argo-rollouts-canary.yaml
-#   kubectl delete deployment backend -n indigopay
-
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
 metadata:
@@ -54,26 +16,24 @@ spec:
       canaryService: backend-svc
       stableService: backend-svc
       steps:
-        - setWeight: 20
-        - pause: { duration: 5m }
-        - setWeight: 50
-        - pause: { duration: 5m }
-        - setWeight: 100
+      - setWeight: 20
+      - pause:
+          duration: 5m
+      - setWeight: 50
+      - pause:
+          duration: 5m
+      - setWeight: 100
       analysis:
         templates:
-          # Real Prometheus-backed canary analysis comparing canary vs stable
-          # error rate and p95 latency (see gitops/analysis-template.yaml).
-          # On `Failed` Argo Rollouts aborts the rollout and traffic reverts
-          # to stable automatically (WS2 / #1100).
-          - templateName: backend-canary-analysis
+        - templateName: canary-vs-stable
         startingStep: 1
-        # Re-run analysis on each weight step. If the template returns
-        # `Failed`, the rollout aborts and traffic reverts to stable.
         args:
-          - name: service-name
-            value: backend-svc
-          - name: prometheus-address
-            value: http://prometheus-operated.monitoring.svc:9090
+        - name: canary-hash
+          valueFrom:
+            podTemplateHashValue: Latest
+        - name: stable-hash
+          valueFrom:
+            podTemplateHashValue: Stable
   template:
     metadata:
       labels:
@@ -81,110 +41,58 @@ spec:
         app.kubernetes.io/component: api
         app.kubernetes.io/part-of: stellar-indigopay
       annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "4000"
-        prometheus.io/path: "/metrics"
+        prometheus.io/scrape: 'true'
+        prometheus.io/port: '4000'
+        prometheus.io/path: /metrics
     spec:
       terminationGracePeriodSeconds: 35
       containers:
-        - name: backend
-          image: stellar-indigopay/backend:latest
-          imagePullPolicy: IfNotPresent
-          ports:
-            - name: http
-              containerPort: 4000
-              protocol: TCP
-          envFrom:
-            - configMapRef:
-                name: stellar-indigopay-config
-            - secretRef:
-                name: stellar-indigopay-secrets
-          startupProbe:
-            httpGet:
-              path: /api/health
-              port: http
-            initialDelaySeconds: 1
-            periodSeconds: 1
-            failureThreshold: 30
-          livenessProbe:
-            httpGet:
-              path: /api/health
-              port: http
-            initialDelaySeconds: 0
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /api/readyz
-              port: http
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            timeoutSeconds: 5
-            failureThreshold: 3
-          lifecycle:
-            preStop:
-              exec:
-                command: ["sh", "-c", "sleep 5"]
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "512Mi"
----
-apiVersion: argoproj.io/v1alpha1
-kind: AnalysisTemplate
-metadata:
-  name: backend-canary-analysis
-  namespace: stellar-indigopay
-  labels:
-    app: backend
-    component: canary-analysis
-spec:
-  args:
-    - name: service-name
-      value: backend-svc
-    - name: prometheus-address
-      value: http://prometheus-operated.monitoring.svc:9090
-  metrics:
-    # Canary error rate must not exceed 1.5× the stable baseline (WS2 / #1100).
-    # The query returns (canary rate) − (1.5 × stable rate); result[0] > 0 means
-    # the canary is regressing beyond the allowed factor. successCondition
-    # evaluates the provider's result vector (that is, `result[0]`), not a
-    # separate recording-rule name.
-    - name: canary-error-rate
-      interval: 30s
-      count: 20
-      successCondition: "result[0] <= 0"
-      failureLimit: 3
-      provider:
-        prometheus:
-          address: http://prometheus-operated.monitoring.svc:9090
-          query: |
-            sum(rate(http_requests_total{version="canary",status_code=~"5.."}[5m]))
-              /
-            clamp_min(sum(rate(http_requests_total{version="canary"}[5m])), 0.001)
-            -
-            sum(rate(http_requests_total{version="stable",status_code=~"5.."}[5m]))
-              /
-            clamp_min(sum(rate(http_requests_total{version="stable"}[5m])), 0.001) * 1.5
-    # Canary p95 latency must not increase by >20% over stable (WS2 / #1100).
-    # Provider query returns (canary p95) − (1.2 × stable p95).
-    - name: canary-p95-latency
-      interval: 30s
-      count: 20
-      successCondition: "result[0] <= 0"
-      failureLimit: 3
-      provider:
-        prometheus:
-          address: http://prometheus-operated.monitoring.svc:9090
-          query: |
-            histogram_quantile(0.95,
-              sum by (le) (rate(http_request_duration_seconds_bucket{version="canary"}[5m]))
-            )
-              -
-            histogram_quantile(0.95,
-              sum by (le) (rate(http_request_duration_seconds_bucket{version="stable"}[5m]))
-            ) * 1.2
+      - name: backend
+        image: stellar-indigopay/backend:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 4000
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: stellar-indigopay-config
+        - secretRef:
+            name: stellar-indigopay-secrets
+        startupProbe:
+          httpGet:
+            path: /api/health
+            port: http
+          initialDelaySeconds: 1
+          periodSeconds: 1
+          failureThreshold: 30
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: http
+          initialDelaySeconds: 0
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /api/readyz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 3
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - sh
+              - -c
+              - sleep 5
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi

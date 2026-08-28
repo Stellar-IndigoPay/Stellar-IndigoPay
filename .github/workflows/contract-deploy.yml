@@ -117,7 +117,14 @@ jobs:
             --admin "$DEPLOYER_ADDRESS" 2>&1 || \
             echo "::warning title=Init skipped::Contract may already be initialized or initialization failed. Check the Stellar Expert link."
 
+      - name: Verify Post-Deployment Correctness
+        if: env.SKIP_DEPLOY != 'true'
+        run: |
+          chmod +x scripts/verify-deployment.sh
+          ./scripts/verify-deployment.sh "$DEPLOYED_CONTRACT_ID" "$DEPLOYER_ADDRESS" contracts/target/wasm32v1-none/release/indigopay_contract.opt.wasm
+
       - name: Upload WASM artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: indigopay-contract-wasm

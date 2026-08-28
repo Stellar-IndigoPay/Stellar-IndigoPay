@@ -30,11 +30,23 @@ scrape_configs:
     authorization:
       type: Bearer
       credentials: ${PROMETHEUS_BEARER_TOKEN}
-    static_configs:
-      - targets: ["backend-svc:4000"]
-        labels:
-          service: stellar-indigopay-api
-          env: production
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: backend
+      - source_labels: [__meta_kubernetes_pod_label_pod_template_hash]
+        target_label: pod_template_hash
+      - source_labels: [__meta_kubernetes_pod_label_rollouts_pod_template_hash]
+        target_label: rollouts_pod_template_hash
+      - source_labels: [__meta_kubernetes_pod_ip]
+        target_label: __address__
+        replacement: $1:4000
+      - target_label: service
+        replacement: stellar-indigopay-api
+      - target_label: env
+        replacement: production
 
   # ── PostgreSQL exporter (primary) ──────────────────────────────────
   # Requires postgres_exporter sidecar or standalone deployment.
