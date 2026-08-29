@@ -1,4 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from "next";
+import { captureEvent } from "@sentry/nextjs";
 
 /**
  * CSP violation reporting endpoint.
@@ -38,6 +39,27 @@ function logViolation(fields: {
     documentUri: fields.documentUri,
     originalPolicy: fields.originalPolicy?.slice(0, 200),
   });
+
+  // Issue #1096 (WS3): Trusted Types / CSP violations must flow into the
+  // alerting pipeline so a policy regression is caught in production, not
+  // just in CI. Sentry is already configured app-wide (@sentry/nextjs); a
+  // failure here must never break report ingestion, hence the try/catch.
+  try {
+    captureEvent({
+      message: "CSP violation",
+      level: "warning",
+      tags: {
+        blockedUri: fields.blockedUri ?? "(none)",
+        violatedDirective: fields.violatedDirective ?? "(unknown)",
+      },
+      extra: {
+        documentUri: fields.documentUri ?? null,
+        originalPolicy: fields.originalPolicy?.slice(0, 200) ?? null,
+      },
+    });
+  } catch {
+    // Report ingestion must never throw.
+  }
 }
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {

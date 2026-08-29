@@ -134,9 +134,80 @@ groups:
           summary: "Database backup verification failed"
           description: "The nightly backup at {{ $labels.backup_path }} failed verification. Investigate immediately — the backup may be corrupt or unrecoverable."
 
+      # Restore drill integrity (WS4 / #1100): a mismatched row-level checksum
+      # or failed drill means the production backup is not provably recoverable,
+      # even though row counts may look healthy.
+      #
+      # The drill emits STATUS gauges (restore_drill_last_result) that are
+      # overwritten on every run — NOT monotonic counters — so we query the
+      # last-run status directly rather than `increase()`, which is meaningless
+      # for an overwritten value.
+      - alert: RestoreDrillFailed
+        expr: |
+          restore_drill_last_result == 1
+        for: 0m
+        labels:
+          severity: critical
+          routing: pagerduty
+        annotations:
+          summary: "Restore drill failed — backup may be unrecoverable"
+          description: |
+            The most recent restore drill reported a failure (restore_drill_last_result == 1).
+            See the drill workflow logs and the restore-drill runbook immediately.
+
+      - alert: RestoreDrillChecksumMismatch
+        expr: restore_drill_checksum_mismatch_last == 1
+        for: 0m
+        labels:
+          severity: critical
+          routing: pagerduty
+        annotations:
+          summary: "Restore drill checksum mismatch detected"
+          description: |
+            A row-level checksum or SHA-256 mismatch was found during the restore
+            drill. Silent data corruption is suspected. Investigate backup_verifications
+            and the affected table immediately.
+
+      # Backup liveness: age of the last successful backup. Uses
+      # backup_last_success_timestamp_seconds (emitted by backup-db.sh) so two
+      # consecutive same-duration backups never false-positive, and an explicit
+      # absent() clause so a backup that stops emitting metrics entirely still
+      # alerts (an absent series would otherwise never fire the rule).
+      - alert: BackupStalled
+        expr: |
+          (time() - backup_last_success_timestamp_seconds > 48 * 3600)
+            or
+          (absent(backup_last_success_timestamp_seconds))
+        for: 2h
+        labels:
+          severity: warn
+        annotations:
+          summary: "No successful database backup in the last 48h"
+          description: |
+            The most recent successful backup (backup_last_success_timestamp_seconds)
+            is older than 48 hours, or the metric is entirely absent. The nightly
+            backup workflow may be failing before it emits metrics.
+
   - name: stellar-indigopay-postgres-failover-info
     interval: 30s
     rules:
+      # Critical: any failover means the primary went down and the standby had
+      # to be promoted. Every failover is an incident worth paging on, even if
+      # the promotion itself succeeded (#1100 / WS1).
+      - alert: PostgresFailoverHappened
+        expr: increase(postgres_failover_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          routing: pagerduty
+        annotations:
+          summary: "Postgres failover triggered — primary unavailable, standby promoted"
+          description: |
+            The postgres-healthcheck daemon detected the primary was down and
+            initiated automated failover. Once settled, verify the old primary
+            is re-synced via pg_rewind before attempting failback. Check:
+            kubectl get pods -n stellar-indigopay -l app=postgres
+
       - alert: PostgresFailoverSucceeded
         expr: increase(indigopay_postgres_failover_total{outcome="succeeded"}[10m]) > 0
         for: 0m
@@ -164,6 +235,23 @@ groups:
             If the primary is genuinely down, the healthcheck sidecar will
             trigger automated failover within 30 s.
             Check: kubectl get pods -n stellar-indigopay -l app=postgres,role=primary
+
+      # Split-brain guard: fires when no single holder owns the primary Lease,
+      # which weakens split-brain prevention. `count` reduces the per-holder
+      # kube_lease_holder series to a scalar-like value that we can compare.
+      - alert: PostgresLeaseContention
+        expr: |
+          count(kube_lease_holder{lease="postgres-primary-lock"})
+            == 0
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Postgres primary Lease has no active holder"
+          description: |
+            No node currently holds the postgres-primary-lock Lease. This means
+            split-brain prevention is not actively locking and manual promotion
+            is unsafe. Verify exactly one primary is accepting writes.
 
   - name: stellar-indigopay-backend-readiness
     interval: 30s

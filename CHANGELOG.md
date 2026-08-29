@@ -2,6 +2,15 @@
 
 ### Features
 
+* **backend:** admin session management endpoints + email/password login with TOTP MFA (closes #1123)
+  - New `backend/src/routes/admin/sessions.js`: `GET /api/admin/sessions` lists active sessions (flagging the caller's), `DELETE /api/admin/sessions/:family` revokes one session family, and `DELETE /api/admin/sessions` revokes every session except the one identified by the refresh cookie
+  - New `admins` table (migration 032) with bcrypt `password_hash`, base32 `mfa_secret`, and `mfa_enabled`; `POST /api/admin/auth/login` authenticates by email + password
+  - `POST /api/admin/auth/mfa/setup` generates a TOTP secret with otpauth URL + QR code; `POST /api/admin/auth/mfa/verify` enables MFA after the first code verifies
+  - MFA logins are two-leg: the password leg returns a short-lived `mfa-challenge` token that is exchanged (with the TOTP code) at the same endpoint, so the password is never re-sent; `adminRequired` rejects `mfa-challenge` tokens outright
+  - Existing `X-Admin-Key` header auth and the env-credential `/api/admin/login` path are unchanged
+  - Session endpoints moved from `admin.js` into the new router; the old `POST /api/admin/sessions/:id/revoke` is replaced by `DELETE /api/admin/sessions/:family`
+  - New tests: 25 admin auth/session tests covering list/revoke acceptance criteria, MFA setup-verify roundtrip, and challenge-token rejection (62 total in `admin.test.js`)
+
 * **monitoring:** synthetic on-chain transaction monitoring + business-level metrics dashboards (closes #1144)
   - Part A: Add `scripts/synthetic-monitor.js` — proactive 5-minute full-path check (Horizon + Soroban RPC + `sendTransaction` + `getTransaction` confirmation) with Prometheus metrics (`synthetic_donation_success`, `synthetic_donation_duration_seconds`, `synthetic_donation_checks_total`, `synthetic_donation_last_timestamp`)
   - Part A: Add `.github/workflows/synthetic-monitor.yml` — scheduled GitHub Actions workflow (every 5 min, explicit `contents: read` + `issues: write` permissions); auto-creates GitHub issue on failure

@@ -378,6 +378,7 @@ try {
 // Each route file is mounted under both /api and /api/v1 so that the v1
 // versioned path and the legacy unversioned path stay in lockstep.
 const routeMounts = [
+  "auth",
   "donations",
   "projects",
   "profiles",

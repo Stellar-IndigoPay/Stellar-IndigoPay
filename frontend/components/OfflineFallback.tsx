@@ -1,8 +1,12 @@
+import useQueuedCount from "@/hooks/useQueuedCount";
+
 interface OfflineFallbackProps {
   isOnline: boolean;
 }
 
 export default function OfflineFallback({ isOnline }: OfflineFallbackProps) {
+  const queuedCount = useQueuedCount(isOnline);
+
   if (isOnline) return null;
 
   return (
@@ -15,6 +19,15 @@ export default function OfflineFallback({ isOnline }: OfflineFallbackProps) {
         The app is available in a limited offline mode. Cached content remains
         accessible, and donations you start will be queued until you reconnect.
       </p>
+      {queuedCount > 0 && (
+        <p
+          className="mt-4 inline-flex items-center gap-2 rounded-full border border-[rgba(99,102,241,0.20)] dark:border-[rgba(129,140,248,0.25)] bg-[rgba(99,102,241,0.06)] dark:bg-[rgba(129,140,248,0.08)] px-4 py-1.5 text-sm font-semibold text-[#4F46E5] dark:text-[#818CF8]"
+          data-testid="offline-queued-badge"
+        >
+          {queuedCount} donation{queuedCount === 1 ? "" : "s"} queued — will
+          submit when you&apos;re back online.
+        </p>
+      )}
     </div>
   );
 }

@@ -20,9 +20,8 @@ import GlobalSearchModal from "@/components/GlobalSearchModal";
 import ConnectivityBanner from "@/components/ConnectivityBanner";
 import OfflineFallback from "@/components/OfflineFallback";
 import InstallPrompt from "@/components/InstallPrompt";
-import { syncQueuedDonations } from "@/lib/offlineDonationQueue";
-import { recordDonation } from "@/lib/api";
 import { initAnalytics, trackEvent } from "@/lib/analytics";
+import useOfflineQueueSync from "@/hooks/useOfflineQueueSync";
 import { inter, display } from "@/lib/fonts";
 import "@/styles/globals.css";
 
@@ -88,36 +87,16 @@ export default function App({ Component, pageProps }: AppProps) {
     };
   }, [router.events]);
 
+  // Issue #1129: drain the offline donation queue on load, on reconnect, and
+  // on Service Worker Background Sync nudges (public/sw.js posts the plain
+  // string "indigopay-queue-sync") — with the server idempotency pre-check,
+  // the conflict toast, and the confirmation notification wired in.
+  useOfflineQueueSync();
+
+  // Register the Service Worker for offline app-shell caching (public/sw.js).
   useEffect(() => {
     if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
-
-    const handleOnlineSync = () => {
-      void syncQueuedDonations(async (payload) => {
-        try {
-          await recordDonation({
-            ...payload,
-            transactionHash: payload.transactionHash || "queued-offline",
-          });
-          return true;
-        } catch {
-          return false;
-        }
-      });
-    };
-
     navigator.serviceWorker.register("/sw.js").catch(() => undefined);
-    navigator.serviceWorker.addEventListener("message", (event) => {
-      if (event.data?.type === "sync-queued-donations") {
-        handleOnlineSync();
-      }
-    });
-    window.addEventListener("online", handleOnlineSync);
-
-    handleOnlineSync();
-
-    return () => {
-      window.removeEventListener("online", handleOnlineSync);
-    };
   }, []);
   return (
     <ErrorBoundary>

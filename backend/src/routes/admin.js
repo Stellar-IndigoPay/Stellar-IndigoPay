@@ -9,7 +9,6 @@ const {
   findRefreshToken,
   revokeRefreshFamily,
   rotateRefreshToken,
-  listActiveSessions,
   blacklistAccessToken,
   adminRequired,
   ACCESS_TOKEN_EXPIRY_SECONDS,
@@ -19,35 +18,12 @@ const { createRateLimiter } = require("../middleware/rateLimiter");
 const { sendAppError } = require("../errors");
 const { buildAuditFilters } = require("./admin/audit-export");
 const { enqueueDigest } = require("../services/digestQueue");
+const {
+  clearRefreshCookie,
+  setRefreshCookie,
+} = require("./admin/refreshCookie");
 
 const loginLimiter = createRateLimiter(10, 15);
-
-const REFRESH_COOKIE = "refresh_token";
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-// Scoped to /api rather than /api/admin: this router is mounted under both
-// /api/admin and /api/v1/admin, and a narrower path would leave the versioned
-// mount without a cookie.
-function refreshCookieOptions() {
-  return {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "strict",
-    path: "/api",
-  };
-}
-
-function setRefreshCookie(res, token) {
-  res.cookie(REFRESH_COOKIE, token, {
-    ...refreshCookieOptions(),
-    maxAge: REFRESH_TOKEN_EXPIRY_MS,
-  });
-}
-
-function clearRefreshCookie(res) {
-  res.clearCookie(REFRESH_COOKIE, refreshCookieOptions());
-}
 
 function accessTokenPayload(adminId) {
   return {
@@ -86,7 +62,7 @@ router.post("/login", loginLimiter, async (req, res, next) => {
 
   try {
     const { token } = await issueRefreshToken(username);
-    setRefreshCookie(res, token);
+    setRefreshCookie(res, token, REFRESH_TOKEN_EXPIRY_MS);
     return res.json(accessTokenPayload(username));
   } catch (e) {
     next(e);
@@ -136,7 +112,7 @@ router.post("/refresh", async (req, res, next) => {
       });
     }
 
-    setRefreshCookie(res, result.token);
+    setRefreshCookie(res, result.token, REFRESH_TOKEN_EXPIRY_MS);
     return res.json(accessTokenPayload(result.adminId));
   } catch (e) {
     next(e);
@@ -170,66 +146,6 @@ router.post("/logout", async (req, res, next) => {
 
     clearRefreshCookie(res);
     return res.json({ success: true });
-  } catch (e) {
-    next(e);
-  }
-});
-
-/**
- * List the authenticated admin's active sessions.
- *
- * @route GET /api/admin/sessions
- * @param {import('express').Request} req - Express request with the authenticated admin context.
- * @param {import('express').Response} res - Express response object.
- * @param {import('express').NextFunction} next - Express error middleware.
- * @returns {Promise<void>} Sends one entry per active session, flagging the current one.
- * @throws {Error} If the session lookup fails.
- */
-router.get("/sessions", adminRequired, async (req, res, next) => {
-  try {
-    const sessions = await listActiveSessions(req.admin.sub);
-
-    const presented = req.cookies?.refresh_token;
-    const currentFamily = presented
-      ? ((await findRefreshToken(presented))?.family ?? null)
-      : null;
-
-    res.json({
-      success: true,
-      data: sessions.map((session) => ({
-        ...session,
-        current: session.id === currentFamily,
-      })),
-    });
-  } catch (e) {
-    next(e);
-  }
-});
-
-/**
- * Revoke one of the authenticated admin's sessions.
- *
- * @route POST /api/admin/sessions/:id/revoke
- * @param {import('express').Request} req - Express request with the session id to revoke.
- * @param {import('express').Response} res - Express response object.
- * @param {import('express').NextFunction} next - Express error middleware.
- * @returns {Promise<void>} Sends success, or an error when no active session matches.
- * @throws {Error} If the revocation query fails.
- */
-router.post("/sessions/:id/revoke", adminRequired, async (req, res, next) => {
-  const { id } = req.params;
-  if (!UUID_PATTERN.test(id)) {
-    return sendAppError(res, "VALIDATION_ERROR", { field: "id" });
-  }
-
-  try {
-    const revoked = await revokeRefreshFamily(id, req.admin.sub);
-    if (revoked === 0) {
-      return sendAppError(res, "NOT_FOUND", {
-        reason: "No active session with that id",
-      });
-    }
-    res.json({ success: true });
   } catch (e) {
     next(e);
   }
@@ -359,8 +275,14 @@ router.use("/documents", require("./admin/documents"));
 router.use("/webhooks", require("./admin/webhooks"));
 router.use("/indexer", require("./admin/indexer"));
 router.use("/secret-rotations", require("./admin/secretRotations"));
+router.use("/secrets", require("./admin/secrets"));
 router.use("/metrics", require("./admin/metrics"));
 router.use("/failover-metric", require("./admin/failoverMetric"));
 router.use("/matches", require("./admin/matches"));
+
+// Session management (issue #1123 Part A) and password/MFA auth
+// (issue #1123 Part B) live in their own routers.
+router.use("/sessions", require("./admin/sessions"));
+router.use("/auth", require("./admin/auth"));
 
 module.exports = router;

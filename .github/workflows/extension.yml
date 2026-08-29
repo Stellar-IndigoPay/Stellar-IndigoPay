@@ -18,11 +18,11 @@ jobs:
       run:
         working-directory: extension
     steps:
-      - name: Start Timer
-        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Start Timer
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
 
       - name: Derive version
         id: version
@@ -52,6 +52,35 @@ jobs:
         with:
           node-version: "22"
           working-directory: extension
+
+      - name: Lint CSP
+        run: |
+          node -e "
+          ['manifest.json', 'manifest.firefox.json'].forEach(f => {
+            const m = require('./' + f);
+            const csp = m.content_security_policy;
+            const policy = typeof csp === 'object' ? csp.extension_pages : csp;
+            if (!policy) {
+              console.error(f + ' missing CSP');
+              process.exit(1);
+            }
+            if (policy.includes('unsafe-inline')) {
+              console.error(f + ' allows inline scripts');
+              process.exit(1);
+            }
+            if (!policy.match(/(?:^|;)\s*script-src\s+\\'self\\'\s*(?:;|$)/)) {
+              console.error(f + ' must restrict script-src to self');
+              process.exit(1);
+            }
+            if (!policy.match(/(?:^|;)\s*object-src\s+\\'none\\'\s*(?:;|$)/)) {
+              console.error(f + ' must restrict object-src to none');
+              process.exit(1);
+            }
+          });
+          "
+
+      - name: Validate Manifest V3 CSP
+        run: npm run check:csp
 
       - name: Lint
         run: npm run lint

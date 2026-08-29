@@ -6,6 +6,25 @@ let provider: any = null;
 let modal: any = null;
 let currentSession: any = null;
 
+/**
+ * E2E test hook (mirrors the Freighter adapter's `__test_publicKey__`): when
+ * a page sets `window.__walletconnect_test_pubkey__`, connect/getPublicKey/
+ * signTransaction short-circuit without importing @walletconnect/universal-
+ * provider or opening the QR modal.  This lets the E2E suite exercise the
+ * full "pair a mobile wallet → sign → submit → recorded" path deterministically
+ * (issue #1096, Workstream 4 — WalletConnect QR pairing E2E, mocked).
+ */
+function hasTestPublicKey(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    !!(window as unknown as Record<string, unknown>).__walletconnect_test_pubkey__
+  );
+}
+
+function getTestPublicKey(): string {
+  return (window as unknown as Record<string, string>).__walletconnect_test_pubkey__;
+}
+
 async function getProvider() {
   if (!provider) {
     const UniversalProvider = (await import("@walletconnect/universal-provider")).default;
@@ -33,6 +52,8 @@ export const walletConnectAdapter: StellarWalletAdapter = {
   },
   
   async connect(): Promise<void> {
+    if (hasTestPublicKey()) return;
+
     const prov = await getProvider();
     
     if (!modal) {
@@ -60,6 +81,8 @@ export const walletConnectAdapter: StellarWalletAdapter = {
   },
   
   async getPublicKey(): Promise<string> {
+    if (hasTestPublicKey()) return getTestPublicKey();
+
     const prov = await getProvider();
     if (!currentSession && prov.session) {
         currentSession = prov.session;
@@ -78,6 +101,8 @@ export const walletConnectAdapter: StellarWalletAdapter = {
     xdr: string,
     opts: { networkPassphrase: string; network: "TESTNET" | "MAINNET" }
   ): Promise<string> {
+    if (hasTestPublicKey()) return xdr;
+
     const prov = await getProvider();
     if (!currentSession) {
         throw new Error("Not connected");

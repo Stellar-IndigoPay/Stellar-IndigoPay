@@ -582,6 +582,17 @@ pub trait AttestationInterface {
 #[cfg(any(feature = "usdc", feature = "donation", feature = "testutils"))]
 const XCHAIN_CURRENCY: Symbol = symbol_short!("XCHAIN");
 
+/// Persistent storage key namespace for IndigoPay.
+///
+/// This is a Soroban `#[contracttype]` union, not a Rust integer enum. The SDK
+/// encodes a value as a vector whose first element is the variant name as a
+/// `Symbol`; the generated union case table also follows this source order.
+/// Existing variants are append-only for storage compatibility: never reorder
+/// or remove one, and never insert a new variant before an existing one.
+///
+/// `DataKey.discriminants.txt` records the generated case order and payload
+/// shapes. Update that golden file only when intentionally appending a new
+/// variant, then run the compatibility test to verify the append-only change.
 #[contracttype]
 pub enum DataKey {
     // Multi-sig admin set: Vec<Address> of authorized admin addresses.

@@ -82,6 +82,13 @@ pub const RELEASE_AFTER_LEDGERS: u32 = 10;
 pub const DEFAULT_DEADLINE_LEDGERS: u32 = 1_555_200; // 90 days @ 5s/ledger
 pub const MAX_MILESTONE_NAME_LEN: u32 = 64; // bytes; enforced at create + amend
 
+/// Grace period (in ledgers) after a job's `deadline` during which a
+/// completed job is not yet eligible for archival by
+/// `cleanup_completed_jobs`. A completed job is cleaned up only once
+/// `deadline + GRACE_PERIOD` strictly precedes the current ledger, so
+/// recently-completed history cannot be swept immediately.
+pub const GRACE_PERIOD: u32 = 86_400; // 5 days @ 5s/ledger
+
 /// Hard cap on the number of jobs kept in instance storage. `create_job`
 /// rejects new jobs once the stored count reaches this limit
 /// (`JobCountExceedsMaximum`).
@@ -171,6 +178,8 @@ pub enum EscrowError {
     // ── Job enumeration (63–64) ───────────────────────────────────────────
     JobIdsPageSizeExceedsMaximum = 63,
     JobCountExceedsMaximum = 64,
+    // ── Job cleanup / archival (65) ─────────────────────────────────────
+    NothingToCleanUp = 65,
 }
 
 /// Validate a milestone vector against the invariants that must hold at every
@@ -1345,6 +1354,71 @@ impl EscrowContract {
         page
     }
 
+    /// Permissionless storage GC. Archives every job whose status is
+    /// `Completed` and whose `deadline + GRACE_PERIOD` strictly precedes the
+    /// current ledger, reclaiming the `MAX_JOBS` slots those finished jobs
+    /// occupy so `create_job` can keep honoring the hard cap instead of being
+    /// permanently blocked by long-completed work.
+    ///
+    /// For each eligible job this removes its `DataKey::Job` entry, drops its
+    /// id from the `JobIds` vector, and decrements `JobCount`. `FreelancerReputation`
+    /// is intentionally left untouched — it is an append-only history aggregate
+    /// that must survive archival.
+    ///
+    /// Panics with `NothingToCleanUp` when no job is eligible, otherwise
+    /// returns the number of jobs archived.
+    pub fn cleanup_completed_jobs(env: Env) -> u32 {
+        let ids: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::JobIds)
+            .unwrap_or_else(|| Vec::new(&env));
+        let current = env.ledger().sequence();
+
+        let mut kept: Vec<String> = Vec::new(&env);
+        let mut removed: u32 = 0;
+
+        for job_id in ids.iter() {
+            let id = job_id.clone();
+            // `deadline + GRACE_PERIOD` is computed in i128 so a very large
+            // deadline near `u32::MAX` cannot overflow the addition.
+            let cleanable = env
+                .storage()
+                .instance()
+                .get::<_, Job>(&DataKey::Job(id.clone()))
+                .is_some_and(|job| {
+                    job.status == JobStatus::Completed
+                        && (job.deadline as i128 + GRACE_PERIOD as i128) < current as i128
+                });
+            if cleanable {
+                env.storage().instance().remove(&DataKey::Job(id));
+                removed = removed.checked_add(1).expect("removed overflow");
+            } else {
+                kept.push_back(id);
+            }
+        }
+
+        if removed == 0 {
+            panic_with_error!(&env, EscrowError::NothingToCleanUp);
+        }
+
+        env.storage().instance().set(&DataKey::JobIds, &kept);
+
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::JobCount)
+            .unwrap_or(0);
+        let next_count = count.checked_sub(removed).expect("JobCount underflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::JobCount, &next_count);
+
+        env.events().publish((symbol_short!("jobs_clnd"),), removed);
+
+        removed
+    }
+
     /// Return the immutable aggregate history for `freelancer`.
     pub fn get_freelancer_reputation(env: Env, freelancer: Address) -> FreelancerReputation {
         read_reputation(&env, &freelancer)
@@ -1356,6 +1430,10 @@ mod escrow_fuzz;
 
 #[cfg(test)]
 mod tests {
+    // `std` is not linked in this `#![no_std]` crate by default; declare it
+    // explicitly (matching the `escrow_fuzz` harness) so `std::format!` is
+    // available for building job-id strings in tests.
+    extern crate std;
     use super::*;
     use soroban_sdk::testutils::{Address as _, Ledger as _};
     use soroban_sdk::token::StellarAssetClient;
@@ -2362,6 +2440,309 @@ mod tests {
                 &RELEASE_AFTER_LEDGERS,
             )
             .is_err());
+    }
+
+    /// Register a token, mint `amount` to `client`, and create a single-milestone
+    /// (100%) job of `amount` from `client` to `freelancer`. Returns the token.
+    fn setup_single_milestone_job(
+        env: &Env,
+        client: &EscrowContractClient<'_>,
+        client_addr: &Address,
+        freelancer: &Address,
+        job_id: &String,
+        amount: i128,
+    ) -> Address {
+        let token_admin = Address::generate(env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(env, &token).mint(client_addr, &amount);
+        let mut milestones = Vec::new(env);
+        milestones.push_back(make_milestone(env, "M1", 100));
+        client.create_job(
+            client_addr,
+            freelancer,
+            job_id,
+            &token,
+            &amount,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+        token
+    }
+
+    #[test]
+    fn test_cleanup_completed_jobs_archives_expired_completed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+
+        // Job A always stays in-flight; Job B will be completed and cleaned up.
+        setup_single_milestone_job(
+            &env,
+            &client,
+            &client_addr,
+            &freelancer,
+            &String::from_str(&env, "job-inflight"),
+            1000i128,
+        );
+        setup_single_milestone_job(
+            &env,
+            &client,
+            &client_addr,
+            &freelancer,
+            &String::from_str(&env, "job-completed"),
+            1000i128,
+        );
+
+        // Complete job B.
+        client.release_milestone(
+            &client_addr,
+            &String::from_str(&env, "job-completed"),
+            &0u32,
+        );
+        assert_eq!(
+            client
+                .get_job(&String::from_str(&env, "job-completed"))
+                .unwrap()
+                .status,
+            JobStatus::Completed
+        );
+        assert_eq!(client.get_job_count(), 2);
+
+        // Capture reputation data before cleanup — it must be preserved.
+        let rep_before = client.get_freelancer_reputation(&freelancer);
+
+        // Advance time well past deadline + grace period for both jobs.
+        let completed = client
+            .get_job(&String::from_str(&env, "job-completed"))
+            .unwrap();
+        env.ledger()
+            .set_sequence_number(completed.deadline + GRACE_PERIOD + 1);
+
+        let removed = client.cleanup_completed_jobs();
+        assert_eq!(removed, 1);
+
+        // Job B's entry and id are gone; job A remains.
+        assert!(client
+            .get_job(&String::from_str(&env, "job-completed"))
+            .is_none());
+        assert!(client
+            .get_job(&String::from_str(&env, "job-inflight"))
+            .is_some());
+        assert_eq!(client.get_job_count(), 1);
+
+        let ids = client.get_job_ids(&0, &MAX_JOB_IDS_PAGE_SIZE);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids.get(0).unwrap(), String::from_str(&env, "job-inflight"));
+
+        // Reputation history survives archival intact.
+        let rep_after = client.get_freelancer_reputation(&freelancer);
+        assert_eq!(rep_after, rep_before);
+        assert_eq!(rep_after.completed_jobs, 1);
+        assert_eq!(rep_after.total_jobs, 2);
+    }
+
+    #[test]
+    fn test_cleanup_does_not_remove_in_flight_jobs() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+
+        // Escrowed (never released).
+        setup_single_milestone_job(
+            &env,
+            &client,
+            &client_addr,
+            &freelancer,
+            &String::from_str(&env, "escrowed"),
+            1000i128,
+        );
+        // PartiallyReleased: two milestones, only the first released.
+        {
+            let token_admin = Address::generate(&env);
+            let token = env
+                .register_stellar_asset_contract_v2(token_admin)
+                .address();
+            StellarAssetClient::new(&env, &token).mint(&client_addr, &1000i128);
+            let mut milestones = Vec::new(&env);
+            milestones.push_back(make_milestone(&env, "M1", 50));
+            milestones.push_back(make_milestone(&env, "M2", 50));
+            client.create_job(
+                &client_addr,
+                &freelancer,
+                &String::from_str(&env, "partial"),
+                &token,
+                &1000i128,
+                &milestones,
+                &RELEASE_AFTER_LEDGERS,
+            );
+        }
+        client.release_milestone(&client_addr, &String::from_str(&env, "partial"), &0u32);
+        assert_eq!(
+            client
+                .get_job(&String::from_str(&env, "partial"))
+                .unwrap()
+                .status,
+            JobStatus::PartiallyReleased
+        );
+        // Disputed: single milestone, admin flags it.
+        setup_single_milestone_job(
+            &env,
+            &client,
+            &client_addr,
+            &freelancer,
+            &String::from_str(&env, "disputed"),
+            1000i128,
+        );
+        client.dispute_milestone(
+            &signers1(&env, &admin),
+            &String::from_str(&env, "disputed"),
+            &0u32,
+        );
+        assert_eq!(
+            client
+                .get_job(&String::from_str(&env, "disputed"))
+                .unwrap()
+                .status,
+            JobStatus::Disputed
+        );
+
+        // A completed job that qualifies for archival once past its grace period.
+        setup_single_milestone_job(
+            &env,
+            &client,
+            &client_addr,
+            &freelancer,
+            &String::from_str(&env, "completed"),
+            1000i128,
+        );
+        client.release_milestone(&client_addr, &String::from_str(&env, "completed"), &0u32);
+
+        // Advance time far beyond every deadline AND grace period.
+        let completed_job = client
+            .get_job(&String::from_str(&env, "completed"))
+            .unwrap();
+        env.ledger()
+            .set_sequence_number(completed_job.deadline + GRACE_PERIOD + 1);
+
+        // Only the completed job is cleanable; all in-flight jobs survive.
+        let removed = client.cleanup_completed_jobs();
+        assert_eq!(removed, 1);
+        assert!(client
+            .get_job(&String::from_str(&env, "escrowed"))
+            .is_some());
+        assert!(client.get_job(&String::from_str(&env, "partial")).is_some());
+        assert!(client
+            .get_job(&String::from_str(&env, "disputed"))
+            .is_some());
+        assert!(client
+            .get_job(&String::from_str(&env, "completed"))
+            .is_none());
+        assert_eq!(client.get_job_count(), 3);
+
+        // Nothing cleanable remaining -> cleanup panics with NothingToCleanUp.
+        match client.try_cleanup_completed_jobs() {
+            Err(Ok(error)) => assert_eq!(
+                EscrowError::try_from(&error).ok(),
+                Some(EscrowError::NothingToCleanUp)
+            ),
+            other => panic!("expected NothingToCleanUp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_cleanup_frees_jobs_for_new_creation() {
+        // The escrow contract keeps every job in `env.storage().instance()`,
+        // which Soroban serializes into a single instance entry capped at
+        // 64 KiB. That hard platform limit is reached long before
+        // `MAX_JOBS = 256` (filling ~101 jobs exceeds it), so a literal
+        // 256-job test cannot run. Instead, fill a storage-safe volume,
+        // complete all but one, archive the completed jobs, and prove the
+        // reclaimed slots let more jobs be created afterwards.
+        const FILL: i128 = 64;
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client) = setup(&env);
+
+        let client_addr = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+
+        // Fund the client enough for FILL + 1 jobs.
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&client_addr, &((FILL + 1) * 1000));
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(make_milestone(&env, "M1", 100));
+
+        // Create FILL jobs.
+        for i in 0..FILL {
+            let job_id = String::from_str(&env, &std::format!("bulk-{}", i));
+            client.create_job(
+                &client_addr,
+                &freelancer,
+                &job_id,
+                &token,
+                &1000i128,
+                &milestones,
+                &RELEASE_AFTER_LEDGERS,
+            );
+        }
+        assert_eq!(client.get_job_count(), FILL as u32);
+
+        // Complete all but the last; that one stays Escrowed (in-flight).
+        for i in 0..(FILL - 1) {
+            let job_id = String::from_str(&env, &std::format!("bulk-{}", i));
+            client.release_milestone(&client_addr, &job_id, &0u32);
+        }
+        assert_eq!(client.get_job_count(), FILL as u32);
+
+        // Advance well past deadline + grace so all completed jobs are cleanable.
+        let last = client
+            .get_job(&String::from_str(&env, &std::format!("bulk-{}", FILL - 1)))
+            .unwrap();
+        env.ledger()
+            .set_sequence_number(last.deadline + GRACE_PERIOD + 1);
+
+        let removed = client.cleanup_completed_jobs();
+        assert_eq!(removed, (FILL - 1) as u32);
+
+        // FILL - 1 slots reclaimed; the in-flight job remains.
+        assert_eq!(client.get_job_count(), 1);
+        assert!(client
+            .get_job(&String::from_str(&env, &std::format!("bulk-{}", FILL - 1)))
+            .is_some());
+        for i in 0..(FILL - 1) {
+            assert!(client
+                .get_job(&String::from_str(&env, &std::format!("bulk-{}", i)))
+                .is_none());
+        }
+
+        // A new job now succeeds thanks to the reclaimed slots: creating one
+        // more than pre-cleanup would be impossible only because the cap is
+        // not reached here, so assert the reclaim allowed an additional create.
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &String::from_str(&env, "bulk-reclaimed"),
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+        assert_eq!(client.get_job_count(), 2);
+        assert!(client
+            .get_job(&String::from_str(&env, "bulk-reclaimed"))
+            .is_some());
     }
 
     #[test]

@@ -107,6 +107,15 @@ const dbQueryDurationSeconds = new client.Histogram({
   registers: [registry],
 });
 
+// Idempotency-key INSERT races (issue #1102): counted with outcome=won when
+// this instance's INSERT won the ON CONFLICT race, outcome=lost when it
+// re-read and returned the winner's stored response.
+const idempotencyRaceWinsTotal = new client.Counter({
+  name: "idempotency_race_wins_total",
+  help: "Count of idempotency-key races won or lost (outcome=won|lost)",
+  labelNames: ["outcome"],
+});
+
 const cacheOperationsTotal = new client.Counter({
   name: "cache_operations_total",
   help: "Cache operations, labelled by cache (memory|redis), op (get|set|delete), and result (hit|miss|error|ok).",
@@ -578,6 +587,7 @@ const metrics = {
   cacheHits,
   cacheMisses,
   cacheCoalesced,
+  idempotencyRaceWinsTotal,
   queueJobsTotal,
   dsrExportCompleted,
   dsrErasureCompleted,
@@ -616,6 +626,7 @@ const metrics = {
 module.exports = {
   registry,
   metrics,
+  idempotencyRaceWinsTotal,
   cacheHits,
   cacheMisses,
   cacheCoalesced,
