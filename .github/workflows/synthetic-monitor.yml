@@ -1,0 +1,117 @@
+name: Synthetic Monitor
+
+on:
+  # Run every 5 minutes
+  schedule:
+    - cron: "*/5 * * * *"
+  # Allow manual triggering
+  workflow_dispatch:
+    inputs:
+      run_once:
+        description: "Run a single synthetic check and exit"
+        required: false
+        default: "true"
+
+# Prevent overlapping runs — if a check is still running when the next
+# 5-minute window fires, cancel the old one.
+concurrency:
+  group: synthetic-monitor
+  cancel-in-progress: true
+
+jobs:
+  synthetic-check:
+    name: Synthetic On-Chain Donation Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read   # required for actions/checkout
+      issues: write    # required to create failure-tracking issues
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          # Install only the backend deps needed for the Stellar SDK
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies (stellar-sdk only)
+        working-directory: backend
+        run: npm ci --omit=dev --ignore-scripts
+
+      - name: Run synthetic donation check
+        env:
+          # Secret key for the synthetic donor account (pre-funded testnet keypair).
+          # SYNTHETIC_DONOR_SECRET_KEY must be configured as a repository secret.
+          # The script will fail if it is not set — no auto-generation occurs.
+          SYNTHETIC_SECRET_KEY: ${{ secrets.SYNTHETIC_DONOR_SECRET_KEY }}
+          CONTRACT_ID: ${{ vars.SYNTHETIC_CONTRACT_ID || 'CCG3QSD7FWTZ5W7NG2N7UDYWYVXF3I2NY5JGT3QPTZ6KHOIKUHMMJ6BT' }}
+          STELLAR_NETWORK: testnet
+          HORIZON_URL: https://horizon-testnet.stellar.org
+          SOROBAN_RPC_URL: https://soroban-testnet.stellar.org
+          SYNTHETIC_PROJECT_ID: ${{ vars.SYNTHETIC_PROJECT_ID || 'project-001' }}
+          SYNTHETIC_AMOUNT_STROOPS: "100000"
+          RUN_ONCE: "true"
+          # Push results to Prometheus Push Gateway if configured
+          PROMETHEUS_PUSH_URL: ${{ secrets.PROMETHEUS_PUSH_URL }}
+          # Make require() resolve stellar-sdk from the backend node_modules
+          NODE_PATH: backend/node_modules
+        run: node scripts/synthetic-monitor.js
+
+      - name: Report check status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "✅ Synthetic donation check passed"
+          else
+            echo "❌ Synthetic donation check FAILED — Horizon/RPC/contract may be degraded"
+            echo "Check Stellar status: https://status.stellar.org"
+            echo "Check contract explorer: https://stellar.expert/explorer/testnet/contract/${{ vars.SYNTHETIC_CONTRACT_ID || 'CCG3QSD7FWTZ5W7NG2N7UDYWYVXF3I2NY5JGT3QPTZ6KHOIKUHMMJ6BT' }}"
+          fi
+
+      # On failure: open a GitHub issue if one doesn't already exist for the
+      # current day. This provides a paper trail even without a push gateway.
+      - name: Create failure issue (if needed)
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const today = new Date().toISOString().slice(0, 10);
+            const title = `[synthetic-monitor] Outage detected on ${today}`;
+
+            // Search for an existing open issue with the same title
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'synthetic-monitor',
+              per_page: 10,
+            });
+
+            const alreadyOpen = existing.data.some(i => i.title === title);
+            if (!alreadyOpen) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body: `## Synthetic donation monitor failure\n\n` +
+                  `**Detected at:** ${new Date().toISOString()}\n` +
+                  `**Workflow run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n` +
+                  `The automated synthetic end-to-end donation check failed.\n` +
+                  `This may indicate Horizon, Soroban RPC, or the IndigoPay contract is degraded.\n\n` +
+                  `Check:\n` +
+                  `- Stellar status: https://status.stellar.org\n` +
+                  `- Contract explorer: https://stellar.expert/explorer/testnet/contract/CCG3QSD7FWTZ5W7NG2N7UDYWYVXF3I2NY5JGT3QPTZ6KHOIKUHMMJ6BT\n\n` +
+                  `_This issue was created automatically by the synthetic-monitor workflow._`,
+                labels: ['synthetic-monitor', 'area: monitoring', 'priority: critical'],
+              });
+              console.log('Created failure issue:', title);
+            } else {
+              console.log('Failure issue already exists for today — skipping.');
+            }

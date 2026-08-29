@@ -209,12 +209,12 @@ async function submitMatchingPayment({
     }
 
     // Sign the transaction
-    transaction.sign(
-      require("@stellar/stellar-sdk").Keypair.fromSecret(matcherSecret),
-    );
+    const keypair = require("@stellar/stellar-sdk").Keypair.fromSecret(matcherSecret);
+    transaction.sign(keypair);
 
-    // Submit to Horizon
-    const result = await getServer().submitTransaction(transaction);
+    // Submit to Horizon with fee bump
+    const { submitWithFeeBump } = require("./stellar");
+    const result = await submitWithFeeBump(transaction, keypair);
 
     console.log(`Matching payment submitted: ${result.hash}`);
 

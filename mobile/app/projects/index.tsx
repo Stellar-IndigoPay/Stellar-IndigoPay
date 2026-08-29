@@ -140,7 +140,7 @@ export default function ProjectsScreen() {
                 borderColor: colors.cardBorder,
               },
             ]}
-            onPress={() => router.push(`/projects/${project.id}`)}
+            onPress={() => router.push(`/project/${project.id}`)}
             accessibilityLabel={`View ${project.name} project`}
             accessibilityRole="button"
           >

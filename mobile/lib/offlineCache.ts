@@ -349,3 +349,9 @@ export function stalenessLabel(ageMs: number): string {
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
 }
+
+export async function cacheOfflineState(alias: string, sequenceNumber: string, latestLedger: number): Promise<void> {
+  const ttl = 30 * 24 * 60 * 60 * 1000; // 30 days
+  await cache.set(`offline_sequence_${alias}`, sequenceNumber, { ttlMs: ttl });
+  await cache.set('offline_ledger', latestLedger, { ttlMs: ttl });
+}

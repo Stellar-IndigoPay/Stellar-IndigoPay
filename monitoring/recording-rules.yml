@@ -78,3 +78,82 @@ groups:
       - record: slo:projects:error_budget_remaining_pct
         expr: |
           (1 - (slo:projects:error_ratio / 0.001)) * 100
+
+# ── Business-level recording rules (issue #1144 Part B) ─────────────────────
+#
+# Pre-computes business KPIs from the business-metrics-exporter gauges so that
+# Grafana panels can reference concise recording-rule names. These rules are
+# evaluated on the same Prometheus instance and only aggregate already-aggregated
+# gauges — no individual donor data is stored in Prometheus.
+
+  - name: indigopay-business-recording
+    interval: 60s
+    rules:
+      # ── Donation volume (rolling 24h / 7d windows from donation rate) ──
+
+      # Rolling 24h donation count derived from the business exporter gauge.
+      # The daily gauge resets at UTC midnight; this rule provides a
+      # continuously-windowed alternative suitable for dashboards.
+      - record: business:donations:rolling_24h_count
+        expr: |
+          sum(increase(http_requests_total{method="POST",route="/api/donations",status_code=~"2.."}[24h]))
+
+      # Rolling 7d donation count
+      - record: business:donations:rolling_7d_count
+        expr: |
+          sum(increase(http_requests_total{method="POST",route="/api/donations",status_code=~"2.."}[7d]))
+
+      # ── Wallet-connect → donation conversion rate (30d) ──────────────────
+      # Approximated from the business metrics exporter gauge.
+      - record: business:conversion:rate_30d
+        expr: indigopay_business_conversion_rate
+
+      # ── Donor retention rate (30d cohort) ────────────────────────────────
+      - record: business:donors:retention_rate_30d
+        expr: indigopay_business_retention_rate_30d
+
+      # ── Active donor counts ───────────────────────────────────────────────
+      - record: business:donors:active_7d
+        expr: indigopay_business_active_donors_7d
+
+      - record: business:donors:active_30d
+        expr: indigopay_business_active_donors_30d
+
+      # ── CO₂ offset totals ─────────────────────────────────────────────────
+      - record: business:co2:offset_kg_total
+        expr: indigopay_business_co2_offset_kg_total
+
+      - record: business:co2:offset_kg_30d
+        expr: indigopay_business_co2_offset_kg_30d
+
+      # ── AI summary cost (30d) ─────────────────────────────────────────────
+      - record: business:ai:summary_cost_usd_30d
+        expr: indigopay_business_ai_summary_cost_usd_30d
+
+      # ── Webhook delivery reliability (24h) ────────────────────────────────
+      - record: business:webhooks:delivery_rate_24h
+        expr: indigopay_business_webhook_delivery_rate_24h
+
+      # ── Project health ────────────────────────────────────────────────────
+      - record: business:projects:total
+        expr: indigopay_business_projects_total
+
+      - record: business:projects:active
+        expr: indigopay_business_projects_active
+
+      # Fraction of projects that are active (health score proxy)
+      - record: business:projects:active_ratio
+        expr: |
+          indigopay_business_projects_active
+          /
+          clamp_min(indigopay_business_projects_total, 1)
+
+      # ── Recurring donations ───────────────────────────────────────────────
+      - record: business:recurring:active_subscriptions
+        expr: indigopay_business_recurring_donors_active
+
+      # ── Synthetic monitor health ──────────────────────────────────────────
+      # Pre-computed success rate over the last 1h for the business dashboard.
+      - record: business:synthetic:success_rate_1h
+        expr: |
+          avg_over_time(synthetic_donation_success{job="synthetic-monitor"}[1h])

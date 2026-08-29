@@ -515,6 +515,11 @@
   background: rgba(16, 185, 129, 0.08);
 }
 
+#indigopay-overlay .igp-status-pending {
+  color: #666;
+  background: rgba(100, 116, 139, 0.08);
+}
+
 #indigopay-overlay .igp-status-error {
   color: #dc2626;
   background: rgba(239, 68, 68, 0.08);

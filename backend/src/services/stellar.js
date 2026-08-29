@@ -28,6 +28,7 @@ const logger = require("../logger");
 const { Counter } = require("prom-client");
 const { registry } = require("./metrics");
 const { CircuitBreaker } = require("./circuitBreaker");
+const { withSpan } = require("./tracing");
 
 // ---------------------------------------------------------------------------
 // Environment / configuration
@@ -168,13 +169,15 @@ async function withRetry(fn, maxRetries = MAX_RETRIES) {
  * @throws  {Error} When the transaction status is `ERROR` or retries are exhausted.
  */
 async function submitTransaction(signedXDR) {
-  return withRetry(async () => {
-    const result = await rpcServer.sendTransaction(signedXDR);
-    if (result.status === "ERROR") {
-      throw new Error(`Transaction failed: ${result.errorResult}`);
-    }
-    return result;
-  });
+  return withSpan("stellar.submitTransaction", () =>
+    withRetry(async () => {
+      const result = await rpcServer.sendTransaction(signedXDR);
+      if (result.status === "ERROR") {
+        throw new Error(`Transaction failed: ${result.errorResult}`);
+      }
+      return result;
+    }),
+  );
 }
 
 /**
@@ -184,12 +187,31 @@ async function submitTransaction(signedXDR) {
  * @returns {Promise<object>} The simulation result.
  */
 async function simulateTransactionWithRetry(tx) {
-  return withRetry(() => rpcServer.simulateTransaction(tx));
+  return withSpan("stellar.simulateTransaction", () =>
+    withRetry(() => rpcServer.simulateTransaction(tx)),
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Existing read helpers (now wrapped with retry / circuit breaker)
 // ---------------------------------------------------------------------------
+
+/**
+ * Fetch a single transaction by hash from Horizon.
+ *
+ * The v12 Horizon.Server removed the `getTransaction` convenience method
+ * (it existed in v11). Callers (routes/donations.js, routes/projects.js)
+ * use this standalone helper instead, which expresses the same query through
+ * the supported transactions() call-builder. Without it, on-chain
+ * transaction verification always failed and every donation recording
+ * returned TX_NOT_FOUND.
+ *
+ * @param {string} hash  Transaction hash (hex string).
+ * @returns {Promise<object>} The Horizon transaction record.
+ */
+async function getTransaction(hash) {
+  return server.transactions().transaction(hash).call();
+}
 
 async function getOnChainProject(projectId) {
   if (!CONTRACT_ID) return null;
@@ -403,11 +425,113 @@ async function getOnChainUsdcToken() {
   return null;
 }
 
+
+/**
+ * Submit a transaction and automatically fee-bump if it stalls.
+ *
+ * @param {Transaction} transaction - The signed transaction object
+ * @param {Keypair} keypair - The keypair to sign the fee bump
+ * @param {object} options
+ * @returns {Promise<object>} The final transaction result
+ */
+async function submitWithFeeBump(transaction, keypair, options = {}) {
+  let attempt = 0;
+  const maxAttempts = 3;
+  
+  let currentTx = transaction;
+  let innerTx = transaction;
+
+  while (attempt <= maxAttempts) {
+    let hash;
+    const isSoroban = innerTx.operations.some(op => op.type === "invokeHostFunction");
+    try {
+      if (isSoroban) {
+        const res = await submitTransaction(currentTx.toXDR());
+        hash = res.hash || currentTx.hash().toString('hex'); // submitTransaction returns hash in some versions
+      } else {
+        const res = await server.submitTransaction(currentTx);
+        hash = res.hash;
+      }
+    } catch (err) {
+      if (!isRetryable(err)) throw err;
+    }
+    
+    // Use transaction hash if not extracted
+    if (!hash) hash = currentTx.hash().toString('hex');
+
+    let included = false;
+    let pollSuccess = null;
+    let start = Date.now();
+    const pollTime = (attempt === maxAttempts) ? 60000 : 30000;
+    
+    while (Date.now() - start < pollTime) {
+      try {
+        const res = await server.transactions().transaction(hash).call();
+        if (res.successful) {
+          return res;
+        }
+      } catch (err) {
+        // 404 means keep polling
+      }
+      await new Promise(r => setTimeout(r, 3000));
+    }
+    
+    attempt++;
+    if (attempt <= maxAttempts) {
+      let currentFee = parseInt(currentTx.fee) * 2;
+      if (isNaN(currentFee)) currentFee = 200000;
+      
+      const feeBumpTx = TransactionBuilder.buildFeeBumpTransaction(
+        keypair.publicKey(),
+        currentFee.toString(),
+        innerTx,
+        NETWORK_PASSPHRASE
+      );
+      feeBumpTx.sign(keypair);
+      currentTx = feeBumpTx;
+    }
+  }
+  
+  throw new Error("Transaction stalled after fee bumps");
+}
+
+// -------------------------------------------------------------------------
+// Synthetic sender account support (WS7 / #1100)
+// -------------------------------------------------------------------------
+
+/**
+ * Resolve the configured synthetic monitoring sender (public address + balance
+ * floor). The full secret key is intentionally NOT exposed to the rest of the
+ * backend runtime — the synthetic-monitor job keeps it in a GitHub/K8s Secret
+ * and this helper only surfaces the PUBLIC attributes for health/telemetry.
+ *
+ * @returns {{ configured: boolean, address: string|null, minBalanceXlm: number }}
+ */
+function getSyntheticSenderInfo() {
+  const secret = process.env.SYNTHETIC_SENDER_SECRET || "";
+  let address = null;
+  if (secret) {
+    try {
+      address = Horizon.Keypair.fromSecret(secret).publicKey();
+    } catch {
+      address = null;
+    }
+  }
+  return {
+    configured: Boolean(secret),
+    address,
+    minBalanceXlm: Number(process.env.SYNTHETIC_MIN_BALANCE_XLM || 10),
+  };
+}
+
 module.exports = {
+  submitWithFeeBump,
   server,
   rpcServer,
   CONTRACT_ID,
   NETWORK_PASSPHRASE,
+  getTransaction,
+  getSyntheticSenderInfo,
   // Retry / circuit breaker helpers (exported for readiness probe + tests)
   withRetry,
   isRetryable,

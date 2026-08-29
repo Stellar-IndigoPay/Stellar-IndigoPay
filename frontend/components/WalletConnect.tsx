@@ -5,13 +5,13 @@
  * when multiple Stellar wallets are detected, or a single connect
  * button when only one is available.
  *
- * Supported wallets: Freighter, Albedo, xBull, Rabet.
+ * Supported wallets: Freighter, Albedo, xBull, Rabet, WalletConnect.
  */
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { trackEvent } from "@/lib/analytics";
 import { useI18n } from "@/lib/i18n";
-import { getAvailableWallets } from "@/lib/wallets";
-import type { StellarWalletAdapter } from "@/lib/wallets/types";
+import { getAvailableWallets, persistWalletSelection } from "@/lib/wallets";
+import type { StellarWalletAdapter, WalletId } from "@/lib/wallets/types";
 
 interface WalletConnectProps {
   /** Called after successful connection with the wallet's public key. */
@@ -36,7 +36,7 @@ const WalletIcon: Record<string, () => JSX.Element> = {
       <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
     </svg>
   ),
-  rabet: () => (
+  walletConnect: () => (
     <svg className="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
     </svg>
@@ -62,13 +62,36 @@ export default function WalletConnect({ onConnect }: WalletConnectProps) {
     return () => { cancelled = true; };
   }, []);
 
+  // Workstream 7, issue #1096 WS7 gap #3: the picker is intentionally INLINE
+  // (not a modal), so a focus-trap is not required — WCAG requires focus
+  // trapping only for <dialog> overlays.  We instead manage focus: when the
+  // picker appears after detection, it receives focus so keyboard and
+  // screen-reader users land directly on the wallet selection instead of
+  // being stranded at the top of the page.
+  const pickerHeadingRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (detected && availableWallets.length > 0) {
+      // Defer so the transition animation completes before moving focus.
+      const timer = window.setTimeout(() => {
+        pickerHeadingRef.current?.focus({ preventScroll: false });
+      }, 100);
+      return () => window.clearTimeout(timer);
+    }
+  }, [detected, availableWallets.length]);
+
   const handleConnect = async (adapter: StellarWalletAdapter) => {
     setLoading(adapter.id);
     setError(null);
     try {
+      await adapter.connect();
       const pk = await adapter.getPublicKey();
       setLoading(null);
-      if (pk) {          trackEvent("wallet_connected", { wallet: adapter.id });
+      if (pk) {
+          // Workstream 4: remember WHICH wallet the donor chose so the
+          // DonateForm signs through the same adapter (lib/wallet.ts resolves
+          // the persisted id via resolveDefaultWallet).
+          persistWalletSelection(adapter.id as WalletId);
+          trackEvent("wallet_connected", { wallet: adapter.id });
           onConnect(pk);
       }
     } catch (err: unknown) {
@@ -101,7 +124,10 @@ export default function WalletConnect({ onConnect }: WalletConnectProps) {
   // --- No wallets installed ---
   if (availableWallets.length === 0) {
     return (
-      <div className="card max-w-sm mx-auto text-center animate-slide-up shadow-indigo">
+      <div
+        className="card max-w-sm mx-auto text-center animate-slide-up shadow-indigo"
+        data-testid="wallet-picker"
+      >
         <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-[#4F46E5] to-[#7C3AED] flex items-center justify-center mx-auto mb-5 shadow-lg shadow-[rgba(79,70,229,0.25)]">
           <WalletIcon.freighter />
         </div>
@@ -126,13 +152,13 @@ export default function WalletConnect({ onConnect }: WalletConnectProps) {
             <WalletIcon.freighter />
             Install Freighter →
           </a>
-          <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-body">
+          <p className="text-xs text-[#475569] dark:text-[#94A3B8] font-body">
             Also available:{" "}
             <a href="https://albedo.link" target="_blank" rel="noopener noreferrer" className="text-[#4F46E5] dark:text-[#818CF8] hover:underline font-medium">Albedo</a>
             {" · "}
             <a href="https://xbull.app" target="_blank" rel="noopener noreferrer" className="text-[#4F46E5] dark:text-[#818CF8] hover:underline font-medium">xBull</a>
             {" · "}
-            <a href="https://rabet.io" target="_blank" rel="noopener noreferrer" className="text-[#4F46E5] dark:text-[#818CF8] hover:underline font-medium">Rabet</a>
+            <a href="https://walletconnect.com" target="_blank" rel="noopener noreferrer" className="text-[#4F46E5] dark:text-[#818CF8] hover:underline font-medium">WalletConnect</a>
           </p>
         </div>
       </div>
@@ -141,13 +167,23 @@ export default function WalletConnect({ onConnect }: WalletConnectProps) {
 
   // --- Wallet picker ---
   return (
-    <div className="card max-w-sm mx-auto text-center animate-slide-up shadow-indigo">
+    <div
+      className="card max-w-sm mx-auto text-center animate-slide-up shadow-indigo"
+      data-testid="wallet-picker"
+      role="group"
+      aria-labelledby="wallet-picker-title"
+    >
       <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-[#4F46E5] to-[#7C3AED] flex items-center justify-center mx-auto mb-5 shadow-lg shadow-[rgba(79,70,229,0.25)]">
         <svg className="w-8 h-8 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a2.25 2.25 0 00-2.25-2.25H15a3 3 0 11-6 0H5.25A2.25 2.25 0 003 12m18 0v6a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 18v-6m18 0V9M3 12V9m18 0a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 9m18 0V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v3" />
         </svg>
       </div>
-      <h3 className="font-display text-xl font-semibold text-[#0F172A] dark:text-[#E2E8F0] mb-2">
+      <h3
+        id="wallet-picker-title"
+        ref={pickerHeadingRef}
+        tabIndex={-1}
+        className="font-display text-xl font-semibold text-[#0F172A] dark:text-[#E2E8F0] mb-2 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#4F46E5] dark:focus-visible:outline-[#818CF8] rounded"
+      >
         {t("wallet.connectTitle")}
       </h3>
       <p className="text-[#475569] dark:text-[#94A3B8] text-sm mb-5 font-body leading-relaxed">
@@ -182,7 +218,7 @@ export default function WalletConnect({ onConnect }: WalletConnectProps) {
                 <div className="font-display font-semibold text-sm text-[#0F172A] dark:text-[#E2E8F0]">
                   {adapter.name}
                 </div>
-                <div className="text-xs text-[#64748B] dark:text-[#94A3B8] font-body truncate">
+                <div className="text-xs text-[#475569] dark:text-[#94A3B8] font-body truncate">
                   {adapter.description}
                 </div>
               </div>
@@ -198,7 +234,7 @@ export default function WalletConnect({ onConnect }: WalletConnectProps) {
         })}
       </div>
 
-      <p className="mt-4 text-xs text-[#64748B] dark:text-[#94A3B8] font-body">
+      <p className="mt-4 text-xs text-[#475569] dark:text-[#94A3B8] font-body">
         Don&apos;t have a wallet?{" "}
         <a
           href="https://freighter.app"

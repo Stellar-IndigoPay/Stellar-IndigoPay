@@ -1,6 +1,7 @@
-use soroban_sdk::{Address, Env, Vec};
+use soroban_sdk::{panic_with_error, Address, Env, Vec};
 
 use crate::donation::types::{DataKey, StealthDonation};
+use crate::ContractError;
 
 pub fn get_stealth_counter(env: &Env) -> u64 {
     env.storage()
@@ -16,9 +17,16 @@ pub fn set_stealth_counter(env: &Env, counter: u64) {
 }
 
 pub fn set_stealth_donation(env: &Env, id: u64, donation: &StealthDonation) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::StealthDonation(id), donation);
+    let key = DataKey::StealthDonation(id);
+    env.storage().persistent().set(&key, donation);
+    // WS6 lazy bump: extend the TTL of the entry we just wrote so it survives
+    // ledger close without a separate transaction (amortized, zero extra gas).
+    // ~30 days at 5s/ledger.
+    env.storage().persistent().extend_ttl(
+        &key,
+        crate::TTL_TARGET_LEDGERS,
+        crate::TTL_TARGET_LEDGERS,
+    );
 }
 
 pub fn get_stealth_donation(env: &Env, id: u64) -> Option<StealthDonation> {
@@ -67,7 +75,9 @@ pub fn add_stealth_withdrawable_balance(
         env,
         project,
         token,
-        balance.checked_add(amount).expect("overflow"),
+        balance
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ArithmeticOverflow)),
     );
 }
 
