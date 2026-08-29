@@ -58,11 +58,10 @@ jobs:
         env:
           WASM_SIZE_LIMIT: ${{ vars.WASM_SIZE_LIMIT || 65536 }}
         run: |
-          wasm-opt -Oz target/wasm32v1-none/release/indigopay_contract.wasm \
-            -o target/wasm32v1-none/release/indigopay_contract.opt.wasm
+          wasm-opt -Oz target/wasm32v1-none/release/indigopay_contract.wasm -o target/wasm32v1-none/release/indigopay_contract.opt.wasm
           size=$(stat -c%s target/wasm32v1-none/release/indigopay_contract.opt.wasm)
           echo "WASM size (slim + wasm-opt): $size bytes (limit: $WASM_SIZE_LIMIT)"
-          if ! [[ "$WASM_SIZE_LIMIT" =~ ^[0-9]+$ ]] || [ "$WASM_SIZE_LIMIT" -le 0 ]; then
+          if [[ ! "$WASM_SIZE_LIMIT" =~ ^[0-9]+$ ]] || [ "$WASM_SIZE_LIMIT" -le 0 ]; then
             echo "::error title=Invalid WASM_SIZE_LIMIT::WASM_SIZE_LIMIT must be a positive integer byte limit"
             exit 1
           fi
