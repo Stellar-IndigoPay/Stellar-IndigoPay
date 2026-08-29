@@ -1020,6 +1020,18 @@ pub enum ContractError {
     AttestationContractMismatch = 137,
     // ── Escrow balance guard (138) ───────────────────────────────────────────
     InsufficientContractBalanceForEscrow = 138,
+    // ── Storage & arithmetic guards (139–141) ────────────────────────────────
+    StorageMissing = 139,
+    ArithmeticOverflow = 140,
+    ArithmeticUnderflow = 141,
+    // ── Re-entrancy guard (142) ──────────────────────────────────────────────
+    ReentrancyDetected = 142,
+    // ── Per-token suspension (WS3) (143–145) ─────────────────────────────────
+    TokenSuspended = 143,
+    TokenAlreadySuspended = 144,
+    TokenNotSuspended = 145,
+    // ── TTL batch budget (WS6) (146) ─────────────────────────────────────────
+    BatchTooLargeForBudget = 146,
 }
 // 48 hours × 3600 s / 5 s per ledger = 34 560 ledgers. The minimum delay
 // between `propose_upgrade` and the earliest ledger at which
