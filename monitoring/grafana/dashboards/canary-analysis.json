@@ -1,0 +1,125 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "row",
+      "title": "Canary vs Stable",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "id": 1,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Error rate (%) — canary vs stable",
+      "id": 2,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "canary_error_rate * 100",
+          "legendFormat": "canary",
+          "refId": "A"
+        },
+        {
+          "expr": "stable_error_rate * 100",
+          "legendFormat": "stable ($threshold)",
+          "refId": "B"
+        },
+        {
+          "expr": "stable_error_rate * 100 * 1.5",
+          "legendFormat": "abort threshold (1.5× stable)",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "description": "5xx error rate for the canary revision vs the stable baseline. If canary exceeds 1.5× stable the Argo Rollouts AnalysisTemplate aborts the rollout (#1100 / WS2)."
+    },
+    {
+      "type": "timeseries",
+      "title": "p95 latency (s) — canary vs stable",
+      "id": 3,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "canary_p95_latency",
+          "legendFormat": "canary",
+          "refId": "A"
+        },
+        {
+          "expr": "stable_p95_latency",
+          "legendFormat": "stable",
+          "refId": "B"
+        },
+        {
+          "expr": "stable_p95_latency * 1.2",
+          "legendFormat": "abort threshold (>20% over stable)",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "description": "95th-percentile request latency for canary vs stable. A >20% regression causes automatic rollback (#1100 / WS2)."
+    },
+    {
+      "type": "timeseries",
+      "title": "Request rate (req/s) by revision",
+      "id": 4,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (version) (rate(http_requests_total{version=~\"canary|stable\"}[1m]))",
+          "legendFormat": "{{version}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "description": "Traffic share observed by each revision during the rollout."
+    },
+    {
+      "type": "timeseries",
+      "title": "Rollout status gauge",
+      "id": 5,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "argocd_rollout_info{rollout=\"backend\"}",
+          "legendFormat": "{{state}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "steps" } }
+      },
+      "description": "Argo Rollouts phase for the backend rollout (Progressing/Success/Degraded)."
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["indigopay", "canary", "rollouts"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Canary Analysis — Backend",
+  "uid": "canary-analysis-backend",
+  "version": 1
+}

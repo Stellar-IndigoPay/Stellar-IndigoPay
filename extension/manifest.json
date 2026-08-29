@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Stellar-IndigoPay Companion",
   "version": "1.0.1",
-  "description": "Support verified climate projects on Stellar with a single click — 100% on-chain, zero fees.",
+  "description": "Support verified climate projects on Stellar with a single click \u2014 100% on-chain, zero fees.",
   "action": {
     "default_popup": "popup.html",
     "default_title": "Stellar-IndigoPay"
@@ -14,22 +14,68 @@
   "background": {
     "service_worker": "dist/background.js"
   },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'"
+  },
   "host_permissions": [
     "https://api.stellar-indigopay.app/*"
   ],
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["dist/content-script.js"],
-      "css": ["inject/overlay.css"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "dist/content-script.js"
+      ],
+      "css": [
+        "inject/overlay.css"
+      ],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["inject/*"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "inject/*"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ],
-  "privacy_policy_url": "https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/blob/main/PRIVACY.md"
+  "privacy_policy_url": "https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/blob/main/PRIVACY.md",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'"
+  },
+  "commands": {
+    "preset-1": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+1",
+        "mac": "MacCtrl+Shift+1"
+      },
+      "description": "Select Preset 1"
+    },
+    "preset-2": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+2",
+        "mac": "MacCtrl+Shift+2"
+      },
+      "description": "Select Preset 2"
+    },
+    "preset-3": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+3",
+        "mac": "MacCtrl+Shift+3"
+      },
+      "description": "Select Preset 3"
+    },
+    "preset-4": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+4",
+        "mac": "MacCtrl+Shift+4"
+      },
+      "description": "Select Preset 4"
+    }
+  }
 }

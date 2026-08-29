@@ -17,6 +17,7 @@
  * runs the legacy donation-flow.spec.ts.
  */
 import { test, expect, type Locator, type TestInfo } from "@playwright/test";
+import type { Donation } from "@/utils/types";
 import { mockFreighterWallet } from "./mocks/wallet";
 import { mockBackendAPI, type MockBackendState } from "./mocks/api";
 import { mockHorizonAPI } from "./mocks/horizon";
@@ -232,5 +233,85 @@ test.describe("Donation flow — V2 (preview + offline durability)", () => {
       timeout: 15000,
     });
     await tabB.close();
+  });
+
+  test("reconnect skips a queued donation another tab already recorded (conflict toast)", async ({
+    page,
+    context,
+  }, testInfo) => {
+    await page.goto(`/projects/${PRIMARY_PROJECT.id}`);
+    await click(
+      page
+        .locator('[data-testid="wallet-connect-button"][data-wallet-id="freighter"]')
+        .last(),
+      testInfo,
+    );
+    await expect(page.getByTestId("donation-amount")).toBeVisible();
+    await page.getByTestId("donation-amount").fill("25");
+
+    // Queue the donation while offline.
+    await context.setOffline(true);
+    await click(page.getByTestId("donate-button"), testInfo);
+    await expect(page.getByTestId("cancel-notice")).toContainText(/queued/i);
+    await expect(page.getByTestId("queued-count-badge")).toContainText(
+      "1 donation",
+    );
+
+    // Simulate the OTHER tab: it already recorded this donation (same
+    // idempotency key) before connectivity returned.  Read the queued
+    // payload straight from the shared IndexedDB queue.
+    const queued = await page.evaluate(async () => {
+      return new Promise<{
+        idempotencyKey: string;
+        donorAddress: string;
+        amount: string;
+      }>((resolve) => {
+        const request = indexedDB.open("indigopay-offline-db");
+        request.onsuccess = () => {
+          const db = request.result;
+          const tx = db.transaction("donations", "readonly");
+          const all = tx.objectStore("donations").getAll();
+          all.onsuccess = () => {
+            const item = all.result[0]?.payload ?? {};
+            db.close();
+            resolve({
+              idempotencyKey: item.idempotencyKey ?? "",
+              donorAddress: item.donorAddress ?? "",
+              amount: item.amount ?? "",
+            });
+          };
+        };
+      });
+    });
+    expect(queued.idempotencyKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    const otherTabDonation: Donation & { idempotencyKey: string } = {
+      id: "e2e-conflict-donation",
+      projectId: PRIMARY_PROJECT.id,
+      donorAddress: queued.donorAddress,
+      amount: queued.amount,
+      amountXLM: queued.amount,
+      currency: "XLM",
+      transactionHash: "ab".repeat(32),
+      createdAt: new Date().toISOString(),
+      idempotencyKey: queued.idempotencyKey,
+    };
+    backend.donations.push(otherTabDonation);
+
+    // Reconnect — the queued copy is recognised as already-processed by the
+    // idempotency pre-check, skipped (never re-submitted), dropped from the
+    // queue, and the donor sees the conflict toast.  Exactly one donation
+    // record: zero duplicates.
+    await context.setOffline(false);
+    await expect(
+      page.getByText(
+        "This donation was already processed while you were offline",
+      ),
+    ).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId("queued-count-badge")).toBeHidden({
+      timeout: 15000,
+    });
+    expect(backend.donations).toHaveLength(1);
   });
 });

@@ -7,6 +7,7 @@
     "dev": "webpack --watch --config webpack.config.js",
     "test": "jest",
     "lint": "tsc --noEmit --project tsconfig.json",
+    "check:csp": "node scripts/validate-csp.js",
     "check:permissions": "node scripts/validate-permissions.js"
   },
   "dependencies": {

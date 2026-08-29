@@ -6,17 +6,15 @@ import dynamic from "next/dynamic";
 import { useRouter } from "next/router";
 import ProjectCard, { ProjectCardSkeleton } from "@/components/ProjectCard";
 import {
-  fetchProjects,
-  fetchProjectFacets,
   fetchTagSuggestions,
   type ProjectFacets,
 } from "@/lib/api";
 import { PROJECT_CATEGORIES, CATEGORY_ICONS } from "@/utils/format";
-import type { ClimateProject } from "@/utils/types";
 import { useAutocomplete } from "@/hooks/useAutocomplete";
 import { trackEvent } from "@/lib/analytics";
 import EmptyState from "@/components/EmptyState";
 import clsx from "clsx";
+import { useProjects, useProjectFacets } from "@/hooks/queries";
 
 const ProjectComparison = dynamic(
   () => import("@/components/ProjectComparison"),
@@ -25,11 +23,10 @@ const ProjectComparison = dynamic(
 
 export default function ProjectsPage() {
   const router = useRouter();
-  const [projects, setProjects] = useState<ClimateProject[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [facets, setFacets] = useState<ProjectFacets | null>(null);
   const [selectedProjectIds, setSelectedProjectIds] = useState<string[]>([]);
   const [showComparison, setShowComparison] = useState(false);
+  const [searchReady, setSearchReady] = useState(false);
+  const [debouncedSearch, setDebouncedSearch] = useState("");
 
   const searchRef = useRef<HTMLDivElement>(null);
 
@@ -56,11 +53,6 @@ export default function ProjectsPage() {
     category || status !== "active" || verified || search || location || co2Min || co2Max,
   );
 
-  const selectedProjects = useMemo(
-    () => projects.filter((project) => selectedProjectIds.includes(project.id)),
-    [projects, selectedProjectIds],
-  );
-
   // Initialize search from URL query parameter
   useEffect(() => {
     if (searchQuery && !search) {
@@ -79,30 +71,48 @@ export default function ProjectsPage() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [setIsAutocompleteOpen]);
 
-  // Debounced search effect
+  // Keep the existing 300ms search debounce while letting React Query retain
+  // the previous result during route/filter changes.
   useEffect(() => {
+    setSearchReady(false);
     const timer = setTimeout(() => {
-      setLoading(true);
-      const filters = {
-        category: category || undefined,
-        status: status || undefined,
-        verified: verified || undefined,
-        search: search || undefined,
-        location: location || undefined,
-        co2Min: co2Min ? Number(co2Min) : undefined,
-        co2Max: co2Max ? Number(co2Max) : undefined,
-      };
-      fetchProjects({ ...filters, limit: 50 })
-        .then(setProjects)
-        .catch(console.error)
-        .finally(() => setLoading(false));
-      fetchProjectFacets(filters)
-        .then(setFacets)
-        .catch(() => setFacets(null));
+      setDebouncedSearch(search);
+      setSearchReady(true);
     }, 300);
 
     return () => clearTimeout(timer);
-  }, [category, status, verified, search, location, co2Min, co2Max]);
+  }, [search]);
+
+  const filters = useMemo(
+    () => ({
+      category: category || undefined,
+      status: status || undefined,
+      verified: verified || undefined,
+      search: debouncedSearch || undefined,
+      location: location || undefined,
+      co2Min: co2Min ? Number(co2Min) : undefined,
+      co2Max: co2Max ? Number(co2Max) : undefined,
+      limit: 50,
+    }),
+    [category, status, verified, debouncedSearch, location, co2Min, co2Max],
+  );
+  const facetFilters = useMemo(
+    () => ({ ...filters, limit: undefined }),
+    [filters],
+  );
+  const {
+    data: projects = [],
+    isLoading: projectsLoading,
+    isError: projectsError,
+    refetch: refetchProjects,
+  } = useProjects(filters, searchReady);
+  const { data: facets = null } = useProjectFacets(facetFilters, searchReady);
+  const loading = !searchReady || projectsLoading;
+
+  const selectedProjects = useMemo(
+    () => projects.filter((project) => selectedProjectIds.includes(project.id)),
+    [projects, selectedProjectIds],
+  );
 
   useEffect(() => {
     if (!loading) {
@@ -577,12 +587,26 @@ export default function ProjectsPage() {
             </div>
           )}
 
-          {loading ? (
+          {loading && projects.length === 0 ? (
             <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {Array.from({ length: 6 }).map((_, i) => (
                 <ProjectCardSkeleton key={i} />
               ))}
             </div>
+          ) : projectsError && projects.length === 0 ? (
+            <EmptyState
+              variant="error"
+              title="Could not load projects"
+              description="Check your connection and try again."
+              action={
+                <button
+                  onClick={() => void refetchProjects()}
+                  className="btn-primary text-sm py-2 px-4"
+                >
+                  Try Again
+                </button>
+              }
+            />
           ) : projects.length === 0 ? (
             <EmptyState
               variant={hasActiveFilters ? "search" : "empty"}
@@ -650,4 +674,3 @@ export default function ProjectsPage() {
     </div>
   );
 }
-

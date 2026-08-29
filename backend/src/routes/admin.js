@@ -275,6 +275,7 @@ router.use("/documents", require("./admin/documents"));
 router.use("/webhooks", require("./admin/webhooks"));
 router.use("/indexer", require("./admin/indexer"));
 router.use("/secret-rotations", require("./admin/secretRotations"));
+router.use("/secrets", require("./admin/secrets"));
 router.use("/metrics", require("./admin/metrics"));
 router.use("/failover-metric", require("./admin/failoverMetric"));
 router.use("/matches", require("./admin/matches"));

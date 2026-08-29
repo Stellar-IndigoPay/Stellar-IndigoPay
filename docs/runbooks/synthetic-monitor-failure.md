@@ -1,3 +1,25 @@
+---
+title: Synthetic Monitor and Transaction Failure Incident Response
+severity: page
+owners:
+  - "@platform-team"
+symptoms:
+  - "SyntheticDonationCheckFailing or SyntheticMonitorSilent alert active"
+  - "End-to-end synthetic donation check failed >= 2 times in 15 minutes"
+  - "Synthetic monitor heartbeat missing in > 15 minutes"
+steps:
+  - "Check Stellar infrastructure status on https://status.stellar.org and testnet health endpoints."
+  - "Inspect synthetic monitor logs in GitHub Actions or via `kubectl logs -n stellar-indigopay -l app=synthetic-monitor`."
+  - "Verify IndigoPay contract responsiveness with `stellar contract invoke`."
+  - "Check synthetic donor account balance on testnet and refund via Friendbot if depleted."
+  - "Execute manual synthetic check via `node scripts/synthetic-monitor.js`."
+verification:
+  - "Confirm synthetic donation check runs successfully and `synthetic_donation_checks_total{result='success'}` increments."
+  - "Confirm `SyntheticDonationCheckFailing` and `SyntheticMonitorSilent` alerts resolve in Alertmanager."
+rollback:
+  - "If RPC or testnet is degraded, silence alerts temporarily or failover to alternative Soroban RPC provider."
+---
+
 # Synthetic Monitor Failure Runbook
 
 **Alert:** `SyntheticDonationCheckFailing` / `SyntheticMonitorSilent`

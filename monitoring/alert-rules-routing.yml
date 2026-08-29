@@ -14,8 +14,6 @@ groups:
     interval: 30s
     rules:
       - alert: BackendDown
-        # The readiness probe gauge is 0 when the deployment is fully down.
-        # /api/readyz returns 503 and increments readiness_check_failed_total.
         expr: |
           sum by (reason) (increase(readiness_check_failed_total{job="stellar-indigopay-backend"}[5m])) > 5
         for: 1m
@@ -26,11 +24,9 @@ groups:
           description: |
             /api/readyz is returning 503. Either the backend is down or
             a required dependency (Postgres, Redis, Horizon) is unreachable.
+          runbook: docs/runbooks/backend-http-5xx-rate.md
 
       - alert: BackupMissed
-        # Fires if a backup was expected in the last 36h but the S3
-        # inventory is older than that. The restore-drill workflow
-        # assumes fresh backups exist.
         expr: |
           (time() - max_over_time(backup_last_success_timestamp[36h])) > 36 * 3600
         for: 30m
@@ -42,6 +38,7 @@ groups:
             The nightly backup workflow is failing. The DR plan assumes
             we can restore from the last 24h of WAL archives on top of
             a base backup.
+          runbook: docs/runbooks/database-backup-verification.md
 
       - alert: PostgresFailoverInitiated
         expr: increase(indigopay_postgres_failover_total{outcome="initiated"}[5m]) > 0
@@ -56,6 +53,7 @@ groups:
             instance is unhealthy and has started promoting the standby.
             Verify the failover Job: kubectl get jobs -n stellar-indigopay -l app=postgres-failover
             If failover fails, execute manual procedure: docs/restore-runbook.md
+          runbook: docs/runbooks/postgres-failover.md
 
       - alert: PostgresFailoverFailed
         expr: increase(indigopay_postgres_failover_total{outcome="failed"}[10m]) > 0
@@ -70,6 +68,7 @@ groups:
             Immediate manual failover is required.
             Runbook: docs/restore-runbook.md
             Check failover Job logs: kubectl logs -n stellar-indigopay -l app=postgres-failover
+          runbook: docs/runbooks/postgres-failover.md
 
       - alert: RedisSentinelFailover
         # Fires when the Redis client reconnects after a master loss — the
@@ -84,10 +83,9 @@ groups:
             The backend Redis client reconnected after a master loss.
             Verify the current Redis master and check for data loss on the
             promoted replica: kubectl get pods -n stellar-indigopay -l app=redis
+          runbook: docs/runbooks/postgres-failover.md
 
       - alert: RestoreDrillFailed
-        # Set by the .github/workflows/restore-drill.yml workflow via
-        # a Pushgateway push. Resolves when the next drill passes.
         expr: restore_drill_failed == 1
         for: 1m
         labels:
@@ -97,22 +95,12 @@ groups:
           description: |
             The restore-drill workflow could not restore the latest
             backup. The production backup may be unrecoverable.
+          runbook: docs/runbooks/database-backup-verification.md
 
   # ── SLO Burn-Rate Alerts ───────────────────────────────────────────
-  # Follows the multi-window, multi-burn-rate approach from the Google
-  # SRE Workbook (Chapter 5). Two critical user journeys are protected:
-  #
-  #   Donation recording  — 99.5% availability (0.5% error budget)
-  #   Project listing     — 99.9% availability (0.1% error budget)
-  #
-  # Burn-rate multipliers vs. a 30-day window:
-  #   2%  in  1 h → 14.4x   (page — immediate on-call response)
-  #   5%  in  6 h →  6.0x   (page — rapid intervention)
-  #  10%  in  3 d →  1.0x   (warn — investigate during business hours)
   - name: indigopay-slo-burn
     interval: 30s
     rules:
-      # ── Donation recording: 2% burn in 1 hour (page) ─────────────
       - alert: DonationsHighBurnRate1h
         expr: |
           slo:donations:error_ratio > 0.02 * 14.4
@@ -128,8 +116,8 @@ groups:
             the 30-day error budget will be exhausted in under 2 days if
             sustained.
             Runbook: docs/performance.md#burn-rate-alert-response
+          runbook: docs/runbooks/backend-http-5xx-rate.md
 
-      # ── Donation recording: 5% burn in 6 hours (page) ────────────
       - alert: DonationsHighBurnRate6h
         expr: |
           slo:donations:error_ratio > 0.05 * 6
@@ -145,8 +133,8 @@ groups:
             the error budget will exhaust in approximately
             {{ 0.005 / $value * 30 | humanizeDuration }}.
             Runbook: docs/performance.md#burn-rate-alert-response
+          runbook: docs/runbooks/backend-http-5xx-rate.md
 
-      # ── Donation recording: 10% burn in 3 days (warn) ────────────
       - alert: DonationsHighBurnRate3d
         expr: |
           slo:donations:error_ratio > 0.10 * 1
@@ -161,8 +149,8 @@ groups:
             budget exceeds 50% consumed in 7 days, schedule an engineering
             review.
             Runbook: docs/performance.md#burn-rate-alert-response
+          runbook: docs/runbooks/backend-http-5xx-rate.md
 
-      # ── Project listing: 2% burn in 1 hour (page) ────────────────
       - alert: ProjectsHighBurnRate1h
         expr: |
           slo:projects:error_ratio > 0.001 * 14.4
@@ -177,8 +165,8 @@ groups:
             Error rate is {{ $value | humanizePercentage }}. At this burn rate
             the 30-day error budget will be exhausted rapidly.
             Runbook: docs/performance.md#burn-rate-alert-response
+          runbook: docs/runbooks/backend-http-5xx-rate.md
 
-      # ── Project listing: 5% burn in 6 hours (page) ───────────────
       - alert: ProjectsHighBurnRate6h
         expr: |
           slo:projects:error_ratio > 0.001 * 6
@@ -192,8 +180,8 @@ groups:
           description: |
             Error rate is {{ $value | humanizePercentage }}.
             Runbook: docs/performance.md#burn-rate-alert-response
+          runbook: docs/runbooks/backend-http-5xx-rate.md
 
-      # ── Project listing: 10% burn in 3 days (warn) ───────────────
       - alert: ProjectsHighBurnRate3d
         expr: |
           slo:projects:error_ratio > 0.001 * 1
@@ -207,3 +195,4 @@ groups:
             Error rate is {{ $value | humanizePercentage }}. Schedule an
             engineering review if the budget exceeds 50% consumed in 7 days.
             Runbook: docs/performance.md#burn-rate-alert-response
+          runbook: docs/runbooks/backend-http-5xx-rate.md

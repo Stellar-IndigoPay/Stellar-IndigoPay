@@ -21,12 +21,8 @@ import MonthlyGivingSetup from "@/components/MonthlyGivingSetup";
 import DescriptionAccordion from "@/components/DescriptionAccordion";
 import WalletAddressQRCode from "@/components/WalletAddressQRCode";
 import {
-  fetchProject,
-  fetchProjectUpdates,
   subscribeToProject,
-  fetchSubscriberCount,
   createProjectCampaign,
-  fetchProjectMatches,
   generateProjectSummary,
   toggleUpdateLike,
   followProject,
@@ -47,21 +43,24 @@ import {
   shortenAddress,
   formatDate,
 } from "@/utils/format";
-import {
-  accountUrl,
-  fetchProjectDiscussion,
-  type ProjectDiscussionMessage,
-} from "@/lib/stellar";
+import { accountUrl } from "@/lib/stellar";
 import { markMonthlySubscriptionPaid } from "@/lib/monthlyGiving";
 import type {
   ClimateProject,
-  Donation,
   ProjectCampaign,
-  ProjectUpdate,
 } from "@/utils/types";
 import { trackEvent } from "@/lib/analytics";
 import { useWishlist } from "@/hooks/useWishlist";
 import { QueryErrorFallback } from "@/components/QueryErrorFallback";
+import {
+  queryKeys,
+  useProject,
+  useProjectDiscussion,
+  useProjectMatches,
+  useProjectUpdates,
+  useSubscriberCount,
+} from "@/hooks/queries";
+import { useQueryClient } from "@tanstack/react-query";
 
 interface ProjectDetailProps {
   ogProject?: {
@@ -79,16 +78,10 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
   const { t } = useI18n();
 
   const [publicKey, setPublicKey] = useState<string | null>(null);
-  const [project, setProject] = useState<ClimateProject | null>(null);
-  const [updates, setUpdates] = useState<ProjectUpdate[]>([]);
-  const [loadError, setLoadError] = useState<unknown>(null);
-  const [isRetrying, setIsRetrying] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
   const [updateLikes, setUpdateLikes] = useState<
     Record<string, { liked: boolean; likeCount: number }>
   >({});
-  const [loading, setLoading] = useState(true);
-  const [refreshKey, setRefreshKey] = useState(0);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">(
     "idle",
   );
@@ -99,7 +92,6 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
     "idle" | "loading" | "success" | "error"
   >("idle");
   const [subError, setSubError] = useState<string | null>(null);
-  const [subscriberCount, setSubscriberCount] = useState<number | null>(null);
   const [showMonthlySetup, setShowMonthlySetup] = useState(false);
   const [subEmail, setSubEmail] = useState("");
   const [countdownNow, setCountdownNow] = useState(Date.now());
@@ -113,9 +105,6 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
     "idle" | "saving" | "success" | "error"
   >("idle");
   const [campaignError, setCampaignError] = useState<string | null>(null);
-  const [discussion, setDiscussion] = useState<ProjectDiscussionMessage[]>([]);
-  const [discussionLoading, setDiscussionLoading] = useState(false);
-  const [matches, setMatches] = useState<any[]>([]);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [aiSummaryState, setAiSummaryState] = useState<
     "idle" | "loading" | "error"
@@ -124,6 +113,24 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
   const [isFollowing, setIsFollowing] = useState(false);
   const [followCount, setFollowCount] = useState(0);
   const [followLoading, setFollowLoading] = useState(false);
+
+  const queryClient = useQueryClient();
+  const projectId = typeof id === "string" ? id : null;
+  const projectQuery = useProject(projectId, publicKey);
+  const updatesQuery = useProjectUpdates(projectId);
+  const matchesQuery = useProjectMatches(projectId);
+  const project = projectQuery.data ?? null;
+  const updates = updatesQuery.data ?? [];
+  const matches = useMemo(() => matchesQuery.data ?? [], [matchesQuery.data]);
+  const discussionQuery = useProjectDiscussion(project?.walletAddress ?? null);
+  const discussion = discussionQuery.data ?? [];
+  const subscriberQuery = useSubscriberCount(projectId);
+  const subscriberCount = subscriberQuery.data ?? null;
+  // The project itself is the page shell. Ancillary data can load or refresh
+  // independently without hiding cached project content.
+  const loading = projectQuery.isLoading;
+  const loadError = projectQuery.error;
+  const isRetrying = projectQuery.isRefetching;
 
   const { toggleWishlist, isInWishlist } = useWishlist();
   const prefillAmount =
@@ -138,25 +145,10 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
       : undefined;
 
   useEffect(() => {
-    if (!id) return;
-    setLoadError(null);
-    Promise.all([
-      fetchProject(id as string, publicKey ?? undefined),
-      fetchProjectUpdates(id as string),
-      fetchProjectMatches(id as string),
-    ])
-      .then(([p, u, m]) => {
-        setProject(p);
-        setUpdates(u);
-        setMatches(m);
-        // Seed follow state from the server response so the button is correct
-        // on initial load without a separate round-trip.
-        setIsFollowing(p.isFollowing ?? false);
-        setFollowCount(p.followCount ?? 0);
-      })
-      .catch((err) => setLoadError(err))
-      .finally(() => setLoading(false));
-  }, [id, publicKey]);
+    if (!project) return;
+    setIsFollowing(project.isFollowing ?? false);
+    setFollowCount(project.followCount ?? 0);
+  }, [project]);
 
   // Filter matches to only show active, non-expired, and non-exhausted pools
   const activeMatches = useMemo(
@@ -173,26 +165,7 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
   const handleRetryLoad = () => {
     if (isRetrying || !id) return;
     setRetryCount((c) => c + 1);
-    setIsRetrying(true);
-    setLoadError(null);
-    setLoading(true);
-    Promise.all([
-      fetchProject(id as string, publicKey ?? undefined),
-      fetchProjectUpdates(id as string),
-      fetchProjectMatches(id as string),
-    ])
-      .then(([p, u, m]) => {
-        setProject(p);
-        setUpdates(u);
-        setMatches(m);
-        setIsFollowing(p.isFollowing ?? false);
-        setFollowCount(p.followCount ?? 0);
-      })
-      .catch((err) => setLoadError(err))
-      .finally(() => {
-        setLoading(false);
-        setIsRetrying(false);
-      });
+    void projectQuery.refetch();
   };
 
   useEffect(() => {
@@ -204,23 +177,6 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- identity stable
   }, [loading, project?.id, project?.category]);
-
-  useEffect(() => {
-    if (!project) return;
-    setDiscussionLoading(true);
-    fetchProjectDiscussion(project.walletAddress, 50)
-      .then(setDiscussion)
-      .catch(() => setDiscussion([]))
-      .finally(() => setDiscussionLoading(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- identity stable
-  }, [project?.walletAddress]);
-
-  useEffect(() => {
-    if (!id) return;
-    fetchSubscriberCount(id as string)
-      .then(setSubscriberCount)
-      .catch(() => null);
-  }, [id]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setCountdownNow(Date.now()), 1000);
@@ -716,7 +672,11 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
       });
       setSubState("success");
       setSubEmail("");
-      setSubscriberCount((c) => (c !== null ? c + 1 : null));
+      queryClient.setQueryData(
+        queryKeys.subscriberCount(project.id),
+        (count: number | undefined) =>
+          count !== undefined ? count + 1 : count,
+      );
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { error?: string } } })
         ?.response?.data?.error;
@@ -732,8 +692,9 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
     setCampaignError(null);
     try {
       await createProjectCampaign(project.id, campaignForm);
-      const updatedProject = await fetchProject(project.id);
-      setProject(updatedProject);
+      await queryClient.invalidateQueries({
+        queryKey: ["project", project.id],
+      });
       setCampaignForm({
         title: "",
         goalXLM: "",
@@ -777,7 +738,7 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
       }
     : null;
 
-  if ((loadError && !loading && !project) || isRetrying)
+  if (loadError && !project)
     return (
       <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10">
         <QueryErrorFallback
@@ -948,7 +909,15 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
         </div>
       )}
 
-      {activeMatches.length > 0 && (
+      {matchesQuery.error ? (
+        <QueryErrorFallback
+          error={matchesQuery.error}
+          onRetry={() => void matchesQuery.refetch()}
+          isRetrying={matchesQuery.isRefetching}
+          title="Couldn't load donation matching"
+          className="mb-6"
+        />
+      ) : activeMatches.length > 0 && (
         <div className="card mb-6 border-green-200 bg-gradient-to-r from-green-50 to-emerald-50">
           <p className="text-xs uppercase tracking-widest font-bold text-green-700 font-body mb-3">
             Donation Matching Active
@@ -1292,7 +1261,11 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
                           project.id,
                           publicKey,
                         );
-                        setProject({ ...project, ...result });
+                        queryClient.setQueriesData(
+                          { queryKey: ["project", project.id] },
+                          (cached: ClimateProject | undefined) =>
+                            cached ? { ...cached, ...result } : cached,
+                        );
                         setAiSummaryState("idle");
                       } catch (err: unknown) {
                         const msg =
@@ -1604,7 +1577,15 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
             <h2 className="font-display text-lg font-semibold text-forest-900 mb-4">
               {t("project.projectUpdates")}
             </h2>
-            {updates.length === 0 ? (
+            {updatesQuery.error ? (
+              <QueryErrorFallback
+                error={updatesQuery.error}
+                onRetry={() => void updatesQuery.refetch()}
+                isRetrying={updatesQuery.isRefetching}
+                title="Couldn't load project updates"
+                className="my-0"
+              />
+            ) : updates.length === 0 ? (
               <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body">
                 {t("project.noUpdatesYet")}
               </p>
@@ -1660,7 +1641,6 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
             <DonationFeed
               projectId={project.id}
               walletAddress={project.walletAddress}
-              refreshKey={refreshKey}
               onNewDonation={(d) => {
                 setToasts((prev) => [
                   ...prev,
@@ -1690,7 +1670,7 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
               real donations.
             </p>
 
-            {discussionLoading ? (
+            {discussionQuery.isLoading ? (
               <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body">
                 Loading discussionâ€¦
               </p>
@@ -1849,11 +1829,6 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
                       );
                     }
                   }
-                  setRefreshKey((k) => k + 1);
-                  setTimeout(
-                    () => fetchProject(project.id).then(setProject),
-                    2000,
-                  );
                 }}
               />
             </div>
@@ -2117,4 +2092,3 @@ window.addEventListener('message', (event) => {
     </div>
   );
 }
-
