@@ -64,6 +64,10 @@ jobs:
           NODE_PATH: backend/node_modules
         run: node scripts/synthetic-monitor.js
 
+      - name: Skip check (secret not configured)
+        if: ${{ secrets.SYNTHETIC_DONOR_SECRET_KEY == '' }}
+        run: echo "⚠️ Skipping synthetic donation check because SYNTHETIC_DONOR_SECRET_KEY is not set."
+
       - name: Report check status
         if: always()
         run: |
