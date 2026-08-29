@@ -92,7 +92,7 @@ export default function DonationFeed({
 
   // Start SSE stream once initial data is loaded
   useEffect(() => {
-    if (loading || !walletAddress) return;
+    if (isLoading || isError || !walletAddress) return;
 
     const cursor = latestIdRef.current || undefined;
     const closeStream = streamProjectPayments(
@@ -104,7 +104,7 @@ export default function DonationFeed({
     return () => {
       closeStream();
     };
-  }, [loading, walletAddress, handleNewPayment]);
+  }, [isLoading, isError, walletAddress, handleNewPayment]);
 
   const handleLoadMore = async () => {
     if (!nextCursor || loadingMore) return;
@@ -128,8 +128,18 @@ export default function DonationFeed({
     }
   };
 
-  if (loading)
+  if (isLoading)
     return <DonationFeedSkeleton />;
+
+  if (isError && donations.length === 0)
+    return (
+      <QueryErrorFallback
+        error={error}
+        onRetry={() => void refetch()}
+        isRetrying={isFetching}
+        title="Couldn&apos;t load recent donations"
+      />
+    );
 
   if (donations.length === 0)
     return (
@@ -238,13 +248,13 @@ export default function DonationFeed({
           </div>
         </div>
       ))}
-      {nextCursor && (
+      {nextCursor && hasNextPage && (
         <button
           onClick={handleLoadMore}
-          disabled={loadingMore}
+          disabled={isFetchingNextPage}
           className="w-full mt-4 px-4 py-2 bg-[rgba(99,102,241,0.08)] dark:bg-[rgba(129,140,248,0.10)] hover:bg-[rgba(99,102,241,0.15)] dark:hover:bg-[rgba(129,140,248,0.18)] text-[#4F46E5] dark:text-[#818CF8] rounded-lg transition-colors font-body text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          {loadingMore ? "Loading..." : "Load more donations"}
+          {isFetchingNextPage ? "Loading..." : "Load more donations"}
         </button>
       )}
 

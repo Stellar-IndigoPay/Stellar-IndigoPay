@@ -1,7 +1,7 @@
 /**
  * pages/dashboard.tsx — Donor impact dashboard
  */
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
 import WalletConnect from "@/components/WalletConnect";
 import EditProfileForm from "@/components/EditProfileForm";
@@ -36,10 +36,7 @@ import {
   calculateStreak,
 } from "@/utils/format";
 import { explorerUrl } from "@/lib/stellar";
-import type {
-  ClimateProject,
-  MonthlySubscription,
-} from "@/utils/types";
+import type { MonthlySubscription } from "@/utils/types";
 import { useWishlist } from "@/hooks/useWishlist";
 import { useQueryClient } from "@tanstack/react-query";
 import { QueryErrorFallback } from "@/components/QueryErrorFallback";
@@ -78,6 +75,13 @@ export default function Dashboard() {
     error: impactError,
     refetch: refetchImpact,
   } = useImpactDonor(publicKey);
+
+  const { data: allProjects = [] } = useProjects({}, !!publicKey);
+  const { data: pendingRating } = usePendingRating(publicKey);
+  const savedProjects = useMemo(
+    () => allProjects.filter((project) => wishlist.includes(project.id)),
+    [allProjects, wishlist],
+  );
 
   // Determine if any data queries are loading
   const loading = (profileLoading || donationsLoading || impactLoading) && !!publicKey;
@@ -224,7 +228,7 @@ export default function Dashboard() {
         />
       ) : (
         <div className="contents">
-          {pendingRating && publicKey && (
+          {pendingRating && pendingRating.id !== dismissedRatingId && publicKey && (
             <ProjectRating
               projectId={pendingRating.id}
               projectName={pendingRating.name}
@@ -622,4 +626,3 @@ export default function Dashboard() {
     </div>
   );
 }
-

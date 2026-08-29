@@ -69,6 +69,9 @@ postgres:
     # Slack webhook URL for failover notifications.
     # If unset, the Job reads SLACK_WEBHOOK_URL from the Secret.
     slackWebhookUrl: ""
+    # Split-brain Lease duration (seconds). The current primary renews the
+    # Lease every ~10 s; a standby may only promote after winning it (#1100 WS1).
+    leaseDurationSeconds: 30
 
 config:
   stellarNetwork: testnet

@@ -1,11 +1,14 @@
 #![no_std]
+// WS2: forbid `.unwrap()` / `.expect()` in production code.
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used)]
 #![allow(deprecated)]
 #[allow(unused_imports)]
 //use soroban_sdk::xdr::ContractEventBody;
 //use soroban_sdk::xdr::ScVal;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
-    Address, Env, InvokeError, String, Symbol, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
+    symbol_short, token, Address, Env, InvokeError, String, Symbol, Vec,
 };
 
 /// Maximum number of price observations retained in the circular buffer.
@@ -89,6 +92,8 @@ pub enum OracleError {
     DefaultTokenNotSet = 53,
     InvalidTokenAddress = 54,
     TokenDeviationExceedsMax = 55,
+    // ── WS2: storage integrity (56) ─────────────────────────────────────────
+    StorageMissing = 56,
 }
 
 #[contracttype]
@@ -177,12 +182,112 @@ pub enum DataKey {
 #[contract]
 pub struct SimpleOracle;
 
+// ─── WS7: typed contract events ─────────────────────────────────────────────
+// Migrated from `env.events().publish(...)` to `#[contractevent]` structs. The
+// emitted topic list and data payload are byte-for-byte identical to the legacy
+// emit sites they replace, so indexers observe an unchanged stream.
+
+#[contractevent(topics = ["rep_add"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepAdded {
+    #[topic]
+    pub admin: Address,
+    pub reporter: Address,
+}
+
+#[contractevent(topics = ["rep_rem"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepRemoved {
+    #[topic]
+    pub admin: Address,
+    pub reporter: Address,
+}
+
+#[contractevent(topics = ["stake_dep"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StakeDeposited {
+    #[topic]
+    pub reporter: Address,
+    pub amount: i128,
+    pub updated: i128,
+    pub available_at: u32,
+}
+
+#[contractevent(topics = ["stake_wdr"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StakeWithdrawn {
+    #[topic]
+    pub reporter: Address,
+    pub amount: i128,
+}
+
+#[contractevent(topics = ["stake_slash"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StakeSlashed {
+    #[topic]
+    pub reporter: Address,
+    pub amount: i128,
+    pub remaining: i128,
+    pub reason: String,
+}
+
+#[contractevent(topics = ["price_rejected"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceRejected {
+    #[topic]
+    pub reporter: Address,
+    pub price: i128,
+    pub current_price: i128,
+    pub deviation_bps: u32,
+}
+
+#[contractevent(topics = ["price_upd"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceUpdated {
+    #[topic]
+    pub reporter: Address,
+    pub price: i128,
+    pub ledger: u32,
+    pub token: Address,
+}
+
+#[contractevent(topics = ["twap_win"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TwapWindowSet {
+    #[topic]
+    pub admin: Address,
+    pub window: u32,
+}
+
+#[contractevent(topics = ["stale_th"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StalenessThresholdSet {
+    #[topic]
+    pub admin: Address,
+    pub threshold: u32,
+}
+
+#[contractevent(topics = ["src_unhealthy"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceUnhealthy {
+    #[topic]
+    pub source: Address,
+    pub consecutive_failures: u32,
+}
+
+#[contractevent(topics = ["src_recover"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceRecovered {
+    #[topic]
+    pub source: Address,
+}
+
 fn require_admin(env: &Env, admin: &Address) {
     let stored_admin: Address = env
         .storage()
         .instance()
         .get(&DataKey::Admin)
-        .expect("Oracle not initialized");
+        .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing));
     if stored_admin != *admin {
         panic_with_error!(env, OracleError::OnlyAdminCanPerformThisAction);
     }
@@ -261,7 +366,7 @@ fn read_observation(env: &Env, token: &Address, index: u32) -> PriceObservation 
     env.storage()
         .instance()
         .get(&DataKey::Observations(token.clone(), index))
-        .expect("Oracle observation missing")
+        .unwrap_or_else(|| panic_with_error!(env, OracleError::ObservationMissing))
 }
 
 fn write_observation(env: &Env, token: &Address, index: u32, obs: &PriceObservation) {
@@ -275,7 +380,7 @@ fn default_token(env: &Env) -> Address {
     env.storage()
         .instance()
         .get(&DataKey::DefaultToken)
-        .expect("Default token not set")
+        .unwrap_or_else(|| panic_with_error!(env, OracleError::DefaultTokenNotSet))
 }
 
 /// Legacy helpers to read from global storage if per-token is absent.
@@ -337,9 +442,14 @@ fn current_price_raw(env: &Env, token: &Address) -> Option<i128> {
     let mut weighted_sum = 0_i128;
     let mut total_weight = 0_i128;
     for i in 0..window {
-        let obs = observations.get(i).unwrap();
+        let obs = observations
+            .get(i)
+            .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing));
         let next_ledger = if i + 1 < window {
-            observations.get(i + 1).unwrap().ledger
+            observations
+                .get(i + 1)
+                .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing))
+                .ledger
         } else {
             current_ledger
         };
@@ -348,11 +458,15 @@ fn current_price_raw(env: &Env, token: &Address) -> Option<i128> {
             weight = 1;
         }
         weighted_sum = weighted_sum
-            .checked_add(obs.price.checked_mul(weight).expect("TWAP mul overflow"))
-            .expect("TWAP overflow");
+            .checked_add(
+                obs.price
+                    .checked_mul(weight)
+                    .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing)),
+            )
+            .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing));
         total_weight = total_weight
             .checked_add(weight)
-            .expect("Total weight overflow");
+            .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing));
     }
 
     if total_weight == 0 {
@@ -371,7 +485,7 @@ fn internal_price(env: &Env, token: &Address) -> i128 {
             .storage()
             .instance()
             .get(&DataKey::FallbackPrice)
-            .expect("Oracle has no observations and no fallback");
+            .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing));
     }
 
     let next_index = read_observation_index(env, token);
@@ -385,7 +499,7 @@ fn internal_price(env: &Env, token: &Address) -> i128 {
             .storage()
             .instance()
             .get(&DataKey::FallbackPrice)
-            .expect("Oracle price is stale and no fallback configured");
+            .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing));
     }
 
     let window = read_twap_window(env).min(count);
@@ -401,9 +515,14 @@ fn internal_price(env: &Env, token: &Address) -> i128 {
     let mut total_weight = 0_i128;
 
     for i in 0..window {
-        let obs = observations.get(i).unwrap();
+        let obs = observations
+            .get(i)
+            .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing));
         let next_ledger = if i + 1 < window {
-            observations.get(i + 1).unwrap().ledger
+            observations
+                .get(i + 1)
+                .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing))
+                .ledger
         } else {
             current_ledger
         };
@@ -412,11 +531,15 @@ fn internal_price(env: &Env, token: &Address) -> i128 {
             weight = 1;
         }
         weighted_sum = weighted_sum
-            .checked_add(obs.price.checked_mul(weight).expect("TWAP mul overflow"))
-            .expect("TWAP overflow");
+            .checked_add(
+                obs.price
+                    .checked_mul(weight)
+                    .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing)),
+            )
+            .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing));
         total_weight = total_weight
             .checked_add(weight)
-            .expect("Total weight overflow");
+            .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing));
     }
 
     if total_weight == 0 {
@@ -424,7 +547,7 @@ fn internal_price(env: &Env, token: &Address) -> i128 {
             .storage()
             .instance()
             .get(&DataKey::FallbackPrice)
-            .expect("Zero-weight TWAP — fallback required");
+            .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing));
     }
 
     weighted_sum / (total_weight * PRICE_SCALE)
@@ -466,6 +589,12 @@ fn read_token_deviation(env: &Env, token: &Address) -> u32 {
 
 #[contractimpl]
 impl SimpleOracle {
+    /// Number of distinct semantic event topics this contract can emit (WS7).
+    /// Keep in sync with the `event_catalog.json` golden file.
+    pub fn event_count(_env: Env) -> u32 {
+        11
+    }
+
     pub fn initialize(env: Env, admin: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, OracleError::ContractAlreadyInitialized);
@@ -506,8 +635,7 @@ impl SimpleOracle {
         env.storage()
             .instance()
             .set(&DataKey::Reporter(reporter.clone()), &true);
-        env.events()
-            .publish((symbol_short!("rep_add"), admin), reporter);
+        RepAdded { admin, reporter }.publish(&env);
     }
 
     pub fn remove_reporter(env: Env, admin: Address, reporter: Address) {
@@ -516,8 +644,7 @@ impl SimpleOracle {
         env.storage()
             .instance()
             .remove(&DataKey::Reporter(reporter.clone()));
-        env.events()
-            .publish((symbol_short!("rep_rem"), admin), reporter);
+        RepRemoved { admin, reporter }.publish(&env);
     }
 
     /// Configure the asset, minimum stake, slash treasury, and unstake
@@ -569,7 +696,7 @@ impl SimpleOracle {
             .storage()
             .instance()
             .get(&DataKey::StakeToken)
-            .expect("Staking not configured");
+            .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing));
         let current: i128 = env
             .storage()
             .instance()
@@ -577,7 +704,7 @@ impl SimpleOracle {
             .unwrap_or(0);
         let updated = current
             .checked_add(amount)
-            .expect("Reporter stake overflow");
+            .unwrap_or_else(|| panic_with_error!(&env, OracleError::AggregationOverflow));
         let available_at = if current == 0 {
             let cooldown: u32 = env
                 .storage()
@@ -587,12 +714,12 @@ impl SimpleOracle {
             env.ledger()
                 .sequence()
                 .checked_add(cooldown)
-                .expect("Stake cooldown overflow")
+                .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing))
         } else {
             env.storage()
                 .instance()
                 .get(&DataKey::StakeAvailableAt(reporter.clone()))
-                .expect("Stake cooldown not set")
+                .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing))
         };
 
         env.storage()
@@ -601,10 +728,13 @@ impl SimpleOracle {
         env.storage()
             .instance()
             .set(&DataKey::StakeAvailableAt(reporter.clone()), &available_at);
-        env.events().publish(
-            (symbol_short!("stake_dep"), reporter.clone()),
-            (amount, updated, available_at),
-        );
+        StakeDeposited {
+            reporter: reporter.clone(),
+            amount,
+            updated,
+            available_at,
+        }
+        .publish(&env);
 
         token::Client::new(&env, &stake_token).transfer(
             &reporter,
@@ -628,7 +758,7 @@ impl SimpleOracle {
             .storage()
             .instance()
             .get(&DataKey::StakeAvailableAt(reporter.clone()))
-            .expect("Stake cooldown not set");
+            .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing));
         if env.ledger().sequence() < available_at {
             panic_with_error!(&env, OracleError::UnstakeCooldownNotReached);
         }
@@ -636,7 +766,7 @@ impl SimpleOracle {
             .storage()
             .instance()
             .get(&DataKey::StakeToken)
-            .expect("Staking not configured");
+            .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing));
 
         env.storage()
             .instance()
@@ -644,8 +774,11 @@ impl SimpleOracle {
         env.storage()
             .instance()
             .remove(&DataKey::StakeAvailableAt(reporter.clone()));
-        env.events()
-            .publish((symbol_short!("stake_wdr"), reporter.clone()), amount);
+        StakeWithdrawn {
+            reporter: reporter.clone(),
+            amount,
+        }
+        .publish(&env);
 
         token::Client::new(&env, &stake_token).transfer(
             &env.current_contract_address(),
@@ -672,17 +805,17 @@ impl SimpleOracle {
         }
         let remaining = current
             .checked_sub(amount)
-            .expect("Reporter stake underflow");
+            .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing));
         let stake_token: Address = env
             .storage()
             .instance()
             .get(&DataKey::StakeToken)
-            .expect("Staking not configured");
+            .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing));
         let treasury: Address = env
             .storage()
             .instance()
             .get(&DataKey::StakeTreasury)
-            .expect("Stake treasury not configured");
+            .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing));
         let meta_key = DataKey::SlashHistoryMeta(reporter.clone());
         let mut meta: SlashHistoryMeta =
             env.storage()
@@ -710,10 +843,13 @@ impl SimpleOracle {
         env.storage()
             .instance()
             .set(&DataKey::ReporterStake(reporter.clone()), &remaining);
-        env.events().publish(
-            (Symbol::new(&env, "stake_slash"), reporter.clone()),
-            (amount, remaining, reason),
-        );
+        StakeSlashed {
+            reporter,
+            amount,
+            remaining,
+            reason,
+        }
+        .publish(&env);
 
         token::Client::new(&env, &stake_token).transfer(
             &env.current_contract_address(),
@@ -781,7 +917,7 @@ impl SimpleOracle {
         env.storage()
             .instance()
             .get(&DataKey::SlashEv(reporter, index))
-            .expect("Slash event slot is empty")
+            .unwrap_or_else(|| panic_with_error!(&env, OracleError::StorageMissing))
     }
 
     pub fn add_source_oracle(env: Env, admin: Address, oracle_address: Address) {
@@ -886,10 +1022,13 @@ impl SimpleOracle {
             if let Some(current_price) = current_price_raw(&env, &token) {
                 let deviation_bps = calculate_deviation_bps(price, current_price);
                 if deviation_bps > max_deviation_bps {
-                    env.events().publish(
-                        (Symbol::new(&env, "price_rejected"), reporter.clone()),
-                        (price, current_price, deviation_bps),
-                    );
+                    PriceRejected {
+                        reporter: reporter.clone(),
+                        price,
+                        current_price,
+                        deviation_bps,
+                    }
+                    .publish(&env);
                     return;
                 }
             }
@@ -905,10 +1044,13 @@ impl SimpleOracle {
         write_observation(&env, &token, index, &observation);
         write_observation_count(&env, &token, (count + 1).min(MAX_OBSERVATIONS));
         write_observation_index(&env, &token, (index + 1) % MAX_OBSERVATIONS);
-        env.events().publish(
-            (symbol_short!("price_upd"), reporter),
-            (price, env.ledger().sequence(), token),
-        );
+        PriceUpdated {
+            reporter,
+            price,
+            ledger: env.ledger().sequence(),
+            token,
+        }
+        .publish(&env);
     }
 
     pub fn set_fallback_price(env: Env, admin: Address, price: i128) {
@@ -963,8 +1105,7 @@ impl SimpleOracle {
             panic_with_error!(&env, OracleError::TwapWindowExceedsStalenessThreshold);
         }
         env.storage().instance().set(&DataKey::TwapWindow, &window);
-        env.events()
-            .publish((symbol_short!("twap_win"), admin), window);
+        TwapWindowSet { admin, window }.publish(&env);
     }
 
     pub fn set_staleness_threshold(env: Env, admin: Address, threshold: u32) {
@@ -979,8 +1120,7 @@ impl SimpleOracle {
         env.storage()
             .instance()
             .set(&DataKey::StalenessThreshold, &threshold);
-        env.events()
-            .publish((symbol_short!("stale_th"), admin), threshold);
+        StalenessThresholdSet { admin, threshold }.publish(&env);
     }
 
     pub fn get_twap_window(env: Env) -> u32 {
@@ -1050,18 +1190,21 @@ impl SimpleOracle {
                             health.consecutive_failures = 0;
                             health.healthy = true;
                             write_source_health(&env, &source, &health);
-                            env.events()
-                                .publish((Symbol::new(&env, "src_recover"), source.clone()), ());
+                            SourceRecovered {
+                                source: source.clone(),
+                            }
+                            .publish(&env);
                         }
                     } else {
                         // Zero or negative price counts as failure
                         health.consecutive_failures += 1;
                         if health.consecutive_failures >= threshold && health.healthy {
                             health.healthy = false;
-                            env.events().publish(
-                                (Symbol::new(&env, "src_unhealthy"), source.clone()),
-                                health.consecutive_failures,
-                            );
+                            SourceUnhealthy {
+                                source: source.clone(),
+                                consecutive_failures: health.consecutive_failures,
+                            }
+                            .publish(&env);
                         }
                         write_source_health(&env, &source, &health);
                     }
@@ -1071,10 +1214,11 @@ impl SimpleOracle {
                     health.consecutive_failures += 1;
                     if health.consecutive_failures >= threshold && health.healthy {
                         health.healthy = false;
-                        env.events().publish(
-                            (Symbol::new(&env, "src_unhealthy"), source.clone()),
-                            health.consecutive_failures,
-                        );
+                        SourceUnhealthy {
+                            source: source.clone(),
+                            consecutive_failures: health.consecutive_failures,
+                        }
+                        .publish(&env);
                     }
                     write_source_health(&env, &source, &health);
                 }
@@ -1111,6 +1255,7 @@ impl SimpleOracle {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     extern crate std;
 
     use super::*;
@@ -2564,6 +2709,7 @@ mod tests {
 
 #[cfg(test)]
 mod deviation_fuzz {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     extern crate std;
 
     use super::calculate_deviation_bps;

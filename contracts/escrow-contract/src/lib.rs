@@ -1,11 +1,13 @@
 #![no_std]
-#![allow(deprecated)]
+// WS2: forbid `.unwrap()` / `.expect()` in production code.
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used)]
 
 //! Escrow contract with milestone-based fund release.
 //! Client locks funds with `create_job`, then releases them per milestone.
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
     Address, BytesN, Env, String, Vec,
 };
 
@@ -180,6 +182,10 @@ pub enum EscrowError {
     JobCountExceedsMaximum = 64,
     // ── Job cleanup / archival (65) ─────────────────────────────────────
     NothingToCleanUp = 65,
+    // ── WS2: checked-arithmetic hardening (66–68) ─────────────────────────
+    ArithmeticOverflow = 66,
+    ArithmeticUnderflow = 67,
+    StorageMissing = 68,
 }
 
 /// Validate a milestone vector against the invariants that must hold at every
@@ -212,8 +218,12 @@ fn validate_milestones(env: &Env, milestones: &Vec<Milestone>) {
     // Vec and keeps the comparison independent of storage.
     for i in 0..milestones.len() {
         for j in (i + 1)..milestones.len() {
-            let a = milestones.get(i).unwrap();
-            let b = milestones.get(j).unwrap();
+            let a = milestones
+                .get(i)
+                .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
+            let b = milestones
+                .get(j)
+                .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
             if a.name == b.name {
                 panic_with_error!(env, EscrowError::DuplicateMilestoneName);
             }
@@ -321,7 +331,7 @@ fn reputation_job_created(env: &Env, freelancer: &Address) {
     reputation.total_jobs = reputation
         .total_jobs
         .checked_add(1)
-        .expect("Freelancer total_jobs overflow");
+        .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
     store_reputation(env, freelancer, &reputation);
 }
 
@@ -334,7 +344,7 @@ fn reputation_job_disputed(env: &Env, job: &Job) {
     reputation.disputed_jobs = reputation
         .disputed_jobs
         .checked_add(1)
-        .expect("Freelancer disputed_jobs overflow");
+        .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
     store_reputation(env, &job.freelancer, &reputation);
     env.storage().instance().set(&counted_key, &true);
 }
@@ -344,26 +354,25 @@ fn reputation_job_completed(env: &Env, job: &Job) {
     reputation.completed_jobs = reputation
         .completed_jobs
         .checked_add(1)
-        .expect("Freelancer completed_jobs overflow");
+        .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
     reputation.total_value_completed = reputation
         .total_value_completed
         .checked_add(job.amount)
-        .expect("Freelancer total_value_completed overflow");
+        .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
     if env.ledger().sequence() <= job.deadline {
         reputation.on_time_completions = reputation
             .on_time_completions
             .checked_add(1)
-            .expect("Freelancer on_time_completions overflow");
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
     }
     store_reputation(env, &job.freelancer, &reputation);
-    env.events().publish(
-        (symbol_short!("rep_upd"), job.freelancer.clone()),
-        (
-            reputation.completed_jobs,
-            reputation.disputed_jobs,
-            reputation.total_value_completed,
-        ),
-    );
+    ReputationUpdated {
+        freelancer: job.freelancer.clone(),
+        completed_jobs: reputation.completed_jobs,
+        disputed_jobs: reputation.disputed_jobs,
+        total_value_completed: reputation.total_value_completed,
+    }
+    .publish(env);
 }
 
 /// Read the stored admin set. Panics if not initialized.
@@ -371,7 +380,7 @@ fn read_admin_set(env: &Env) -> Vec<Address> {
     env.storage()
         .instance()
         .get(&DataKey::AdminSet)
-        .expect("Not initialized")
+        .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing))
 }
 
 /// Read the stored admin threshold. Panics if not initialized.
@@ -379,7 +388,7 @@ fn read_admin_threshold(env: &Env) -> u32 {
     env.storage()
         .instance()
         .get(&DataKey::AdminThreshold)
-        .expect("Not initialized")
+        .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing))
 }
 
 /// Count the number of distinct addresses in `signers` that belong to
@@ -388,13 +397,15 @@ fn read_admin_threshold(env: &Env) -> u32 {
 /// signed authorization entry per signer. Duplicate signers are counted
 /// only once so a single compromised key cannot satisfy a threshold by
 /// appearing multiple times in `signers`.
-fn count_distinct_admins(admin_set: &Vec<Address>, signers: &Vec<Address>) -> u32 {
+fn count_distinct_admins(env: &Env, admin_set: &Vec<Address>, signers: &Vec<Address>) -> u32 {
     let mut counted: Vec<Address> = Vec::new(admin_set.env());
     let mut valid_count: u32 = 0;
     for signer in signers.iter() {
         if admin_set.contains(&signer) && !counted.contains(&signer) {
             counted.push_back(signer.clone());
-            valid_count = valid_count.checked_add(1).expect("valid_count overflow");
+            valid_count = valid_count
+                .checked_add(1)
+                .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
         }
     }
     valid_count
@@ -412,7 +423,7 @@ fn verify_m_of_n(env: &Env, signers: &Vec<Address>, required_threshold: u32) {
     }
 
     let admin_set: Vec<Address> = read_admin_set(env);
-    let valid_count = count_distinct_admins(&admin_set, signers);
+    let valid_count = count_distinct_admins(env, &admin_set, signers);
 
     if valid_count < required_threshold {
         panic_with_error!(env, EscrowError::InsufficientAdminSignatures);
@@ -428,8 +439,156 @@ fn require_admin(env: &Env, signers: &Vec<Address>) {
 #[contract]
 pub struct EscrowContract;
 
+// ─── WS7: typed contract events ─────────────────────────────────────────────
+// Migrated from `env.events().publish(...)` to `#[contractevent]` structs. The
+// emitted topic list and data payload are byte-for-byte identical to the legacy
+// emit sites they replace, so indexers observe an unchanged stream.
+
+#[contractevent(topics = ["rep_upd"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReputationUpdated {
+    #[topic]
+    pub freelancer: Address,
+    pub completed_jobs: u32,
+    pub disputed_jobs: u32,
+    pub total_value_completed: i128,
+}
+
+#[contractevent(topics = ["job_creat"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JobCreated {
+    #[topic]
+    pub client: Address,
+    pub job_id: String,
+    pub freelancer: Address,
+    pub amount: i128,
+}
+
+#[contractevent(topics = ["job_amend"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JobAmended {
+    #[topic]
+    pub client: Address,
+    pub job_id: String,
+    pub old_milestone_count: u32,
+    pub new_milestone_count: u32,
+    pub next_amendment_count: u32,
+}
+
+#[contractevent(topics = ["ms_rel"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MilestoneReleased {
+    #[topic]
+    pub client: Address,
+    pub job_id: String,
+    pub milestone_index: u32,
+    pub release_amount: i128,
+}
+
+#[contractevent(topics = ["ms_proof"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MilestoneProofSubmitted {
+    #[topic]
+    pub freelancer: Address,
+    pub job_id: String,
+    pub milestone_index: u32,
+}
+
+#[contractevent(topics = ["ms_verif"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MilestoneVerified {
+    #[topic]
+    pub oracle: Address,
+    pub job_id: String,
+    pub milestone_index: u32,
+}
+
+#[contractevent(topics = ["job_disp"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JobDisputed {
+    pub job_id: String,
+}
+
+#[contractevent(topics = ["job_reslv"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JobResolved {
+    pub job_id: String,
+    pub approve_remaining: bool,
+}
+
+#[contractevent(topics = ["ms_disp"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MilestoneDisputed {
+    pub job_id: String,
+    pub milestone_index: u32,
+}
+
+#[contractevent(topics = ["ms_reslv"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MilestoneResolved {
+    pub job_id: String,
+    pub milestone_index: u32,
+    pub approve: bool,
+}
+
+#[contractevent(topics = ["job_refnd"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JobRefunded {
+    #[topic]
+    pub client: Address,
+    pub job_id: String,
+    pub remaining: i128,
+}
+
+#[contractevent(topics = ["ms_claim"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MilestoneClaimed {
+    #[topic]
+    pub freelancer: Address,
+    pub job_id: String,
+    pub milestone_index: u32,
+    pub release_amount: i128,
+}
+
+#[contractevent(topics = ["rel_upd"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReleaseUpdated {
+    pub job_id: String,
+    pub new_release_after: u32,
+}
+
+#[contractevent(topics = ["admin_add"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminAdded {
+    pub new_admin: Address,
+}
+
+#[contractevent(topics = ["admin_rmv"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminRemoved {
+    pub admin_to_remove: Address,
+}
+
+#[contractevent(topics = ["thresh_up"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThresholdUpdated {
+    pub new_threshold: u32,
+}
+
+#[contractevent(topics = ["jobs_clnd"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JobsCleaned {
+    pub removed: u32,
+}
+
 #[contractimpl]
 impl EscrowContract {
+    /// Number of distinct semantic event topics this contract can emit (WS7).
+    /// Keep in sync with the `event_catalog.json` golden file.
+    pub fn event_count(_env: Env) -> u32 {
+        17
+    }
+
     /// Initialize the contract with an M-of-N multi-sig admin set.
     /// Single-admin deployments call this with `vec![admin]` and threshold `1`.
     pub fn initialize(env: Env, admins: Vec<Address>, threshold: u32) {
@@ -487,7 +646,7 @@ impl EscrowContract {
         for milestone in milestones.iter() {
             total_percentage = total_percentage
                 .checked_add(milestone.percentage)
-                .expect("Milestone percentage overflow");
+                .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
         }
         if total_percentage != 100 {
             panic_with_error!(&env, EscrowError::MilestonesMustSumTo100);
@@ -531,7 +690,9 @@ impl EscrowContract {
         if count >= MAX_JOBS {
             panic_with_error!(&env, EscrowError::JobCountExceedsMaximum);
         }
-        let next_count = count.checked_add(1).expect("JobCount overflow");
+        let next_count = count
+            .checked_add(1)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
         env.storage()
             .instance()
             .set(&DataKey::JobCount, &next_count);
@@ -545,10 +706,13 @@ impl EscrowContract {
         env.storage().instance().set(&DataKey::JobIds, &ids);
 
         // Event emission
-        env.events().publish(
-            (symbol_short!("job_creat"), client.clone()),
-            (job_id, freelancer, amount),
-        );
+        JobCreated {
+            client: client.clone(),
+            job_id,
+            freelancer,
+            amount,
+        }
+        .publish(&env);
 
         // ── Interaction: external token transfer last.
         let token_client = token::Client::new(&env, &token);
@@ -575,7 +739,7 @@ impl EscrowContract {
             .storage()
             .instance()
             .get(&DataKey::Job(job_id.clone()))
-            .expect("Job not found");
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
 
         if job.client != client {
             panic_with_error!(&env, EscrowError::OnlyJobClientCanAmend);
@@ -596,7 +760,7 @@ impl EscrowContract {
             }
             total_percentage = total_percentage
                 .checked_add(milestone.percentage)
-                .expect("Milestone percentage overflow");
+                .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
         }
         if total_percentage != 100 {
             panic_with_error!(&env, EscrowError::MilestonesMustSumTo100);
@@ -616,21 +780,20 @@ impl EscrowContract {
             .unwrap_or(0);
         let next_amendment_count = amendment_count
             .checked_add(1)
-            .expect("AmendmentCount overflow");
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
         env.storage().instance().set(
             &DataKey::AmendmentCount(job_id.clone()),
             &next_amendment_count,
         );
 
-        env.events().publish(
-            (symbol_short!("job_amend"), client),
-            (
-                job_id,
-                old_milestone_count,
-                new_milestone_count,
-                next_amendment_count,
-            ),
-        );
+        JobAmended {
+            client,
+            job_id,
+            old_milestone_count,
+            new_milestone_count,
+            next_amendment_count,
+        }
+        .publish(&env);
     }
 
     /// Number of times a job's milestones have been amended via `amend_job_milestones`.
@@ -648,7 +811,7 @@ impl EscrowContract {
             .storage()
             .instance()
             .get(&DataKey::Job(job_id.clone()))
-            .expect("Job not found");
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
 
         if job.client != client {
             panic_with_error!(&env, EscrowError::OnlyClientCanRelease);
@@ -657,7 +820,10 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::InvalidMilestoneIndex);
         }
 
-        let milestone = &job.milestones.get(milestone_index).unwrap();
+        let milestone = &job
+            .milestones
+            .get(milestone_index)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
         if milestone.disputed {
             panic_with_error!(&env, EscrowError::MilestoneIsDisputed);
         }
@@ -704,14 +870,17 @@ impl EscrowContract {
         let mut updated_milestones = job.milestones.clone();
         let mut released_count = 0u32;
         for i in 0..updated_milestones.len() {
-            let mut m = updated_milestones.get(i).unwrap().clone();
+            let mut m = updated_milestones
+                .get(i)
+                .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing))
+                .clone();
             if i == milestone_index {
                 m.released = true;
             }
             if m.released {
                 released_count = released_count
                     .checked_add(1)
-                    .expect("released_count overflow");
+                    .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
             }
             updated_milestones.set(i, m);
         }
@@ -732,10 +901,13 @@ impl EscrowContract {
         }
 
         // Event emission
-        env.events().publish(
-            (symbol_short!("ms_rel"), client),
-            (job_id, milestone_index, release_amount),
-        );
+        MilestoneReleased {
+            client,
+            job_id,
+            milestone_index,
+            release_amount,
+        }
+        .publish(&env);
 
         // ── Interaction: external token transfer last.
         let token_client = token::Client::new(&env, &job.token);
@@ -759,7 +931,7 @@ impl EscrowContract {
             .storage()
             .instance()
             .get(&DataKey::Job(job_id.clone()))
-            .expect("Job not found");
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
 
         if job.freelancer != freelancer {
             panic_with_error!(&env, EscrowError::OnlyAssignedFreelancerCanSubmitProof);
@@ -769,7 +941,10 @@ impl EscrowContract {
         }
 
         let mut milestones = job.milestones.clone();
-        let mut milestone = milestones.get(milestone_index).unwrap().clone();
+        let mut milestone = milestones
+            .get(milestone_index)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing))
+            .clone();
         if milestone.released {
             panic_with_error!(&env, EscrowError::MilestoneAlreadyCompleted);
         }
@@ -782,10 +957,12 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::Job(job_id.clone()), &job);
 
-        env.events().publish(
-            (symbol_short!("ms_proof"), freelancer),
-            (job_id, milestone_index),
-        );
+        MilestoneProofSubmitted {
+            freelancer,
+            job_id,
+            milestone_index,
+        }
+        .publish(&env);
     }
 
     /// Oracle verifies a milestone proof and marks it as verified.
@@ -798,18 +975,26 @@ impl EscrowContract {
             .storage()
             .instance()
             .get(&DataKey::Job(job_id.clone()))
-            .expect("Job not found");
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
 
         if milestone_index >= job.milestones.len() {
             panic_with_error!(&env, EscrowError::InvalidMilestoneIndex);
         }
 
         let mut milestones = job.milestones.clone();
-        let mut milestone = milestones.get(milestone_index).unwrap().clone();
+        let mut milestone = milestones
+            .get(milestone_index)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing))
+            .clone();
         if milestone.oracle.is_none() {
             panic_with_error!(&env, EscrowError::MilestoneHasNoOracleConfigured);
         }
-        if milestone.oracle.as_ref().unwrap() != &oracle {
+        if milestone
+            .oracle
+            .as_ref()
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing))
+            != &oracle
+        {
             panic_with_error!(&env, EscrowError::OnlyConfiguredOracleCanVerify);
         }
         if milestone.proof_hash.is_none() {
@@ -826,10 +1011,12 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::Job(job_id.clone()), &job);
 
-        env.events().publish(
-            (symbol_short!("ms_verif"), oracle),
-            (job_id, milestone_index),
-        );
+        MilestoneVerified {
+            oracle,
+            job_id,
+            milestone_index,
+        }
+        .publish(&env);
     }
 
     /// M-of-N admin (deprecated): Mark a job as disputed, freezing remaining releases.
@@ -846,13 +1033,16 @@ impl EscrowContract {
             .storage()
             .instance()
             .get(&DataKey::Job(job_id.clone()))
-            .expect("Job not found");
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
 
         // Mirror the dispute onto every unreleased milestone so the
         // milestone-level resolution path can resolve it later.
         let mut milestones = job.milestones.clone();
         for i in 0..milestones.len() {
-            let mut milestone = milestones.get(i).unwrap().clone();
+            let mut milestone = milestones
+                .get(i)
+                .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing))
+                .clone();
             if !milestone.released {
                 milestone.disputed = true;
                 #[cfg(feature = "oracle-escrow")]
@@ -872,7 +1062,7 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::Job(job_id.clone()), &job);
 
-        env.events().publish((symbol_short!("job_disp"),), job_id);
+        JobDisputed { job_id }.publish(&env);
     }
 
     /// M-of-N admin (deprecated): Resolve a dispute and release remaining funds.
@@ -892,7 +1082,7 @@ impl EscrowContract {
             .storage()
             .instance()
             .get(&DataKey::Job(job_id.clone()))
-            .expect("Job not found");
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
 
         if !job.disputed {
             panic_with_error!(&env, EscrowError::JobIsNotDisputed);
@@ -903,7 +1093,10 @@ impl EscrowContract {
 
         let mut updated_milestones = job.milestones.clone();
         for i in 0..updated_milestones.len() {
-            let mut m = updated_milestones.get(i).unwrap().clone();
+            let mut m = updated_milestones
+                .get(i)
+                .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing))
+                .clone();
             m.released = true;
             m.disputed = false;
             updated_milestones.set(i, m);
@@ -916,10 +1109,11 @@ impl EscrowContract {
             .set(&DataKey::Job(job_id.clone()), &job);
         reputation_job_completed(&env, &job);
 
-        env.events().publish(
-            (symbol_short!("job_reslv"),),
-            (job_id.clone(), approve_remaining),
-        );
+        JobResolved {
+            job_id: job_id.clone(),
+            approve_remaining,
+        }
+        .publish(&env);
 
         if remaining_amount > 0 {
             let token_client = token::Client::new(&env, &job.token);
@@ -946,14 +1140,17 @@ impl EscrowContract {
             .storage()
             .instance()
             .get(&DataKey::Job(job_id.clone()))
-            .expect("Job not found");
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
 
         if milestone_index >= job.milestones.len() {
             panic_with_error!(&env, EscrowError::InvalidMilestoneIndex);
         }
 
         let mut milestones = job.milestones.clone();
-        let mut milestone = milestones.get(milestone_index).unwrap().clone();
+        let mut milestone = milestones
+            .get(milestone_index)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing))
+            .clone();
         if milestone.released {
             panic_with_error!(&env, EscrowError::MilestoneAlreadyReleased);
         }
@@ -976,8 +1173,11 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::Job(job_id.clone()), &job);
 
-        env.events()
-            .publish((symbol_short!("ms_disp"),), (job_id, milestone_index));
+        MilestoneDisputed {
+            job_id,
+            milestone_index,
+        }
+        .publish(&env);
     }
 
     /// M-of-N admin: Resolve a single milestone dispute.
@@ -996,14 +1196,17 @@ impl EscrowContract {
             .storage()
             .instance()
             .get(&DataKey::Job(job_id.clone()))
-            .expect("Job not found");
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
 
         if milestone_index >= job.milestones.len() {
             panic_with_error!(&env, EscrowError::InvalidMilestoneIndex);
         }
 
         let mut milestones = job.milestones.clone();
-        let mut milestone = milestones.get(milestone_index).unwrap().clone();
+        let mut milestone = milestones
+            .get(milestone_index)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing))
+            .clone();
         if !milestone.disputed {
             panic_with_error!(&env, EscrowError::MilestoneIsNotDisputed);
         }
@@ -1060,10 +1263,12 @@ impl EscrowContract {
             reputation_job_completed(&env, &job);
         }
 
-        env.events().publish(
-            (symbol_short!("ms_reslv"),),
-            (job_id, milestone_index, approve),
-        );
+        MilestoneResolved {
+            job_id,
+            milestone_index,
+            approve,
+        }
+        .publish(&env);
 
         if release_amount > 0 {
             let token_client = token::Client::new(&env, &job.token);
@@ -1084,7 +1289,7 @@ impl EscrowContract {
             .storage()
             .instance()
             .get(&DataKey::Job(job_id.clone()))
-            .expect("Job not found");
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
 
         if job.client != client {
             panic_with_error!(&env, EscrowError::OnlyClientCanRequestRefund);
@@ -1106,10 +1311,12 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::Job(job_id.clone()), &job);
 
-        env.events().publish(
-            (symbol_short!("job_refnd"), client.clone()),
-            (job_id, remaining),
-        );
+        JobRefunded {
+            client: client.clone(),
+            job_id,
+            remaining,
+        }
+        .publish(&env);
 
         if remaining > 0 {
             let token_client = token::Client::new(&env, &job.token);
@@ -1125,7 +1332,7 @@ impl EscrowContract {
             .storage()
             .instance()
             .get(&DataKey::Job(job_id.clone()))
-            .expect("Job not found");
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
 
         if job.freelancer != freelancer {
             panic_with_error!(&env, EscrowError::OnlyJobFreelancerCanClaim);
@@ -1136,7 +1343,10 @@ impl EscrowContract {
         if milestone_index >= job.milestones.len() {
             panic_with_error!(&env, EscrowError::InvalidMilestoneIndex);
         }
-        let milestone = &job.milestones.get(milestone_index).unwrap();
+        let milestone = &job
+            .milestones
+            .get(milestone_index)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
         if milestone.disputed {
             panic_with_error!(&env, EscrowError::MilestoneDisputedCannotClaimMilestone);
         }
@@ -1175,7 +1385,10 @@ impl EscrowContract {
         // ── Effects: mark milestone released and update status BEFORE
         //    the external token transfer (CEI ordering).
         let mut updated_milestones = job.milestones.clone();
-        let mut m = updated_milestones.get(milestone_index).unwrap().clone();
+        let mut m = updated_milestones
+            .get(milestone_index)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing))
+            .clone();
         m.released = true;
         updated_milestones.set(milestone_index, m);
         job.milestones = updated_milestones;
@@ -1196,10 +1409,13 @@ impl EscrowContract {
         }
 
         // Event emission
-        env.events().publish(
-            (symbol_short!("ms_claim"), freelancer),
-            (job_id, milestone_index, release_amount),
-        );
+        MilestoneClaimed {
+            freelancer,
+            job_id,
+            milestone_index,
+            release_amount,
+        }
+        .publish(&env);
 
         // ── Interaction: external token transfer last.
         let token_client = token::Client::new(&env, &job.token);
@@ -1223,7 +1439,7 @@ impl EscrowContract {
             .storage()
             .instance()
             .get(&DataKey::Job(job_id.clone()))
-            .expect("Job not found");
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
 
         if new_release_after <= job.release_after {
             panic_with_error!(&env, EscrowError::NewReleaseAfterMustExtendCurrent);
@@ -1237,8 +1453,11 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::Job(job_id.clone()), &job);
 
-        env.events()
-            .publish((symbol_short!("rel_upd"),), (job_id, new_release_after));
+        ReleaseUpdated {
+            job_id,
+            new_release_after,
+        }
+        .publish(&env);
     }
 
     /// M-of-N admin: add a new address to the admin set.
@@ -1250,8 +1469,7 @@ impl EscrowContract {
         }
         admin_set.push_back(new_admin.clone());
         env.storage().instance().set(&DataKey::AdminSet, &admin_set);
-        env.events()
-            .publish((symbol_short!("admin_add"),), new_admin);
+        AdminAdded { new_admin }.publish(&env);
     }
 
     /// M-of-N admin: remove an address from the admin set. Panics if this would
@@ -1277,8 +1495,7 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::ThresholdExceedsAdminCount);
         }
         env.storage().instance().set(&DataKey::AdminSet, &new_set);
-        env.events()
-            .publish((symbol_short!("admin_rmv"),), admin_to_remove);
+        AdminRemoved { admin_to_remove }.publish(&env);
     }
 
     /// M-of-N admin: update the threshold for admin-gated actions. Must
@@ -1292,8 +1509,7 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::AdminThreshold, &new_threshold);
-        env.events()
-            .publish((symbol_short!("thresh_up"),), new_threshold);
+        ThresholdUpdated { new_threshold }.publish(&env);
     }
 
     /// Returns the full admin set.
@@ -1392,7 +1608,9 @@ impl EscrowContract {
                 });
             if cleanable {
                 env.storage().instance().remove(&DataKey::Job(id));
-                removed = removed.checked_add(1).expect("removed overflow");
+                removed = removed
+                    .checked_add(1)
+                    .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
             } else {
                 kept.push_back(id);
             }
@@ -1409,12 +1627,14 @@ impl EscrowContract {
             .instance()
             .get(&DataKey::JobCount)
             .unwrap_or(0);
-        let next_count = count.checked_sub(removed).expect("JobCount underflow");
+        let next_count = count
+            .checked_sub(removed)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::StorageMissing));
         env.storage()
             .instance()
             .set(&DataKey::JobCount, &next_count);
 
-        env.events().publish((symbol_short!("jobs_clnd"),), removed);
+        JobsCleaned { removed }.publish(&env);
 
         removed
     }
@@ -1430,6 +1650,7 @@ mod escrow_fuzz;
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     // `std` is not linked in this `#![no_std]` crate by default; declare it
     // explicitly (matching the `escrow_fuzz` harness) so `std::format!` is
     // available for building job-id strings in tests.
@@ -1702,6 +1923,11 @@ mod tests {
     }
 
     #[test]
+    // Legacy `dispute_job`/`resolve_dispute` are retained for backward
+    // compatibility and are authorized with the same M-of-N `require_admin`
+    // gate as `dispute_milestone`/`resolve_milestone_dispute` (issue #1104,
+    // Part B) — the allow is scoped to these compatibility tests only.
+    #[allow(deprecated)]
     fn test_dispute_freezes_release() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1745,6 +1971,8 @@ mod tests {
     }
 
     #[test]
+    // Legacy-path compatibility test; see `test_dispute_freezes_release`.
+    #[allow(deprecated)]
     fn test_resolve_dispute_deprecated() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2837,6 +3065,36 @@ mod tests {
         }
     }
 
+    /// Create a funded single-milestone job and return its key components.
+    /// Shared by the issue #1104 dispute-authorization tests.
+    fn create_job_fixture(
+        env: &Env,
+        client: &EscrowContractClient,
+    ) -> (Address, Address, Address, String) {
+        let client_addr = Address::generate(env);
+        let freelancer = Address::generate(env);
+        let token_admin = Address::generate(env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(env, &token).mint(&client_addr, &1000i128);
+        let job_id = String::from_str(env, "job-authz-audit");
+
+        let mut milestones = Vec::new(env);
+        milestones.push_back(make_milestone(env, "M1", 100));
+
+        client.create_job(
+            &client_addr,
+            &freelancer,
+            &job_id,
+            &token,
+            &1000i128,
+            &milestones,
+            &RELEASE_AFTER_LEDGERS,
+        );
+        (client_addr, freelancer, token, job_id)
+    }
+
     #[test]
     fn test_amend_unreleased_job() {
         let env = Env::default();
@@ -3249,6 +3507,134 @@ mod tests {
         mixed_signers.push_back(admins[0].clone());
         mixed_signers.push_back(stranger);
         client.dispute_milestone(&mixed_signers, &job_id, &0u32);
+    }
+
+    // ─── Issue #1104, Part B: legacy dispute-path authorization audit ────────
+    // `dispute_job` and `resolve_dispute` are deprecated but retained for
+    // backward compatibility; the audit (issue #1104) requires them to be
+    // gated with the SAME M-of-N `require_admin` checks as
+    // `dispute_milestone`/`resolve_milestone_dispute`, with tests for wrong
+    // callers, insufficient admin signatures, and disputed-state transitions.
+
+    /// A non-admin signer cannot dispute a job through the legacy entrypoint.
+    #[test]
+    #[should_panic]
+    fn test_dispute_job_wrong_signer_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let (client_addr, freelancer, token, job_id) = create_job_fixture(&env, &client);
+
+        // 1-of-1 admin set: a stranger's signature never satisfies the threshold.
+        let stranger = Address::generate(&env);
+        client.dispute_job(&signers1(&env, &stranger), &job_id);
+        let _ = (admin, client_addr, freelancer, token);
+    }
+
+    /// The legacy `dispute_job` enforces the same M-of-N threshold as the
+    /// modern `dispute_milestone` — one valid admin of a 2-of-2 set is not
+    /// enough.
+    #[test]
+    #[should_panic]
+    fn test_dispute_job_insufficient_signatures_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let cid = env.register_contract(None, EscrowContract);
+        let client = EscrowContractClient::new(&env, &cid);
+
+        let admins = [Address::generate(&env), Address::generate(&env)];
+        client.initialize(&build_signers(&env, &admins), &2u32);
+
+        let (client_addr, freelancer, token, job_id) = create_job_fixture(&env, &client);
+        let _ = (client_addr, freelancer, token);
+
+        // Only one of the two required admins signs; the second signer is a
+        // stranger, so the valid count stays at 1 (< 2).
+        let stranger = Address::generate(&env);
+        let mut mixed_signers = Vec::new(&env);
+        mixed_signers.push_back(admins[0].clone());
+        mixed_signers.push_back(stranger);
+        client.dispute_job(&mixed_signers, &job_id);
+    }
+
+    /// The legacy `resolve_dispute` enforces the same M-of-N threshold.
+    #[test]
+    #[should_panic]
+    fn test_resolve_dispute_insufficient_signatures_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let cid = env.register_contract(None, EscrowContract);
+        let client = EscrowContractClient::new(&env, &cid);
+
+        let admins = [Address::generate(&env), Address::generate(&env)];
+        client.initialize(&build_signers(&env, &admins), &2u32);
+
+        let (_client_addr, _freelancer, _token, job_id) = create_job_fixture(&env, &client);
+
+        // Put the job into a disputed state with a full admin set first.
+        client.dispute_job(&build_signers(&env, &admins), &job_id);
+
+        // Resolving with only one valid admin must be rejected.
+        let stranger = Address::generate(&env);
+        let mut mixed_signers = Vec::new(&env);
+        mixed_signers.push_back(admins[0].clone());
+        mixed_signers.push_back(stranger);
+        client.resolve_dispute(&mixed_signers, &job_id, &true);
+    }
+
+    /// `resolve_milestone_dispute` enforces the same M-of-N threshold.
+    #[test]
+    #[should_panic]
+    fn test_resolve_milestone_dispute_insufficient_signatures_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let cid = env.register_contract(None, EscrowContract);
+        let client = EscrowContractClient::new(&env, &cid);
+
+        let admins = [Address::generate(&env), Address::generate(&env)];
+        client.initialize(&build_signers(&env, &admins), &2u32);
+
+        let (_client_addr, _freelancer, _token, job_id) = create_job_fixture(&env, &client);
+
+        client.dispute_milestone(&build_signers(&env, &admins), &job_id, &0u32);
+
+        let stranger = Address::generate(&env);
+        let mut mixed_signers = Vec::new(&env);
+        mixed_signers.push_back(admins[0].clone());
+        mixed_signers.push_back(stranger);
+        client.resolve_milestone_dispute(&mixed_signers, &job_id, &0u32, &true);
+    }
+
+    /// `resolve_dispute` on a job that was never disputed panics.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #39)")]
+    fn test_resolve_dispute_not_disputed_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let (_client_addr, _freelancer, _token, job_id) = create_job_fixture(&env, &client);
+
+        client.resolve_dispute(&signers1(&env, &admin), &job_id, &true);
+    }
+
+    /// A non-admin signer cannot resolve a milestone dispute.
+    #[test]
+    #[should_panic]
+    fn test_resolve_milestone_dispute_wrong_signer_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = setup(&env);
+
+        let (_client_addr, _freelancer, _token, job_id) = create_job_fixture(&env, &client);
+        client.dispute_milestone(&signers1(&env, &admin), &job_id, &0u32);
+
+        let stranger = Address::generate(&env);
+        client.resolve_milestone_dispute(&signers1(&env, &stranger), &job_id, &0u32, &true);
     }
 
     #[test]

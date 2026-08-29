@@ -22,7 +22,6 @@ import DescriptionAccordion from "@/components/DescriptionAccordion";
 import WalletAddressQRCode from "@/components/WalletAddressQRCode";
 import {
   subscribeToProject,
-  fetchSubscriberCount,
   createProjectCampaign,
   generateProjectSummary,
   toggleUpdateLike,
@@ -42,17 +41,11 @@ import {
   shortenAddress,
   formatDate,
 } from "@/utils/format";
-import {
-  accountUrl,
-  fetchProjectDiscussion,
-  type ProjectDiscussionMessage,
-} from "@/lib/stellar";
+import { accountUrl } from "@/lib/stellar";
 import { markMonthlySubscriptionPaid } from "@/lib/monthlyGiving";
 import type {
   ClimateProject,
-  Donation,
   ProjectCampaign,
-  ProjectUpdate,
 } from "@/utils/types";
 import { trackEvent } from "@/lib/analytics";
 import { useWishlist } from "@/hooks/useWishlist";
@@ -83,7 +76,6 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
   const [calcAmount, setCalcAmount] = useState<string>("50");
   const [subState, setSubState] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [subError, setSubError] = useState<string | null>(null);
-  const [subscriberCount, setSubscriberCount] = useState<number | null>(null);
   const [showMonthlySetup, setShowMonthlySetup] = useState(false);
   const [subEmail, setSubEmail] = useState("");
   const [countdownNow, setCountdownNow] = useState(Date.now());
@@ -96,6 +88,24 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
   const [aiSummaryState, setAiSummaryState] = useState<"idle" | "loading" | "error">("idle");
   const [aiSummaryError, setAiSummaryError] = useState<string | null>(null);
   const [updateLikes, setUpdateLikes] = useState<Record<string, { liked: boolean; likeCount: number }>>({});
+
+  const queryClient = useQueryClient();
+  const projectId = typeof id === "string" ? id : null;
+  const projectQuery = useProject(projectId, publicKey);
+  const updatesQuery = useProjectUpdates(projectId);
+  const matchesQuery = useProjectMatches(projectId);
+  const project = projectQuery.data ?? null;
+  const updates = updatesQuery.data ?? [];
+  const matches = useMemo(() => matchesQuery.data ?? [], [matchesQuery.data]);
+  const discussionQuery = useProjectDiscussion(project?.walletAddress ?? null);
+  const discussion = discussionQuery.data ?? [];
+  const subscriberQuery = useSubscriberCount(projectId);
+  const subscriberCount = subscriberQuery.data ?? null;
+  // The project itself is the page shell. Ancillary data can load or refresh
+  // independently without hiding cached project content.
+  const loading = projectQuery.isLoading;
+  const loadError = projectQuery.error;
+  const isRetrying = projectQuery.isRefetching;
 
   const { toggleWishlist, isInWishlist } = useWishlist();
   const prefillAmount =
@@ -141,23 +151,6 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- identity stable
   }, [loading, project?.id, project?.category]);
-
-  useEffect(() => {
-    if (!project) return;
-    setDiscussionLoading(true);
-    fetchProjectDiscussion(project.walletAddress, 50)
-      .then(setDiscussion)
-      .catch(() => setDiscussion([]))
-      .finally(() => setDiscussionLoading(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- identity stable
-  }, [project?.walletAddress]);
-
-  useEffect(() => {
-    if (!id) return;
-    fetchSubscriberCount(id as string)
-      .then(setSubscriberCount)
-      .catch(() => null);
-  }, [id]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setCountdownNow(Date.now()), 1000);
@@ -650,7 +643,11 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
       });
       setSubState("success");
       setSubEmail("");
-      setSubscriberCount((c) => (c !== null ? c + 1 : null));
+      queryClient.setQueryData(
+        queryKeys.subscriberCount(project.id),
+        (count: number | undefined) =>
+          count !== undefined ? count + 1 : count,
+      );
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { error?: string } } })
         ?.response?.data?.error;
@@ -710,7 +707,7 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
       }
     : null;
 
-  if ((loadError && !loading && !project) || isRetrying)
+  if (loadError && !project)
     return (
       <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10">
         <QueryErrorFallback
@@ -880,7 +877,15 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
         </div>
       )}
 
-      {activeMatches.length > 0 && (
+      {matchesQuery.error ? (
+        <QueryErrorFallback
+          error={matchesQuery.error}
+          onRetry={() => void matchesQuery.refetch()}
+          isRetrying={matchesQuery.isRefetching}
+          title="Couldn't load donation matching"
+          className="mb-6"
+        />
+      ) : activeMatches.length > 0 && (
         <div className="card mb-6 border-green-200 bg-gradient-to-r from-green-50 to-emerald-50">
           <p className="text-xs uppercase tracking-widest font-bold text-green-700 font-body mb-3">
             Donation Matching Active
@@ -1536,7 +1541,15 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
             <h2 className="font-display text-lg font-semibold text-forest-900 mb-4">
               {t("project.projectUpdates")}
             </h2>
-            {updates.length === 0 ? (
+            {updatesQuery.error ? (
+              <QueryErrorFallback
+                error={updatesQuery.error}
+                onRetry={() => void updatesQuery.refetch()}
+                isRetrying={updatesQuery.isRefetching}
+                title="Couldn't load project updates"
+                className="my-0"
+              />
+            ) : updates.length === 0 ? (
               <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body">
                 {t("project.noUpdatesYet")}
               </p>
@@ -1621,7 +1634,7 @@ export default function ProjectDetail({ ogProject }: ProjectDetailProps) {
               real donations.
             </p>
 
-            {discussionLoading ? (
+            {discussionQuery.isLoading ? (
               <p className="text-sm text-[#5a7a5a] dark:text-[#8aaa8a] font-body">
                 Loading discussionâ€¦
               </p>
@@ -2047,4 +2060,3 @@ window.addEventListener('message', (event) => {
     </div>
   );
 }
-

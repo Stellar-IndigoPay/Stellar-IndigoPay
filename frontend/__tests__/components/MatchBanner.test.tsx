@@ -5,6 +5,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import ProjectDetail from "@/pages/projects/[id]";
 import type { ClimateProject } from "@/utils/types";
+import { renderWithProviders } from "@/__tests__/test-utils";
 
 // Mock next/router
 const mockPush = jest.fn();

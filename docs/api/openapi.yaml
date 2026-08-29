@@ -2521,6 +2521,58 @@ paths:
                 $ref: "#/components/schemas/AdminMeResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /api/admin/secrets/status:
+    get:
+      tags: [Admin]
+      summary: Get secret rotation status
+      operationId: getAdminSecretsStatus
+      description: >-
+        Report the live rotation status of every secret the backend consumes:
+        current/previous/next key fingerprints (SHA-256), the last successful
+        rotation timestamp, and the next scheduled rotation. Returns fingerprints
+        only, never secret values. Requires admin authentication.
+      responses:
+        "200":
+          description: Secret rotation status for all configured secrets.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    description: One entry per configured secret.
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                          description: Canonical secret name.
+                        currentKid:
+                          type: string
+                          nullable: true
+                          description: Fingerprint of the current issuing key.
+                        previousKid:
+                          type: string
+                          nullable: true
+                          description: Fingerprint of the previous (verify-only) key, if any.
+                        nextKid:
+                          type: string
+                          nullable: true
+                          description: Fingerprint of the next (verify+promote) key, if any.
+                        lastRotatedAt:
+                          type: string
+                          format: date-time
+                          nullable: true
+                          description: When the last rotation completed.
+                        nextScheduledAt:
+                          type: string
+                          format: date-time
+                          description: When the next automated rotation is expected.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /api/admin/audit-log:
     get:
       tags: [Admin]

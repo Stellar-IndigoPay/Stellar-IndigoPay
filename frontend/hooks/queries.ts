@@ -1,7 +1,14 @@
 /**
  * hooks/queries.ts — React Query hooks for server-state management
  */
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+  keepPreviousData,
+  type InfiniteData,
+} from "@tanstack/react-query";
 import {
   fetchDonorHistory,
   fetchLeaderboard,
@@ -9,6 +16,14 @@ import {
   fetchProfile,
   fetchImpactDonor,
   fetchImpactGlobal,
+  fetchProjects,
+  fetchProject,
+  fetchProjectFacets,
+  fetchProjectMatches,
+  fetchProjectUpdates,
+  fetchProjectDonations,
+  fetchSubscriberCount,
+  fetchPendingRating,
   recordDonation,
   followProject,
   unfollowProject,
@@ -168,7 +183,9 @@ export function useDueSubscriptions(publicKey: string | null) {
 
 export function useRecordDonation() {
   const queryClient = useQueryClient();
-  return useMutation({
+
+  return useMutation<Donation, unknown, RecordDonationPayload, DonationMutationContext>({
+    mutationKey: [RECORD_DONATION_MUTATION_KEY],
     mutationFn: recordDonation,
     onMutate: async (variables) => {
       // Optimistic update

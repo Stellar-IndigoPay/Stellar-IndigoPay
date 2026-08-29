@@ -226,3 +226,67 @@ Unlike the automated pipeline (which flags for admin review), reaching the confi
 | Sybil donors            | On-chain stats cannot be faked — all linked to real wallet |
 | Backend downtime        | Donations still work — backend is not on the critical path |
 | Inflated CO₂ rates      | Automated verification against independent scientific data |
+
+## Network Policy & Zero-Trust Model
+
+Workstream 6 of [issue #1100](https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/issues/1100)
+enforces a zero-trust network model: **no pod may reach another pod or any
+external service unless a NetworkPolicy explicitly allows it.**
+
+### Default-deny
+
+A single `default-deny-all` NetworkPolicy (`k8s/networkpolicy-default-deny.yaml`)
+selects all pods with an empty `podSelector` and declares both `Ingress` and
+`Egress` policy types. This means:
+
+- No ingress rules ⇒ no other pod may connect in.
+- No egress rules ⇒ no outbound traffic at all.
+
+The layered `networkpolicy-allow-*.yaml` files then open exactly the paths the
+app needs.
+
+### Allowed communication paths
+
+```
+ Internet
+    │  (HTTPS ingress via Ingress/ClusterIssuer)
+    ▼
+┌──────────────┐
+│   Ingress    │──► backend          (allow-ingress-backend)
+└──────────────┘
+
+┌──────────────┐        ┌───────────────┐
+│  frontend    │ ─────► │   backend     │   (allow-frontend-backend)
+└──────────────┘        └──────┬────────┘
+                               │
+              ┌────────────────┼────────────────────┐
+              ▼                ▼                    ▼
+      ┌──────────────┐  ┌──────────────┐   ┌──────────────┐
+      │  PostgreSQL  │  │    Redis     │   │  external    │
+      │ primary/stand│  │              │   │ APIs (HTTPS) │
+      └──────────────┘  └──────────────┘   └──────────────┘
+   (allow-backend-postgres,
+    allow-postgres-replication)
+```
+
+Backend egress to external networks is restricted to: Stellar Horizon
+(testnet/mainnet), Soroban RPC, the CO₂/Gold-Standard reference APIs, SMTP
+relay, FCM, and APNs — each enumerated, never `0.0.0.0/0`. Frontend egress is
+backend-only. `postgres-exporter` is allowed to the primary so Prometheus can
+scrape replication metrics.
+
+### Enforcement in CI
+
+`.github/workflows/networkpolicy-lint.yml` runs
+`scripts/validate-networkpolicies.js` on every PR and push. It fails CI if:
+
+- Any NetworkPolicy YAML is invalid.
+- `default-deny-all` (Ingress + Egress, empty podSelector) is missing.
+- Any Deployment/StatefulSet has no matching allow policy (a new pod added
+  without a policy fails CI).
+- Any egress rule references `0.0.0.0/0` without a documented exception.
+
+> **Rollout guidance**: introduce deny-first policies in `logging` mode, observe
+> dropped flows for a cycle, then switch to enforcement — never apply a broad
+> default-deny to a live cluster without first confirming the allow-list is
+> complete.

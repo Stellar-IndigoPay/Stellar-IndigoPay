@@ -136,6 +136,34 @@ function attachSentinelEventHandlers(client) {
 }
 
 /**
+ * Return the list of Redis passwords to attempt, current first.
+ *
+ * Dual-version support (WS3 / #1100): during a rotation the current password
+ * lives in `REDIS_PASSWORD` and the previous one lives in `REDIS_PASSWORD_PREVIOUS`
+ * (or `CLIENTSIDE_REDIS_PASSWORD_PREVIOUS` if the URL carries the credentials).
+ * A consumer that fails AUTH with the current key can retry with the previous
+ * key until the rotation grace period is over.
+ *
+ * @param {object} [opts]
+ * @param {{password?: string, previousPassword?: string}} [opts.urlCreds] - parsed
+ *   credentials from a REDIS_URL (user:pass@host). When provided they take
+ *   precedence over env vars.
+ * @returns {string[]} Non-empty password candidates, current first.
+ */
+function getAuthCandidates(opts = {}) {
+  const urlCreds = opts.urlCreds || {};
+  const candidates = [
+    urlCreds.password || process.env.REDIS_PASSWORD || "",
+    urlCreds.previousPassword ||
+      process.env.REDIS_PASSWORD_PREVIOUS ||
+      process.env.CLIENTSIDE_REDIS_PASSWORD_PREVIOUS ||
+      "",
+  ];
+  // De-duplicate, drop empties, preserve order (current first).
+  return [...new Set(candidates)].filter(Boolean);
+}
+
+/**
  * Initialise Redis connections from environment variables.
  *
  * Priority:
@@ -182,13 +210,49 @@ function initRedis() {
     : [process.env.REDIS_URL || "redis://localhost:6379"];
 
   clients = urlsRaw.map((url) => {
+    // Parse URL credentials so we can layer dual-version AUTH fallback on top
+    // of whatever the connection string already carries.
+    const parsed = /([^:@/]+)?:([^@/]+)@/.exec(url);
+    const urlCreds = parsed
+      ? { password: decodeURIComponent(parsed[2] || "") }
+      : {};
+    const authCandidates = getAuthCandidates({ urlCreds });
+
     const client = new Redis(url, {
       lazyConnect: true,
       enableOfflineQueue: false,
       maxRetriesPerRequest: 0,
+      // When a separate REDIS_PASSWORD is configured, pass it explicitly so
+      // ioredis authenticates with it before any command (dual-version safe).
+      ...(urlCreds.password ? {} : authCandidates[0] ? { password: authCandidates[0] } : {}),
     });
 
-    client.on("error", () => {
+    client.on("error", (err) => {
+      // On an AUTH error, transparently retry the connection with the previous
+      // password (rotation grace window). Other errors remain non-fatal.
+      // Redis 7 returns `WRONGPASS invalid username-password pair or user is
+      // disabled` for bad credentials (older 5.x used `ERR invalid password`);
+      // match both so the previous-password fallback never gets skipped (#1100).
+      if (
+        authCandidates.length > 1 &&
+        err &&
+        /NOAUTH|WRONGPASS|ERR.*auth/i.test(String(err.message || ""))
+      ) {
+        const fallback = new Redis(url, {
+          lazyConnect: true,
+          enableOfflineQueue: false,
+          maxRetriesPerRequest: 0,
+          password: authCandidates[1],
+        });
+        fallback.connect().catch(() => {
+          // Best-effort fallback; cache simply goes unauthenticated otherwise.
+        });
+        fallback.on("error", () => {});
+        // Swap the box-level client so subsequent calls use the working one.
+        const idx = clients.indexOf(client);
+        if (idx !== -1) clients[idx] = fallback;
+        return;
+      }
       // Redis connection errors are non-fatal; bypass cache on failure
     });
 
@@ -435,5 +499,6 @@ module.exports = {
   donorNonceIssued,
   donorNonceKey,
   donorConsumedKey,
+  getAuthCandidates,
   _reset,
 };

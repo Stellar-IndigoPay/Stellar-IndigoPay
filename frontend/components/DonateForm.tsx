@@ -65,6 +65,10 @@ type Step =
   | "unknown"
   | "error";
 
+function isDonationProcessingError(error: unknown): boolean {
+  return error instanceof Error && error.name === "DonationProcessingError";
+}
+
 const PRESETS_XLM = ["10", "25", "50", "100", "250"];
 const PRESETS_USDC = ["5", "10", "25", "50", "100"];
 
@@ -394,7 +398,7 @@ export default function DonateForm({
    */
   const submitStandardPayment = async (
     tx: Transaction,
-    idempotencyKey?: string,
+    idempotencyKey: string,
   ) => {
     // Transaction.hash() returns a Buffer — hex-encode it so the recovery
     // path polls and persists the required 64-character hexadecimal hash.
@@ -459,6 +463,7 @@ export default function DonateForm({
     // duplicate idempotency key from an earlier retry) must never surface as
     // an error after the on-chain payment already succeeded — the chain is
     // the source of truth.
+    let donationStillProcessing = false;
     await recordDonationMutation.mutateAsync({
       projectId: project.id,
       donorAddress: publicKey,
@@ -468,9 +473,14 @@ export default function DonateForm({
       encrypted: pendingMessageRef.current.encrypted,
       transactionHash: result?.hash ?? expectedTxHash,
       idempotencyKey,
-    }).catch(() => {
+    }).catch((error: unknown) => {
       // Backend recording failure — the donation is already on-chain.
+      donationStillProcessing = isDonationProcessingError(error);
     });
+    if (donationStillProcessing) {
+      setStep("unknown");
+      return;
+    }
 
     trackEvent("donation_confirmed", {
       projectId: project.id,
@@ -493,10 +503,9 @@ export default function DonateForm({
     setError(null);
     try {
       const freshTx = await buildDonationTransaction(pendingParamsRef.current);
-      await submitStandardPayment(
-        freshTx,
-        pendingIdempotencyRef.current ?? undefined,
-      );
+      const idempotencyKey = pendingIdempotencyRef.current;
+      if (!idempotencyKey) throw new Error("Missing donation idempotency key");
+      await submitStandardPayment(freshTx, idempotencyKey);
     } catch (err: unknown) {
       await handleDonationError(err);
     }
@@ -681,7 +690,10 @@ export default function DonateForm({
           setDonorBadge(badgeNames[stats.badge] || null);
         }
 
-        // Still record in backend for feed/analytics
+        // Still record in backend for feed/analytics. Match the standard
+        // path: a 202 means the on-chain payment may already be recorded, so
+        // do not present a completed donation that could be submitted again.
+        let donationStillProcessing = false;
         await recordDonationMutation.mutateAsync({
           projectId: project.id,
           donorAddress: publicKey,
@@ -691,7 +703,13 @@ export default function DonateForm({
           encrypted: isEncrypted,
           transactionHash: result.hash,
           idempotencyKey,
+        }).catch((error: unknown) => {
+          donationStillProcessing = isDonationProcessingError(error);
         });
+        if (donationStillProcessing) {
+          setStep("unknown");
+          return;
+        }
 
         trackEvent("donation_confirmed", {
           projectId: project.id,

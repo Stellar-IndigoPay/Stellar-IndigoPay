@@ -71,3 +71,6 @@
 65 CampaignEscrowJobId(String)
 66 AnonymousCommitment(U32)
 67 AttestationContract
+68 ReentrancyGuard
+69 SuspendToken(Address)
+70 TtlBumpCursor

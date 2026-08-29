@@ -83,9 +83,12 @@ export default function useOfflineQueueSync(): void {
     void syncQueuedDonations(
       async (payload) => {
         try {
+          const { idempotencyKey } = payload;
+          if (!idempotencyKey) return false;
           await recordDonation({
             ...payload,
             transactionHash: payload.transactionHash || "queued-offline",
+            idempotencyKey,
           });
           return true;
         } catch {
