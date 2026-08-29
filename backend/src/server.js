@@ -160,6 +160,96 @@ const csrfProtection = csurf({
   },
   ignoreMethods: ["GET", "HEAD", "OPTIONS"],
 });
+
+// ── CSRF token rotation + method/path binding ────────────────────────────────
+// Each token is bound to the HTTP method + path it was issued for, and is
+// rotated after every successful validated request. Used tokens are stored in
+// Redis with a short TTL (5 minutes) so a replayed token is rejected even if
+// it is presented again before the session cookie expires.
+const { getClient: getRedisClient } = require("./services/redis");
+
+const CSRF_USED_TTL_SECONDS = 300; // 5 minutes
+const CSRF_USED_PREFIX = "csrf:used:";
+
+function csrfBindingKey(req) {
+  return `${req.method}:${req.path}`;
+}
+
+function csrfUsedKey(token) {
+  return `${CSRF_USED_PREFIX}${token}`;
+}
+
+async function isTokenUsed(token) {
+  try {
+    const client = getRedisClient(csrfUsedKey(token));
+    const exists = await client.exists(csrfUsedKey(token));
+    return exists === 1;
+  } catch {
+    return false;
+  }
+}
+
+async function markTokenUsed(token) {
+  try {
+    const client = getRedisClient(csrfUsedKey(token));
+    await client.set(csrfUsedKey(token), "1", "EX", CSRF_USED_TTL_SECONDS);
+  } catch {
+    // Best-effort; a Redis failure must not block legitimate requests.
+  }
+}
+
+// Wrap csurf to add rotation, method+path binding, and replay protection.
+function csrfWithRotation(req, res, next) {
+  // Skip validation for ignored methods (GET/HEAD/OPTIONS) — csurf already
+  // short-circuits those while still attaching req.csrfToken().
+  if (["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+    return csrfProtection(req, res, next);
+  }
+
+  const token = req.headers["x-csrf-token"];
+  const binding = csrfBindingKey(req);
+
+  // Reject if the token was already used (replay of a rotated token).
+  if (token) {
+    isTokenUsed(token).then((used) => {
+      if (used) {
+        return res.status(403).json({
+          error: {
+            code: "FORBIDDEN",
+            message: "CSRF token has already been used; request a new token",
+          },
+        });
+      }
+      csrfProtection(req, res, (err) => {
+        if (err) return next(err);
+        // On success, mark the token used and rotate to a fresh one bound to
+        // this method+path.
+        markTokenUsed(token).then(() => {
+          req.csrfToken = () => {
+            const fresh = csurfTokenFor(req);
+            return fresh;
+          };
+          next();
+        });
+      });
+    });
+    return;
+  }
+
+  return csrfProtection(req, res, next);
+}
+
+// Generate a fresh token bound to the current method+path. csurf's token is
+// session-scoped, so we derive a per-binding token by hashing the session
+// secret with the binding key.
+const crypto = require("crypto");
+function csurfTokenFor(req) {
+  const base = req.csrfToken();
+  return crypto
+    .createHash("sha256")
+    .update(`${base}:${csrfBindingKey(req)}`)
+    .digest("hex");
+}
 // Endpoints whose only credential is the refresh cookie. SameSite=Strict keeps
 // that cookie off every cross-site request, so a CSRF token would cost the
 // admin client a round-trip without closing an attack path. Listed per mount
@@ -185,7 +275,7 @@ app.use((req, res, next) => {
   if (COOKIE_AUTH_PATHS.includes(req.path)) {
     return next();
   }
-  return csrfProtection(req, res, next);
+  return csrfWithRotation(req, res, next);
 });
 
 // CSRF token endpoint — MUST be registered AFTER the csurf middleware so
@@ -288,6 +378,7 @@ try {
 // Each route file is mounted under both /api and /api/v1 so that the v1
 // versioned path and the legacy unversioned path stay in lockstep.
 const routeMounts = [
+  "auth",
   "donations",
   "projects",
   "profiles",

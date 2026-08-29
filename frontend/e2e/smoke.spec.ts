@@ -30,9 +30,11 @@ test('performance budget for LCP and INP', async ({ page }) => {
 
   await page.goto('/');
 
-  // Simulate user interaction to trigger INP measurement
-  await page.waitForSelector('text=Explore Projects');
-  await page.click('text=Explore Projects');
+  // Simulate user interaction to trigger INP measurement.
+  // The homepage CTA reads "Browse Projects", not "Explore Projects"
+  // (the latter only appears on the dashboard).
+  await page.waitForSelector('text=Browse Projects');
+  await page.click('text=Browse Projects');
   
   // Wait a moment for layout to settle and observers to fire
   await page.waitForTimeout(2000);

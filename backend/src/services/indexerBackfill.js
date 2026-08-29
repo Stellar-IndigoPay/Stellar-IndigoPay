@@ -60,9 +60,20 @@ async function runBackfill(options = {}) {
     let startLedger = fromLedger;
     if (!startLedger) {
       const state = await pool.query(
-        "SELECT last_processed_ledger FROM indexer_state WHERE key = 'primary'",
+        "SELECT last_processed_ledger, cursor_hash FROM indexer_state WHERE key = 'primary'",
       );
-      startLedger = (state.rows[0]?.last_processed_ledger) || 0;
+      const ledger = state.rows[0]?.last_processed_ledger || 0;
+      const storedHash = state.rows[0]?.cursor_hash;
+      
+      if (storedHash && ledger > 0) {
+        const crypto = require('crypto');
+        const expectedHash = crypto.createHash("sha256").update(String(ledger)).digest("hex");
+        if (storedHash !== expectedHash) {
+          throw new Error(`Checkpoint corruption detected: hash mismatch for ledger ${ledger}`);
+        }
+      }
+      
+      startLedger = ledger;
     }
 
     let endLedger = toLedger;

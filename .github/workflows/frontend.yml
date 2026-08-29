@@ -5,6 +5,11 @@ on:
     branches: [main, develop]
   pull_request:
 
+# All frontend jobs only read the repo (and upload artifacts, which needs no
+# write scopes) — the token never needs more than read access.
+permissions:
+  contents: read
+
 # Pin every devDependency additively here so floating semver never lands a
 # different jest-axe on a system where we cannot pin via overrides.
 # Comments by hand: nexus of jest+axe versions that play together.
@@ -17,7 +22,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Start Timer
-        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
+        run: echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
       - name: Checkout code
         uses: actions/checkout@v4
       - uses: ./.github/actions/setup-node-cached
@@ -41,7 +46,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Start Timer
-        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
+        run: echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
       - name: Checkout code
         uses: actions/checkout@v4
       - uses: ./.github/actions/setup-node-cached
@@ -59,13 +64,44 @@ jobs:
           start-time: ${{ env.START_TIME }}
           max-seconds: '600'
 
+  frontend-locales:
+    name: Frontend Locale Parity + Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Start Timer
+        run: echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-node-cached
+        with:
+          node-version: "22"
+          working-directory: frontend
+          legacy-peer-deps: 'true'
+      - name: Locale key parity + translation coverage
+        working-directory: frontend
+        run: npm run test:i18n-parity
+      - name: Upload translation coverage metric
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: locale-coverage
+          path: frontend/locale-coverage.json
+          if-no-files-found: warn
+      - name: Budget Check
+        if: always()
+        uses: ./.github/actions/budget-check
+        with:
+          start-time: ${{ env.START_TIME }}
+          max-seconds: '600'
+
   frontend-tests-smoke:
     name: Frontend jest smoke (jest-axe resolves)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Start Timer
-        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
+        run: echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
       - name: Checkout code
         uses: actions/checkout@v4
       - uses: ./.github/actions/setup-node-cached
@@ -93,7 +129,7 @@ jobs:
     needs: [frontend-tests-smoke]
     steps:
       - name: Start Timer
-        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
+        run: echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
       - name: Checkout code
         uses: actions/checkout@v4
       - uses: ./.github/actions/setup-node-cached
@@ -104,6 +140,11 @@ jobs:
       - name: Run jest (unit + a11y)
         working-directory: frontend
         run: npm test -- --ci --colors=false
+      # Issue #1096 (WS3): the deployed CSP must match the whitelist on every
+      # page — enforce it statically so a policy regression fails CI pre-merge.
+      - name: Verify CSP whitelist
+        working-directory: frontend
+        run: node scripts/verify-csp.mjs
       - name: Budget Check
         if: always()
         uses: ./.github/actions/budget-check
@@ -122,7 +163,7 @@ jobs:
         shardTotal: [3]
     steps:
       - name: Start Timer
-        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
+        run: echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
       - name: Checkout code
         uses: actions/checkout@v4
       - uses: ./.github/actions/setup-node-cached
@@ -205,7 +246,7 @@ jobs:
     needs: [frontend-lint, frontend-typecheck, frontend-tests, frontend-e2e]
     steps:
       - name: Start Timer
-        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
+        run: echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -303,7 +344,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Start Timer
-        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
+        run: echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -339,7 +380,7 @@ jobs:
         shardTotal: [3]
     steps:
       - name: Start Timer
-        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
+        run: echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -406,12 +447,39 @@ jobs:
           NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
           NEXT_PUBLIC_API_URL: http://localhost:4000
 
+      # Issue #1096: the V2 money-path suite (donation preview + offline
+      # durability incl. the two-tab exactly-once race, WCAG a11y scan of the
+      # full donation flow, visual regression) lives in e2e/ and runs on a
+      # dedicated config — route-mocked, flag-overridden, desktop viewport.
+      # Runs once (shard 1) to avoid triplicating it across the shard matrix.
+      - name: Run V2 donation-flow suite (Issue #1096)
+        if: matrix.shardIndex == 1
+        working-directory: frontend
+        # Separate HTML report directory so the V2 run cannot clear shard 1's
+        # main-suite report (Playwright wipes the default dir per run).
+        run: npx playwright test -c playwright.v2.config.ts --reporter=html,list
+        env:
+          NEXT_PUBLIC_STELLAR_NETWORK: testnet
+          NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
+          NEXT_PUBLIC_API_URL: http://localhost:4000
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report-v2
+
+      # Issue #1096 (WS3): the production server started above is still
+      # running here, so verify the *deployed* middleware headers — not just
+      # the source text — match the CSP whitelist.
+      - name: Verify deployed CSP headers (Issue #1096)
+        if: matrix.shardIndex == 1
+        working-directory: frontend
+        run: VERIFY_CSP_URL=http://127.0.0.1:3000 node scripts/verify-csp.mjs
+
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: playwright-report
-          path: frontend/playwright-report/
+          path: |
+            frontend/playwright-report/
+            frontend/playwright-report-v2/
           retention-days: 14
       - name: Budget Check
         if: always()

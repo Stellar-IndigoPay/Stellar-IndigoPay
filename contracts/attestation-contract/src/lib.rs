@@ -1,8 +1,9 @@
 #![no_std]
+// WS2: forbid `.unwrap()` / `.expect()` in production code.
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used)]
 #![allow(clippy::too_many_arguments)]
 #![allow(deprecated)]
-// The env.events().publish() calls use the deprecated `Events::publish`
-// method. The #[contractevent] migration is tracked in TODO(indigopay-272).
 /**
  * contracts/attestation-contract/src/lib.rs
  *
@@ -32,8 +33,8 @@
  *   cargo build --target wasm32v1-none --release
  */
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    Env, Map, String, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
+    BytesN, Env, Map, String, Vec,
 };
 
 #[cfg(all(test, feature = "testutils"))]
@@ -248,13 +249,17 @@ pub enum AttestationError {
     AggregationUpdateFailed = 58,
     DonorAggregateNotFound = 59,
     ChainAggregateNotFound = 60,
+    // ── WS2: checked-arithmetic hardening (61–63) ─────────────────────────
+    ArithmeticOverflow = 61,
+    ArithmeticUnderflow = 62,
+    StorageMissing = 63,
 }
 
 fn read_admin(env: &Env) -> Address {
     env.storage()
         .instance()
         .get(&DataKey::Admin)
-        .expect("Not initialized")
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing))
 }
 
 fn require_admin(env: &Env, caller: &Address) {
@@ -268,7 +273,8 @@ fn read_relayer(env: &Env) -> Option<Address> {
 }
 
 fn require_relayer(env: &Env, caller: &Address) {
-    let relayer = read_relayer(env).expect("Relayer not configured");
+    let relayer = read_relayer(env)
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
     if relayer != *caller {
         panic_with_error!(env, AttestationError::OnlyRelayerCanPerformThisAction);
     }
@@ -331,20 +337,16 @@ fn require_source_chain_allowed(env: &Env, source_chain: &String) {
 }
 
 fn emit_attestation_new(env: &Env, relayer: &Address, record: &Attestation) {
-    env.events().publish(
-        (
-            symbol_short!("att_new"),
-            relayer.clone(),
-            record.donor.clone(),
-            record.source_chain.clone(),
-        ),
-        (
-            record.id,
-            record.project_id.clone(),
-            record.amount_usd,
-            record.amount_xlm,
-        ),
-    );
+    AttestationNew {
+        relayer: relayer.clone(),
+        donor: record.donor.clone(),
+        source_chain: record.source_chain.clone(),
+        id: record.id,
+        project_id: record.project_id.clone(),
+        amount_usd: record.amount_usd,
+        amount_xlm: record.amount_xlm,
+    }
+    .publish(env);
 }
 
 fn record_attestations_internal(
@@ -354,7 +356,9 @@ fn record_attestations_internal(
     emit_batch_event: bool,
 ) -> Vec<u64> {
     let count = attestations.len();
-    let first_input = attestations.get(0).expect("Batch must not be empty");
+    let first_input = attestations
+        .get(0)
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
     let source_chain = first_input.source_chain.clone();
 
     validate_source_chain(&source_chain);
@@ -385,23 +389,27 @@ fn record_attestations_internal(
     let count_u64 = u64::from(count);
     let first_id = current_last
         .checked_add(1)
-        .expect("Attestation id overflow");
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
     let last_id = current_last
         .checked_add(count_u64)
-        .expect("Attestation id overflow");
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
 
     let total: u64 = env
         .storage()
         .instance()
         .get(&DataKey::TotalCount)
         .unwrap_or(0);
-    let new_total = total.checked_add(count_u64).expect("total overflow");
+    let new_total = total
+        .checked_add(count_u64)
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
     let pending: u64 = env
         .storage()
         .instance()
         .get(&DataKey::PendingCount)
         .unwrap_or(0);
-    let new_pending = pending.checked_add(count_u64).expect("pending overflow");
+    let new_pending = pending
+        .checked_add(count_u64)
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
 
     let now = env.ledger().sequence();
     let mut ids = Vec::new(env);
@@ -409,10 +417,12 @@ fn record_attestations_internal(
     let mut donor_order: Vec<Address> = Vec::new(env);
 
     for index in 0..count {
-        let input = attestations.get(index).unwrap();
+        let input = attestations
+            .get(index)
+            .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
         let id = first_id
             .checked_add(u64::from(index))
-            .expect("Attestation id overflow");
+            .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
         ids.push_back(id);
 
         let seen_key = DataKey::SourceTxSeen(source_chain.clone(), input.source_tx_hash.clone());
@@ -460,7 +470,9 @@ fn record_attestations_internal(
     }
 
     for donor in donor_order.iter() {
-        let donor_ids = donor_indexes.get(donor.clone()).unwrap();
+        let donor_ids = donor_indexes
+            .get(donor.clone())
+            .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
         env.storage()
             .instance()
             .set(&DataKey::DonorAttestations(donor), &donor_ids);
@@ -477,10 +489,14 @@ fn record_attestations_internal(
         .set(&DataKey::PendingCount, &new_pending);
 
     if emit_batch_event {
-        env.events().publish(
-            (symbol_short!("att_batch"), relayer.clone(), source_chain),
-            (count, first_id, last_id),
-        );
+        AttestationBatch {
+            relayer: relayer.clone(),
+            source_chain,
+            count,
+            first_id,
+            last_id,
+        }
+        .publish(env);
     }
 
     ids
@@ -546,28 +562,34 @@ fn update_aggregates_on_record(
     donor_agg.total_attestations = donor_agg
         .total_attestations
         .checked_add(1)
-        .expect("donor total_attestations overflow");
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
     donor_agg.total_usd = donor_agg
         .total_usd
         .checked_add(amount_usd)
-        .expect("donor total_usd overflow");
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
     donor_agg.total_xlm = donor_agg
         .total_xlm
         .checked_add(amount_xlm)
-        .expect("donor total_xlm overflow");
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
     donor_agg.pending = donor_agg
         .pending
         .checked_add(1)
-        .expect("donor pending overflow");
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
 
     // Update (or insert) per-chain counter within the donor aggregate.
     {
         let mut found = false;
         let mut new_chains: Vec<ChainCount> = Vec::new(env);
         for i in 0..donor_agg.chains.len() {
-            let mut cc: ChainCount = donor_agg.chains.get(i).unwrap();
+            let mut cc: ChainCount = donor_agg
+                .chains
+                .get(i)
+                .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
             if cc.chain == *chain {
-                cc.count = cc.count.checked_add(1).expect("chain count overflow");
+                cc.count = cc
+                    .count
+                    .checked_add(1)
+                    .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
                 new_chains.push_back(cc);
                 found = true;
             } else {
@@ -589,19 +611,19 @@ fn update_aggregates_on_record(
     chain_agg.total_attestations = chain_agg
         .total_attestations
         .checked_add(1)
-        .expect("chain total_attestations overflow");
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
     chain_agg.total_usd = chain_agg
         .total_usd
         .checked_add(amount_usd)
-        .expect("chain total_usd overflow");
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
     chain_agg.total_xlm = chain_agg
         .total_xlm
         .checked_add(amount_xlm)
-        .expect("chain total_xlm overflow");
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
     chain_agg.pending = chain_agg
         .pending
         .checked_add(1)
-        .expect("chain pending overflow");
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
     write_chain_aggregate(env, chain, &chain_agg);
 }
 
@@ -616,7 +638,7 @@ fn update_aggregates_on_verify(env: &Env, donor: &Address, chain: &String) {
     donor_agg.verified = donor_agg
         .verified
         .checked_add(1)
-        .expect("donor verified overflow");
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
     write_donor_aggregate(env, donor, &donor_agg);
 
     // ── Chain aggregate ────────────────────────────────────────────────
@@ -627,7 +649,7 @@ fn update_aggregates_on_verify(env: &Env, donor: &Address, chain: &String) {
     chain_agg.verified = chain_agg
         .verified
         .checked_add(1)
-        .expect("chain verified overflow");
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
     write_chain_aggregate(env, chain, &chain_agg);
 }
 
@@ -646,7 +668,7 @@ fn update_aggregates_on_revoke(env: &Env, donor: &Address, chain: &String, was_p
     donor_agg.revoked = donor_agg
         .revoked
         .checked_add(1)
-        .expect("donor revoked overflow");
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
     write_donor_aggregate(env, donor, &donor_agg);
 
     // ── Chain aggregate ────────────────────────────────────────────────
@@ -661,7 +683,7 @@ fn update_aggregates_on_revoke(env: &Env, donor: &Address, chain: &String, was_p
     chain_agg.revoked = chain_agg
         .revoked
         .checked_add(1)
-        .expect("chain revoked overflow");
+        .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
     write_chain_aggregate(env, chain, &chain_agg);
 }
 
@@ -670,8 +692,118 @@ fn update_aggregates_on_revoke(env: &Env, donor: &Address, chain: &String, was_p
 #[contract]
 pub struct AttestationContract;
 
+// ─── WS7: typed contract events ─────────────────────────────────────────────
+// Migrated from `env.events().publish(...)` to `#[contractevent]` structs. The
+// emitted topic list and data payload are byte-for-byte identical to the legacy
+// emit sites they replace, so indexers observe an unchanged stream.
+
+#[contractevent(topics = ["att_new"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttestationNew {
+    #[topic]
+    pub relayer: Address,
+    #[topic]
+    pub donor: Address,
+    #[topic]
+    pub source_chain: String,
+    pub id: u64,
+    pub project_id: String,
+    pub amount_usd: i128,
+    pub amount_xlm: i128,
+}
+
+#[contractevent(topics = ["att_batch"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttestationBatch {
+    #[topic]
+    pub relayer: Address,
+    #[topic]
+    pub source_chain: String,
+    pub count: u32,
+    pub first_id: u64,
+    pub last_id: u64,
+}
+
+#[contractevent(topics = ["att_init"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttestationInitialized {
+    pub admin: Address,
+}
+
+#[contractevent(topics = ["rl_set"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelayerSet {
+    pub relayer: Address,
+}
+
+#[contractevent(topics = ["rl_clr"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelayerCleared {}
+
+#[contractevent(topics = ["chain_a"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChainAllowed {
+    pub chain: String,
+}
+
+#[contractevent(topics = ["chain_r"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChainRemoved {
+    pub chain: String,
+}
+
+#[contractevent(topics = ["paused"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Paused {}
+
+#[contractevent(topics = ["unpause"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Unpaused {}
+
+#[contractevent(topics = ["att_vfy"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttestationVerified {
+    pub id: u64,
+}
+
+#[contractevent(topics = ["att_rvk"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttestationRevoked {
+    #[topic]
+    pub admin: Address,
+    pub id: u64,
+}
+
+#[contractevent(topics = ["upg_prop"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeProposed {
+    #[topic]
+    pub admin: Address,
+    pub new_wasm_hash: BytesN<32>,
+    pub effective_at: u32,
+}
+
+#[contractevent(topics = ["upg_exec"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeExecuted {
+    pub new_wasm_hash: BytesN<32>,
+}
+
+#[contractevent(topics = ["upg_cncl"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeCancelled {
+    #[topic]
+    pub admin: Address,
+}
+
 #[contractimpl]
 impl AttestationContract {
+    /// Number of distinct semantic event topics this contract can emit (WS7).
+    /// Keep in sync with the `event_catalog.json` golden file.
+    pub fn event_count(_env: Env) -> u32 {
+        14
+    }
+
     // ─── Initialization ─────────────────────────────────────────────────────
 
     /// One-shot init. Stores the admin and primes counters. Subsequent calls
@@ -688,7 +820,7 @@ impl AttestationContract {
         env.storage().instance().set(&DataKey::TotalCount, &0u64);
         env.storage().instance().set(&DataKey::PendingCount, &0u64);
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events().publish((symbol_short!("att_init"),), admin);
+        AttestationInitialized { admin }.publish(&env);
     }
 
     // ─── Configuration ─────────────────────────────────────────────────────
@@ -704,7 +836,7 @@ impl AttestationContract {
             panic_with_error!(&env, AttestationError::RelayerAlreadySetClearFirst);
         }
         env.storage().instance().set(&DataKey::Relayer, &relayer);
-        env.events().publish((symbol_short!("rl_set"),), relayer);
+        RelayerSet { relayer }.publish(&env);
     }
 
     /// Admin-only: drop the stored relayer. Used when the relayer key is
@@ -717,7 +849,7 @@ impl AttestationContract {
             panic_with_error!(&env, AttestationError::RelayerNotConfigured);
         }
         env.storage().instance().remove(&DataKey::Relayer);
-        env.events().publish((symbol_short!("rl_clr"),), ());
+        RelayerCleared {}.publish(&env);
     }
 
     /// Admin-only: register an allowed source chain. While the allow-list
@@ -736,7 +868,7 @@ impl AttestationContract {
         env.storage()
             .instance()
             .set(&DataKey::AllowedChain(chain.clone()), &true);
-        env.events().publish((symbol_short!("chain_a"),), chain);
+        ChainAllowed { chain }.publish(&env);
     }
 
     /// Admin-only: remove a chain from the allow-list. After removal any new
@@ -748,7 +880,7 @@ impl AttestationContract {
         env.storage()
             .instance()
             .remove(&DataKey::AllowedChain(chain.clone()));
-        env.events().publish((symbol_short!("chain_r"),), chain);
+        ChainRemoved { chain }.publish(&env);
     }
 
     /// Pause every state-mutating function. Reads continue to work so the
@@ -757,14 +889,14 @@ impl AttestationContract {
         admin.require_auth();
         require_admin(&env, &admin);
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events().publish((symbol_short!("paused"),), ());
+        Paused {}.publish(&env);
     }
 
     pub fn unpause(env: Env, admin: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events().publish((symbol_short!("unpause"),), ());
+        Unpaused {}.publish(&env);
     }
 
     // ─── Attestation lifecycle ─────────────────────────────────────────────
@@ -804,7 +936,7 @@ impl AttestationContract {
 
         record_attestations_internal(&env, &relayer, attestations, false)
             .get(0)
-            .unwrap()
+            .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing))
     }
 
     /// Relayer-only — atomically record up to `MAX_BATCH_SIZE` attestations
@@ -836,7 +968,7 @@ impl AttestationContract {
             .storage()
             .instance()
             .get(&DataKey::Attestation(id))
-            .expect("Attestation not found");
+            .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
         match record.status {
             AttestationStatus::Verified => {
                 panic_with_error!(&env, AttestationError::AlreadyVerified)
@@ -870,7 +1002,7 @@ impl AttestationContract {
 
         update_aggregates_on_verify(&env, &donor, &chain);
 
-        env.events().publish((symbol_short!("att_vfy"),), id);
+        AttestationVerified { id }.publish(&env);
     }
 
     /// Admin-only: revoke an attestation. Used when the source-chain tx is
@@ -884,7 +1016,7 @@ impl AttestationContract {
             .storage()
             .instance()
             .get(&DataKey::Attestation(id))
-            .expect("Attestation not found");
+            .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
         if record.status == AttestationStatus::Revoked {
             panic_with_error!(&env, AttestationError::AlreadyRevoked);
         }
@@ -912,7 +1044,7 @@ impl AttestationContract {
 
         update_aggregates_on_revoke(&env, &donor, &chain, was_pending);
 
-        env.events().publish((symbol_short!("att_rvk"), admin), id);
+        AttestationRevoked { admin, id }.publish(&env);
     }
 
     // ─── Read endpoints ────────────────────────────────────────────────────
@@ -921,7 +1053,7 @@ impl AttestationContract {
         env.storage()
             .instance()
             .get(&DataKey::Attestation(id))
-            .expect("Attestation not found")
+            .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing))
     }
 
     /// Convenience: locate an attestation by the source-chain keys without
@@ -1036,17 +1168,19 @@ impl AttestationContract {
             .ledger()
             .sequence()
             .checked_add(UPGRADE_TIMELOCK_LEDGERS)
-            .expect("Upgrade effective-at overflow");
+            .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
         env.storage()
             .instance()
             .set(&DataKey::PendingUpgrade, &new_wasm_hash);
         env.storage()
             .instance()
             .set(&DataKey::UpgradeEffectiveAt, &effective_at);
-        env.events().publish(
-            (symbol_short!("upg_prop"), admin),
-            (new_wasm_hash, effective_at),
-        );
+        UpgradeProposed {
+            admin,
+            new_wasm_hash,
+            effective_at,
+        }
+        .publish(&env);
     }
 
     pub fn execute_upgrade(env: Env) {
@@ -1054,12 +1188,12 @@ impl AttestationContract {
             .storage()
             .instance()
             .get(&DataKey::PendingUpgrade)
-            .expect("No pending upgrade");
+            .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
         let effective_at: u32 = env
             .storage()
             .instance()
             .get(&DataKey::UpgradeEffectiveAt)
-            .expect("No pending upgrade effective-at");
+            .unwrap_or_else(|| panic_with_error!(&env, AttestationError::StorageMissing));
         if env.ledger().sequence() < effective_at {
             panic_with_error!(&env, AttestationError::UpgradeTimelockNotYetElapsed);
         }
@@ -1071,7 +1205,10 @@ impl AttestationContract {
         env.storage()
             .instance()
             .remove(&DataKey::UpgradeEffectiveAt);
-        env.events().publish((symbol_short!("upg_exec"),), pending);
+        UpgradeExecuted {
+            new_wasm_hash: pending,
+        }
+        .publish(&env);
     }
 
     pub fn cancel_upgrade(env: Env, admin: Address) {
@@ -1084,7 +1221,7 @@ impl AttestationContract {
         env.storage()
             .instance()
             .remove(&DataKey::UpgradeEffectiveAt);
-        env.events().publish((symbol_short!("upg_cncl"), admin), ());
+        UpgradeCancelled { admin }.publish(&env);
     }
 
     pub fn get_pending_upgrade(env: Env) -> Option<(soroban_sdk::BytesN<32>, u32)> {
@@ -1106,11 +1243,12 @@ impl AttestationContract {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     extern crate std;
 
     use super::*;
     use soroban_sdk::testutils::{Address as _, Events as _};
-    use soroban_sdk::{IntoVal, String, Val};
+    use soroban_sdk::{symbol_short, IntoVal, String, Val};
 
     fn init_and_relayer() -> (Env, Address, Address, Address, Address) {
         let env = Env::default();

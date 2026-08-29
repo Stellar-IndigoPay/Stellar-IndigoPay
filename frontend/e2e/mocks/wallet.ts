@@ -84,3 +84,89 @@ export async function mockFreighterWallet(
     { publicKey, network },
   );
 }
+
+/**
+ * e2e/mocks/wallet.ts — mocked Albedo wallet (popup postMessage protocol).
+ *
+ * `@albedo-link/intent` connects by `window.open`-ing the Albedo confirm page
+ * and exchanging postMessage frames with it (see its `transport-handler.js`):
+ *
+ *   1. The app opens a popup and waits for a `{ albedo: { protocol: 3 } }`
+ *      handshake on its own `window`.
+ *   2. Once loaded, the app posts the intent request (with a `__reqid`) to
+ *      the popup window.
+ *   3. The popup replies to the app's `window` with
+ *      `{ albedoIntentResult: { __reqid, …result } }`.
+ *
+ * The mock below intercepts `window.open` to return a fake popup that (a)
+ * sends the handshake and (b) answers each intent request synchronously:
+ * `public_key` → the deterministic fixture public key, `tx` → the unsigned
+ * envelope echoed back as "signed" (Horizon is mocked separately and never
+ * validates the signature).
+ */
+export async function mockAlbedoWallet(
+  page: Page,
+  options: MockWalletOptions = {},
+) {
+  const publicKey = options.publicKey ?? MOCK_PUBLIC_KEY;
+
+  await page.addInitScript(
+    ({ publicKey }) => {
+      // Synchronous "is Albedo installed" marker used by albedoAdapter.isInstalled().
+      (window as unknown as { albedo: unknown }).albedo = true;
+
+      const w = window as unknown as {
+        open: typeof window.open;
+      };
+      const originalOpen = w.open;
+      w.open = function open(
+        url?: string | URL,
+        target?: string,
+        features?: string,
+      ) {
+        // The app's intent transport only ever opens the Albedo confirm
+        // dialog during a connection/sign flow — answer it without creating
+        // a real popup.
+        void url;
+        void target;
+        void features;
+
+        const fakePopup = {
+          postMessage(data: {
+            __reqid?: string;
+            intent?: string;
+            xdr?: string;
+          }) {
+            // The app posts the intent request TO the popup; respond on the
+            // app's own window so the transport's `messageHandler` resolves
+            // the pending request.
+            const result: Record<string, unknown> = {
+              __reqid: data.__reqid,
+              intent: data.intent,
+            };
+            if (data.intent === "public_key") {
+              result.pubkey = publicKey;
+            } else if (data.intent === "tx") {
+              // Echo the unsigned envelope back as "signed" (Horizon is
+              // mocked and never checks the signature).
+              result.signed_envelope_xdr = data.xdr;
+            }
+            window.postMessage({ albedoIntentResult: result }, window.location.origin);
+          },
+          close() {
+            /* ephemeral popup — no-op */
+          },
+        } as unknown as Window;
+
+        // Signal the transport that the popup finished loading. Deferred a
+        // tick so the transport's `message` listener is attached first.
+        window.setTimeout(() => {
+          window.postMessage({ albedo: { protocol: 3 } }, window.location.origin);
+        }, 0);
+
+        return fakePopup;
+      };
+    },
+    { publicKey },
+  );
+}

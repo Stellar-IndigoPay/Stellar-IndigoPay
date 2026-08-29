@@ -62,6 +62,11 @@ rules:
     resources: ["deployments"]
     resourceNames: ["backend"]
     verbs: ["update"]  # required for rollout restart
+  # Split-brain prevention: promote only while holding the Lease.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["postgres-primary-lock"]
+    verbs: ["get", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -79,7 +84,7 @@ roleRef:
   name: postgres-failover-role
   apiGroup: rbac.authorization.k8s.io
 ---
-# ── Healthcheck SA role (minimal — only create Jobs) ─────────────────────
+# ── Healthcheck SA role (minimal — create Jobs + manage the Lease) ──────
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -92,6 +97,12 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list"]
+  # The healthcheck daemon owns the split-brain Lease: it must read it to
+  # win a fair CAS and write it to acquire/renew.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["postgres-primary-lock"]
+    verbs: ["get", "create", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -41,11 +41,6 @@ fn proportional(amount: i128, percentage: i128) -> i128 {
     (amount / 100) * percentage + (amount % 100) * percentage / 100
 }
 
-/// Sum of the 50/30/20 milestone payouts for `amount`.
-fn three_milestone_total(amount: i128) -> i128 {
-    proportional(amount, 50) + proportional(amount, 30) + proportional(amount, 20)
-}
-
 /// Assert that a `try_*` client call succeeded, and nothing else.
 ///
 /// The generated `try_*` client methods return
@@ -223,7 +218,7 @@ fn test_resolve_dispute_remaining_funds_pay_exactly() {
 
     assert_eq!(
         common::token_balance(&env, &token, &freelancer),
-        three_milestone_total(MAX_AMOUNT),
+        MAX_AMOUNT,
         "approved freelancer should receive the full remaining payout"
     );
 }
@@ -257,7 +252,7 @@ fn test_refund_expired_job_remaining_funds_pay_exactly() {
 
     assert_eq!(
         common::token_balance(&env, &token, &client_addr),
-        three_milestone_total(MAX_AMOUNT),
+        MAX_AMOUNT,
         "client should be refunded the full remaining payout"
     );
 }

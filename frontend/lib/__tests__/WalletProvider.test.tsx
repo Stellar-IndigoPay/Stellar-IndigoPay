@@ -28,6 +28,7 @@ function makeAdapter() {
     description: "Mock wallet",
     installUrl: "https://freighter.app",
     isInstalled: mockIsInstalled,
+    connect: jest.fn().mockResolvedValue(undefined),
     getPublicKey: mockGetPublicKey,
     signTransaction: mockSignTransaction,
   };

@@ -1,0 +1,35 @@
+# k8s/postgres-primary-lock.yaml
+#
+# Distributed split-brain lock for PostgreSQL failover (Workstream 1 of #1100).
+#
+# A Kubernetes Lease is used as the coordination primitive across the primary
+# and standby StatefulSets. Its purpose:
+#
+#   - Only ONE node may hold `postgres-primary-lock` at a time.
+#   - The *current primary* renews the Lease every LEASE_RENEW_MS (~10 s) so the
+#     holder identity stays fresh.
+#   - A standby that detects a primary outage must WIN this Lease (compare-and-
+#     swap on holderIdentity/renewTime) before it may run `pg_ctl promote`.
+#   - A node that loses the CAS backs off and logs a warning instead of acting,
+#     which is what prevents two primaries from both accepting writes.
+#
+# The Lease object is created here so the RBAC and object always exist; the
+# healthcheck daemon (scripts/postgres-healthcheck-daemon.js) updates it via
+# the Kubernetes API. No human operator involvement is needed.
+#
+# Reference: https://kubernetes.io/docs/concepts/architecture/leases/
+
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: postgres-primary-lock
+  namespace: stellar-indigopay
+  labels:
+    app: postgres
+    component: healthcheck
+    role: split-brain-lock
+spec:
+  # Initial holder — immediately reassigned by the first healthy node to
+  # renew. Kept blank until a node claims it.
+  holderIdentity: ""
+  leaseDurationSeconds: 30

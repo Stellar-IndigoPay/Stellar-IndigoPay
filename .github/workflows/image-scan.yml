@@ -1,9 +1,12 @@
 # .github/workflows/image-scan.yml
 #
-# Trivy image scan for backend and frontend Docker images. Runs after
-# the CI build (or directly on main pushes). Reports CRITICAL and HIGH
-# vulnerabilities but does not fail the build on unfixable upstream
-# CVEs, so security findings are visible without blocking delivery.
+# Trivy image scan for backend and frontend Docker images. Two jobs:
+#
+#   1. `scan` — reports CRITICAL and HIGH vulnerabilities as SARIF to the
+#      GitHub Security tab (informative, does not block).
+#   2. `severity-gate` — **blocks** any PR / push that carries a CRITICAL or
+#      HIGH CVE unless a structured, non-expired .trivyignore exception is in
+#      place (WS5 / #1100).
 
 name: Image Scan
 
@@ -64,3 +67,52 @@ jobs:
         with:
           sarif_file: trivy-${{ matrix.service }}.sarif
           category: trivy-${{ matrix.service }}
+
+  # ── Severity gate (WS5 / #1100) ────────────────────────────────────────────
+  # Blocks any PR that introduces a CRITICAL or HIGH CVE unless a structured,
+  # non-expired .trivyignore exception is in place. The gate feeds Trivy the
+  # bare CVE list extracted from the reviewed .trivyignore.
+  severity-gate:
+    name: Fail on CRITICAL/HIGH CVEs
+    runs-on: ubuntu-latest
+    needs: scan
+    strategy:
+      matrix:
+        service: [backend, frontend]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Validate .trivyignore format and build effective ignore list
+        id: gate
+        run: |
+          # Fails (exit 1) on malformed or expired entries; writes bare CVEs to
+          # a temp file that Trivy can parse natively.
+          node scripts/trivyignore-gate.js .trivyignore > /tmp/trivy-ignore-bare.txt
+
+      - name: Build image
+        run: |
+          docker build -t stellar-indigopay-${{ matrix.service }}:gate \
+            ./${{ matrix.service }}
+
+      - name: Run Trivy severity gate (exit 1 on un-excepted CRITICAL/HIGH)
+        id: trivy-gate
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: stellar-indigopay-${{ matrix.service }}:gate
+          format: "json"
+          output: /tmp/trivy-${{ matrix.service }}-gate.json
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+          ignore-unfixed: false
+          vuln-type: "os,library"
+          trivyignores: /tmp/trivy-ignore-bare.txt
+
+      - name: Summarize gate result
+        if: success()
+        run: |
+          echo "✅ Severity gate passed for ${{ matrix.service }} — no un-excepted CRITICAL/HIGH CVEs."
