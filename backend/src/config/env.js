@@ -17,7 +17,7 @@ const envSchema = z.object({
     .enum(["development", "production", "test"])
     .optional()
     .default("development"),
-  STELLAR_NETWORK: z.enum(["testnet", "mainnet"]).optional().default("testnet"),
+  STELLAR_NETWORK: z.enum(["testnet", "mainnet"]).optional(),
   HORIZON_URL: z
     .string()
     .url()
@@ -42,6 +42,16 @@ const envSchema = z.object({
   ADMIN_API_KEYS: z.string().optional().default(""),
   ANTHROPIC_API_KEY: z.string().optional().default(""),
   REDIS_URL: z.string().optional().default("redis://localhost:6379"),
+
+  // ── Redis Sentinel failover ─────────────────────────────────────────────
+  // Comma-separated Sentinel `host:port` addresses. When set together with
+  // REDIS_SENTINEL_MASTER_NAME, the backend connects to Redis via Sentinel
+  // and auto-reconnects to the promoted master on failover. When unset,
+  // falls back to REDIS_URL / REDIS_URLS (single-instance / sharded).
+  // Example: REDIS_SENTINELS=sentinel-0:26379,sentinel-1:26379,sentinel-2:26379
+  REDIS_SENTINELS: z.string().optional().default(""),
+  REDIS_SENTINEL_MASTER_NAME: z.string().optional().default(""),
+  REDIS_SENTINEL_PASSWORD: z.string().optional().default(""),
 
   // ── Distributed rate limiting (multi-Redis sharding) ─────────────────────
   // Comma-separated Redis URLs for consistent-hashing-based sharding.
@@ -123,18 +133,27 @@ const envSchema = z.object({
 
 function validateEnv() {
   const result = envSchema.safeParse(process.env);
+  const missingProductionNetwork =
+    result.success &&
+    result.data.NODE_ENV === "production" &&
+    !result.data.STELLAR_NETWORK;
 
-  if (!result.success) {
+  if (!result.success || missingProductionNetwork) {
     // zod v4 renamed `error.errors` to `error.issues`. Fall back to
     // `errors` for any v3 shim that still defines it.
-    const issues = (result.error.issues || result.error.errors || [])
-      .map((e) => `  - ${(e.path || []).join(".")}: ${e.message}`)
-      .join("\n");
+    const issues = missingProductionNetwork
+      ? "  - STELLAR_NETWORK: STELLAR_NETWORK is required in production"
+      : (result.error.issues || result.error.errors || [])
+        .map((e) => `  - ${(e.path || []).join(".")}: ${e.message}`)
+        .join("\n");
     console.error(`\n[Startup] Environment validation failed:\n${issues}\n`);
     process.exit(1);
   }
 
-  return result.data;
+  return {
+    ...result.data,
+    STELLAR_NETWORK: result.data.STELLAR_NETWORK || "testnet",
+  };
 }
 
 module.exports = { validateEnv };

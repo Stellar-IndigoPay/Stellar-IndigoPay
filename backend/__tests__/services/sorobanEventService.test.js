@@ -170,6 +170,36 @@ describe("sorobanEventService - durable deduplication", () => {
     expect(commitCalls.length).toBeGreaterThan(0);
   });
 
+  test("dispatches prop_noq to its dedicated handler (not generic other)", async () => {
+    const event = mockSorobanEvent({
+      topic: ["prop_noq"],
+      value: ["proj-123"],
+    });
+    rpcServer.getEvents.mockResolvedValue({
+      events: [event],
+    });
+
+    const client = makeMockClient();
+    pool.connect.mockResolvedValue(client);
+    const logger = require("../../src/logger");
+
+    await pollEvents();
+
+    // Logged with the dedicated prop_noq event tag, not the generic "other" tag
+    const noqLog = logger.info.mock.calls.find(
+      ([ctx]) => ctx.event === "soroban_events_prop_noq",
+    );
+    expect(noqLog).toBeDefined();
+    expect(noqLog[0].projectId).toBe("proj-123");
+
+    // Marked as processed with event_type prop_noq
+    const markProcessed = client.query.mock.calls.find(
+      ([sql]) => sql.includes("INSERT INTO soroban_processed_events"),
+    );
+    expect(markProcessed).toBeDefined();
+    expect(markProcessed[1][1]).toBe("prop_noq");
+  });
+
   test("skips already processed event (redelivery idempotency)", async () => {
     const event = mockSorobanEvent();
     rpcServer.getEvents.mockResolvedValue({

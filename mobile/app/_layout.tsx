@@ -84,6 +84,7 @@ export default function RootLayout() {
     // Initialise offline-first subsystems
     initConnectivity();
     void cache.init();
+    void import("../lib/ota").then(m => m.checkAndApplyUpdates());
   }, []);
 
   return (

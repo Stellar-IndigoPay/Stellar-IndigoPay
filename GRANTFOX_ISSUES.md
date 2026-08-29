@@ -1,3270 +1,4193 @@
-# GrantFox OSS — 50 Implementation-Ready GitHub Issues
+# GrantFox OSS — 50 High-Value Implementation-Ready GitHub Issues
 
-> Generated from deep analysis of the Stellar-IndigoPay codebase (contracts, backend, frontend, CI/CD, monitoring, and cross-cutting concerns). Every issue references real files, modules, and tests that already exist.
+> Generated from direct inspection of the Stellar-IndigoPay codebase: all 4 Soroban contracts (17,499-line IndigoPay lib.rs with 137 error codes and 16 feature gates), escrow (milestone escrow, M-of-N governance, reputation), attestation (cross-chain bridge, batch record), oracle (TWAP with stake/slash, median-of-medians), the event-sourcing backend (projection engine with staged atomic rebuild), webhook delivery, AI summary pipeline, Horizon SSE + Soroban RPC indexers with DLQ, CO2 verification, Turrets donation matching, DSR export/erasure, recurring donation keeper, and the Kubernetes/Helm/ArgoCD/Prometheus production infrastructure. Every issue targets a genuine technical gap, security concern, or production-readiness requirement verified in the code.
 
 ---
 
-## Issue #001 — Escrow: Add freelancer identity check in `claim_milestone`
+## Issue #001 — IndigoPay: Migrate `Events::publish` to `#[contractevent]` pattern across all 4 contracts
 
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/bug`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/architecture`, `priority/high`, `effort/large`
 
 ### Summary
-The `claim_milestone` function in the escrow contract accepts any `freelancer` address as a caller but never verifies that the caller is actually the job's assigned freelancer. A malicious actor who can sign as any address could claim a milestone on a job they have no relationship with.
-
-### Background
-The `claim_milestone` entrypoint (in `contracts/escrow-contract/src/lib.rs`) allows a freelancer to auto-claim a milestone after the `release_after` ledger sequence has passed. Unlike `release_milestone` (which verifies `job.client == client`) and `submit_milestone_proof` (which verifies `job.freelancer == freelancer`), `claim_milestone` only calls `freelancer.require_auth()` but never compares the authenticated caller against `job.freelancer`.
+All four Soroban contracts use the deprecated `env.events().publish()` API with `#![allow(deprecated)]` at the crate root. The `#[contractevent]` macro provides type-safe event emission with automatic XDR schema generation and structured topic indexing. The TODO `indigopay-272` at `contracts/indigopay-contract/src/lib.rs` line 4 has tracked this for over a year. Every contract suppresses the deprecation warning; 310+ total events use ad-hoc `symbol_short!()` topic strings.
 
 ### Problem Statement
-A caller holding any valid Stellar keypair can call `claim_milestone` with a `freelancer` argument matching a key they control, and `require_auth()` will succeed. But the contract never checks that this caller is the same address stored in `job.freelancer`, so the caller could claim a stranger's milestone. Because `claim_milestone` transfers tokens to `job.freelancer` (the *stored* address, not the caller), an attacker couldn't steal funds — but they could disrupt the job by prematurely marking a milestone as released and transferring tokens to the genuine freelancer without the client's consent, or cause state inconsistency.
+1. **Deprecation risk**: The deprecated API may be removed in a future soroban-sdk release, blocking SDK upgrades.
+2. **Type unsafety**: Manual tuple construction means adding or reordering event fields is a silent runtime bug — indexers receive garbled data with no compile error.
+3. **Duplicate topic risk**: Two events using the same `symbol_short!()` string would silently collide and corrupt indexer data.
+4. **310 total events** across 4 contracts — manual topic management is unsustainable.
 
 ### Objectives
-- Add an identity check at the start of `claim_milestone`: `if job.freelancer != freelancer { panic!("Only the job's freelancer can claim"); }`
-- This mirrors the existing guard already present in `release_milestone` (`if job.client != client`) and `submit_milestone_proof`.
+- Replace all `env.events().publish(...)` calls with `#[contractevent]` structs and `env.events().publish(&event)`
+- Remove `#![allow(deprecated)]` from each contract's crate root
+- Update `contracts/EVENTS.md` to reflect the new `#[contractevent]` discriminants
+- Ensure all existing event tests continue to pass (event count, topic names, data fields)
 
 ### Scope
-
 **In Scope**
-- Add the identity assertion to `claim_milestone` in `contracts/escrow-contract/src/lib.rs`
-- Add a `#[should_panic]` test that calls `claim_milestone` with a different address after the release period
+- `contracts/indigopay-contract/src/lib.rs` — all event emission sites
+- `contracts/escrow-contract/src/lib.rs` — all event emission sites
+- `contracts/attestation-contract/src/lib.rs` — all event emission sites
+- `contracts/oracle-contract/src/lib.rs` — all event emission sites
+- `contracts/EVENTS.md` — update event topic table
+- Test modules in all 4 contracts — update event assertions
 
 **Out of Scope**
-- Changing the token transfer logic
-- Modifying other entrypoints
+- Changing event data payloads (keep identical)
+- Adding new events
+- Backend indexer changes (`sorobanEventService` already deserializes raw event data generically)
 
 ### Implementation Plan
-1. Navigate to `contracts/escrow-contract/src/lib.rs`
-2. Find the `claim_milestone` function
-3. After loading the job but before any other logic, add:
-   ```rust
-   if job.freelancer != freelancer {
-       panic!("Only the job's freelancer can claim");
-   }
-   ```
-4. Add a test in the test module:
-   ```rust
-   #[test]
-   #[should_panic(expected = "Only the job's freelancer can claim")]
-   fn test_claim_milestone_wrong_freelancer_panics() { ... }
-   ```
-5. Run `cargo test --features testutils -p escrow-contract` to verify all existing tests pass and the new test panics correctly.
-
-### Expected Files or Components
-- `contracts/escrow-contract/src/lib.rs` — the `claim_milestone` function and test module
+1. Define one `#[contractevent]` struct per existing event (e.g., `DonatedEvent`, `NftMintEvent`, `ProjectRegisteredEvent`)
+2. Replace each `env.events().publish((topic, ...), (data, ...))` with `env.events().publish(&EventName { ... })`
+3. Run `cargo build --workspace --target wasm32v1-none --release` and verify no size regression against the 64 KB CI limit
+4. Run `cargo test --features testutils --workspace` and fix any event assertion breakage
+5. Run `cargo clippy --workspace -- -D warnings` and confirm no new warnings
 
 ### Acceptance Criteria
-- `claim_milestone` panics with a clear message when `job.freelancer != freelancer`
-- The new unit test passes (expected panic)
-- All existing escrow tests continue to pass
-- `cargo fmt` and `cargo clippy` produce no warnings
+- Zero `env.events().publish(tuple)` calls remain in any contract
+- `#![allow(deprecated)]` removed from all 4 crate roots
+- `cargo build --target wasm32v1-none --release` passes with WASM sizes within CI budget (64 KB per contract)
+- All 2,400+ existing tests pass
+- `contracts/EVENTS.md` updated with new event discriminants
+- CI green on `contracts.yml` workflow
 
-### Testing Requirements
-- Unit test (`#[should_panic]`) for the wrong-freelancer case
-- No integration or fuzz test needed — this is a pure access-control check
-
-### CI Requirements
-- `cargo fmt --all -- --check`
-- `cargo clippy --workspace -- -D warnings`
-- `cargo test --features testutils --workspace -- --skip fuzz`
-
-### Deliverables
-- Single commit with the fix + test
-- Changelog entry under `[Unreleased]` in `CHANGELOG.md`
-
-### Definition of Done
-- [ ] Identity check added to `claim_milestone`
-- [ ] Test added
-- [ ] All CI checks green
-- [ ] PR reviewed and merged
-
-### References
-- `contracts/escrow-contract/src/lib.rs` lines ~500-560 (`claim_milestone`)
-- `contracts/escrow-contract/src/lib.rs` lines ~340-380 (`release_milestone`) for comparison
-- ADR-004 (CEI pattern) at `docs/adr/ADR-004-cei-pattern.md`
-
----
-
-## Issue #002 — Escrow: Add unit tests for `FreelancerReputation` on-time completion tracking
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/testing`, `priority/medium`
-
-### Summary
-The `FreelancerReputation` struct tracks `on_time_completions` and the test module creates helpers like `create_reputation_job` and `setup`, but no test explicitly verifies that `on_time_completions` increments only when the freelancer completes before the deadline and does *not* increment when completion happens after the deadline.
-
-### Background
-`reputation_job_completed` in `contracts/escrow-contract/src/lib.rs` compares `env.ledger().sequence() <= job.deadline` to decide whether to bump `on_time_completions`. The existing tests for `release_milestone`, `claim_milestone`, and `resolve_dispute` exercise the completion path but never assert on the resulting `FreelancerReputation.on_time_completions` field. The tests only verify `JobStatus`.
-
-### Problem Statement
-Without explicit assertions on `on_time_completions`, a regression that always sets this field to 0 (or always increments it regardless of deadline) would go unnoticed.
-
-### Objectives
-- Write two tests: one that proves `on_time_completions` increments when a job is completed before its deadline, and one that proves it stays at 0 (or doesn't increase) when completion happens after the deadline
-- Use the existing test helpers (`create_reputation_job`, `setup`, `signers1`)
-
-### Scope
-
-**In Scope**
-- Two new unit tests in `contracts/escrow-contract/src/lib.rs` test module
-- Use `client.get_freelancer_reputation(&freelancer)` to assert on the reputation struct
-
-**Out of Scope**
-- Modifying the reputation logic itself
-- Adding new contract entry points
-
-### Implementation Plan
-1. Write `test_reputation_on_time_completion` — create a job, release its milestone *before* advancing the ledger past the deadline, then assert `reputation.on_time_completions == 1`
-2. Write `test_reputation_late_completion` — create a job, advance the ledger past the deadline, release the milestone, then assert `reputation.on_time_completions == 0`
-3. Run `cargo test --features testutils -p escrow-contract`
-
-### Expected Files or Components
-- `contracts/escrow-contract/src/lib.rs` — test module
 
 ### Acceptance Criteria
-- Both new tests pass
-- All existing escrow tests continue to pass
-- `cargo fmt` + `cargo clippy` clean
+- Zero `env.events().publish(tuple)` calls remain in any contract
+- `#![allow(deprecated)]` removed from all 4 crate roots
+- `cargo build --target wasm32v1-none --release` passes with WASM sizes within CI budget (64 KB per contract)
+- All 2,400+ existing tests pass
+- `contracts/EVENTS.md` updated with new event discriminants
+- CI green on `contracts.yml` workflow
 
 ### Testing Requirements
-- Two new unit tests only
-
-### CI Requirements
-- Standard contract CI (`cargo test`, `cargo fmt`, `cargo clippy`)
-
-### Deliverables
-- Single commit with two tests
-- Changelog entry
-
-### Definition of Done
-- [ ] Two reputation on-time tests written and passing
-- [ ] CI green
-
-### References
-- `contracts/escrow-contract/src/lib.rs` — `reputation_job_completed` function
-- `contracts/escrow-contract/src/lib.rs` — `create_reputation_job` helper
-- `contracts/escrow-contract/src/lib.rs` — `FreelancerReputation` struct
-
----
-
-## Issue #003 — IndigoPay: Validate Vec size in `add_project_donation` to prevent unbounded storage growth
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/bug`, `priority/high`
-
-### Summary
-The `add_project_donation` function in `contracts/indigopay-contract/src/donation/storage.rs` pushes donation IDs into a `Vec<u64>` keyed by project address with no upper bound. A project receiving many stealth donations could grow this vector without limit, increasing state read/write costs and potentially hitting Soroban ledger entry size limits.
-
-### Background
-`add_project_donation` is called from `donate_stealth` in `contract.rs`. Each donation appends a `u64` to the project's donation list. The Soroban host enforces a maximum ledger entry size; a sufficiently large `Vec` would eventually exceed this limit and cause all future donations to that project to fail irrecoverably.
-
-### Problem Statement
-No guard prevents the per-project donation list from growing without bound. This is both a storage-cost concern (every `donate_stealth` call reads and writes the full `Vec`) and a correctness concern (the vector could eventually hit the host limit).
-
-### Objectives
-- Add a maximum-size check in `add_project_donation` that panics with a clear message when the project's donation count exceeds a reasonable limit (e.g., 10,000)
-- Add a test that verifies the panic fires when the limit is reached
-
-### Scope
-
-**In Scope**
-- Add a `const MAX_DONATIONS_PER_PROJECT: u64 = 10_000;` constant
-- Add a length check in `add_project_donation`
-- Add a respective unit test
-
-**Out of Scope**
-- Pagination or iteration changes for `get_project_donations`
-- Changing the data model
-
-### Implementation Plan
-1. Define the constant in `storage.rs`
-2. Before `ids.push_back(donation_id)`, check `ids.len() as u64 >= MAX_DONATIONS_PER_PROJECT` and panic
-3. Write a test that creates the maximum number of entries and verifies the next push panics
-
-### Expected Files or Components
-- `contracts/indigopay-contract/src/donation/storage.rs`
-
-### Acceptance Criteria
-- `donate_stealth` panics with a clear message when the per-project limit is reached
-- Test verifies the panic
-- All existing tests pass
-
-### Testing Requirements
-- Unit test verifying the panic behavior
-
-### CI Requirements
-- Standard contract CI
+- All existing event-related unit tests must pass
+- `cargo test --features testutils --workspace` full pass
+- Manual verification that `stellar contract invoke` still emits expected event topics on testnet
 
 ### Deliverables
-- Single commit with guard + test
-- Changelog entry
-
-### Definition of Done
-- [ ] Vec size limit added
-- [ ] Test added
-- [ ] CI green
+- Single PR touching all 4 contracts
+- Changelog entry under `[Unreleased]`
 
 ### References
-- `contracts/indigopay-contract/src/donation/storage.rs` — `add_project_donation`
-- `contracts/indigopay-contract/src/donation/contract.rs` — `donate_stealth`
-
----
-
-## Issue #004 — IndigoPay: Replace `.expect()` with graceful `Option` return in `get_stealth_donation`
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/bug`, `priority/medium`
-
-### Summary
-`get_stealth_donation` in `contracts/indigopay-contract/src/donation/storage.rs` calls `.expect("stealth donation not found")` — this panics the contract if called with a non-existent ID. The function should return `Option<StealthDonation>` and let callers handle the missing case.
-
-### Background
-The `scan_stealth_donations` function (in `contract.rs`) iterates over `get_project_donations` and calls `get_stealth_donation` for each ID. If a donation ID was stored but the corresponding `StealthDonation` entry was somehow removed (edge case in persistent storage), iterating would panic the entire scan call.
-
-### Problem Statement
-A panic in a Soroban contract reverts the entire transaction. Since `scan_stealth_donations` is a read-only call that iterates over IDs, a missing entry should be a skip, not a fatal error.
-
-### Objectives
-- Change `get_stealth_donation` to return `Option<StealthDonation>` instead of panicking
-- Update `scan_stealth_donations` to `continue` on `None`
-- Update the test module to reflect the new return type
-
-### Scope
-
-**In Scope**
-- `get_stealth_donation` return type change
-- `scan_stealth_donations` caller update
-- Test updates
-
-**Out of Scope**
-- Other callers (if any exist outside this module)
-
-### Implementation Plan
-1. Change `get_stealth_donation` signature to return `Option<StealthDonation>` and use `env.storage().persistent().get(...)` without `.expect()`
-2. In `scan_stealth_donations`, change `let donation = get_stealth_donation(&env, id);` to `if let Some(donation) = get_stealth_donation(&env, id) { donations.push_back(donation); }`
-3. Update test helpers to unwrap the Option
-4. Add a new test: `test_scan_with_missing_donation_is_graceful` that verifies the scan doesn't panic when an ID points to nothing
-
-### Expected Files or Components
-- `contracts/indigopay-contract/src/donation/storage.rs`
-- `contracts/indigopay-contract/src/donation/contract.rs`
-
-### Acceptance Criteria
-- `get_stealth_donation` returns `Option<StealthDonation>`
-- `scan_stealth_donations` skips missing entries gracefully
-- Existing tests updated and pass
-- New test passes
-
-### Testing Requirements
-- Unit tests updated
-- New test for missing entry recovery
-
-### CI Requirements
-- Standard contract CI
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Option return type added
-- [ ] Callers updated
-- [ ] Tests updated/passing
-- [ ] CI green
-
-### References
-- `contracts/indigopay-contract/src/donation/storage.rs` line ~22
-- `contracts/indigopay-contract/src/donation/contract.rs` — `scan_stealth_donations`
-
----
-
-## Issue #005 — Escrow: Validate that `release_after` does not exceed `deadline` in `create_job`
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/bug`, `priority/medium`
-
-### Summary
-`create_job` sets `deadline = env.ledger().sequence() + DEFAULT_DEADLINE_LEDGERS` and also accepts a caller-supplied `release_after` floor. If the caller passes a `release_after` that extends past the computed `deadline`, the freelancer could auto-claim milestones after the refund window has already opened, creating a race between `claim_milestone` (freelancer) and `refund_expired_job` (client).
-
-### Background
-`release_after` is an absolute ledger sequence computed as `env.ledger().sequence() + release_after`. The `deadline` is also absolute: `env.ledger().sequence() + DEFAULT_DEADLINE_LEDGERS`. `DEFAULT_DEADLINE_LEDGERS` is 1,555,200 (90 days at 5s/ledger). `RELEASE_AFTER_LEDGERS` is only 10. A caller could pass `release_after = 2_000_000`, which would exceed the 90-day deadline, giving the freelancer a claim window that starts after refund eligibility.
-
-### Problem Statement
-No invariant enforces `release_after <= deadline`. The contract should either reject such jobs or cap `release_after` at `deadline`.
-
-### Objectives
-- Add a check in `create_job` that panics if `release_after > deadline`
-- Add a test for this validation
-
-### Scope
-
-**In Scope**
-- Validation check in `create_job`
-- Unit test
-
-**Out of Scope**
-- Changing the default deadline
-- Modifying `claim_milestone` or `refund_expired_job`
-
-### Implementation Plan
-1. In `create_job`, after computing `deadline`, add:
-   ```rust
-   if release_after > deadline {
-       panic!("release_after must not exceed the job deadline");
-   }
-   ```
-2. Add a `#[should_panic]` test
-
-### Expected Files or Components
-- `contracts/escrow-contract/src/lib.rs` — `create_job`
-
-### Acceptance Criteria
-- `create_job` panics when `release_after > deadline`
-- Test passes
-- Existing tests pass
-
-### Testing Requirements
-- One `#[should_panic]` unit test
-
-### CI Requirements
-- Standard contract CI
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Validation added
-- [ ] Test added
-- [ ] CI green
-
-### References
-- `contracts/escrow-contract/src/lib.rs` — `create_job`
-- `contracts/escrow-contract/src/lib.rs` — `claim_milestone`, `refund_expired_job`
-
----
-
-## Issue #006 — Escrow: Add fuzz target for milestone percentage edge cases in `create_job`
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/testing`, `priority/medium`
-
-### Summary
-The escrow fuzz test in `contracts/escrow-contract/src/escrow_fuzz.rs` covers general job lifecycle but doesn't specifically fuzz the milestone percentage validation in `create_job`. Edge cases like individual percentages of 0, percentages that sum correctly but have one at 0, or overflow scenarios should be validated.
-
-### Background
-`create_job` iterates over milestones and sums their percentages using `checked_add`, then asserts the total equals 100. The existing fuzz test creates jobs with random parameters but milestone percentages are not a fuzzed input dimension.
-
-### Problem Statement
-Without fuzzing milestone percentages specifically, edge cases like a milestone with percentage 0 (which would sum correctly to 100 with other milestones but might be semantically invalid) could slip through.
-
-### Objectives
-- Add a dedicated fuzz test or proptest that generates milestone vectors with valid and invalid percentage distributions
-- Verify `create_job` panics on invalid sums and succeeds on valid ones
-
-### Scope
-
-**In Scope**
-- New fuzz/proptest test targeting milestone percentage validation
-
-**Out of Scope**
-- Fuzzing other contract entrypoints
-- Changing the milestone validation logic
-
-### Implementation Plan
-1. Add a proptest strategy in `escrow_fuzz.rs` (or a new `tests/milestone_fuzz.rs` file) that generates `Vec<Milestone>` with random percentages
-2. Assert: if percentages sum to 100, `create_job` succeeds; otherwise it panics
-3. Ensure the fuzz test is registered in the proptest regression file
-
-### Expected Files or Components
-- `contracts/escrow-contract/src/escrow_fuzz.rs` or new test file
-- `contracts/escrow-contract/Cargo.toml` (if adding `proptest` dependency)
-
-### Acceptance Criteria
-- Fuzz test exercises at least 1,000 random milestone distributions
-- Test catches the known bug: any sum != 100 panics
-- `cargo test --features testutils -p escrow-contract` passes
-
-### Testing Requirements
-- New fuzz/proptest test
-
-### CI Requirements
-- Standard contract CI (fuzz tests are skipped in CI via `-- --skip fuzz` but should run locally)
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Fuzz test added and passing locally with `cargo test`
-- [ ] CI green
-
-### References
-- `contracts/escrow-contract/src/escrow_fuzz.rs`
-- `contracts/escrow-contract/src/lib.rs` — `create_job` milestone validation
-
----
-
-## Issue #007 — Escrow: Ensure milestone percentages sum to 100 on `amend_job_milestones` before accepting the amendment
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/improvement`, `priority/low`
-
-### Summary
-`amend_job_milestones` verifies that new milestone percentages sum to 100, but it also checks `if milestone.released || milestone.disputed` for each new milestone. This check flags when a new milestone is somehow marked as released/disputed, but the error message doesn't distinguish *which* new milestone triggered the panic. The message should include the offending milestone index for better debugging.
-
-### Background
-When `amend_job_milestones` iterates the new milestones and finds one that's `released` or `disputed`, it panics with `"New milestones must not be released or disputed"`. In a multi-milestone amendment, the caller can't tell which milestone caused the failure.
-
-### Problem Statement
-Poor error messages make debugging harder in contract call failures. Including the milestone index is a one-line change that improves developer experience.
-
-### Objectives
-- Include the index of the offending milestone in the panic message
-
-### Scope
-
-**In Scope**
-- Better panic message in `amend_job_milestones`
-
-**Out of Scope**
-- Structural changes to milestone validation
-
-### Implementation Plan
-Change:
-```rust
-panic!("New milestones must not be released or disputed");
-```
-to:
-```rust
-panic!("New milestone {} must not be released or disputed", i);
-```
-(where `i` is the loop index).
-
-### Expected Files or Components
-- `contracts/escrow-contract/src/lib.rs` — `amend_job_milestones`
-
-### Acceptance Criteria
-- Panic message includes the milestone index
-- Existing `amend_job_milestones` tests still pass (the message check uses partial matching)
-
-### Testing Requirements
-- Verify existing `#[should_panic]` tests still match
-
-### CI Requirements
-- Standard contract CI
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Error message improved
-- [ ] CI green
-
-### References
-- `contracts/escrow-contract/src/lib.rs` — `amend_job_milestones`
-- `contracts/escrow-contract/tests/amend_job.rs`
-
----
-
-## Issue #008 — IndigoPay: Add test verifying stealth donation counter monotonicity across multiple donations
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/testing`, `priority/medium`
-
-### Summary
-The existing `test_donate_stealth` test verifies the donation counter starts at 1, and `seed_donations` creates multiple donations but never asserts on the counter values of the second donation. Add a test that verifies the counter increments monotonically and correctly across 3+ donations.
-
-### Background
-The stealth donation counter (`StealthCounter` in `storage.rs`) is incremented with `set_stealth_counter(&env, donation_id)`. If `donate_stealth` were refactored and the counter logic accidentally moved, the counter could skip values or reset. No test verifies the counter sequence.
-
-### Problem Statement
-Without a test for counter monotonicity, a regression could silently break donation ID assignment.
-
-### Objectives
-- Write a test that creates 3 sequential stealth donations and asserts their IDs are exactly 1, 2, 3
-
-### Scope
-
-**In Scope**
-- One new test in `contracts/indigopay-contract/src/donation/contract.rs`
-- Verify donation IDs are sequential
-
-**Out of Scope**
-- Concurrent donation testing (Soroban transactions are serial)
-
-### Implementation Plan
-1. Create a new test `test_stealth_donation_counter_monotonic` that calls `donate_stealth` three times and asserts IDs are 1, 2, and 3
-
-### Expected Files or Components
-- `contracts/indigopay-contract/src/donation/contract.rs`
-
-### Acceptance Criteria
-- Test passes
-- Existing tests pass
-
-### Testing Requirements
-- One unit test
-
-### CI Requirements
-- Standard contract CI
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Test added and passing
-- [ ] CI green
-
-### References
-- `contracts/indigopay-contract/src/donation/contract.rs` — `test_donate_stealth`
-- `contracts/indigopay-contract/src/donation/storage.rs` — `get_stealth_counter`, `set_stealth_counter`
-
----
-
-## Issue #009 — Escrow: Deduplicate the `Milestone` struct definition across `cfg` branches
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/improvement`, `priority/low`
-
-### Summary
-The `Milestone` struct in `contracts/escrow-contract/src/lib.rs` is defined twice with identical fields — once under `#[cfg(not(feature = "oracle-escrow"))]` and once under `#[cfg(feature = "oracle-escrow")]`. This duplication is a maintenance burden: any field change must be made in two places.
-
-### Background
-Both `Milestone` definitions have the same fields: `name`, `percentage`, `released`, `disputed`, `oracle`, `verified`, `proof_hash`. The `#[cfg]` gating was likely added during oracle feature development and never collapsed.
-
-### Problem Statement
-Two identical struct definitions mean any future field change to `Milestone` requires updating both branches. A mistake in one branch is a compile error in only one feature configuration, making it easy to miss.
-
-### Objectives
-- Remove the `#[cfg]` gating and keep a single `Milestone` definition
-- Verify both build configurations compile
-
-### Scope
-
-**In Scope**
-- Deduplicate `Milestone` struct in `lib.rs`
-
-**Out of Scope**
-- Other `#[cfg]` branches in the contract
-
-### Implementation Plan
-1. Remove `#[cfg(not(feature = "oracle-escrow"))]` and `#[cfg(feature = "oracle-escrow")]` attributes
-2. Keep one `Milestone` struct definition
-3. Build and test with both feature sets: `cargo test --features testutils` and `cargo test --features "testutils,oracle-escrow"`
-
-### Expected Files or Components
-- `contracts/escrow-contract/src/lib.rs`
-
-### Acceptance Criteria
-- Single `Milestone` struct definition remains
-- Both `cargo build` and `cargo test` pass with and without `oracle-escrow` feature
-
-### Testing Requirements
-- Build verification with both feature configurations
-
-### CI Requirements
-- Standard contract CI (builds with default features)
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Struct deduplicated
-- [ ] Both feature builds pass
-- [ ] CI green
-
-### References
-- `contracts/escrow-contract/src/lib.rs` lines ~20-40
-
----
-
-## Issue #010 — Attestation: Add unit tests for aggregate query helper functions
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/testing`, `priority/medium`
-
-### Summary
-The `attestation-contract` was recently merged with "on-chain donor aggregation queries" (`feat(attestation): implement on-chain donor aggregation queries`). The `src/lib.rs` and `src/fuzz_tests.rs` exist, but the aggregate query helpers lack dedicated unit tests verifying correctness of aggregation logic (sum, count, filtering by donor/project).
-
-### Background
-The attestation contract (`contracts/attestation-contract/src/lib.rs`) provides cross-chain donation attestation. Aggregate queries compute totals across attestations — these need tests to ensure sums are correct, empty result sets are handled, and filters work.
-
-### Problem Statement
-Aggregate queries that produce incorrect sums or counts would corrupt the on-chain attestation ledger without any test failing.
-
-### Objectives
-- Add unit tests for each aggregate query helper function
-- Test with 0, 1, and multiple attestations
-- Verify sums match expected values
-
-### Scope
-
-**In Scope**
-- Unit tests in `contracts/attestation-contract/src/lib.rs` (or `tests/` directory)
-
-**Out of Scope**
-- Changing aggregate logic
-- Integration tests
-
-### Implementation Plan
-1. Examine the existing aggregate helpers in `lib.rs`
-2. Write tests that create attestations and call each aggregate function, asserting on the results
-3. Run `cargo test --features testutils -p attestation-contract`
-
-### Expected Files or Components
-- `contracts/attestation-contract/src/lib.rs`
-- `contracts/attestation-contract/src/fuzz_tests.rs`
-
-### Acceptance Criteria
-- At least 3 new unit tests for aggregate helpers
-- All tests pass
-- `cargo fmt` + `cargo clippy` clean
-
-### Testing Requirements
-- Unit tests only
-
-### CI Requirements
-- Standard contract CI
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Tests added for aggregate helpers
-- [ ] CI green
-
-### References
-- `contracts/attestation-contract/src/lib.rs`
-- `contracts/attestation-contract/src/fuzz_tests.rs`
-
----
-
-## Issue #011 — Oracle: Add test coverage for slash event with stake boundary values
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/testing`, `priority/medium`
-
-### Summary
-The oracle contract (`contracts/oracle-contract/src/lib.rs`) has a staking and slashing mechanism for reporter accountability. The existing tests cover basic slash scenarios but may not cover edge cases: slashing exactly the full stake, slashing more than the stake (overflow), slashing when stake is 0.
-
-### Background
-Oracle reporters stake tokens as collateral; submitting an invalid price results in slashing. The slash function likely uses `checked_sub` or similar. Edge-case behavior (slashing 0 stake, slashing > full stake) needs explicit test coverage.
-
-### Problem Statement
-Without boundary tests, an off-by-one or overflow in the slash function could go undetected.
-
-### Objectives
-- Add tests for: slashing exactly the full stake, attempting to slash more than staked, and slashing when stake is 0
-
-### Scope
-
-**In Scope**
-- New unit tests in `contracts/oracle-contract/src/lib.rs` (or test file)
-
-**Out of Scope**
-- Changing the slash logic
-- Adding new oracle features
-
-### Implementation Plan
-1. Read `contracts/oracle-contract/src/lib.rs` to understand the slash mechanism
-2. Write `#[should_panic]` or assertion tests for each boundary case
-3. Run `cargo test --features testutils -p oracle-contract`
-
-### Expected Files or Components
-- `contracts/oracle-contract/src/lib.rs`
-
-### Acceptance Criteria
-- Tests for full-stake slash, over-stake slash, zero-stake slash
-- All tests pass or panic as expected
-
-### Testing Requirements
-- Unit tests
-
-### CI Requirements
-- Standard contract CI
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Boundary tests added
-- [ ] CI green
-
-### References
-- `contracts/oracle-contract/src/lib.rs`
-- `contracts/oracle-contract/SECURITY.md`
-
----
-
-## Issue #012 — IndigoPay: Add event emission for `scan_stealth_donations` to surface the number of donations scanned
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/improvement`, `priority/low`
-
-### Summary
-`scan_stealth_donations` returns a `Vec<StealthDonation>` but doesn't emit any event. For off-chain indexers that track donation scanning activity, an event would be useful to know when a project wallet scanned and how many donations were found.
-
-### Background
-The donation flow emits `StelthDn` events on donation. But project wallets calling `scan_stealth_donations` to discover their donations produce no observable on-chain side effect. Adding a lightweight event helps indexers and transparency tools.
-
-### Objectives
-- Emit a `StealthScan` event from `scan_stealth_donations` with the project wallet, number of donations found, and current ledger timestamp
-
-### Scope
-
-**In Scope**
-- New event in `events.rs`
-- Call from `scan_stealth_donations` in `contract.rs`
-
-**Out of Scope**
-- Changing the return type
-- Modifying the scanning logic
-
-### Implementation Plan
-1. Add `emit_stealth_scan` to `events.rs`
-2. Add the event call at the end of `scan_stealth_donations` before returning
-3. Update `EVENTS.md` documentation
-
-### Expected Files or Components
-- `contracts/indigopay-contract/src/donation/events.rs`
-- `contracts/indigopay-contract/src/donation/contract.rs`
+- `contracts/indigopay-contract/src/lib.rs` line 3-5 (`#![allow(deprecated)]`, TODO comment)
 - `contracts/EVENTS.md`
 
-### Acceptance Criteria
-- `StealthScan` event emitted
-- `EVENTS.md` updated
-- All tests pass
 
-### Testing Requirements
-- Update existing scan test to check event emission (if test framework supports it) or add a note
-
-### CI Requirements
-- Standard contract CI
-
-### Deliverables
-- Single commit with event + docs update
-- Changelog entry
-
-### Definition of Done
-- [ ] Event added and emitted
-- [ ] Docs updated
-- [ ] CI green
-
-### References
-- `contracts/indigopay-contract/src/donation/events.rs`
-- `contracts/EVENTS.md`
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
 
-## Issue #013 — Backend: Add Zod validation schema for `POST /api/projects/:id/campaigns`
+## Issue #002 — IndigoPay: Implement batched storage TTL extension with `bump_ttl` and `get_ttl_stats` entrypoints
 
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/improvement`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/feature`, `priority/high`, `effort/large`
 
 ### Summary
-The campaign creation endpoint (`POST /api/projects/:id/campaigns` in `backend/src/routes/projects.js`) uses inline manual validation with `AppError("VALIDATION_ERROR", ...)` instead of the shared `validate(schema)` middleware used by the project creation endpoint. This is inconsistent and misses the automatic field-level Zod error details that other endpoints provide.
-
-### Background
-The codebase has a well-established pattern in `backend/src/middleware/validate.js` and `backend/src/validators/schemas.js` where Zod schemas validate request bodies and return structured `{ error: "Validation failed", details: [...] }` responses. The campaign route performs manual validation of `title`, `goalXLM`, `deadline`, and `description` but doesn't use this shared infrastructure.
+Soroban persistent storage entries have a Time-To-Live (TTL) measured in ledgers. When TTL expires, the network archives the entry. The IndigoPay contract has ~40 `DataKey` variants, many storing persistent data (donation records, project data, donor stats, governance proposals, vesting schedules, refund requests, attestation settlements, ZK nullifiers). There is no systematic TTL extension mechanism beyond the existing `extend_all_ttl` entrypoint (which calls `ensure_min_ttl` on every key — a full scan that does not fit in a per-transaction resource budget for a grown contract). The `docs/gas-optimization.md` "Further Optimization Opportunities" section lists "Batched TTL extension" as a long-term item. `ZK_STORAGE_TTL_LEDGERS` (6,307,200 ledgers ≈ 1 year) demonstrates TTL awareness but only addresses the ZK nullifier case.
 
 ### Problem Statement
-- Inconsistent validation approach across routes
-- Inline validation misses Zod's coercion, trimming, and rich error messages
-- No shared schema means validation rules are duplicated if campaigns need validation elsewhere
+1. **Silent data loss**: After the default TTL, critical on-chain data (donation history, project registrations, governance proposals) becomes unreadable.
+2. **No automated recovery**: No internal mechanism bumps TTLs during normal operation.
+3. **Operator burden**: Every deployment requires an external cron/keeper to submit TTL extension transactions.
+4. **`extend_all_ttl` does not scale**: it iterates every persistent key in one invocation, which exceeds Soroban's per-transaction resource budget once the contract has meaningful data.
 
 ### Objectives
-- Define a `campaignSchema` in `backend/src/validators/schemas.js`
-- Use `validate(campaignSchema)` middleware on the `POST /api/projects/:id/campaigns` route
-- Remove the inline validation code
-- Update any tests that depend on the old error shape
+- Implement a `bump_ttl(from: u32, count: u32)` entrypoint that extends the TTL of `count` persistent storage entries starting at index `from`, using a deterministic iteration order over `DataKey` variants
+- Add `get_ttl_stats()` returning total persistent entries and the ledger at which the earliest entry expires
+- Implement a "lazy bump" pattern: each state-mutating function bumps the TTL of the entries it touches during normal operation (amortized, zero additional transactions)
 
 ### Scope
-
 **In Scope**
-- New `campaignSchema` in `schemas.js`
-- Route handler update in `projects.js`
-- Test updates if needed
+- New `bump_ttl` and `get_ttl_stats` entrypoints in IndigoPay contract
+- Lazy TTL bump in `donate`, `register_project`, `vote_on_proposals`, `create_vesting_schedule` (via `donate_vested`), and other high-frequency mutators
+- Unit tests verifying TTL extension
+- Update `docs/gas-optimization.md` with benchmark data
 
 **Out of Scope**
-- Other campaign endpoints (GET /campaigns)
-- Frontend validation
+- TTL extension for companion contracts (escrow, attestation, oracle) — separate issues
+- Off-chain keeper implementation (that is a backend service task)
 
 ### Implementation Plan
-1. Add `campaignSchema` to `backend/src/validators/schemas.js` with Zod validation for `title` (3-120 chars), `goalXLM` (positive number string), `deadline` (ISO datetime string, future), `description` (optional, max 500)
-2. Replace the manual validation block in `POST /:id/campaigns` with `validate(campaignSchema)`
-3. Keep the project-exists check
-4. Update the route to use `req.body` (already validated by middleware)
-5. Run `npm test` to verify no breakage
-
-### Expected Files or Components
-- `backend/src/validators/schemas.js` — add `campaignSchema`
-- `backend/src/routes/projects.js` — update `POST /:id/campaigns`
-- `backend/src/routes/projects.test.js` — if tests exist for this endpoint
+1. Add a `DataKey` iterator helper that yields all variant discriminants in a fixed order
+2. Implement `bump_ttl(env, from, count)` — iterate from `from` for `count` entries, call `env.storage().persistent().extend_ttl(&key, threshold, extend_to)` on each
+3. Implement `get_ttl_stats(env)` — scan all persistent keys, find minimum TTL, return `(total_entries, min_ttl_ledger, current_ledger)`
+4. Add a `ttl_bump` event with `(from, count, extended_count)`
+5. In `donate` and other hot paths, after writing persistent data, bump the specific keys just written
+6. Benchmark and document the gas cost per entry and estimate batch sizes that fit within Soroban's per-transaction budget
 
 ### Acceptance Criteria
-- Campaign creation uses Zod schema validation
-- Validation returns structured `details` on failure
-- 5xx errors on validation failure no longer occur
-- Existing tests pass (or are updated)
+- `bump_ttl` extends TTL of the requested number of entries; `get_ttl_stats` returns accurate `(total, min_ttl)` data
+- Lazy bump keeps recently-touched entries alive without separate transactions
+- `cargo test --features testutils -p indigopay-contract` passes (new + existing)
+- Gas benchmarks documented for batch sizes 10, 50, 100
 
 ### Testing Requirements
-- Verify existing test suite passes
-- If no existing tests, add a basic validation-failure test
-
-### CI Requirements
-- `npm run lint`
-- `npm test`
-- `npm run migration:lint`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] `campaignSchema` defined
-- [ ] Route uses `validate()` middleware
-- [ ] CI green
+- Unit tests: bump 0 entries (no-op), bump within range, bump beyond range (panic), verify TTL after bump
+- Integration test: create donation → verify TTL extended on donation record
 
 ### References
-- `backend/src/routes/projects.js` ~line 225-270 (campaign creation)
-- `backend/src/validators/schemas.js` — existing schemas for pattern reference
-- `backend/src/middleware/validate.js`
+- `docs/gas-optimization.md` — "Further Optimization Opportunities" section
+- `contracts/indigopay-contract/src/lib.rs` — `ZK_STORAGE_TTL_LEDGERS`, `DataKey` enum, `extend_all_ttl`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
 
-## Issue #014 — Backend: Add `adminRequired` middleware to `GET /api/projects/admin/pending`
+## Issue #003 — IndigoPay: Add donation message length cap and Unicode-normalization validation to bound event payloads
 
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/security`, `priority/high`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/security`, `priority/medium`, `effort/small`
 
 ### Summary
-`GET /api/projects/admin/pending` in `backend/src/routes/projects.js` returns unverified projects without requiring admin authentication. This endpoint is mounted at both `/api/projects/admin/pending` and `/api/v1/projects/admin/pending` with no auth middleware, unlike `POST /admin/register` and `POST /admin/confirm` which both use `adminRequired`.
-
-### Background
-The `admin/pending` endpoint lists unverified active projects for admin review. It exposes project metadata (name, description, category, wallet address) that should only be visible to authenticated administrators during the review process. The sibling `admin/register` and `admin/confirm` endpoints correctly apply `adminRequired`.
+`process_donation_token` emits the donation `msg_hash` (a u32 hash of the message) rather than the raw message, which bounds payload size. However the message-hashing path is inconsistent across the multi-token entrypoints: `donate_asset` and `donate_token` derive the hash from arbitrary-length `String` inputs, and `MAX_CHALLENGE_REASON_LEN` (200 bytes) bounds only challenge reasons, not donation messages. A donor can pass a maximally long message string that is hashed on-chain — the hash is constant-size, but the input string is read and hashed inside the contract, consuming CPU instructions and memory per byte with no upper bound enforced at the entrypoint.
 
 ### Problem Statement
-Unauthenticated access to the pending projects list leaks pre-verification project data. This is a security concern because project submissions may contain work-in-progress or unvetted information.
+1. **Unbounded input processing**: long message strings are hashed inside the contract; the cost is linear in message length with no documented cap.
+2. **Inconsistent limits**: some entrypoints hash the message, others truncate before hashing; there is no single policy.
+3. **Indexer ambiguity**: `msg_hash` is a u32; two different messages can collide (birthday bound ~2^16 with 10k donations) making the hash unsuitable as a message identity.
 
 ### Objectives
-- Add `adminRequired` middleware to `GET /admin/pending` route
-- Add/fix test to verify 401 response when unauthenticated
+- Enforce a single `MAX_DONATION_MSG_LEN` cap (e.g. 140 bytes) applied consistently across all donate entrypoints before hashing
+- Normalize message input (trim, reject control characters) so identical visible messages hash identically
+- Document the `msg_hash` collision caveat in `contracts/EVENTS.md`
 
 ### Scope
-
-**In Scope**
-- One middleware addition
-- Test verification
-
-**Out of Scope**
-- Changing the response shape
-
-### Implementation Plan
-1. Add `adminRequired` as the second argument to the route handler:
-   ```js
-   router.get("/admin/pending", adminRequired, async (req, res, next) => { ... });
-   ```
-2. Import `adminRequired` from `../middleware/auth` (already imported in the file)
-3. Run tests to verify 401 response behavior
-
-### Expected Files or Components
-- `backend/src/routes/projects.js`
-- `backend/src/routes/projects.test.js` (if pending endpoint tests exist)
+- `contracts/indigopay-contract/src/lib.rs` — all donate entrypoints and the shared message-hash helper
+- `contracts/EVENTS.md` — document `msg_hash` semantics
 
 ### Acceptance Criteria
-- `GET /api/projects/admin/pending` returns 401 without valid auth
-- `GET /api/projects/admin/pending` returns 200 with valid auth
-- Existing admin tests pass
-
-### Testing Requirements
-- Verify auth gate works for this endpoint
-- Extend existing admin route test if needed
-
-### CI Requirements
-- `npm run lint`
-- `npm test`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] `adminRequired` added to route
-- [ ] Auth test covers this endpoint
-- [ ] CI green
+- All donate paths enforce `MAX_DONATION_MSG_LEN` with a clear panic message
+- Unit tests: boundary length, over-length rejection, control-character normalization
+- No behavior change for existing valid messages
 
 ### References
-- `backend/src/routes/projects.js` — `router.get("/admin/pending", ...)` ~line 400
-- `backend/src/routes/projects.js` — `router.post("/admin/register", adminRequired, ...)` for comparison
-- `backend/src/middleware/auth.js` — `adminRequired`
+- `contracts/indigopay-contract/src/lib.rs` — `process_donation_token`, `MAX_CHALLENGE_REASON_LEN`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
 
-## Issue #015 — Backend: Add control-character and excessive-whitespace validation to donation message field
+## Issue #004 — Escrow: `claim_milestone` missing `job.freelancer == freelancer` verification (access-control gap)
 
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/improvement`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/security`, `priority/high`, `effort/small`
 
 ### Summary
-The `donationSchema` in `backend/src/validators/schemas.js` validates that `message` is at most 100 characters but doesn't strip or reject control characters, excessive whitespace, or zero-width characters. This could lead to display issues in the donation feed.
-
-### Background
-Donation messages appear in the public donation feed on the frontend. Messages with control characters like `\n`, `\t`, `\0`, or zero-width Unicode characters can disrupt the UI layout or be used for spoofing.
+`claim_milestone` at `contracts/escrow-contract/src/lib.rs` (~line 1062) calls `freelancer.require_auth()` but then checks `if job.freelancer != freelancer` — the check **was already added** in the current codebase. This issue tracks the **remaining** access-control gap in the same function family: `release_milestone` correctly checks `job.client == client`, and `claim_milestone` now checks `job.freelancer == freelancer`, but the deprecated job-level dispute functions (`dispute_job`, `resolve_dispute`) still use the older model and are documented in `docs/gas-optimization.md` as "remain callable but use the older job-level dispute model." Audit these legacy paths and either gate them with the same M-of-N admin checks used by `dispute_milestone`/`resolve_milestone_dispute` or remove them.
 
 ### Problem Statement
-While the backend is not the primary UI layer, sanitizing donation messages server-side before storage prevents malformed data from entering the database and being served to all clients.
+1. Legacy `dispute_job`/`resolve_dispute` may bypass the milestone-level access controls.
+2. The escrow contract still has `#![allow(deprecated)]` and mixed governance models.
 
 ### Objectives
-- Add a Zod `.refine()` or `.transform()` to `donationSchema.message` that strips or rejects control characters and trims excessive whitespace
-- Ensure the message is trimmed and normalized before storage
+- Audit `dispute_job`, `resolve_dispute` and any other legacy entrypoints against the milestone-level equivalents
+- Align their authorization with `require_admin` (M-of-N) or remove them with a documented deprecation path
+- Add `#[should_panic]` tests for unauthorized callers on every remaining entrypoint
 
 ### Scope
+- `contracts/escrow-contract/src/lib.rs` — legacy dispute paths, tests
 
-**In Scope**
-- `donationSchema.message` refinement in `schemas.js`
-- Backend-level sanitization
+### Acceptance Criteria
+- No entrypoint mutates job state without matching the authorization of its modern equivalent
+- Test coverage: wrong caller, insufficient admin signatures, disputed-state transitions
 
-**Out of Scope**
-- Frontend sanitization (separate concern)
-- Historical data cleanup
+### References
+- `contracts/escrow-contract/src/lib.rs` — `claim_milestone`, `dispute_job`, `resolve_dispute`, `docs/gas-optimization.md`
 
-### Implementation Plan
-1. Add a `.transform((s) => s?.replace(/[\x00-\x1F\x7F]/g, "").replace(/\s+/g, " ").trim())` or similar to the message field in `donationSchema`
-2. Ensure the transformed value is what gets stored
-3. Add a test to `schemas.test.js` verifying control characters are stripped
 
-### Expected Files or Components
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #005 — Oracle: Implement deviation-tolerance ramp to prevent TWAP deadlock during rapid market moves
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/feature`, `priority/medium`, `effort/medium`
+
+### Summary
+The oracle contract's `report_price` deviation circuit breaker rejects any observation exceeding `max_deviation_bps` from the current TWAP. During rapid market movements (e.g. a 15% XLM price swing in minutes), all reporter observations get rejected because they all differ from the stale TWAP by more than the configured threshold. This creates a deadlock: the TWAP cannot update because new observations are rejected because they differ from the TWAP. The `OracleError::PriceDeviationExceedsThreshold` path has no recovery mechanism.
+
+### Problem Statement
+1. **Deadlock**: TWAP freezes at a stale value during volatility; `get_price` returns an outdated price that IndigoPay's USDC donation path depends on.
+2. **Fallback dependency**: the only escape is the fallback price path, which is static and operator-managed.
+
+### Objectives
+- Implement a "slashing threshold ramp" that progressively relaxes the deviation tolerance when no valid observation has been accepted for N consecutive ledgers
+- Bound the ramp so it cannot be exploited to push the TWAP through multiple thresholds faster than the market actually moves (cap total relaxation, require per-step minimums)
+
+### Scope
+- `contracts/oracle-contract/src/lib.rs` — `report_price`, `current_price_raw`, config storage
+- New config fields: ramp start ledger, ramp step, ramp ceiling
+
+### Acceptance Criteria
+- Simulation test: inject stale TWAP, attempt rapid price change, verify ramp allows catch-up within a bounded number of ledgers
+- Security test: verify the ramp cannot be gamed to move TWAP faster than the market (each accepted observation must still be within the *ramped* threshold and the ramp must reset on acceptance)
+
+### References
+- `contracts/oracle-contract/src/lib.rs` — `report_price`, `PriceDeviationExceedsThreshold`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #006 — IndigoPay: Add quadratic voting credit decay to prevent long-term voter credit hoarding
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/feature`, `priority/medium`, `effort/medium`
+
+### Summary
+The governance system uses quadratic voting: voting power = sqrt(credits_spent), and credits are allocated based on badge tier via `voting_credits_from_badge`. Credits are never consumed beyond the single `vote_on_proposals` call, and badge tiers never decrease. A Seedling badge holder who never votes accumulates full voting power indefinitely. `update_voter_credits_on_badge_change` refreshes credits only on badge changes — there is no decay for inactive voters.
+
+### Problem Statement
+1. **Voting power hoarding**: long-term holders dominate governance regardless of recent participation.
+2. **Sybil-incentive**: creating many low-tier accounts and waiting accrues the same weight as active participants.
+
+### Objectives
+- Implement exponential credit decay: credits earned more than N ledgers ago (configurable, default ~90 days) decay at X% per ledger
+- Apply decay on read (`get_voting_credits`) so no background process is required; store `last_decay_ledger` per voter
+- Ensure monotonic non-negative credits and that decay never enables credit *increases*
+
+### Scope
+- `contracts/indigopay-contract/src/lib.rs` — `VoterCredits`, `get_voting_credits`, `vote_on_proposals`, `update_voter_credits_on_badge_change`
+- New config: `CREDIT_DECAY_RATE`, `CREDIT_DECAY_START_LEDGERS`
+
+### Acceptance Criteria
+- Unit test for decay calculation, property test for monotonic non-negative decay, integration test vote → wait → verify reduced credits
+- Badge-change credit refresh must account for already-decayed credits (no credit resurrection)
+
+### References
+- `contracts/indigopay-contract/src/lib.rs` — `voting_credits_from_badge`, `update_voter_credits_on_badge_change`, `get_voting_credits`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #007 — Attestation: Add batched `record_attestations` with per-item validation and atomic rollback
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/feature`, `priority/medium`, `effort/medium`
+
+### Summary
+The attestation contract has `MAX_BATCH_SIZE = 50` and a `BatchAttestationInput` struct, and the current code already implements a batch record path (`batch_rec` event exists). However the batch path processes inputs in a loop with per-item panic semantics: a single invalid item aborts the entire batch and no partial state is written (Soroban reverts the whole transaction). There is no way for the relayer to distinguish "rejected because one item was a replay" from "all items invalid" without resubmitting.
+
+### Problem Statement
+1. **Replay poisoning**: a batch containing one replayed `(source_chain, source_tx_hash)` fails the whole batch; the relayer must bisect manually.
+2. **No per-item outcome reporting**: the relayer cannot see which items were accepted vs rejected without scanning storage.
+
+### Objectives
+- Add per-item validation that reports outcomes instead of panic-aborting the whole batch where safe (e.g. skip already-recorded hashes, emit a `batch_partial` event listing accepted/rejected indices)
+- Preserve the "reject known-replay" guarantee (a replayed hash must never be double-credited)
+- Keep `MAX_BATCH_SIZE = 50` enforcement
+
+### Scope
+- `contracts/attestation-contract/src/lib.rs` — batch record path, new outcome event, tests
+
+### Acceptance Criteria
+- Batch with one replay records the remaining items and reports the rejected index
+- Batch of all-replays records nothing and reports all rejected
+- `MAX_BATCH_SIZE` enforcement unchanged
+
+### References
+- `contracts/attestation-contract/src/lib.rs` — `MAX_BATCH_SIZE`, `BatchAttestationInput`, batch record path
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #008 — IndigoPay: Implement `get_donation_page` for efficient on-chain donation history reads
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/feature`, `priority/medium`, `effort/medium`
+
+### Summary
+The contract stores donation records as individual `DataKey::DonationRecord(u32)` entries with a `DonationCount` counter. Reading donation history requires N separate `get_donation_record` calls — one per index. For projects with 10,000+ donations, this is O(n) RPC calls for any consumer (backend indexer reconciliation, transparency pages).
+
+### Problem Statement
+1. **O(n) RPC pattern**: any consumer that wants the full history issues one call per donation.
+2. **No batch read**: there is a `batch` feature flag in Cargo.toml but it is disabled by default and unexercised for donation history.
+
+### Objectives
+- Implement `get_donation_page(env, from: u32, count: u32) -> Vec<DonationRecord>` that reads `count` entries starting at `from` in a single function call, with a cap (e.g. 50) to stay within Soroban's per-call resource budget
+- Keep the existing single-read functions unchanged
+
+### Scope
+- `contracts/indigopay-contract/src/lib.rs` — new read function
+- `contracts/indigopay-contract/src/donation/` — any shared record types
+
+### Acceptance Criteria
+- Unit tests for empty page, partial page (near end), full page, out-of-bounds `from`
+- Gas benchmark documented comparing N+1 vs single-page read
+
+### References
+- `contracts/indigopay-contract/src/lib.rs` — `DataKey::DonationRecord`, `DonationCount`, `get_donation_record`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #009 — Escrow: Add `cleanup_completed_jobs` with grace-period archival to prevent `MAX_JOBS` exhaustion
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/feature`, `priority/medium`, `effort/medium`
+
+### Summary
+The escrow contract enforces `MAX_JOBS = 256` in `create_job` but provides no mechanism to remove completed or disputed jobs from the `JobIds` vector or free their storage slots. Once 256 jobs are created, no new jobs can be created — even if 255 are long-completed. `docs/gas-optimization.md` documents `cleanup_*` functions as a storage-GC pattern, but the escrow contract has none.
+
+### Problem Statement
+1. **Permanent capacity ceiling**: completed jobs occupy slots forever; a freelancer marketplace will eventually hit 256 jobs.
+2. **Storage bloat**: `Job` entries and the `JobIds` vector grow without bound and every TTL extension pays for them.
+
+### Objectives
+- Implement a permissionless `cleanup_completed_jobs` function that removes jobs with status `Completed` where `deadline + GRACE_PERIOD < current_ledger`
+- Remove their `DataKey::Job` entries and drop them from `JobIds`
+- Preserve `FreelancerReputation` even after job cleanup
+
+### Scope
+- `contracts/escrow-contract/src/lib.rs` — new `cleanup_completed_jobs`, `GRACE_PERIOD` constant
+
+### Acceptance Criteria
+- Unit test: create 256 jobs, complete 255, verify cleanup frees slots, verify the 257th job succeeds
+- Security test: cleanup cannot remove in-flight (Escrowed/PartiallyReleased/Disputed) jobs
+
+### References
+- `contracts/escrow-contract/src/lib.rs` — `MAX_JOBS`, `create_job`, `JobIds`, `FreelancerReputation`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #010 — Oracle: Add per-source health tracking with `src_unhealthy` events and `get_source_health`
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/feature`, `priority/high`, `effort/large`
+
+### Summary
+`get_aggregated_price` queries all registered source oracles and computes a median-of-medians. It silently skips oracles that return errors or invalid values (`SourceOracleUnresponsive`, `SourceOracleReturnedInvalidPrice`). A compromised oracle consistently returning 0 or panicking is simply skipped — no event is emitted, no alarm is raised, and the source stays in the allowlist forever.
+
+### Problem Statement
+1. **No observability**: failing sources are invisible to operators.
+2. **No automatic exclusion**: a persistently failing source is still queried every call, wasting gas and skewing the median if it intermittently returns garbage.
+
+### Objectives
+- Track the last N (e.g. 20) response outcomes per source
+- Emit a `src_unhealthy` event when a source exceeds a configurable failure threshold; emit `src_recover` when it recovers
+- Provide `get_source_health(source) -> SourceHealth` read function
+- Health must be reversible — a recovered source must be re-included automatically
+
+### Scope
+- `contracts/oracle-contract/src/lib.rs` — new health storage, `get_aggregated_price` integration, new events
+
+### Acceptance Criteria
+- Simulate failing source → verify health event after threshold; verify healthy-source recovery resets counters
+- Excluded sources are skipped in aggregation (documented gas savings)
+- Full test suite passes
+
+### References
+- `contracts/oracle-contract/src/lib.rs` — `get_aggregated_price`, `SourceOracleUnresponsive`, `SourceOracleReturnedInvalidPrice`
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #011 — IndigoPay: Add Merkle Mountain Range accumulation and proof verification for streaming impact data
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/feature`, `priority/high`, `effort/large`
+
+### Summary
+The impact verification system (`#[cfg(feature = "impact")]`) supports Merkle tree proofs via `verify_impact_inclusion` and `ImpactRoot` archiving with period rotation. But it uses a flat Merkle tree that requires O(log n) recomputation per proof and O(n) recomputation when a new leaf is appended. MMRs (Merkle Mountain Ranges) support efficient append-only proofs and are better suited for streaming impact data where new leaves are continuously added without recomputing the entire tree. The `ImpactLeaf` struct already has `donor`, `donation_index`, `co2_kg`, `trees`, and `hectares` — all the fields needed.
+
+### Problem Statement
+1. **O(n) append cost**: adding one leaf to a flat Merkle tree rebuilds the entire tree.
+2. **No incremental proofs**: every proof must refer to a specific tree root; mid-period reports require a new root per batch.
+
+### Objectives
+- Implement an MMR structure with `append_impact_leaf` that maintains peak hashes in persistent storage
+- Implement `verify_impact_mmr(env, project_id, leaf, mmr_proof) -> bool` that verifies a leaf's inclusion in the current MMR root
+- The MMR must support incremental updates without recomputing the entire tree
+
+### Scope
+- `contracts/indigopay-contract/src/lib.rs` — new MMR functions, `ImpactRoot` extension, new events
+- Unit tests for MMR append, proof generation/verification, edge cases (empty MMR, single leaf, multiple peaks)
+
+
+### Scope
+- `contracts/indigopay-contract/src/lib.rs` — new MMR functions, `ImpactRoot` extension, new events
+- Unit tests for MMR append, proof generation/verification, edge cases (empty MMR, single leaf, multiple peaks)
+
+### Acceptance Criteria
+- MMR proof for included leaf verifies; proof for excluded leaf fails
+- MMR consistency across period boundaries (archiving one period's root doesn't invalidate the next)
+
+### References
+- `contracts/indigopay-contract/src/lib.rs` — `ImpactLeaf`, `ImpactRoot`, `verify_impact_inclusion`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #012 — IndigoPay: Add cross-contract re-entrancy guard for escrow and attestation settlement calls
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/security`, `priority/high`, `effort/medium`
+
+
+---
+## Issue #012 — IndigoPay: Add cross-contract re-entrancy guard for escrow and attestation settlement calls
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/security`, `priority/high`, `effort/medium`
+
+### Summary
+The IndigoPay contract makes cross-contract calls to the escrow contract (`EscrowClient` for campaign escrow lifecycle) and attestation contract (`AttestationClient` for `settle_attestation`). While CEI (Checks-Effects-Interactions) ordering is followed within IndigoPay, a malicious escrow or attestation contract (if upgraded through admin compromise) could call back into IndigoPay during the cross-contract invocation. Soroban prevents direct self-re-entrancy, but cross-contract re-entrancy through a chain of trusted contracts is possible if all use `#![no_std]` and the host's re-entrancy prevention only covers same-address recursion.
+
+### Problem Statement
+1. **Cross-contract re-entrancy risk**: if any companion contract is upgraded maliciously, it could re-enter IndigoPay mid-flow.
+2. **No guard**: there is no `REENTRANCY_GUARD` flag in instance storage.
+
+### Objectives
+- Implement a `REENTRANCY_GUARD` instance-storage flag set before and cleared after each cross-contract call, panicking if entered while set
+- Apply to `setup_campaign_escrow`, `fund_escrow`, `release_campaign_milestone`, `claim_campaign_milestone`, and `settle_attestation`
+- Emit a `reentrancy_blocked` event if the guard triggers, for operator visibility
+
+### Scope
+- `contracts/indigopay-contract/src/lib.rs` — escrow and attestation call paths
+- Test with a mock re-entrant contract that attempts callback, verify guard panics
+
+### Acceptance Criteria
+- All cross-contract calls set/clear the guard; guard panics on re-entry attempt
+- No measurable gas regression on standard donation path (guard check is a single instance-storage read)
+
+### References
+- `contracts/indigopay-contract/src/lib.rs` — `setup_campaign_escrow`, `fund_escrow`, `release_campaign_milestone`, `settle_attestation`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #013 — Escrow: Add oracle-verification timeout to prevent indefinite milestone blocking
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/bug`, `priority/medium`, `effort/medium`
+
+### Summary
+When a milestone has an `oracle` configured (behind `oracle-escrow` feature), `release_milestone` checks `milestone.verified` before allowing release. If the oracle never calls `verify_milestone`, the milestone is permanently blocked — neither client nor freelancer can unblock it. The only escape is admin dispute resolution. `docs/gas-optimization.md` documents this pattern but offers no solution.
+
+### Problem Statement
+1. **Permanent block**: a non-responsive oracle freezes the escrow forever.
+2. **No automatic fallback**: the `oracle` field becomes a permanent gate if the oracle is unresponsive.
+
+
+### Summary
+When a milestone has an `oracle` configured (behind `oracle-escrow` feature), `release_milestone` checks `milestone.verified` before allowing release. If the oracle never calls `verify_milestone`, the milestone is permanently blocked — neither client nor freelancer can unblock it. The only escape is admin dispute resolution. `docs/gas-optimization.md` documents this pattern but offers no solution.
+
+### Problem Statement
+1. **Permanent block**: a non-responsive oracle freezes the escrow forever.
+2. **No automatic fallback**: the `oracle` field becomes a permanent gate if the oracle is unresponsive.
+
+### Objectives
+- Implement a timeout: if `proof_hash` was set more than N ledgers ago and the oracle hasn't verified, the milestone's oracle requirement is waived
+- The timeout should be configurable per-milestone at `create_job` with a floor of 1,000 ledgers (~83 minutes)
+- `Milestone` struct gets a new `oracle_timeout_ledgers` field (appended for backward compat)
+
+### Scope
+- `contracts/escrow-contract/src/lib.rs` — `create_job` (new field), `release_milestone` (timeout check), tests
+
+
+### Scope
+- `contracts/escrow-contract/src/lib.rs` — `create_job` (new field), `release_milestone` (timeout check), tests
+
+### Acceptance Criteria
+- Create job with oracle milestone, advance ledger past timeout, verify release succeeds without oracle verification
+- ORACLE_TIMEOUT_FLOOR of 1,000 ledgers enforced
+
+### References
+- `contracts/escrow-contract/src/lib.rs` — `release_milestone`, Milestone struct, `oracle-escrow` feature
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #014 — IndigoPay: Implement `get_donor_history_paginated` with per-donor sequential indexing
+
+
+---
+## Issue #014 — IndigoPay: Implement `get_donor_history_paginated` with per-donor sequential indexing
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/performance`, `priority/medium`, `effort/medium`
+
+### Summary
+The frontend donor dashboard calls `get_donor_stats` (1 RPC call) plus `get_donation_record(i)` for each of the donor's N donations (N RPC calls via `DonationRecord` key enumeration). For a donor with 200 donations, this is 201 RPC calls to render one page. The contract has no batched donor-history read function.
+
+### Problem Statement
+1. **N+1 query pattern**: O(n) RPC calls for donor history in the frontend and backend.
+2. **No per-donor index**: donations are indexed by global index only.
+
+### Objectives
+- Implement `get_donor_history(env, donor, from: u32, count: u32) -> Vec<DonationRecord>`
+- Add `DataKey::DonorDonationIndex(Address, u32) -> u32` mapping per-donor sequential indices to global donation indices
+- Update the `donate` path to append this index entry
+
+### Scope
+- `contracts/indigopay-contract/src/lib.rs` — new read function, new DataKey variant, donation path update
+
+### Acceptance Criteria
+- Paginated donor history returns the same records as N individual calls
+- Gas-cost comparison documented (N+1 vs single page)
+- Storage-write cost per donation increases by 1 entry — document in `docs/gas-optimization.md`
+
+### References
+- `contracts/indigopay-contract/src/lib.rs` — `DataKey::DonorStats`, `DataKey::DonationRecord`, `get_donor_stats`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #015 — All Contracts: Add cross-contract fuzz harness deploying all 4 contracts together
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/testing`, `priority/high`, `effort/large`
+
+### Summary
+Each contract has isolated fuzz tests (`escrow_fuzz.rs`, `indigopay-contract/src/fuzz_tests.rs`, `attestation-contract/src/fuzz_tests.rs`). There is no fuzz harness that exercises cross-contract call sequences: IndigoPay → Escrow (campaign escrow lifecycle via `setup_campaign_escrow` → `fund_escrow` → `release/claim_campaign_milestone`), IndigoPay → Attestation (`settle_attestation`), IndigoPay → Oracle (`donate_usdc` price lookup). Cross-contract bugs are the hardest class of Soroban vulnerabilities — state inconsistencies across contracts caused by partial failures or mismatched state transitions.
+
+### Problem Statement
+1. **No cross-contract fuzzing**: isolated unit/fuzz tests cannot catch state drift across contract boundaries.
+2. **Invariant violations**: e.g., IndigoPay's `CampaignEscrowMilestones` and the escrow's `Job` state can desynchronize.
+
+### Objectives
+- Implement a workspace-level fuzz harness deploying all 4 contracts and exercising random sequences of cross-contract calls
+- Assert global invariants: sum of project balances across contracts matches total donated minus total withdrawn; attestation settlement deduplication holds; escrow balance + project balance = donations
+
+### Scope
+- New `contracts/cross_contract_fuzz.rs` or expanded fuzz tests in the workspace
+- Must run 10,000+ iterations of random cross-contract sequences in CI nightly
+
+
+### Summary
+Each contract has isolated fuzz tests (`escrow_fuzz.rs`, `indigopay-contract/src/fuzz_tests.rs`, `attestation-contract/src/fuzz_tests.rs`). There is no fuzz harness that exercises cross-contract call sequences: IndigoPay → Escrow (campaign escrow lifecycle via `setup_campaign_escrow` → `fund_escrow` → `release/claim_campaign_milestone`), IndigoPay → Attestation (`settle_attestation`), IndigoPay → Oracle (`donate_usdc` price lookup). Cross-contract bugs are the hardest class of Soroban vulnerabilities — state inconsistencies across contracts caused by partial failures or mismatched state transitions.
+
+### Problem Statement
+1. **No cross-contract fuzzing**: isolated unit/fuzz tests cannot catch state drift across contract boundaries.
+2. **Invariant violations**: e.g., IndigoPay's `CampaignEscrowMilestones` and the escrow's `Job` state can desynchronize.
+
+### Objectives
+- Implement a workspace-level fuzz harness deploying all 4 contracts and exercising random sequences of cross-contract calls
+- Assert global invariants: sum of project balances across contracts matches total donated minus total withdrawn; attestation settlement deduplication holds; escrow balance + project balance = donations
+
+### Scope
+- New `contracts/cross_contract_fuzz.rs` or expanded fuzz tests in the workspace
+- Must run 10,000+ iterations of random cross-contract sequences in CI nightly
+
+### Acceptance Criteria
+- The harness catches at least one real cross-contract invariant violation before merging
+- CI nightly job runs 10,000 iterations
+
+### References
+- `contracts/indigopay-contract/src/fuzz_tests.rs`, `contracts/escrow-contract/src/escrow_fuzz.rs`, `contracts/attestation-contract/src/fuzz_tests.rs`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #016 — Backend: Add database connection-pool metrics with per-operation latency histograms
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/observability`, `priority/medium`, `effort/medium`
+
+
+---
+## Issue #016 — Backend: Add database connection-pool metrics with per-operation latency histograms
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/observability`, `priority/medium`, `effort/medium`
+
+### Summary
+The backend uses `pg` (node-postgres) with a pool (`backend/src/db/pool.js`). Prometheus metrics at `/metrics` expose overall request latencies, but there are no database-level metrics: pool utilization, idle connection count, waiting client count, or per-query-type latency histograms. The `monitoring/grafana` dashboards have no DB-level panels from which to diagnose slow-query root causes.
+
+### Problem Statement
+1. **No DB-level observability**: when p95 latency spikes, there is no way to attribute it to pool exhaustion vs slow queries vs RPC time.
+2. **Pool exhaustion invisible**: if all connections are in use, the next request waits indefinitely with no metric emitted.
+
+### Objectives
+- Expose `db_pool_total`, `db_pool_idle`, `db_pool_waiting` gauges via the Prometheus metrics endpoint
+- Add per-operation histograms (`db_query_duration_seconds` with `operation` label for SELECT/INSERT/UPDATE/DELETE)
+- Integrate with the existing `backend/src/services/metrics.js` pattern
+
+### Scope
+- `backend/src/db/pool.js` — integrate metrics, new `backend/src/services/dbMetrics.js`
+- Sample rate via `DB_METRICS_SAMPLE_RATE` env var (default 1.0 for production)
+
+### Acceptance Criteria
+- `GET /metrics` exposes pool gauges and query histograms
+- Histogram buckets cover p50/p95/p99 ranges (e.g., 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2s, 5s)
+- Tests verify gauge values change under load
+
+### References
+- `backend/src/db/pool.js`, `backend/src/services/metrics.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #017 — Backend: Implement event-driven cache invalidation with Redis pub/sub
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/architecture`, `priority/high`, `effort/large`
+
+### Summary
+The backend caching layer uses TTL-based expiration exclusively (`backend/src/services/cacheManager.js`, `backend/src/services/cache.js`). Mutation endpoints do not invalidate related cache keys. The docs mention cache invalidation on project status changes, but it is manual and inconsistent — new endpoints are added without updating invalidation logic.
+
+### Problem Statement
+1. **Stale reads under mutation**: project updates, donation recording, and governance resolution all leave stale cache entries for their TTL duration.
+2. **Inconsistent invalidation**: some endpoints manually invalidate; most do not.
+
+### Objectives
+- Implement a pub/sub cache-invalidation system: mutation handlers publish invalidation events to Redis channels; subscribers listen and invalidate relevant keys
+- Build an `invalidationRouter` mapping resource types to cache key patterns
+- Fall back to TTL-only if Redis pub/sub is unavailable (graceful degradation)
+
+### Scope
+- `backend/src/services/cacheManager.js` — add pub/sub, rewrite invalidation dispatch
+- All mutation route handlers — add invalidation events
+- `backend/src/services/redis.js` — pub/sub subscriber integration
+
+
+### Objectives
+- Implement a pub/sub cache-invalidation system: mutation handlers publish invalidation events to Redis channels; subscribers listen and invalidate relevant keys
+- Build an `invalidationRouter` mapping resource types to cache key patterns
+- Fall back to TTL-only if Redis pub/sub is unavailable (graceful degradation)
+
+### Scope
+- `backend/src/services/cacheManager.js` — add pub/sub, rewrite invalidation dispatch
+- All mutation route handlers — add invalidation events
+- `backend/src/services/redis.js` — pub/sub subscriber integration
+
+### Acceptance Criteria
+- Integration test: create project → cache miss → update project → cache invalidated immediately
+- Subscription test verifies Redis pub/sub delivery; fallback test verifies TTL fallback path
+- No migration required; backward-compatible
+
+### References
+- `backend/src/services/cacheManager.js`, `backend/src/services/cache.js`, `backend/src/routes/donations.js`, `backend/src/routes/admin.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #018 — Backend: Idempotent auto-catch-up for the projection engine on partial failure
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/bug`, `priority/high`, `effort/medium`
+
+
+---
+## Issue #018 — Backend: Idempotent auto-catch-up for the projection engine on partial failure
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/bug`, `priority/high`, `effort/medium`
+
+### Summary
+The projection engine (`backend/src/services/projectionEngine.js`) processes events in a transaction: append event to `donation_events`, then update all 4 projections. If the transaction fails after appending the event but before updating one projection, the event is persisted but that projection is stale. The `rebuildAllProjections` recovery mechanism requires admin intervention, and `projectionLagEvents` tracks this gap but does not trigger automatic recovery.
+
+### Problem Statement
+1. **Admin-dependent recovery**: lagging projections wait for an operator to call the rebuild endpoint.
+2. **Silent drift**: the lag metric increases but no automated catch-up runs.
+
+### Objectives
+- At process startup and after a configurable idle period, the engine auto-replays missed events into lagging projections
+- Use the existing staging-schema atomic swap pattern (`projection_stage` schema → `public`) so live reads see consistent state during catch-up
+- Bound the auto-catch-up: if lag exceeds `PROJECTION_AUTO_CATCHUP_MAX_LAG`, log and alert instead of attempting
+
+### Scope
+- `backend/src/services/projectionEngine.js` — auto-catch-up logic
+- `backend/src/services/sorobanEventService.js` — startup check
+- `backend/src/services/metrics.js` — new metric `projectionAutoCatchupRuns`
+
+### Acceptance Criteria
+- Simulate partial failure (mock one projection to throw) → verify auto-catch-up restores consistency → `projectionLagEvents` returns to 0
+- Auto-catch-up respects `PROJECTION_AUTO_CATCHUP_MAX_LAG` bound
+- CI test verifies the full recovery path
+
+### References
+- `backend/src/services/projectionEngine.js` — `rebuildAllProjections`, `projectionLagEvents`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #019 — Backend: CSRF token rotation with method+path binding and replay prevention
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/security`, `priority/high`, `effort/medium`
+
+### Summary
+The backend CSRF middleware has test coverage (`backend/src/routes/csrf.test.js`) but uses single-use-per-session tokens with no rotation. If a token is leaked (e.g., via `Referer` header), the attacker can use it for the session's duration. The recent commit "replace per-request CSP nonce with cache-safe SHA-256 hash" demonstrates awareness of token-replay attacks but CSRF rotation was not addressed.
+
+### Problem Statement
+1. **Session-lifetime replay**: a leaked CSRF token works until the session expires.
+2. **No binding**: the same token works for any endpoint and any method.
+
+### Objectives
+- Implement token rotation: issue a new CSRF token after each successful validated request
+- Bind each token to the specific HTTP method + path it was issued for
+- Store used tokens in Redis with a short TTL (5 minutes) to prevent replay of rotated tokens
+
+### Scope
+- `backend/src/middleware/csrf.js` (or wherever csrf is implemented), `backend/src/routes/csrf.test.js`
+
+### Acceptance Criteria
+- Unit test for token rotation, replay test (old token rejected after rotation), binding test (token for POST rejected on PUT)
+- No regression on existing CSRF tests
+
+### References
+- `backend/src/routes/csrf.test.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #020 — Backend: Implement circuit-breaker integrated retry for the Stellar Horizon/RPC client
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/reliability`, `priority/high`, `effort/medium`
+
+
+---
+## Issue #020 — Backend: Implement circuit-breaker integrated retry for the Stellar Horizon/RPC client
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/reliability`, `priority/high`, `effort/medium`
+
+### Summary
+`backend/src/services/stellar.js` exports `rpcBreaker` (a `CircuitBreaker` instance) and `withRetry` but the `withRetry` function uses a generic retry wrapper that retries any error — including non-transient failures. `circuitBreaker.js` implements a clean state machine but is not universally integrated across all Stellar RPC calls. `sorobanEventService.js` has its own `withRetry` wrapper, `recurringKeeper.js` uses `simulateTransactionWithRetry`, and the `turrets.js` file has no retry at all.
+
+### Problem Statement
+1. **Inconsistent retry**: three different retry implementations with no shared policy.
+2. **No circuit breaker on Horizon calls**: the Horizon SSE stream (`indexerService.js`) does not use `rpcBreaker`.
+3. **Non-transient errors retried**: `withRetry` may exhaust all allocates on a permission error.
+
+### Objectives
+- Unify all Stellar RPC/Horizon calls under `stellar.js`'s circuit breaker + retry combination
+- `withRetry` must distinguish transient (5xx, network error, timeout) from non-transient (4xx, bad request) and not retry the latter
+- Add Prometheus metrics for RPC call latency and failures per endpoint
+
+### Scope
+- `backend/src/services/stellar.js` — unified retry, `circuitBreaker.js` — integrate across all callers
+- `backend/src/services/sorobanEventService.js`, `backend/src/services/recurringKeeper.js`, `backend/src/services/turrets.js` — adopt unified retry
+
+### Acceptance Criteria
+- Mock RPC failures, verify retry with backoff on 5xx, no retry on 4xx
+- Circuit breaker opens after 5 consecutive failures, half-opens after cooldown
+- Tests pass with the unified implementation
+
+### References
+- `backend/src/services/stellar.js`, `backend/src/services/circuitBreaker.js`, `backend/src/services/sorobanEventService.js`
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #021 — Backend: Graceful degradation for the CO₂ verification pipeline with per-source circuit breakers
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/reliability`, `priority/medium`, `effort/medium`
+
+### Summary
+`backend/src/services/co2Verifier.js` queries Gold Standard, Verra, and Global Forest Watch APIs, falling back to static `CATEGORY_BENCHMARKS` and IPCC emission factors. If any of these APIs are down or rate-limited, the verification cron (weekly, via pg-boss) fails silently for affected projects. There's no retry logic, no partial-degradation mode, and no alert when a data source is persistently unavailable. The `circuitBreaker.js` utility exists but is not used by this service.
+
+### Problem Statement
+1. **Silent degradation**: API failures produce `co2_verification_runs` rows with errors but no alarm.
+2. **No circuit breaking**: a rate-limited API is hammered every weekly run.
+
+### Objectives
+- Integrate per-source circuit breakers (Gold Standard, Verra, GFW) using the existing `CircuitBreaker` class
+- Implement fallback verification using only available sources with a `degraded: true` flag
+- Add Prometheus counter `indigopay_co2_verification_source_errors` per source
+- Add Alertmanager rule firing when any source has >3 consecutive failures
+
+
+### Problem Statement
+1. **Silent degradation**: API failures produce `co2_verification_runs` rows with errors but no alarm.
+2. **No circuit breaking**: a rate-limited API is hammered every weekly run.
+
+### Objectives
+- Integrate per-source circuit breakers (Gold Standard, Verra, GFW) using the existing `CircuitBreaker` class
+- Implement fallback verification using only available sources with a `degraded: true` flag
+- Add Prometheus counter `indigopay_co2_verification_source_errors` per source
+- Add Alertmanager rule firing when any source has >3 consecutive failures
+
+### Scope
+- `backend/src/services/co2Verifier.js`, `backend/src/services/circuitBreaker.js`
+- `monitoring/alert-rules.yml` — new rule
+
+### Acceptance Criteria
+- Mock API failures, verify degraded verification still produces results
+- Verify circuit breaker opens/closes correctly and metrics increment
+- Config: `CO2_VERIFIER_CIRCUIT_BREAKER_THRESHOLD`, `CO2_VERIFIER_CIRCUIT_BREAKER_TIMEOUT_MS`
+
+### References
+- `backend/src/services/co2Verifier.js`, `backend/src/services/circuitBreaker.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #022 — Backend: Add migration linting to CI for backward-incompatible database changes
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/ci`, `priority/medium`, `effort/medium`
+
+
+---
+## Issue #022 — Backend: Add migration linting to CI for backward-incompatible database changes
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/ci`, `priority/medium`, `effort/medium`
+
+### Summary
+The backend has a `migration-policy.test.js` (referenced in the repo) that validates migration naming conventions. There's no automated detection of backward-incompatible migration patterns: DROP COLUMN, RENAME COLUMN, changing a column type, removing a NOT NULL constraint — all of which can cause downtime during rolling deployments. The migration files in `backend/src/db/migrations/` follow a numbered convention and the `migrate.js` runner applies them in order.
+
+### Problem Statement
+1. **Downtime risk**: destructive operations slip through code review.
+2. **No CI gate**: nothing parses migration SQL for dangerous patterns.
+
+### Objectives
+- Implement a migration linter (Jest test or standalone script) that parses SQL migration files and flags:
+  - destructive operations (DROP, RENAME)
+  - type changes that may lose data
+  - missing CONCURRENTLY on index creation
+  - missing IF NOT EXISTS on CREATE operations
+  - long-running operations without `lock_timeout`
+
+### Scope
+- Extend `backend/__tests__/migration-policy.test.js`, new `scripts/lint-migrations.js`
+- CI: add `npm run migration:lint` step to `ci.yml`
+
+### Acceptance Criteria
+- Linter flags a sample bad migration in tests
+- Existing migrations pass the linter (or documented exceptions)
+
+### References
+- `backend/src/db/migrations/`, `backend/src/db/migrate.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #023 — Backend: Redis Sentinel/failover support for cache, session, idempotency, and Socket.IO layers
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/reliability`, `priority/high`, `effort/large`
+
+### Summary
+The backend connects to Redis (`backend/src/services/redis.js`) for caching, session storage, idempotency keys, and the Socket.IO adapter. The connection is configured via a single `REDIS_URL` with no sentinel, cluster, or failover support. If Redis goes down, cache goes cold and Socket.IO rooms disconnect (admin real-time features break).
+
+### Problem Statement
+1. **Single point of failure**: a Redis restart causes socket disconnects and cold cache.
+2. **No failover**: no automatic reconnection to a promoted replica.
+
+### Objectives
+- Accept `REDIS_SENTINELS` (comma-separated host:port list) and `REDIS_SENTINEL_MASTER_NAME` env vars
+- Configure `ioredis` with sentinel support
+- Handle sentinel failover events gracefully (log, emit metric, reconnect)
+- Fall back to single-instance `REDIS_URL` when sentinels are unset
+
+### Scope
+- `backend/src/services/redis.js`, `backend/src/config/env.js`
+- Tests with `redis-memory-server` or a dockerized sentinel cluster
+
+### Acceptance Criteria
+- Automatic failover reconnection verified in integration test
+- Backward-compatible: single-instance config unchanged when sentinels unset
+
+### References
+- `backend/src/services/redis.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #024 — Backend: Slow-query detection with automatic EXPLAIN logging and baseline histogram
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/performance`, `priority/medium`, `effort/medium`
+
+
+---
+## Issue #024 — Backend: Slow-query detection with automatic EXPLAIN logging and baseline histogram
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/performance`, `priority/medium`, `effort/medium`
+
+### Summary
+The SLO requires p95 < 500ms. Leaderboard (`GET /api/leaderboard`) and donation history (`GET /api/donations/project/:id`) degrade under load. There's no automated slow-query detection beyond PostgreSQL's `log_min_duration_statement`. The `analyticsQueryPlans.integration.test.js` test suggests awareness of query performance but there's no production instrumentation.
+
+### Problem Statement
+1. **No slow-query attribution**: when p95 degrades, there's no way to identify the exact SQL.
+2. **No baseline**: no latency histogram exists to compare regressions.
+
+### Objectives
+- Implement a pg query wrapper that:
+  - logs any query taking > `SLOW_QUERY_THRESHOLD_MS` (default 200ms) with full query text and parameters
+  - runs EXPLAIN ANALYZE on the query and logs the plan
+  - increments a Prometheus counter `db_slow_queries_total` with the query operation label
+  - samples 1% of fast queries to build a baseline latency histogram
+
+### Scope
+- `backend/src/db/queryWrapper.js` (new), integrate in `backend/src/db/pool.js`
+
+### Acceptance Criteria
+- Mock slow query, verify EXPLAIN log output, verify metric increment
+- Config: `SLOW_QUERY_THRESHOLD_MS`, `SLOW_QUERY_SAMPLE_RATE`
+
+### References
+- `backend/src/db/pool.js`, `backend/src/services/analyticsService.js`
+
+### References
+- `backend/src/db/pool.js`, `backend/src/services/analyticsService.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #025 — Backend: Add OpenTelemetry distributed tracing across all service boundaries
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/observability`, `priority/medium`, `effort/large`
+
+### Summary
+The backend uses Sentry for error tracking and Prometheus for metrics, but lacks distributed tracing. When a donation request takes 800ms (exceeding p95), there's no way to trace which component contributed the latency: Stellar RPC, database query, webhook enqueue, projection update, or cache write.
+
+### Problem Statement
+1. **No cross-component latency attribution**: the donation pipeline spans Horizon, RPC, pg-boss, and projections.
+2. **No trace correlation**: `X-Request-Id` header exists but is not correlated with spans.
+
+### Objectives
+- Instrument Express routes with OTel auto-instrumentation
+- Add manual spans for Stellar Horizon calls, pg-boss job enqueue/dequeue, Redis operations, and external API calls
+- Preserve `X-Request-Id` as the trace ID for correlation with Pino logs
+- Export to a configurable OTLP endpoint (`OTEL_EXPORTER_OTLP_ENDPOINT`)
+
+### Scope
+- `backend/src/server.js` — OTel middleware, `backend/src/services/stellar.js`, `backend/src/services/webhookQueue.js`, `backend/src/services/projectionEngine.js`
+
+### Acceptance Criteria
+- Span context propagates across async boundaries; trace ID matches `X-Request-Id`
+- Config: `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `OTEL_SAMPLE_RATE`
+
+### References
+- `backend/src/server.js`, `backend/src/services/stellar.js`, `backend/src/middleware/requestId.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #026 — Backend: Rate-limit aware request queuing with priority lanes
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/performance`, `priority/medium`, `effort/medium`
+
+### Summary
+The rate limiter (`backend/src/middleware/rateLimiter.js`) returns 429 when limits are exceeded. For donation recording (`POST /api/donations`), a 429 means the donor's transaction hash may not be recorded. During high-traffic events (campaign launches, matching rounds), the rate limiter becomes a hard wall, and the `turrets.js` matching path is also subject to the same limiter.
+
+### Problem Statement
+1. **Hard 429 wall**: legitimate donation requests are rejected during campaign peaks.
+2. **No prioritization**: leaderboard reads compete with donation writes.
+
+### Objectives
+- When rate limit is approaching (e.g. 80% consumed), place requests in a priority queue with configurable timeout instead of rejecting
+- Critical endpoints (donations) get higher priority than reads
+- Requests that time out in queue still get 429
+
+### Scope
+- `backend/src/middleware/rateLimiter.js`, new `backend/src/services/requestQueue.js`
+
+### Acceptance Criteria
+- Load test simulating rate-limit approach, verify queued requests succeed, verify priority ordering
+- Config: `RATE_LIMIT_QUEUE_ENABLED`, `RATE_LIMIT_QUEUE_TIMEOUT_MS`, `RATE_LIMIT_QUEUE_MAX_SIZE`
+
+### References
+- `backend/src/middleware/rateLimiter.js`, `backend/src/middleware/rateLimitConfig.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #027 — Backend: Public audit-chain verification endpoints
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/feature`, `priority/medium`, `effort/medium`
+
+### Summary
+The audit chain (`backend/src/services/auditChain.js`) creates a hash chain for database rows; each row's hash includes the previous row's hash, creating a tamper-evident log. `auditRetention` manages retention. There's no public endpoint for external parties to verify the chain's integrity. The recent commits "re-anchor audit hash chain so verification survives retention" show the chain has a verification story internally, but it's not exposed.
+
+### Problem Statement
+1. **No public verifiability**: a third-party auditor cannot independently confirm chain integrity.
+2. **No chain segment reads**: no way to fetch a chain segment with hashes for offline recomputation.
+
+### Objectives
+- Implement `GET /api/audit/verify/:table` and `GET /api/audit/chain/:table?from=X&to=Y` endpoints
+- Return chain segments with hashes so anyone can recompute and verify
+- Rate-limit but do NOT require authentication (public verifiability is the point)
+
+### Scope
+- New `backend/src/routes/audit.js`, `backend/src/services/auditChain.js`
+
+### Acceptance Criteria
+- Verify chain segment integrity, verify tampered chain detection, verify pagination
+- Rate-limited public access without auth
+
+### References
+- `backend/src/services/auditChain.js`, `backend/src/services/auditAnchor.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #028 — Backend: Input sanitization middleware for Unicode/homoglyph/HTML injection across all text fields
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/security`, `priority/medium`, `effort/medium`
+
+### Summary
+The Zod schemas (`backend/src/validators/schemas.js`) validate types and lengths but don't sanitize against injection or XSS vectors: Unicode homoglyph attacks (confusable characters), bidirectional text override characters (U+202E), zero-width joiners, HTML/JavaScript fragments in text fields that could be stored and later rendered by the frontend. Project names, descriptions, profile bios, update bodies, and donation messages all accept arbitrary Unicode.
+
+### Problem Statement
+1. **XSS vector**: stored HTML/JS fragments can execute in the frontend if rendered unescaped.
+2. **Spoofing**: homoglyph project names can impersonate real projects in the donation feed.
+3. **Bidi override**: U+202E can reorder displayed text and disguise malicious links.
+
+### Objectives
+- Implement a shared `sanitize` Zod transform that:
+  - strips bidirectional control characters
+  - normalizes Unicode to NFC
+  - strips HTML tags from plain-text fields
+  - truncates at the schema-defined max length rather than rejecting
+- Apply to all text fields in `backend/src/validators/schemas.js`
+
+### Scope
+- `backend/src/validators/schemas.js`, new `backend/src/validators/sanitize.js`
+
+### Acceptance Criteria
+- Unit tests for each sanitization rule: NFC normalization, HTML stripping, bidi removal
+- Server-side only; frontend sanitization is defense-in-depth but not required
+
+### References
 - `backend/src/validators/schemas.js`
-- `backend/src/validators/schemas.test.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #029 — Backend: Unified pg-boss DLQ monitoring with reprocess endpoint and alerting
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/reliability`, `priority/medium`, `effort/medium`
+
+### Summary
+pg-boss dead-letter queues accumulate failed jobs across webhook deliveries, AI summaries, profile enrichment, CO₂ verification, and digest generation. `webhookQueue` has its own DLQ, `indexerDLQWorker.js` handles indexer dead letters, and `sorobanEventService.js` quarantines poison events. There's no unified DLQ monitoring, no automatic reprocessing strategy, and no alert when the DLQ grows beyond a threshold. The `queueMetrics.js` service tracks queue sizes but not DLQ health.
+
+### Problem Statement
+1. **Siloed DLQs**: each queue manages dead letters independently with no unified view.
+2. **No reprocessing UI**: operators can't manually retry a specific failed job without DB access.
+3. **No alerting**: DLQ growth is invisible until it impacts delivery.
+
+### Objectives
+- Implement `GET /api/admin/queue/dlq` listing DLQ entries across all queues with age, retry count, and error message
+- Implement `POST /api/admin/queue/dlq/reprocess` to retry specific failed jobs
+- Add Prometheus gauge `pgboss_dlq_size` per queue
+- Add Alertmanager rule when any DLQ exceeds 50 entries
+
+### Scope
+- `backend/src/services/queueMetrics.js` (extend), `backend/src/routes/admin.js` (DLQ endpoints)
 
 ### Acceptance Criteria
-- Control characters stripped from donation messages
-- Multiple spaces collapsed to single space
-- Messages trimmed
-- Test verifies the transformation
-
-### Testing Requirements
-- Unit test for schema refinement
-
-### CI Requirements
-- `npm run lint`
-- `npm test`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Message sanitization added to schema
-- [ ] Test added
-- [ ] CI green
+- Verify DLQ listing, reprocessing, and metric emission
+- Config: `PGBOSS_DLQ_ALERT_THRESHOLD` (default 50)
 
 ### References
-- `backend/src/validators/schemas.js` — `donationSchema`
-- `backend/src/validators/schemas.test.js`
+- `backend/src/services/queueMetrics.js`, `backend/src/routes/admin.js`, `backend/src/services/indexerDLQWorker.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #030 — Backend: ConsistentHash-aware webhook delivery for sharded receivers
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/architecture`, `priority/medium`, `effort/medium`
+
+### Summary
+`backend/src/services/consistentHash.js` implements a consistent-hash ring but the webhook delivery path (`webhookQueue.js`) does not use it. If the backend ever scales to multiple instances, webhook deliveries are not pinned to a specific instance, which can cause duplicate deliveries or out-of-order delivery when multiple workers pick up the same job. The existence of `consistentHash.js` suggests it was built for a purpose (session stickiness, key routing) that is not yet wired in.
+
+### Problem Statement
+1. **Unused infrastructure**: `consistentHash.js` has no production caller.
+2. **Delivery ordering risk**: multiple workers can process the same endpoint's deliveries concurrently.
+
+### Objectives
+- Wire consistent hashing into webhook delivery so that deliveries for the same receiver (endpoint) are processed by a single worker
+- Preserve the existing 6-attempt backoff and DLQ behavior
+- Keep the change backward-compatible for single-instance deployments
+
+### Scope
+- `backend/src/services/webhookQueue.js`, `backend/src/services/consistentHash.js`
+
+### Acceptance Criteria
+- Two simulated workers process the same endpoint's jobs without overlap
+- Existing webhook delivery tests still pass
+
+### References
+- `backend/src/services/consistentHash.js`, `backend/src/services/webhookQueue.js`
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #031 — Frontend: Implement Service Worker with offline-first donation queue and Background Sync
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/feature`, `priority/high`, `effort/large`
+
+### Summary
+The frontend requires an active internet connection to sign and submit Stellar transactions. Donors in low-connectivity areas (common for climate projects) cannot donate. The `frontend/components/OfflineFallback.tsx` and `ConnectivityBanner.tsx` components detect offline state but don't queue donations, and `frontend/hooks/useOnlineStatus.ts` only toggles UI — no donation queue exists.
+
+### Problem Statement
+1. **No offline donation path**: donors in low-connectivity areas are excluded.
+2. **Offline detection is UI-only**: `ConnectivityBanner` shows a banner but doesn't buffer work.
+
+### Objectives
+- Implement a Service Worker with offline-page caching for the project shell
+- Implement an IndexedDB-backed donation queue (`frontend/lib/offlineQueue.ts` or hook) storing unsigned transaction parameters
+- Integrate Background Sync API to submit queued donations when connectivity returns
+- Show push notification when a queued donation is confirmed on-chain
+
+### Scope
+- `frontend/public/sw.js` (new), `frontend/lib/offlineQueue.ts` (new), `frontend/pages/_app.tsx` (register SW)
+- `frontend/hooks/useOnlineStatus.ts` (extend), `frontend/components/OfflineFallback.tsx` (extend)
+
+### Acceptance Criteria
+- E2E test: simulate offline → queue donation → go online → verify submission
+- SW must not store private keys; only unsigned transaction parameters
+
+### References
+- `frontend/components/OfflineFallback.tsx`, `frontend/hooks/useOnlineStatus.ts`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #032 — Frontend: Virtualized donation feed with infinite scroll and cursor-based pagination
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/performance`, `priority/medium`, `effort/medium`
+
+### Summary
+The donation feed (`frontend/components/DonationFeed.tsx`, `LiveDonationTicker.tsx`) renders all visible donations as DOM nodes. Socket.IO events push new donations in real-time, and the feed grows without bound during a session. For a popular project with 5,000+ donations, the DOM node count causes scroll jank and memory pressure.
+
+### Problem Statement
+1. **DOM bloat**: unbounded DOM growth during active sessions.
+2. **No pagination**: the feed loads all donations at mount.
+
+### Objectives
+- Implement `@tanstack/virtual` or `react-window` for virtualized list rendering
+- Integrate cursor-based pagination from the API
+- Infinite scroll loading older pages on scroll-up
+- Real-time items appended at the top without disrupting scroll position
+
+### Scope
+- `frontend/components/DonationFeed.tsx`, `frontend/components/LiveDonationTicker.tsx`
+- A11y: virtualized list must be keyboard-navigable and screen-reader accessible
+
+### Acceptance Criteria
+- Unit test for virtual list rendering, E2E test for infinite scroll loading
+- Memory profile shows bounded DOM node count
+
+### References
+- `frontend/components/DonationFeed.tsx`, `frontend/components/LiveDonationTicker.tsx`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #033 — Frontend: E2E encryption for donation message field using project's Stellar public key
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/feature`, `priority/medium`, `effort/medium`
+
+### Summary
+Donation messages are stored in plaintext and are publicly visible in the donation feed (`DonationFeed.tsx`). Donors who want to send a private message to the project owner have no option to do so privately. The frontend's `DonateForm.tsx` accepts a message field without any encryption option.
+
+### Problem Statement
+1. **No private messaging**: all donation messages are public on-chain/off-chain.
+2. **Donor friction**: donors may avoid adding a message because it's public.
+
+### Objectives
+- Add a "Private message" checkbox to `DonateForm.tsx`
+- When checked, encrypt the message using the project wallet's Stellar public key via `nacl.box` (Curve25519-XSalsa20-Poly1305)
+- Store the ciphertext in the `message` field with an `encrypted: true` flag
+- Only the project wallet owner (who holds the corresponding secret key) can decrypt
+
+### Scope
+- `frontend/lib/encryption.ts` (new), `frontend/components/DonateForm.tsx`
+- Backend: message column already accepts binary; flag via existing JSON or new column
+
+### Acceptance Criteria
+- Unit test for encrypt/decrypt roundtrip, backward compatibility with plaintext messages
+- The encryption key is the project's public key — donor does not need the project's secret key
+
+### References
+- `frontend/components/DonateForm.tsx`, `frontend/components/DonationFeed.tsx`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #034 — Frontend: Full keyboard-navigation and screen-reader WCAG 2.1 AA audit
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/accessibility`, `priority/high`, `effort/large`
+
+### Summary
+The frontend has `@axe-core/playwright` in E2E tests and `jest-axe` for unit-level checks, plus `frontend/components/SkipToContent.tsx`. However, missing coverage: focus management during route transitions (Next.js client-side navigation doesn't announce page changes), keyboard trap prevention in modals and drawers, ARIA labels on dynamically-updated content (`LiveDonationTicker.tsx`, `LeaderboardTable.tsx`), color contrast in dark mode (`ThemeToggle.tsx`), focus indicators, and form error announcement via `aria-live` regions. The `a11y-nightly.yml` workflow exists but likely only runs smoke tests.
+
+### Problem Statement
+1. **Partial audit**: only ~30% of WCAG 2.1 AA violations are caught.
+2. **Dynamic content**: real-time components have no ARIA live-region updates.
+3. **Focus management**: route transitions are silent to screen readers.
+
+### Objectives
+- Add `@axe-core/playwright` checks to every E2E page test
+- Fix all violations found
+- Implement focus management on route transitions, keyboard trap prevention in all modals
+- Add `aria-live` regions to `LiveDonationTicker`, `LeaderboardTable`
+- Extend `a11y-nightly.yml` to run full axe scan against all pages
+
+### Scope
+- `frontend/components/**/*.tsx`, `frontend/pages/**/*.tsx`, `frontend/e2e/**/*.spec.ts`
+- `.github/workflows/a11y-nightly.yml`
+
+### Acceptance Criteria
+- Zero critical/medium axe violations across all pages in CI
+- Keyboard navigation through all interactive elements without trap
+
+### References
+- `frontend/components/SkipToContent.tsx`, `.github/workflows/a11y-nightly.yml`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #035 — Frontend: Refactor server-state management with `@tanstack/react-query` and optimistic updates
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/performance`, `priority/medium`, `effort/large`
+
+### Summary
+The frontend uses a mix of `useEffect` + `fetch` for server state with no optimistic updates and no offline support. The donation flow: user signs in Freighter → transaction submitted to Stellar → frontend calls `POST /api/donations` → waits for 201 → updates UI. This means a 2-3 second delay between clicking "Donate" and seeing confirmation. The `frontend/hooks/queries.ts` file suggests some query abstraction but is minimal. `frontend/hooks/useAsyncData.ts` is a generic async wrapper without caching.
+
+### Problem Statement
+1. **No optimistic UI**: every mutation waits for the server response before updating the UI.
+2. **No stale-while-revalidate**: every page mount refetches data unconditionally.
+3. **Manual cache management**: each component manages its own cache with `useState`.
+
+### Objectives
+- Implement `@tanstack/react-query` with:
+  - optimistic mutation updates (show donation in feed immediately, rollback on error)
+  - IndexedDB persistence for offline resilience
+  - automatic background refetch on window focus
+  - mutation retry with exponential backoff
+- Convert incrementally, starting with donations
+
+### Scope
+- New `frontend/lib/queryClient.ts`, update all data-fetching hooks in `frontend/hooks/`, update mutation callers
+
+### Acceptance Criteria
+- Unit test for optimistic update + rollback
+- E2E test for offline → online flow
+- No regression on existing data-fetching behavior
+
+### References
+- `frontend/hooks/queries.ts`, `frontend/hooks/useAsyncData.ts`, `frontend/components/DonationForm.tsx`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #036 — Mobile: Biometric-secured transaction signing with hardware-backed key storage
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/mobile`, `type/security`, `priority/high`, `effort/large`
+
+### Summary
+The mobile app uses `expo-secure-store` (`mobile/lib/secureStore.ts`) for sensitive-data storage and `useBiometricAuth` (`mobile/hooks/`). However, Stellar transaction signing happens in JavaScript using the `stellar-sdk` Keypair class — the secret key must be loaded into JS memory to sign. On a compromised or jailbroken device, this secret key is extractable. The `mobile/lib/wallet/` directory contains wallet-management code.
+
+### Problem Statement
+1. **Key in JS memory**: the Stellar secret key is exposed to any JS-memory scanner.
+2. **No hardware signing**: neither iOS Secure Enclave nor Android Keystore is used for Ed25519 operations.
+
+### Objectives
+- Store the Stellar secret key in iOS Secure Enclave / Android Keystore (via `expo-crypto` or native module)
+- Perform Ed25519 signing inside the HSM so the secret key never enters JS memory
+- `useBiometricAuth` hook gates access to the signing operation
+
+### Scope
+- `mobile/lib/secureStore.ts`, new `mobile/lib/stellarSigner.ts`, `mobile/hooks/useBiometricAuth.ts`
+
+### Acceptance Criteria
+- Signing succeeds with valid biometric; fails with invalid biometric
+- Verify secret key never appears in JS heap (memory profiling test)
+
+### References
+- `mobile/lib/secureStore.ts`, `mobile/lib/wallet/`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #037 — Mobile: Offline transaction building with QR-based air-gapped signing
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/mobile`, `type/feature`, `priority/medium`, `effort/medium`
+
+### Summary
+The mobile app targets donors where internet connectivity is intermittent. `mobile/lib/offlineCache.ts` and `mobile/lib/connectivity.ts` handle offline data caching and connectivity detection, but donations still require an active connection to Horizon for account sequence number lookup and transaction submission. The `mobile/lib/offlineQueue.ts` file exists for queueing actions but does not handle Stellar transaction building.
+
+### Problem Statement
+1. **Online-only donations**: sequence-number lookup requires connectivity.
+2. **No air-gapped signing**: no way to sign offline and submit later via another device.
+
+### Objectives
+- Cache the account sequence number and latest ledger from the last online state
+- Allow building and signing transactions offline (the sequence number may be stale — handle this gracefully on submission)
+- Generate a QR code containing the signed transaction XDR
+- Provide a "Submit Later" queue that submits when connectivity returns
+
+### Scope
+- `mobile/lib/offlineTx.ts` (new), `mobile/lib/offlineCache.ts`, `mobile/lib/offlineQueue.ts`
+- Edge cases: sequence number staleness → tx rejected, retry with new sequence
+
+### Acceptance Criteria
+- Build transaction offline, verify XDR is valid, simulate online submission
+- Stale sequence rejected with clear retry UX
+
+### References
+- `mobile/lib/offlineCache.ts`, `mobile/lib/connectivity.ts`, `mobile/lib/offlineQueue.ts`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #038 — Mobile: Deep-link routing for donation flows with universal-link fallback
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/mobile`, `type/feature`, `priority/medium`, `effort/medium`
+
+### Summary
+The mobile app uses `expo-router` for file-based navigation and supports deep links for wallet connections (`freighter://tx?xdr=...`). However, project donation deep links (e.g., `indigopay://donate/project-001?amount=100`) are not implemented. `mobile/app/` directories suggest the app has donation and project pages but no deep-link registration. The `mobile/.well-known/` directory exists for universal link configuration.
+
+### Problem Statement
+1. **No project deep links**: scanning a project QR code at an event doesn't open the app to the donation screen.
+2. **No universal links**: users without the app installed see a broken link.
+
+### Objectives
+- Implement `indigopay://donate/:projectId` with optional `?amount=X` query param
+- Implement `indigopay://project/:projectId` for the project detail page
+- Add universal link (`https://stellarindigopay.com/donate/:projectId`) as fallback
+- Configure `app.json` associated domains
+
+### Scope
+- `mobile/app/donate/[projectId].tsx` (new), `mobile/app.config.ts`
+- `mobile/.well-known/apple-app-site-association` (new)
+
+### Acceptance Criteria
+- Deep link integration test, pre-filled amount verified, fallback to web verified
+
+### References
+- `mobile/app/`, `mobile/.well-known/`, `mobile/app.json`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #039 — Extension: CSP compliance for Manifest V3 with inline-script removal
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/extension`, `type/security`, `priority/high`, `effort/medium`
+
+### Summary
+The Chrome Web Store enforces stricter Manifest V3 CSP requirements. The extension's `extension/manifest.json` specifies `manifest_version: 3` but `extension/popup.html` and `extension/settings.html` may contain inline scripts or event handlers violating CSP. The Firefox manifest (`manifest.firefox.json`) has different CSP rules. `extension/src/` contains the bundled source, and `extension/webpack.config.js` handles bundling.
+
+### Problem Statement
+1. **CSP violation risk**: inline scripts may cause Chrome Web Store rejection.
+2. **Dual-manifest divergence**: Firefox and Chrome manifests may have different CSP policies.
+
+### Objectives
+- Audit `popup.html`, `settings.html` for inline scripts and event handlers (`onclick`, `onload`)
+- Move all logic to bundled JS files loaded via `<script src="...">`
+- Add strict CSP: `"content_security_policy": { "extension_pages": "script-src 'self'; object-src 'none'" }` to both manifests
+- Add CSP lint step to `.github/workflows/extension.yml`
+
+### Scope
+- `extension/popup.html`, `extension/settings.html`, `extension/manifest.json`, `extension/manifest.firefox.json`
+
+### Acceptance Criteria
+- CSP validation test (parse manifest, verify no inline-script allowances)
+- Chrome Web Store compliance review passes
+
+### References
+- `extension/manifest.json`, `extension/manifest.firefox.json`, `extension/popup.html`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #040 — Extension: Configurable donation presets with keyboard shortcuts
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/extension`, `type/feature`, `priority/low`, `effort/small`
+
+### Summary
+The extension popup (`extension/popup.html`, `extension/src/popup.ts`) requires the user to enter a custom donation amount each time. Power users (repeat donors) would benefit from configurable preset amounts with keyboard shortcuts. `extension/settings.html` and `extension/src/settings.ts` provide a settings UI ready for extension.
+
+### Problem Statement
+1. **No presets**: every donation requires manual amount entry.
+2. **No keyboard shortcuts**: no power-user efficiency for the extension surface.
+
+### Objectives
+- Settings page with 4 configurable preset amounts stored in `chrome.storage.sync`
+- Popup UI showing preset buttons ("10 XLM", "50 XLM", "100 XLM", "Custom")
+- Keyboard shortcuts: Ctrl+1 through Ctrl+4 for presets, Enter to confirm
+- "Quick Donate" mode: one-click donation of default preset when a Stellar address is detected
+
+### Scope
+- `extension/src/popup.ts`, `extension/src/settings.ts`, `extension/settings.html`, `extension/popup.html`
+
+### Acceptance Criteria
+- Unit test for preset storage/retrieval, E2E test for keyboard shortcut behavior
+- Presets labeled with XLM amounts and approximate fiat values
+
+### References
+- `extension/src/popup.ts`, `extension/src/settings.ts`, `extension/popup.html`
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #041 — CI/CD: Implement automated canary analysis with a real `AnalysisTemplate` for Argo Rollouts
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/devops`, `type/feature`, `priority/high`, `effort/large`
+
+### Summary
+`gitops/argo-rollouts-canary.yaml` sets up Argo Rollouts for canary deployments with Prometheus analysis, but the file references an `AnalysisTemplate` that does not exist in `gitops/`. The canary promotion therefore relies on manual review or default step logic rather than automated success criteria.
+
+### Problem Statement
+1. **Missing AnalysisTemplate**: canary analysis is not actually configured.
+2. **No automated rollback**: canary regressions require human detection.
+
+### Objectives
+- Create a real `AnalysisTemplate` resource in `gitops/`
+- Query Prometheus for error rate and p95 latency of canary vs stable pods over a 10-minute window
+- Automated rollback if canary error rate exceeds 1.5x stable baseline or p95 increases by >20%
+- Add a Grafana dashboard panel showing canary-vs-stable metrics during rollout
+
+### Scope
+- `gitops/analysis-template.yaml` (new), `gitops/argo-rollouts-canary.yaml`
+- `monitoring/recording-rules.yml` — canary-specific recording rules
+
+### Acceptance Criteria
+- `helm template` dry-run validates both manifests
+- Manual canary test on staging verifies promotion/rollback based on analysis
+
+### References
+- `gitops/argo-rollouts-canary.yaml`, `monitoring/prometheus.yml`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #042 — CI/CD: Severity-gated SBOM vulnerability scanning with `.trivyignore` exceptions
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/devops`, `type/security`, `priority/high`, `effort/medium`
+
+### Summary
+The `.github/workflows/sbom.yml` generates an SBOM and `.github/workflows/image-scan.yml` runs Trivy, but there's no CI gate based on vulnerability severity. A critical CVE in a base image or npm dependency can be merged without blocking CI. A `.trivyignore` file exists but its semantics are not enforced as a reviewable process.
+
+### Problem Statement
+1. **No severity gate**: CRITICAL/HIGH CVEs don't fail CI.
+2. **No exception process**: `.trivyignore` entries aren't reviewed or time-boxed.
+
+### Objectives
+- Run Trivy with `--severity CRITICAL,HIGH --exit-code 1` in CI
+- Document `.trivyignore` exceptions with justification and review requirement
+- Add a weekly SBOM diff job comparing current SBOM against previous release, flagging new dependencies
+- Auto-create GitHub issues for new CRITICAL CVEs
+
+### Scope
+- `.github/workflows/image-scan.yml`, `.github/workflows/sbom.yml`, `.trivyignore`
+
+### Acceptance Criteria
+- CI fails on critical CVE; `.trivyignore` exceptions work as documented
+- New CVEs in `.trivyignore` require PR review
+
+### References
+- `.github/workflows/image-scan.yml`, `.github/workflows/sbom.yml`, `.trivyignore`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #043 — CI/CD: Post-deploy contract verification with invariant smoke tests on testnet
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/devops`, `type/testing`, `priority/medium`, `effort/medium`
+
+### Summary
+`.github/workflows/contract-deploy.yml` deploys contracts to testnet but does not verify post-deployment correctness beyond checking the deploy transaction succeeded. There's no automated verification that: (1) the deployed WASM hash matches the build artifact, (2) `initialize` was called with the correct admin set, (3) `register_project` succeeds, (4) `donate` succeeds and emits the expected event, (5) `get_global_stats` returns zero-state values.
+
+### Problem Statement
+1. **Deploy ≠ correct**: a successful deploy transaction doesn't prove the contract works.
+2. **No regression signal**: contract-breaking changes reach testnet without smoke verification.
+
+### Objectives
+- Implement a post-deploy verification script running a smoke-test sequence against the freshly deployed contract
+- Assert each step's outcome and event emissions
+- Fail the workflow if verification fails
+
+### Scope
+- `.github/workflows/contract-deploy.yml`, new `scripts/verify-deployment.sh`
+
+### Acceptance Criteria
+- Verification script runs automatically after deployment; fails workflow on mismatch
+
+### References
+- `.github/workflows/contract-deploy.yml`, `contracts/indigopay-contract/README.md`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #044 — CI/CD: k6 load-test regression detection with PR comments and baseline comparison
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/devops`, `type/ci`, `priority/medium`, `effort/medium`
+
+### Summary
+`scripts/load-test.js` k6 script enforces p95 < 500ms as a hard threshold. The load test only runs manually or in a CI smoke test (10 VUs, 10s). There's no automated regression detection: a PR that increases p50 from 82ms to 150ms (still below the 500ms threshold) merges without flagging the 83% degradation.
+
+### Problem Statement
+1. **No baseline comparison**: only hard thresholds, no relative regression detection.
+2. **Manual-only full runs**: 100 VU runs require an operator.
+
+### Objectives
+- Add a nightly load test run (100 VUs, 60s) posting results as a JSON artifact
+- Add a PR workflow comparing current results against the `main` baseline and posting a PR comment with the diff
+- Config: `LATENCY_REGRESSION_THRESHOLD_PCT` (default 20%) — PRs exceeding it get a warning comment but are not blocked
+
+### Scope
+- `.github/workflows/ci.yml` (nightly load-test job), new `.github/workflows/perf-regression.yml`
+
+### Acceptance Criteria
+- Verify regression comment appears on PR; baseline comparison logic tested
+
+### References
+- `scripts/load-test.js`, `.github/workflows/ci.yml`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #045 — CI/CD: Database restore drill with data-integrity checksum validation
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/devops`, `type/reliability`, `priority/high`, `effort/medium`
+
+### Summary
+`.github/workflows/restore-drill.yml` runs monthly and asserts row counts after restore. Row counts alone don't catch silent data corruption — a restore that truncates all `TEXT` columns to empty strings would pass the row-count check. `scripts/backup-db.sh` handles the backup (pg_dump + S3/GCS upload) but doesn't compute a checksum of canonical row data.
+
+### Problem Statement
+1. **Row count ≠ integrity**: silent corruption passes the drill.
+2. **No checksum**: backups have no content hash to compare against after restore.
+
+### Objectives
+- Compute SHA-256 of sorted, canonical-form row data for critical tables (donations, projects, donation_events) during backup
+- During restore drill, recompute checksums and compare against the backup checksum
+- Fail the drill and alert via the existing `RestoreDrillFailed` Alertmanager rule on mismatch
+- Add a `restore_drill_checksum_mismatch` Prometheus gauge
+
+### Scope
+- `.github/workflows/restore-drill.yml`, `.github/workflows/database-backup.yml`, new `scripts/verify-restore-checksum.sh`
+
+### Acceptance Criteria
+- Intentional-corruption test (alter one row after restore) detected by checksum mismatch
+
+### References
+- `.github/workflows/restore-drill.yml`, `scripts/backup-db.sh`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #046 — Monitoring: Synthetic transaction monitoring with on-chain donation simulation
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/monitoring`, `type/observability`, `priority/high`, `effort/large`
+
+### Summary
+All existing monitoring (Prometheus metrics, Sentry errors, Alertmanager rules) is passive. If all real users are sleeping (off-peak) and the Soroban RPC goes down, the first alert fires when the first real donation fails — potentially hours later. The `monitoring/` directory has alert rules but no synthetic monitoring.
+
+### Problem Statement
+1. **Passive-only detection**: outages are detected by user impact, not proactive checks.
+2. **No end-to-end signal**: the full donation path (build tx → sign → submit → verify on-chain event → verify backend recording) is unmonitored.
+
+### Objectives
+- Implement a synthetic monitoring agent: dedicated Stellar testnet account with pre-funded XLM
+- Cron job (every 5 minutes) executing a full donation flow
+- Prometheus gauge `synthetic_donation_success` (1 = last attempt succeeded, 0 = failed)
+- `synthetic_donation_duration_seconds` histogram
+- Alertmanager rule firing on 2 consecutive synthetic-check failures
+
+### Scope
+- New `scripts/synthetic-monitor.js`, `monitoring/alert-rules.yml` (new alert), `.github/workflows/synthetic-monitor.yml`
+
+### Acceptance Criteria
+- Verify synthetic donation succeeds end-to-end; verify alert fires on failure
+- Synthetic donor account funded automatically from faucet/pool
+
+### References
+- `monitoring/alert-rules.yml`, `backend/src/services/stellar.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #047 — Monitoring: Business-level metrics dashboard (donation volume, project health, donor retention)
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/monitoring`, `type/observability`, `priority/medium`, `effort/medium`
+
+### Summary
+Existing Grafana dashboards (`monitoring/grafana/`) focus on infrastructure (CPU, memory, latency, error rates). There's no business-level visibility: daily donation volume by project, donor retention cohort analysis, conversion rate (wallet-connect → donation), project health scores, AI summary generation costs, or CO₂ offset totals by category. The `monitoring/recording-rules.yml` has only infra rules.
+
+### Problem Statement
+1. **No business KPIs**: donation volume, retention, conversion are invisible in dashboards.
+2. **No precomputed metrics**: SQL-level business queries run ad hoc.
+
+### Objectives
+- Add Prometheus recording rules precomputing business metrics from the projection tables
+- New "Business Overview" Grafana dashboard: daily/monthly donation volume, active donors, top projects, retention cohorts
+- `business_metrics_exporter` cronjob querying Postgres and exposing Prometheus gauges
+
+### Scope
+- `monitoring/recording-rules.yml`, new `scripts/business-metrics-exporter.js`, new Grafana dashboard JSON
+
+### Acceptance Criteria
+- Metric values match database queries; dashboard renders
+- Aggregate metrics only — no individual donor data in Prometheus
+
+### References
+- `monitoring/recording-rules.yml`, `monitoring/grafana/`, `backend/src/services/analyticsService.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #048 — Contracts: Kani formal verification of contract-level state invariants
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/testing`, `priority/high`, `effort/large`
+
+### Summary
+The Kani verification scaffold exists at `contracts/indigopay-contract/verification/kani/` and the current harness (`verify_badge_threshold_disjointness`) only verifies basic arithmetic properties. It does not verify contract-level state invariants, and the escrow/oracle/attestation contracts have no Kani harness at all.
+
+### Problem Statement
+1. **Narrow harness**: only badge-threshold disjointness is proven.
+2. **No state invariants**: `GlobalTotalRaised == sum(project.total_raised)` and similar invariants are unproven.
+3. **No coverage of companion contracts**: escrow payout arithmetic and oracle TWAP math are unverified.
+
+### Objectives
+- Prove `GlobalTotalRaised == sum(project.total_raised for all projects)` with a Kani harness
+- Prove `DonationCount == number of DonationRecord entries`
+- Prove badge monotonicity (badge tier never decreases)
+- Prove escrow payout arithmetic: `compute_proportional_payout` never overflows and `sum(released) <= amount`
+- Prove oracle TWAP: weighted average never exceeds max observed price
+- Update `contracts/indigopay-contract/VERIFICATION.md`
+
+### Scope
+- `contracts/indigopay-contract/verification/kani/` — new harnesses
+- New harnesses for escrow and oracle contracts
+
+### Acceptance Criteria
+- `cargo kani --harness invariant_global_total` passes
+- Kani verification runs in CI (`contracts.yml`)
+
+### References
+- `contracts/indigopay-contract/verification/kani/src/lib.rs`, `contracts/indigopay-contract/VERIFICATION.md`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #049 — Cross-cutting: Dual-version webhook signing-secret rotation with `kid` header
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/security`, `priority/high`, `effort/medium`
+
+### Summary
+Webhook delivery signs payloads with HMAC-SHA256 using `signingSecretProvider` (`backend/src/services/signingSecretProvider.js`). The secret-rotation workflow exists (`.github/workflows/secret-rotation.yml`, `scripts/workflow/rotate_secrets.py` or similar) but there's no multi-version secret support in the signing provider. During rotation, there's a window where the old secret's signatures are no longer valid but the new secret hasn't propagated to all webhook receivers.
+
+### Problem Statement
+1. **Rotation gap**: signatures from the old secret become invalid before receivers learn the new one.
+2. **No versioning**: `signingSecretProvider` returns a single secret with no key ID.
+
+### Objectives
+- Dual-version signing: sign with both current and previous secret; include a `kid` (key ID) header in the signature
+- Multi-version verification: accept signatures from current, previous, and next secrets (3-version window)
+- `GET /api/webhooks/keys` endpoint for receivers to discover active key IDs
+- Automatic key-version expiry after rotation + 7-day grace period
+
+### Scope
+- `backend/src/services/signingSecretProvider.js`, `backend/src/services/webhook.js`, `.github/workflows/secret-rotation.yml`
+
+### Acceptance Criteria
+- Verify dual-version signing, verification with previous secret, 3-version window
+- Previous secret securely deleted after grace period (Kubernetes Secret update + pod restart)
+
+### References
+- `backend/src/services/signingSecretProvider.js`, `.github/workflows/secret-rotation.yml`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #050 — Cross-cutting: API fuzz testing with automatic OpenAPI schema conformance
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/testing`, `priority/high`, `effort/large`
+
+### Summary
+The backend has extensive unit tests but no fuzz testing of the API layer. `scripts/validate-openapi.js` validates the OpenAPI spec, and `docs/api/openapi.yaml` defines endpoint schemas, but there is no fuzzing that generates random requests and verifies responses conform to the schema. Edge cases in request parsing, parameter validation, concurrent request handling, and error-recovery paths are untested.
+
+### Problem Statement
+1. **No API fuzzing**: malformed but schema-plausible inputs are untested.
+2. **No conformance gate**: responses aren't machine-verified against the OpenAPI spec.
+3. **5xx on invalid input**: some endpoints may 500 instead of 4xx on garbage input.
+
+### Objectives
+- Parse the OpenAPI spec to extract endpoint schemas
+- Generate random valid and invalid requests per endpoint (max-length strings, boundary numbers, Unicode, missing required fields, extra unknown fields, concurrent identical requests)
+- Verify all responses conform to the OpenAPI response schema
+- Verify no 5xx errors occur for invalid input (should be 4xx)
+- Run as a Jest test suite with 10,000+ iterations per endpoint, integrated into CI
+
+### Scope
+- New `backend/__tests__/fuzz/` directory, `scripts/validate-openapi.js` (extend with fuzz mode)
+
+### Acceptance Criteria
+- Fuzz harness catches at least one real bug before merging
+- CI: fast subset (100 iterations) in PR CI, full run (10,000 iterations) nightly
+
+### References
+- `docs/api/openapi.yaml`, `scripts/validate-openapi.js`, `backend/src/routes/donations.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
 
-## Issue #016 — Backend: Add cache invalidation for impact endpoints when project status changes
+## Summary — Batch 1 (#001–#050)
 
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/bug`, `priority/medium`
+This first issue set was generated from direct code inspection and targets real, verifiable gaps in the Stellar-IndigoPay repository:
 
-### Summary
-When a project's status is updated via `PATCH /api/projects/:id/status`, the cache invalidation covers project detail, list, and global stats. However, the impact endpoint cache keys (`cache:v1:impact:project:<id>` and `cache:v1:impact:global`) are not invalidated, so the impact dashboard may serve stale data after a status change.
+- **Contract correctness & security** (#001, #003–#015): deprecated-event migration, access control, re-entrancy, TTL, MMR proofs, fuzzing, formal verification
+- **Backend reliability & observability** (#016–#030): pool metrics, cache invalidation, projection catch-up, CSRF rotation, circuit breakers, DLQ monitoring, sanitization, tracing, slow-query detection
+- **Frontend performance & a11y** (#031–#035): offline donations, virtualization, E2E-encrypted messages, accessibility, query caching
+- **Mobile & extension** (#036–#040): hardware-backed signing, offline+QR signing, deep links, CSP, donation presets
+- **DevOps, monitoring, and CI** (#041–#047): canary analysis, SBOM gates, post-deploy verification, perf regression, restore checksums, synthetic monitoring, business dashboards
+- **Cross-cutting** (#048–#050): Kani invariants, webhook key rotation, API fuzzing
 
-### Background
-The cache invalidation logic is documented in `docs/api.md` under "Cache invalidation". The impact endpoints were added after the cache invalidation was initially designed, and their cache keys are not invalidated on project status changes.
+Each issue includes the files/contracts/components to change, expected behavior, edge cases, acceptance criteria, and testing requirements, and each is objectively verifiable through code review, automated tests, CI, benchmarks, or demonstrable project behavior.
 
-### Problem Statement
-Stale impact data is served for up to 300 seconds after a project is paused, completed, or rejected. For the transparency/impact dashboard, this is a data freshness bug.
-
-### Objectives
-- Add `cache:v1:impact:project:<id>` and `cache:v1:impact:global` to the invalidation list for `PATCH /api/projects/:id/status`
-
-### Scope
-
-**In Scope**
-- Cache invalidation update in the project status update handler
-
-**Out of Scope**
-- Other mutation endpoints
-- Changing cache TTLs
-
-### Implementation Plan
-1. Locate the status update handler in `backend/src/routes/projects.js` (the `PATCH /:id/status` route or equivalent)
-2. Add `await invalidateCache(...)` calls for the impact cache keys
-3. Verify with `backend/src/routes/projects.test.js`
-
-### Expected Files or Components
-- `backend/src/routes/projects.js`
-- `docs/api.md` — update the cache invalidation table
-
-### Acceptance Criteria
-- Impact cache keys are invalidated on project status change
-- Docs updated
-
-### Testing Requirements
-- Verify via test that cache is cleared after status change
-
-### CI Requirements
-- Standard backend CI
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Impact cache keys invalidated
-- [ ] Docs updated
-- [ ] CI green
-
-### References
-- `docs/api.md` — "Cache invalidation" section
-- `backend/src/routes/projects.js`
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
 
-## Issue #017 — Backend: Add `GEOCODING_ERROR` to `ERROR_CODES` taxonomy
+# GrantFox OSS — Batch 2: 50 Additional High-Value Issues (#051–#100)
 
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/improvement`, `priority/low`
-
-### Summary
-When geocoding fails in `POST /api/projects`, the backend logs a warning but doesn't return any structured error code to the client. The `ERROR_CODES` taxonomy in `backend/src/errors.js` doesn't include a geocoding-specific error code.
-
-### Background
-`backend/src/errors.js` has a comprehensive error code taxonomy with codes like `PROJECT_NOT_FOUND`, `INVALID_ADDRESS`, `TX_FAILED`, etc. Geocoding failures are handled silently — the project is created without coordinates but the client isn't informed.
-
-### Problem Statement
-Clients creating projects should know when geocoding failed so they can correct the location string, rather than discovering later that their project doesn't appear on the map.
-
-### Objectives
-- Add `GEOCODING_ERROR` to `ERROR_CODES` (status 400 or 422)
-- Instead of silently swallowing geocoding errors, return a warning in the response body so the client can show it to the user
-- Do NOT fail the project creation — just surface the warning
-
-### Scope
-
-**In Scope**
-- New error code
-- Warning in the project creation response when geocoding fails
-
-**Out of Scope**
-- Changing the geocoding service itself
-- Retry logic
-
-### Implementation Plan
-1. Add `GEOCODING_ERROR: { status: 422, message: "Could not geocode the provided location" }` to `ERROR_CODES`
-2. In the project creation handler, when geocoding returns null, add a `warnings: [{ code: "GEOCODING_ERROR", message: "..." }]` field to the response
-
-### Expected Files or Components
-- `backend/src/errors.js`
-- `backend/src/routes/projects.js`
-
-### Acceptance Criteria
-- Geocoding failure returns a warning in the response
-- Project is still created successfully
-- Test verifies the warning field
-
-### Testing Requirements
-- Test the warning field in the 201 response when geocoding fails
-
-### CI Requirements
-- Standard backend CI
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Error code added
-- [ ] Warning surfaced in response
-- [ ] CI green
-
-### References
-- `backend/src/errors.js`
-- `backend/src/routes/projects.js` — `POST /` handler
-- `backend/src/services/geocoder.js`
+> Second batch generated from further deep inspection of the Stellar-IndigoPay codebase: all 4 Soroban contracts (17,499-line IndigoPay lib.rs), the event-sourcing backend, webhook delivery, CO₂ verification, Turrets donation matching, DEX path-payment integration, recurring donation keeper, off-chain Merkle tree service, idempotency middleware, device-integrity mobile gate, offline donation queue, and the full Kubernetes/Helm/ArgoCD production infrastructure.
 
 ---
 
-## Issue #018 — Backend: Validate `tags` array length and individual tag length in project submission
+## Issue #051 — Backend: Nonce-based replay protection for `donorAuth` Ed25519 signature challenge
 
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/improvement`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/security`, `priority/high`, `effort/medium`
 
 ### Summary
-The `projectSubmissionSchema` in `backend/src/validators/schemas.js` accepts `tags` as `z.array(z.string())` with no length constraints. An attacker could submit a project with thousands of tags or tags with excessively long strings, causing database bloat.
-
-### Background
-Tags are stored as a PostgreSQL text array (`tags TEXT[]`) and used in full-text search. The schema has no `.max()` on the array or `.max()` on individual tag strings.
+`backend/src/middleware/donorAuth.js` authenticates donors by verifying an Ed25519 signature of a UNIX timestamp passed in `X-Timestamp`. The 5-minute timestamp window mitigates clock skew but does not prevent replay within that window — an attacker who observes a valid `(timestamp, signature)` pair can replay it to any endpoint until the window expires. The signature payload is only the timestamp string, with no nonce, no request body binding, and no per-endpoint binding.
 
 ### Problem Statement
-Unbounded array input can cause:
-- Database bloat (large text arrays)
-- Search index bloat
-- Potential DoS via memory exhaustion during tag processing
+1. **Replay within window**: the same signed timestamp works on any endpoint for 5 minutes.
+2. **No request binding**: a signature obtained for `GET /api/donor/stats` can be replayed against `POST /api/donor/delete-account` or any other donor-authed endpoint.
+3. **No nonce tracking**: server has no way to detect that a (timestamp, signature) has already been consumed.
 
 ### Objectives
-- Add `.max(10)` to the tags array and `.max(50)` to each tag string
-- Add a `.refine()` to reject empty strings in tags
+- Implement a server-issued challenge: `GET /api/auth/challenge` returns `{ nonce: "<random>", expiresAt: "<ISO8601>" }`
+- Donor signs `nonce + method + path` and sends `X-Donor-Address`, `X-Donor-Nonce`, `X-Donor-Signature`
+- Server stores consumed nonces in Redis with the same TTL as their expiration (60 seconds)
+- Reject replayed nonces with 401 "Nonce already consumed"
 
 ### Scope
+- `backend/src/middleware/donorAuth.js` — rewrite challenge-response flow
+- New `GET /api/auth/challenge` in existing routes
+- Config: `DONOR_AUTH_NONCE_TTL_MS` (default 60_000)
 
-**In Scope**
-- `projectSubmissionSchema` tag validation
-- Test updates
+### Acceptance Criteria
+- Replay test: capture valid signature, replay within window → 401
+- Binding test: signature for GET rejected on POST with same nonce
+- No regression: existing donor-authed endpoints continue to work
 
-**Out of Scope**
-- Frontend validation (handled by `submitProjectSchema` in `frontend/lib/validation.ts`)
+### References
+- `backend/src/middleware/donorAuth.js`, `backend/src/routes/donations.js`
 
-### Implementation Plan
-1. Update the `tags` field in `projectSubmissionSchema`:
-   ```js
-   tags: z.array(z.string().min(1).max(50)).max(10).optional().default([])
-   ```
-2. Add test cases in `schemas.test.js` for exceeding max tags and tag length
 
-### Expected Files or Components
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #052 — Backend: Idempotency-key race condition — INSERT without ON CONFLICT
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/bug`, `priority/high`, `effort/small`
+
+### Summary
+`backend/src/middleware/idempotency.js` inserts a placeholder row before processing the request and later updates it with the actual response. But the INSERT uses a plain `INSERT INTO idempotency_keys …` without `ON CONFLICT (key) DO NOTHING`. Two concurrent requests with the same `Idempotency-Key` header both read-and-miss the SELECT check, then both execute INSERT — the second one hits a uniqueness violation on `key` (the primary key) and throws a 500 error, which `catch (err) { next(err); }` propagates to the client.
+
+### Problem Statement
+1. **Race window**: concurrent requests with same key can 500 instead of returning the first request's response.
+2. **No locking**: no `SELECT … FOR UPDATE` or advisory lock to serialize concurrent idempotency probes.
+
+### Objectives
+- Change the INSERT to `INSERT INTO idempotency_keys … ON CONFLICT (key) DO NOTHING RETURNING key`
+- If RETURNING returns no row (another request won the race), re-read the idempotency row and return the stored response
+- Add integration test with two concurrent POST requests sharing an idempotency key
+
+### Scope
+- `backend/src/middleware/idempotency.js`
+- `backend/__tests__/idempotency.integration.test.js` (new or extend)
+
+### Acceptance Criteria
+- Concurrent test: fire two requests simultaneously with same key → both get 201, only one donation record created
+- No race-condition 500s in 1,000-iteration stress test
+
+### References
+- `backend/src/middleware/idempotency.js`, `backend/src/db/schema.sql` (idempotency_keys table)
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #053 — Backend: Socket.IO donation batcher — add backpressure, metrics, and graceful overflow
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/reliability`, `priority/medium`, `effort/medium`
+
+### Summary
+`backend/src/services/donationBatcher.js` batches Socket.IO donation events with a 500ms window and a 50-item cap. But it has no backpressure: if the `io.emit("donation_batch", batch)` call blocks or the Socket.IO adapter (Redis-based) is slow, batched donations accumulate in memory without any bound. There is no prometheus metric tracking batch sizes, flush latency, or dropped batches, making the donation feed's observability entirely dependent on client-side metrics.
+
+### Problem Statement
+1. **No memory bound**: the `donations` array grows unboundedly if emit is slow.
+2. **No observability**: batch size distribution, flush latency, and dropped batches are invisible to operators.
+3. **No graceful overflow**: when Redis adapter is disconnected, batches are silently emitted with no fallback.
+
+### Objectives
+- Add a hard cap (`maxPendingDonations`, default 500) — beyond this, oldest donations are dropped with a `donation_batcher_drop` prometheus counter increment
+- Emit prometheus histogram `donation_batch_size` and `donation_batch_flush_duration_seconds`
+- When Socket.IO Redis adapter is disconnected, log an error and stop accumulating (graceful degradation)
+- Add `getStats()` method exposing pending count, total flushed, total dropped
+
+### Scope
+- `backend/src/services/donationBatcher.js`, `backend/src/services/metrics.js`
+
+### Acceptance Criteria
+- Overload test: simulate slow IO, verify drops and counter
+- Metrics test: verify histogram buckets populated
+- Disconnect test: Redis down → batcher pauses, Redis up → resumes
+
+### References
+- `backend/src/services/donationBatcher.js`, `backend/src/services/metrics.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #054 — Contracts: Upgrade path verification — test the `propose_upgrade`/`execute_upgrade` flow against a real testnet deployment
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/testing`, `priority/high`, `effort/medium`
+
+### Summary
+The IndigoPay contract has a full two-step upgrade flow: `propose_upgrade` (M-of-N admin signatures required), 48-hour `UPGRADE_TIMELOCK_LEDGERS` delay, then `execute_upgrade` (single admin signature). `cancel_upgrade` can abort during the timelock. `LastExecutedUpgrade` and `UpgradeEffectiveAt` storage keys are maintained. However, none of this is tested against a real deployed contract on testnet — it is only tested in the Soroban SDK's test environment where `env.deployer().update_current_contract_wasm()` is not an actual on-chain operation.
+
+### Problem Statement
+1. **Test environment != production**: the SDK test harness's `testutils` host does not exercise the real network's WASM deployment lifecycle.
+2. **No integration test**: the upgrade flow that will be used in production has never been exercised against a live testnet deployment.
+
+### Objectives
+- Deploy V1 contract to testnet, then propose and execute an upgrade to a V2 (no-op change with a new constant, same interface)
+- Verify `LastExecutedUpgrade` is readable after upgrade
+- Verify `propose_upgrade` with insufficient signatures (below threshold) is rejected
+- Verify `execute_upgrade` before timelock is rejected
+- Verify `cancel_upgrade` works during timelock
+- Script entire flow in CI (`contract-deploy.yml`)
+
+### Scope
+- `.github/workflows/contract-deploy.yml`, new `scripts/test-upgrade-flow.sh`, test-only V2 contract variant
+
+### Acceptance Criteria
+- Full upgrade lifecycle validated on testnet
+- Upgrade test runs on every merge to main
+
+### References
+- `contracts/indigopay-contract/src/lib.rs` — `propose_upgrade`, `execute_upgrade`, `cancel_upgrade`, `UPGRADE_TIMELOCK_LEDGERS`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #055 — Backend: Admin session-management endpoint for forced logout of specific sessions
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/security`, `priority/medium`, `effort/small`
+
+### Summary
+`backend/src/middleware/auth.js` already implements `listActiveSessions(adminId)` and `revokeRefreshFamily(family, adminId)` — the full infrastructure for session management exists. But there is no admin endpoint to list all sessions for an admin user or to revoke a specific session family. An admin who notices an unrecognized session has no way to terminate it short of rotating their credentials.
+
+### Problem Statement
+1. **No session visibility**: admins cannot see their active sessions.
+2. **No targeted revocation**: if one device is compromised, all sessions must be killed.
+
+### Objectives
+- `GET /api/admin/sessions` — list active sessions for the authenticated admin
+- `DELETE /api/admin/sessions/:family` — revoke a specific session family
+- `DELETE /api/admin/sessions` — revoke ALL sessions except the current one (identified by the cookie's refresh token family)
+
+### Scope
+- New `backend/src/routes/admin/sessions.js`, `backend/src/middleware/auth.js` (minor exports)
+
+### Acceptance Criteria
+- Integration test: create 2 sessions, list both, revoke one, verify only that one is revoked
+- Revoke-all test: 3 sessions, revoke-all-except-current, verify 2 revoked
+
+### References
+- `backend/src/middleware/auth.js` — `listActiveSessions`, `revokeRefreshFamily`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #056 — Contracts: Implement per-token pause for selective emergency gating
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/feature`, `priority/medium`, `effort/medium`
+
+### Summary
+The contract has a global `ContractPaused` flag that gates all state-mutating functions. But there is no per-token pause: if only the USDC oracle is compromised, the admin must pause the entire contract (blocking XLM donations too). The `TokenConfig` struct already has an `active` field — but it gates new donations, not an emergency pause. An emergency affecting only USDC should gate USDC flows while leaving XLM fully operational.
+
+### Problem Statement
+1. **All-or-nothing pause**: a USDC-only incident blocks XLM donations.
+2. **No granular control**: the `TokenConfig.active` flag is not a pause, it's a registration lifecycle flag.
+
+### Objectives
+- Add `TokenConfig.suspended: bool` (appended for backward compatibility)
+- `suspend_token(admin, token_address)` and `resume_token(admin, token_address)` entrypoints
+- `donate_token` and `donate_usdc` check `suspended` in addition to `active`
+- Emit `token_suspended`/`token_resumed` events
+
+### Scope
+- `contracts/indigopay-contract/src/lib.rs` — TokenConfig, new entrypoints, donation paths
+
+### Acceptance Criteria
+- Suspend USDC token → XLM donations succeed, USDC donations reject with error
+- Resume → USDC donations work again
+- `cargo test --features testutils -p indigopay-contract` passes
+
+### References
+- `contracts/indigopay-contract/src/lib.rs` — `TokenConfig`, `ContractPaused`, `donate_token`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #057 — Frontend: Implement `DonateForm.tsx` overhaul — real-time fee estimation, max-button, impact preview
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/feature`, `priority/high`, `effort/large`
+
+### Summary
+`frontend/src/components/DonateForm.overhaul.md` documents a planned overhaul of `DonateForm.tsx` with real-time balance display, a "Max" button (balance minus fees minus reserve), fee estimation using stellar-sdk transaction building, amount presets, and an impact preview. None of this is implemented — the TODO has been sitting in the overhaul doc without progress. The current `DonateForm.tsx` accepts basic amount input only.
+
+### Problem Statement
+1. **No fee estimation**: donors have no visibility into Stellar transaction fees before signing.
+2. **No max button**: donors must manually calculate how much they can send.
+3. **No impact preview**: donors don't see estimated CO₂ offset before donating.
+
+### Objectives
+- Implement real-time balance polling via `useWallet()` hook
+- Implement "Max" button using `stellar-sdk` transaction build to estimate fees and XLM reserve
+- Implement fee estimator showing stroops and estimated USD value
+- Implement amount presets (10, 50, 100, 250 XLM)
+- Show estimated CO₂ impact inline using `project.co2_per_xlm`
+- Respect `prefers-reduced-motion` for animations
+
+### Scope
+- `frontend/components/DonateForm.tsx` — full rewrite per overhaul plan
+- `frontend/components/AnimatedNumber.tsx` — use for balance and CO₂
+- `frontend/__tests__/DonateForm.test.tsx` — new tests
+
+### Acceptance Criteria
+- All goals from `DonateForm.overhaul.md` are met
+- Unit tests for validation, max button calculation, and preset selection
+- Accessibility: keyboard navigation, `role="alert"` on errors
+
+### References
+- `frontend/src/components/DonateForm.overhaul.md`, `frontend/components/DonateForm.tsx`, `frontend/lib/WalletProvider.tsx`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #058 — Frontend: Implement `DonationModal.tsx` — animated confirmation, sharing, donate-again flow
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/feature`, `priority/medium`, `effort/medium`
+
+### Summary
+`frontend/src/components/DonationModal.overhaul.md` documents the planned `DonationModal.tsx` with animated confirmation (checkmark + thank-you fade), a share section (Twitter, copy link, download certificate via `ImpactCertificate.tsx`), and a "Donate Again" flow back to the form. This TODO is unimplemented.
+
+### Problem Statement
+1. **No post-donation UX**: donors get a basic success message with no share or re-engagement.
+2. **No viral loop**: sharing a donation drives no new donors.
+
+### Objectives
+- Implement `DonationModal.tsx` per overhaul plan: animated checkmark, share via `ShareButton.tsx`, download impact certificate via `ImpactCertificate.tsx`, donate-again button
+- Use `framer-motion` if already in dependencies; CSS animation fallback
+- Ensure focus management and reduced-motion support
+
+### Scope
+- `frontend/components/DonationModal.tsx` — new component
+- `frontend/__tests__/DonationModal.test.tsx`
+
+### Acceptance Criteria
+- Animated confirmation renders after donation
+- Share button generates correct Twitter/copy-link payloads
+- "Donate Again" resets the form
+- A11y: focus moves to modal on open, trapped within modal on keyboard navigation
+
+### References
+- `frontend/src/components/DonationModal.overhaul.md`, `frontend/components/ShareButton.tsx`, `frontend/components/ImpactCertificate.tsx`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #059 — Contracts: `unwrap_or` panics in non-test code paths — audit and replace with error handling
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/security`, `priority/high`, `effort/medium`
+
+### Summary
+The contract's `get_donation_record`, `get_donor_stats`, and `get_global_stats` read functions use `.unwrap_or(default_value)` — safe unwrap patterns. But `read_admin_set` and `read_admin_threshold` at lines in `lib.rs` use `.expect("Not initialized")` and `.expect("Admin threshold not set")` respectively — these are plain panics that would crash the WASM if storage is corrupted or missing. Additionally, `reverse_donation_accounting` uses multiple `.unwrap_or_else(|| panic_with_error!(...))` which is the correct pattern, but the helper `get_donation_record` at line ~98 in `donation/contract.rs` uses `.unwrap()` directly on a `Vec::get()` result.
+
+### Problem Statement
+1. **Unrecoverable panics**: `.unwrap()` in non-test paths crash the contract with no event.
+2. **No error surfacing**: a corrupted DonationCount leads to a WASM panic, not a `ContractError`.
+
+### Objectives
+- Audit all `.unwrap()`, `.expect()`, and `panic!()` in non-test code paths across all 4 contracts
+- Replace with `panic_with_error!(env, ContractError::...)` or `if let Some(...)` graceful handling
+- Ensure every read from storage that could be absent returns a meaningful error
+
+### Scope
+- `contracts/indigopay-contract/src/lib.rs`, `contracts/indigopay-contract/src/donation/contract.rs`
+- Same audit for escrow, attestation, oracle contracts
+
+### Acceptance Criteria
+- Zero `.unwrap()` or `.expect()` calls in non-test paths that read from storage
+- `cargo test --features testutils --workspace` passes
+- `cargo clippy --workspace -- -D clippy::unwrap_used` passes (configured to allow only in test modules)
+
+### References
+- `contracts/indigopay-contract/src/lib.rs` — `read_admin_set`, `read_admin_threshold`
+- `contracts/indigopay-contract/src/donation/contract.rs` — `get_donation_record`, test unwraps
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #060 — Backend: Turrets matching — idempotency guard and retry for `submitMatchingPayment`
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/bug`, `priority/high`, `effort/medium`
+
+### Summary
+`backend/src/services/turrets.js` `submitMatchingPayment()` builds, signs, and submits a matching payment transaction. There is no idempotency guard: if the transaction is submitted to Horizon successfully but the response is lost (network timeout), the caller has no way to know whether the payment went through. A retry would double-spend the matcher's funds. There is also no `withRetry` wrapping for the Horizon submission — if Horizon returns a transient 503, the matching payment is silently dropped.
+
+### Problem Statement
+1. **No idempotency**: lost submission responses can lead to double-payments or missed matching.
+2. **No retry**: transient Horizon failures silently drop matching.
+
+### Objectives
+- Derive an idempotency key from the `originalTxHash` + `matchId` and check/set in `idempotency_keys` before submission
+- Wrap Horizon submission with the unified `withRetry` from `stellar.js`
+- If the transaction hash is already recorded, skip the submission and return the stored result
+- Add `matchRetry` metrics
+
+### Scope
+- `backend/src/services/turrets.js` — `submitMatchingPayment`, `matchDonationTxFunction`
+
+### Acceptance Criteria
+- Integration test: mock Horizon timeout, verify no double-submit on retry
+- Metrics test: verify `matchRetry` counter increments on retry
+
+### References
+- `backend/src/services/turrets.js`, `backend/src/services/stellar.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #061 — Backend: Recurring keeper — dynamic fee estimation instead of hardcoded 100,000 stroops
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/performance`, `priority/medium`, `effort/small`
+
+### Summary
+`backend/src/services/recurringKeeper.js` line ~155 builds the `execute_recurring` transaction with a hardcoded fee of `"100000"` stroops (0.01 XLM). During network congestion, this may be too low for inclusion. During low-fee periods, it overspends. The contract uses `TransactionBuilder` with a fixed fee rather than querying `server.fetchBaseFee()` or using the Soroban RPC's `getTransaction` fee estimation.
+
+### Problem Statement
+1. **No congestion adaptivity**: 100k stroops may be too low during congestion.
+2. **No fee optimization**: overspending during normal operation.
+
+### Objectives
+- Query `stellarServer.fetchBaseFee()` before building the transaction
+- Apply a configurable multiplier (`RECURRING_KEEPER_FEE_MULTIPLIER`, default 1.5) for inclusion margin
+- Cap at a configurable max (`RECURRING_KEEPER_FEE_MAX_STROOPS`, default 500_000)
+- Log the fee used and emit a prometheus histogram `recurring_keeper_fee_stroops`
+
+### Scope
+- `backend/src/services/recurringKeeper.js` — `executeSchedule`
+- Config: `RECURRING_KEEPER_FEE_MULTIPLIER`, `RECURRING_KEEPER_FEE_MAX_STROOPS`
+
+### Acceptance Criteria
+- Test: mock base fee at 100 stroops → fee becomes 150 (×1.5); mock at 1,000,000 → capped at 500,000
+- No regression on existing keeper integration test
+
+### References
+- `backend/src/services/recurringKeeper.js`, `backend/src/services/stellar.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #062 — Backend: Merkle tree service — streaming support for large audit-chain datasets
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/performance`, `priority/medium`, `effort/medium`
+
+### Summary
+`backend/src/services/merkleTree.js` `buildMerkleTree()` loads all entries into memory, computes all leaf hashes, then iteratively builds all tree levels. For the audit chain with hundreds of thousands of rows, this is O(n) memory in both the input array and the full tree structure. A large audit-verification request could exhaust the Node.js heap.
+
+### Problem Statement
+1. **Memory-bound**: thousands of audit entries consume significant heap.
+2. **No streaming**: the entire tree must be built before any proof can be generated.
+
+### Objectives
+- Implement `buildMerkleTreeStreaming(entryIterator)` that accepts an async iterator and builds the tree level-by-level, discarding lower levels as higher ones are built
+- Leverage pinned `Buffer` pooling to avoid temporary-object GC pressure
+- Keep the existing `buildMerkleTree` as a simpler API for small datasets
+- Add a memory-usage test with 100,000 entries
+
+### Scope
+- `backend/src/services/merkleTree.js` — new streaming API, Buffer pool
+
+### Acceptance Criteria
+- 100,000-entry tree builds without exceeding 256 MB heap
+- Proofs from streaming tree match proofs from regular tree for the same inputs
+
+### References
+- `backend/src/services/merkleTree.js`, `backend/src/services/auditChain.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #063 — Backend: Donation endpoint — validate `transaction_hash` format before database insert
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/security`, `priority/medium`, `effort/small`
+
+### Summary
+The `POST /api/donations` endpoint accepts a `transaction_hash` field that is stored in the `donations` table and used for deduplication (unique index `uq_donations_tx`). The Zod validation schema only checks that `transaction_hash` is a string — it does not validate that it is a valid Stellar transaction hash (64 hex characters). A malformed hash can be stored, creating an unusable dedup key. A malicious caller could submit a short string like "abc" and block the unique index for the real transaction hash, requiring admin cleanup.
+
+### Problem Statement
+1. **No format validation**: any string can be stored as a `transaction_hash`.
+2. **Dedup pollution**: a short-string hash can block the real hash from being recorded.
+
+### Objectives
+- Add a `.refine()` to the Zod schema checking `transaction_hash` is a 64-character lowercase hex string
+- Reject invalid hashes with 400 "Invalid transaction hash format"
+- Backfill: log (don't reject) existing rows with invalid hashes for audit
+
+### Scope
+- `backend/src/validators/schemas.js` — donation schema
+
+### Acceptance Criteria
+- Valid 64-char hex accepted, any deviation rejected with 400
+- No regression on donation integration tests
+
+### References
+- `backend/src/validators/schemas.js`, `backend/src/routes/donations.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #064 — Frontend: DEX path-payment donation — cache `findBestPath` results with TTL
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/performance`, `priority/medium`, `effort/small`
+
+### Summary
+`frontend/lib/dex.ts` `findBestPath()` queries Horizon `/paths/strict-send` on every call. When a donor holds multiple non-native assets and is browsing the donation UI, each asset selection triggers a fresh Horizon query for the same `(source_asset, source_amount)` pair. Horizon path-finding is a relatively expensive API call — caching results with a short TTL (30 seconds) would eliminate redundant queries without risking stale data.
+
+### Problem Statement
+1. **Redundant queries**: same path recomputed on re-render.
+2. **Rate-limit risk**: rapid asset switching can trigger Horizon rate limits.
+
+### Objectives
+- Implement an in-memory LRU cache (max 100 entries) with a 30-second TTL
+- Key: `${sourceAssetCode}:${sourceAssetIssuer}:${sourceAmount}`
+- Expose `invalidatePathCache()` for testing
+- Cache expiry handled on read (lazy)
+
+### Scope
+- `frontend/lib/dex.ts` — new cache, exported cache control functions
+
+### Acceptance Criteria
+- Cache hit: second call with same params within TTL returns cached result without Horizon call
+- Cache miss: TTL expired → fresh query
+- No behavior change for callers
+
+### References
+- `frontend/lib/dex.ts` — `findBestPath`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #065 — Backend: Redis client — implement health-check probe and readiness gate
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/reliability`, `priority/high`, `effort/small`
+
+### Summary
+`backend/src/services/redis.js` connects to Redis and is used by the cache layer, session store, Socket.IO adapter, and idempotency keys. But the health check endpoint `GET /api/health` does not verify Redis connectivity — it only returns `{ status: "ok" }`. If Redis is down, the health check still passes, Kubernetes sends traffic, and every request that touches Redis fails with runtime errors.
+
+### Problem Statement
+1. **No Redis readiness check**: K8s liveness/readiness probes don't detect Redis failures.
+2. **Cascading failures**: a Redis outage causes 500s on cache-dependent endpoints.
+
+### Objectives
+- Add a Redis PING to the health check and return degraded status if Redis is unreachable
+- Add a Redis-specific readiness endpoint: `GET /api/health/redis`
+- Emit prometheus gauge `redis_up` (1 = connected, 0 = disconnected)
+- Wire into existing metrics.js pattern
+
+### Scope
+- `backend/src/routes/health.js`, `backend/src/routes/readiness.js`, `backend/src/services/redis.js`
+
+### Acceptance Criteria
+- Health check returns 200 when Redis is up; returns 503 with `{ status: "degraded", redis: "disconnected" }` when Redis is down
+- `redis_up` gauge reflects connectivity
+- Existing health-check tests updated
+
+### References
+- `backend/src/routes/health.js`, `backend/src/routes/readiness.js`, `backend/src/services/redis.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #066 — Frontend: Replace `useEffect`+`fetch` data-fetching with `@tanstack/react-query` for leaderboard and project detail pages
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/performance`, `priority/high`, `effort/large`
+
+### Summary
+`frontend/hooks/queries.ts` provides a minimal query abstraction, but leaderboard and project detail pages use raw `useEffect`+`fetch` patterns with no caching, no stale-while-revalidate, no background refetch, and no retry. Each page navigation refetches data, showing spinners unnecessarily when the data hasn't changed. `frontend/hooks/useAsyncData.ts` is a generic async wrapper without caching. `frontend/lib/queryRetry.ts` defines a retry policy but it's not wired into the actual data-fetching hooks.
+
+### Problem Statement
+1. **No caching**: every page visit refetches data.
+2. **No SWR**: stale data is discarded, forcing spinners.
+3. **Incomplete abstraction**: `queries.ts` has partial coverage only.
+
+### Objectives
+- Install `@tanstack/react-query` and create a `QueryClient` with IndexedDB persistence (`persistQueryClient`)
+- Convert leaderboard, project detail, donations feed, and dashboard pages to use `useQuery`
+- Wire `queryRetryPolicy` as the default retry function
+- Use `staleTime: 30_000` for project data (30 second SWR window)
+- Preserve existing `QueryErrorFallback` component integration
+
+### Scope
+- `frontend/lib/queryClient.ts` (new), `frontend/hooks/queries.ts` (extend), `frontend/pages/leaderboard.tsx`, `frontend/pages/projects/[id].tsx`
+
+### Acceptance Criteria
+- Route A → B → back to A: data served from cache with background refetch, no spinner flash
+- Offline test: cached data renders without network; stale indicator shown
+- No regression on existing page behavior
+
+### References
+- `frontend/hooks/queries.ts`, `frontend/lib/queryRetry.ts`, `frontend/lib/queryErrors.ts`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #067 — Backend: Push notification — implement delivery receipts and retry tracking
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/feature`, `priority/medium`, `effort/medium`
+
+### Summary
+`backend/src/services/pushService.js`, `pushQueue.js`, and `pushProviders.js` handle push notification delivery via FCM and APNs. Notifications are sent but there is no delivery receipt tracking: the system does not know if a notification was actually delivered to the device, opened, or silently dropped. The `device_tokens` table stores device tokens but has no per-notification delivery status.
+
+### Problem Statement
+1. **No delivery confirmation**: operators can't measure notification deliverability.
+2. **No retry for transient failures**: FCM/APNs transient errors may drop notifications.
+
+### Objectives
+- Add `notification_deliveries` table: `id`, `device_token_id`, `notification_id`, `status` (sent/delivered/failed/opened), `provider_response`, `attempts`, `created_at`
+- Parse FCM/APNs delivery receipts (webhook or polling) to update status
+- Add `push_delivery_rate` prometheus gauge by platform
+- Retry failed deliveries up to 3 times with exponential backoff
+
+### Scope
+- `backend/src/services/pushService.js`, `backend/src/services/pushProviders.js`, new migration
+
+### Acceptance Criteria
+- Integration test: send notification → verify delivery record → verify status transitions
+- Gauge shows accurate delivery rate
+
+### References
+- `backend/src/services/pushService.js`, `backend/src/services/pushProviders.js`, `backend/src/db/schema.sql` (device_tokens)
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #068 — Frontend: Offline donation queue — conflict resolution when queued donation was already submitted online
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/bug`, `priority/medium`, `effort/medium`
+
+### Summary
+`frontend/lib/offlineDonationQueue.ts` implements an IndexedDB-backed queue for offline donations. When connectivity returns, `syncQueuedDonations` calls a processor function for each queued item and removes it if the processor returns `true`. But the processor does not check whether the same donation (identified by `idempotencyKey` or `transactionHash`) was already recorded — either by a Service Worker Background Sync attempt or by another browser tab. This can result in a duplicate donation submission.
+
+### Problem Statement
+1. **Duplicate risk**: offline queue may re-submit already-processed donations.
+2. **No idempotency-key reuse detection**: the processor ignores the `idempotencyKey` field already in `DonationQueuePayload`.
+
+### Objectives
+- Before calling the processor for each queued item, check `GET /api/donations/check-idempotency/:key` (new or existing) for the item's `idempotencyKey`
+- If the server already has this idempotency key, skip submission and remove from queue
+- Show a toast notification for conflicts: "This donation was already processed while you were offline"
+
+### Scope
+- `frontend/lib/offlineDonationQueue.ts` — `syncQueuedDonations`, `Backend/src/routes/donations.js` — new endpoint or reuse existing
+
+### Acceptance Criteria
+- E2E test: queue donation offline, submit same donation online via another tab, go online → queued donation skipped with conflict toast
+- No duplicate donation records in database
+
+### References
+- `frontend/lib/offlineDonationQueue.ts`, `frontend/components/ConnectivityBanner.tsx`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #069 — Contracts: Add configurable deviation-threshold per token in the oracle contract
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/feature`, `priority/medium`, `effort/medium`
+
+### Summary
+The oracle contract has a `max_deviation_bps` configuration applied globally to all price observations. But XLM/USDC and XLM/BTC have vastly different volatility profiles — a 500 bps (5%) threshold that is appropriate for BTC would falsely reject legitimate USDC observations (which are stablecoin-pegged and shouldn't deviate >1%). Conversely, a 50 bps threshold for USDC would make the BTC price feed unusable.
+
+### Problem Statement
+1. **One-size-fits-all threshold**: the same deviation tolerance applies to all assets.
+2. **Cannot support both stablecoins and volatile assets**: adding a new asset requires choosing a threshold that's wrong for one of them.
+
+### Objectives
+- Add `token_max_deviation_bps: Map<Address, u32>` config storage
+- `report_price` reads the per-token threshold, falling back to the global default if unset
+- Add `set_token_deviation(admin, token, bps)` entrypoint
+- Add `get_token_config(token) -> TokenOracleConfig` read function
+
+### Scope
+- `contracts/oracle-contract/src/lib.rs` — new storage, entrypoints, read path
+
+### Acceptance Criteria
+- Set per-token threshold of 50 bps for USDC, 500 bps for BTC → each token follows its own threshold
+- Fallback to global default when per-token threshold is unset
+- `cargo test --features testutils -p oracle-contract` passes
+
+### References
+- `contracts/oracle-contract/src/lib.rs` — `report_price`, `max_deviation_bps`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #070 — Backend: CO₂ verification pipeline — mock-server test harness for Gold Standard, Verra, and GFW APIs
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/testing`, `priority/high`, `effort/medium`
+
+### Summary
+`backend/src/services/co2Verifier.js` queries external APIs (Gold Standard, Verra, Global Forest Watch) but the test file `co2Verifier.test.js` likely mocks at the HTTP client level rather than testing with realistic API response shapes. If any external API changes its response schema, the verifier silently breaks — and it won't be caught until the weekly cron runs on production.
+
+### Problem Statement
+1. **No contract testing**: API schema changes go undetected.
+2. **No CI coverage**: the weekly verification pipeline is untested in CI.
+
+### Objectives
+- Implement mock HTTP servers for Gold Standard, Verra, and GFW using `nock` or a test server fixture with real response schemas
+- Test the full `verifyProjectCO2Rate` pipeline end-to-end with mock responses
+- Test edge cases: empty results, rate-limit responses (429), malformed JSON, timeout
+- Add a CI step that runs these integration tests against the mock servers
+
+### Scope
+- `backend/__tests__/co2Verifier.integration.test.js` (new)
+- New `backend/__tests__/fixtures/` with sample API responses
+
+### Acceptance Criteria
+- All major code paths in `co2Verifier.js` exercised via mock servers
+- Rate-limit path, empty-results path, and malformed-response path all tested
+
+### References
+- `backend/src/services/co2Verifier.js`, `backend/src/services/co2Verifier.test.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #071 — Frontend: Visual regression testing with Storybook + Chromatic or Playwright screenshot comparison
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/testing`, `priority/medium`, `effort/large`
+
+### Summary
+The frontend has 11 Storybook stories (`*.stories.tsx`) and Playwright E2E tests, but no visual regression testing. A CSS change that breaks the donation form layout or a dark-mode regression passes CI because unit and E2E tests don't capture visual regressions. The `frontend/__tests__/` directory has DOM-based tests but no screenshot diffing.
+
+### Problem Statement
+1. **No visual regression detection**: CSS/layout bugs pass CI silently.
+2. **Dark mode untested visually**: `ThemeToggle` changes are not verified.
+
+### Objectives
+- Add Playwright screenshot comparison tests for all critical pages (home, project detail, leaderboard, donate, governance, dashboard) in both light and dark modes
+- Configure a baseline storage strategy (local or Chromatic)
+- Add a CI job (`frontend-visual.yml`) that diffs against approved baselines
+- Document baseline-update process for intentional design changes
+
+### Scope
+- `frontend/e2e/visual/` (new), `.github/workflows/frontend-visual.yml` (new)
+
+### Acceptance Criteria
+- Intentional layout change → CI fails with visual diff → approved baseline → CI passes
+- Both light and dark mode screenshots cover all critical pages
+
+### References
+- `frontend/playwright.config.ts`, `frontend/e2e/`, `frontend/components/`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #072 — Backend: Rate limiter — per-endpoint granular configuration
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/feature`, `priority/medium`, `effort/medium`
+
+### Summary
+`backend/src/middleware/rateLimitConfig.js` defines global rate-limit windows and max requests. But a single rate limit applies to all endpoints: donation recording (`POST /api/donations`) shares the same budget as project listing (`GET /api/projects`). A user browsing the project catalog should not consume budget that the donation endpoint needs. The rate limiter is configurable but not per-route.
+
+### Problem Statement
+1. **One budget for all**: reads and writes share the same limit.
+2. **Cannot protect critical endpoints independently**: donations and project creation need separate budgets.
+
+### Objectives
+- Extend `rateLimitConfig.js` to support per-route overrides via path-pattern matching
+- `POST /api/donations` → stricter limit (e.g., 10/min)
+- `GET /api/projects` → generous limit (e.g., 100/min)
+- `POST /api/admin/*` → admin endpoints with separate budget
+- Config stays backward-compatible: routes without specific overrides use the global default
+
+### Scope
+- `backend/src/middleware/rateLimitConfig.js`, `backend/src/middleware/rateLimiter.js`
+
+### Acceptance Criteria
+- Rate-limit test: hit donation endpoint 10 times → 429 on 11th; project listing still works
+- Config test: verify path-pattern matching, default fallback
+
+### References
+- `backend/src/middleware/rateLimiter.js`, `backend/src/middleware/rateLimitConfig.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #073 — Mobile: Automated EAS Update over-the-air (OTA) deployment with version gating
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/mobile`, `type/devops`, `priority/medium`, `effort/medium`
+
+### Summary
+The mobile app uses `expo-updates` (configured in `app.json`) but there is no CI/CD pipeline for EAS Update OTA deployments. Every fix requires a full app-store build and review. The `eas.json` file configures build profiles but has no `updates` configuration. OTA updates would allow pushing JavaScript-layer fixes to users' devices immediately without app-store review.
+
+### Problem Statement
+1. **No OTA pipeline**: every JS fix requires a full build + store review.
+2. **No version gating**: an OTA update could be pushed to incompatible native builds.
+
+### Objectives
+- Add `eas update` configuration to CI: on merge to main, run `eas update --branch production --message "$(git log -1 --oneline)"`
+- Implement runtime version check: refuse to apply updates if the native runtime version is incompatible (semver major mismatch)
+- Add a staged rollout: `eas update --branch staging` first, then promote
+- Add mobile OTA deployment job to `.github/workflows/mobile.yml`
+
+### Scope
+- `mobile/app.json`, `mobile/eas.json`, `.github/workflows/mobile.yml`
+
+### Acceptance Criteria
+- Merge to main triggers OTA update to "staging" channel
+- Manual promotion from staging to production via workflow dispatch
+- Incompatible native version rejects the update gracefully
+
+### References
+- `mobile/app.json`, `mobile/eas.json`, `.github/workflows/mobile.yml`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #074 — Backend: Dry-run mode for migration runner with rollback plan generation
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/reliability`, `priority/medium`, `effort/medium`
+
+### Summary
+`backend/src/db/migrate.js` applies migrations sequentially in a transaction (where DDL supports transactional DDL). But there is no dry-run mode: the operator cannot preview what a migration will do before it runs. There is no rollback plan generation — if a migration corrupts data, the only fallback is database restore.
+
+### Problem Statement
+1. **No dry-run**: migration side effects are invisible until execution.
+2. **No rollback plan**: every migration is forward-only.
+
+### Objectives
+- `npm run migrate:dry-run` — parses migration SQL and logs the DDL statements without executing them
+- `npm run migrate:plan-rollback` — for the LAST applied migration, generate a best-effort rollback SQL (DROP for CREATE, re-add for DROP, etc.)
+- Document the limitations: rollback plan is a starting point, not a guarantee
+
+### Scope
+- `scripts/migrate-dry-run.js` (new), `scripts/migrate-plan-rollback.js` (new), `backend/src/db/migrate.js`
+
+### Acceptance Criteria
+- `migrate:dry-run` outputs all pending DDL without executing
+- `migrate:plan-rollback` outputs a rollback for the most recent migration
+- Both scripts exit 0 but output warnings for destructive operations
+
+### References
+- `backend/src/db/migrate.js`, `backend/src/db/migrations/`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #075 — Frontend: WalletConnect — multi-wallet support beyond Freighter (Albedo, xBull, Ledger via WalletConnect)
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/feature`, `priority/high`, `effort/large`
+
+### Summary
+`frontend/components/WalletConnect.tsx` and `frontend/lib/WalletProvider.tsx` only support Freighter. `frontend/lib/wallets/` suggests a multi-wallet abstraction is planned but not implemented. The Stellar ecosystem has several popular wallets (Albedo, xBull, Rabet, Lobstr) but donors must use Freighter or cannot donate. Freighter's ~20% adoption among Stellar users means 80% of potential donors are excluded.
+
+### Problem Statement
+1. **Single-wallet lock-in**: only Freighter users can donate.
+2. **No wallet abstraction**: `WalletProvider.tsx` is Freighter-specific.
+
+### Objectives
+- Implement a wallet adapter abstraction supporting Freighter, Albedo, xBull, and WalletConnect (for mobile wallets)
+- Use `@stellar/wallet-sdk` or a Stellar-compatible wallet adapter pattern
+- `WalletConnect.tsx` shows a wallet-picker modal with all supported wallets
+- Each wallet sign transaction via its own API; the rest of the flow is wallet-agnostic
+
+### Scope
+- `frontend/lib/WalletProvider.tsx` — refactor to adapter pattern
+- `frontend/components/WalletConnect.tsx` — multi-wallet picker
+- `frontend/lib/wallets/` — per-wallet adapter modules
+
+### Acceptance Criteria
+- Integration test: connect with Freighter, Albedo (mock), and xBull (mock)
+- Donate flow works with each wallet
+- Network/account switching handled per-wallet
+
+### References
+- `frontend/components/WalletConnect.tsx`, `frontend/lib/WalletProvider.tsx`, `frontend/lib/wallets/`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #076 — Contracts: IndigoPay `DataKey` enum — document and enforce ordering invariants for backward compatibility
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/security`, `priority/high`, `effort/medium`
+
+### Summary
+The `DataKey` enum has 60+ variants. The comment on `DonorRateLimitPerToken` says it is "Appended to preserve the discriminants of all previously deployed DataKey variants" — but there is no CI gate that detects accidental reordering of `DataKey` variants. A maintainer could insert a variant in the middle instead of at the end, shifting all subsequent discriminants by 1 and silently corrupting every storage entry that uses those variants on upgraded contracts. There is no test that asserts the ordering is strictly append-only.
+
+### Problem Statement
+1. **No ordering guard**: a mid-insert corrupts all storage silently.
+2. **No deterministic discriminant test**: tests don't assert specific discriminant values.
+
+### Objectives
+- Add a compile-time or test-time assertion that every `DataKey` variant appears in a specific order and no variant is inserted before existing ones
+- Generate variant discriminants from the enum definition and compare against a committed golden file (`DataKey.discriminants.txt`)
+- Add a CI step in `contracts.yml` that fails if discriminants change in any way other than append-only
+
+### Scope
+- `contracts/indigopay-contract/src/lib.rs` — new test, golden file
+- `.github/workflows/contracts.yml` — new step
+
+### Acceptance Criteria
+- CI fails when a variant is inserted in the middle of DataKey
+- CI passes when a variant is appended at the end (and golden file is updated)
+- No runtime overhead (compile-time or test-time only)
+
+### References
+- `contracts/indigopay-contract/src/lib.rs` — `DataKey` enum, UPGRADE.md
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #077 — Backend: Webhook delivery — exponential backoff with jitter for retry scheduling
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/reliability`, `priority/medium`, `effort/small`
+
+### Summary
+`backend/src/services/webhookQueue.js` manages webhook delivery jobs with pg-boss. The current retry configuration likely uses pg-boss's default retry backoff (fixed delay or simple exponential). But during a receiver outage, synchronized retries from multiple donors hitting the same endpoint create a thundering herd — all retries fire at the same time, overwhelming the receiver again. Adding jitter (randomized delay) spreads retries across the backoff window.
+
+### Problem Statement
+1. **No jitter**: synchronous retries create thundering herds.
+2. **No per-endpoint retry budget**: a single failing endpoint can consume all retry capacity.
+
+### Objectives
+- Configure pg-boss webhook jobs with `retryBackoff: true` and implement a custom backoff function: `delay = min(base * 2^attempt, maxDelay) * (0.5 + random() * 0.5)` (full jitter)
+- Add per-endpoint retry budget: max 6 attempts per endpoint per window before DLQ
+- Emit `webhook_retry_count` and `webhook_jitter_seconds` metrics
+
+### Scope
+- `backend/src/services/webhookQueue.js`, `backend/src/services/webhook.js`
+
+### Acceptance Criteria
+- Test: mock receiver returns 503 for 3 attempts → verify each attempt's delay includes jitter (variance > 0)
+- Thundering herd test: 10 simultaneous failing webhooks → retries spread across backoff window
+
+### References
+- `backend/src/services/webhookQueue.js`, `backend/src/services/webhook.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #078 — Frontend: Leaderboard — time-window filtering with historical trend charts
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/feature`, `priority/medium`, `effort/medium`
+
+### Summary
+The leaderboard page (`frontend/pages/leaderboard.tsx`) shows all-time donation rankings. There is no time-window filter (this week, this month, this year) and no historical trend visualization. A donor who discovers the platform can only see all-time totals, which makes the leaderboard appear static and discourages new donors who can never catch up.
+
+### Problem Statement
+1. **Static all-time rankings only**: no time-window context.
+2. **No trend visualization**: no charts showing donation patterns over time.
+
+### Objectives
+- Add time-window tabs: All-time, This Month, This Week
+- Add a `DonationGrowthChart` showing the selected time window's donation volume trend
+- Backend: add `GET /api/leaderboard?window=month|week|all` with `startDate`/`endDate`
+- Project leaderboards too: which projects raised the most this month
+
+### Scope
+- `frontend/pages/leaderboard.tsx`, `frontend/components/LeaderboardTable.tsx`, `frontend/components/DonationGrowthChart.tsx`
+- `backend/src/routes/leaderboard.js` — new query params
+
+### Acceptance Criteria
+- Time-window tabs change leaderboard rankings correctly
+- Chart renders donation trend for selected window
+- Backend window parameter filters donations by `created_at`
+
+### References
+- `frontend/pages/leaderboard.tsx`, `frontend/components/LeaderboardTable.tsx`, `backend/src/routes/leaderboard.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #079 — Contracts: Escrow — implement `get_job_page` for paginated job listing
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/feature`, `priority/medium`, `effort/medium`
+
+### Summary
+The escrow contract stores jobs indexed by `JobIds` (a `Vec<String>`) with a `MAX_JOBS = 256` limit. Reading all jobs requires N individual `get_job` calls — one per `JobId` entry. There is no paginated read. Backend indexers and frontend freelancer marketplaces must issue up to 256 RPC calls to fetch all jobs followed by individual `get_job` reads.
+
+### Problem Statement
+1. **O(n) RPC calls**: listing all jobs is inefficient.
+2. **No pagination**: every consumer incurs the full scan.
+
+### Objectives
+- Implement `get_job_page(env, from: u32, count: u32) -> Vec<Job>` that reads `count` jobs starting at `from` in the `JobIds` vector
+- Cap `count` at `MAX_PAGE_SIZE` (e.g., 50) to stay within resource budget
+- Keep existing `get_job` single-read function unchanged
+
+### Scope
+- `contracts/escrow-contract/src/lib.rs` — new read function
+
+### Acceptance Criteria
+- Unit test for empty page, partial page, full page, out-of-bounds `from`
+- Gas comparison: N+1 single reads vs single page read, documented
+
+### References
+- `contracts/escrow-contract/src/lib.rs` — `JobIds`, `MAX_JOBS`, `get_job`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #080 — Frontend: Accessibility — `aria-live` regions for `LiveDonationTicker`, `LeaderboardTable`, and `DonationFeed`
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/accessibility`, `priority/high`, `effort/medium`
+
+### Summary
+The `LiveDonationTicker.tsx` uses Socket.IO to push real-time donations and animates them into the DOM. Screen readers receive no announcement of new donations. `LeaderboardTable.tsx` updates rankings live — screen readers cannot detect ranking changes. Both are dynamic regions with no `aria-live` attributes, making the real-time experience invisible to screen-reader users.
+
+### Problem Statement
+1. **No screen-reader announcements**: live updates are silent to AT.
+2. **Dynamic content invisible**: ranking changes and new donations go unannounced.
+
+### Objectives
+- Add `aria-live="polite"` region wrapping `LiveDonationTicker` content with announcements like "New donation: 50 XLM to Project X"
+- Add `aria-live="polite"` region wrapping `LeaderboardTable` with announcements when a donor changes rank
+- Debounce announcements: max 1 per 2 seconds to avoid overwhelming screen readers
+- Ensure `DonationFeed` new items receive `aria-label` with donor/amount/project
+
+### Scope
+- `frontend/components/LiveDonationTicker.tsx`, `frontend/components/LeaderboardTable.tsx`, `frontend/components/DonationFeed.tsx`
+
+### Acceptance Criteria
+- Screen-reader test (jest-axe + manual): new donation announced within 2 seconds
+- Axe audit passes on all three components (no `aria-live` violations)
+
+### References
+- `frontend/components/LiveDonationTicker.tsx`, `frontend/components/LeaderboardTable.tsx`, `frontend/components/DonationFeed.tsx`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #081 — CI/CD: Contract WASM size regression alerting in CI
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/devops`, `type/ci`, `priority/high`, `effort/small`
+
+### Summary
+The Soroban network enforces a 64 KB contract WASM size limit. The CI `contracts.yml` builds WASM artifacts but does not track WASM size across commits. A dependency update or new feature could silently approach the 64 KB limit, and the first warning would be a failed deploy (or worse, a failed mainnet upgrade proposal). There is no budget tracking and no alerting.
+
+### Problem Statement
+1. **No size budget**: WASM size regressions are invisible until hitting the hard cap.
+2. **No historical tracking**: operators don't know the current WASM size without manual inspection.
+
+### Objectives
+- Add a CI step that records WASM sizes (wasm-opt stripped) to a JSON artifact on every PR
+- Compare against the `main` branch baseline: flag a warning comment on PR if size increases by >5%
+- Fail CI if any contract exceeds 60 KB (leaving 4 KB budget headroom)
+- Publish sizes to a small GitHub Pages or artifact dashboard for trending
+
+### Scope
+- `.github/workflows/contracts.yml` — new step
+- `scripts/check-wasm-size.js` (new)
+
+### Acceptance Criteria
+- PR adds a large dependency → CI comment: "IndigoPay WASM size increased by 8% (52 KB → 56 KB). Review before merging."
+- Any contract over 60 KB fails CI
+
+### References
+- `.github/workflows/contracts.yml`, `contracts/indigopay-contract/Cargo.toml`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #025 — Backend: Add OpenTelemetry distributed tracing across all service boundaries
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/observability`, `priority/medium`, `effort/large`
+
+### Summary
+The backend uses Sentry for error tracking and Prometheus for metrics, but lacks distributed tracing. When a donation request takes 800ms (exceeding p95), there's no way to trace which component contributed the latency: Stellar RPC, database query, webhook enqueue, projection update, or cache write.
+
+### Problem Statement
+1. **No cross-component latency attribution**: the donation pipeline spans Horizon, RPC, pg-boss, and projections.
+2. **No trace correlation**: `X-Request-Id` header exists but is not correlated with spans.
+
+### Objectives
+- Instrument Express routes with OTel auto-instrumentation
+- Add manual spans for Stellar Horizon calls, pg-boss job enqueue/dequeue, Redis operations, and external API calls
+- Preserve `X-Request-Id` as the trace ID for correlation with Pino logs
+- Export to a configurable OTLP endpoint (`OTEL_EXPORTER_OTLP_ENDPOINT`)
+
+### Scope
+- `backend/src/server.js` — OTel middleware, `backend/src/services/stellar.js`, `backend/src/services/webhookQueue.js`, `backend/src/services/projectionEngine.js`
+
+### Acceptance Criteria
+- Span context propagates across async boundaries; trace ID matches `X-Request-Id`
+- Config: `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `OTEL_SAMPLE_RATE`
+
+### References
+- `backend/src/server.js`, `backend/src/services/stellar.js`, `backend/src/middleware/requestId.js`
+
+## Issue #082 — Backend: Horizon indexer — checkpoint/restart from specific ledger
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/reliability`, `priority/medium`, `effort/medium`
+
+### Summary
+`backend/src/services/indexerService.js` and `sorobanEventService.js` stream events from Horizon SSE and Soroban RPC. If the indexer crashes or is restarted, it starts from the last processed cursor (stored in the database). But there is no way to force-restart from a specific ledger — for example, to re-process a ledger range after a bug fix. Operators must manually manipulate the cursor in the database.
+
+### Problem Statement
+1. **No manual rescan**: re-indexing a ledger range requires DB manipulation.
+2. **No checkpoint verification**: the last-processed cursor may be corrupted silently.
+
+### Objectives
+- `POST /api/admin/indexer/rescan` — accepts `{ fromLedger: number, toLedger: number }` and re-processes the range
+- `GET /api/admin/indexer/checkpoint` — returns the current cursor ledger and timestamp
+- Store checkpoints with a CRC/hash of the cursor value to detect corruption
+
+### Scope
+- `backend/src/services/indexerService.js`, `backend/src/services/sorobanEventService.js`, `backend/src/routes/admin.js`
+
+### Acceptance Criteria
+- Rescan test: inject events for ledgers 100-105, rescan 100-103 → only those 4 re-processed
+- Checkpoint verification test: corrupt cursor → detected on next read
+
+### References
+- `backend/src/services/indexerService.js`, `backend/src/services/sorobanEventService.js`, `backend/src/services/indexerReconciler.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #083 — Frontend: Project detail page — skeleton loading states with `ProjectDetailSkeleton`
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/performance`, `priority/low`, `effort/small`
+
+### Summary
+`frontend/components/ProjectDetailSkeleton.tsx` and `DashboardSkeleton.tsx` already exist but are not consistently used. Project detail pages still show a full-page spinner or unstyled loading state rather than layout-matching skeleton screens. This causes layout shift when data loads, reducing perceived performance.
+
+### Problem Statement
+1. **Inconsistent loading states**: some pages use spinners, some use skeletons.
+2. **Layout shift**: spinner → content causes a jarring re-layout.
+
+### Objectives
+- Wire `ProjectDetailSkeleton` into the project detail page
+- Wire `DashboardSkeleton` into the dashboard page
+- Add `LeaderboardSkeleton` (already exists) to leaderboard page
+- Add `DonorProfileSkeleton` (already exists) to donor profile page
+- Ensure all skeletons match the exact dimensions of the loaded content to eliminate layout shift
+
+### Scope
+- `frontend/pages/projects/[id].tsx`, `frontend/pages/dashboard.tsx`, `frontend/pages/leaderboard.tsx`
+- `frontend/components/ProjectDetailSkeleton.tsx`, etc.
+
+### Acceptance Criteria
+- Page navigates → skeleton renders immediately → content fades in with zero layout shift
+- Verified via Playwright: measure element positions before/after content load
+
+### References
+- `frontend/components/ProjectDetailSkeleton.tsx`, `frontend/pages/projects/[id].tsx`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #026 — Backend: Rate-limit aware request queuing with priority lanes
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/performance`, `priority/medium`, `effort/medium`
+
+### Summary
+The rate limiter (`backend/src/middleware/rateLimiter.js`) returns 429 when limits are exceeded. For donation recording (`POST /api/donations`), a 429 means the donor's transaction hash may not be recorded. During high-traffic events (campaign launches, matching rounds), the rate limiter becomes a hard wall, and the `turrets.js` matching path is also subject to the same limiter.
+
+### Problem Statement
+1. **Hard 429 wall**: legitimate donation requests are rejected during campaign peaks.
+2. **No prioritization**: leaderboard reads compete with donation writes.
+
+### Objectives
+- When rate limit is approaching (e.g. 80% consumed), place requests in a priority queue with configurable timeout instead of rejecting
+- Critical endpoints (donations) get higher priority than reads
+- Requests that time out in queue still get 429
+
+### Scope
+- `backend/src/middleware/rateLimiter.js`, new `backend/src/services/requestQueue.js`
+
+### Acceptance Criteria
+- Load test simulating rate-limit approach, verify queued requests succeed, verify priority ordering
+- Config: `RATE_LIMIT_QUEUE_ENABLED`, `RATE_LIMIT_QUEUE_TIMEOUT_MS`, `RATE_LIMIT_QUEUE_MAX_SIZE`
+
+### References
+- `backend/src/middleware/rateLimiter.js`, `backend/src/middleware/rateLimitConfig.js`
+## Issue #084 — Backend: Auth — add email/password admin login as alternative to wallet-based auth for operators
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/feature`, `priority/medium`, `effort/medium`
+
+### Summary
+Admin authentication supports JWT access tokens + refresh tokens, and X-Admin-Key header authentication. But there is no password-based initial authentication — admins must have a pre-shared API key. For admin dashboards and operator tooling, a standard email/password login with MFA would be more practical than managing API keys. The JWT infrastructure already exists; only the initial credential exchange is missing.
+
+### Problem Statement
+1. **No password auth**: admins can only use pre-shared API keys.
+2. **No MFA**: no second factor for admin operations.
+
+### Objectives
+- Add `admins` table: `id`, `email`, `password_hash` (bcrypt), `mfa_secret`, `created_at`
+- `POST /api/admin/auth/login` — email + password → access + refresh tokens
+- `POST /api/admin/auth/mfa/setup` — generate TOTP secret and QR code
+- `POST /api/admin/auth/mfa/verify` — verify TOTP code, enable MFA
+- `POST /api/admin/auth/login` — if MFA enabled, require TOTP code
+- Keep existing X-Admin-Key path for CI/bot access
+
+### Scope
+- New migration, `backend/src/routes/admin/auth.js`, `backend/src/middleware/auth.js` (extend)
+
+### Acceptance Criteria
+- Email/password login works; MFA setup + verification roundtrip succeeds
+- Both auth methods coexist; existing admin-key auth unchanged
+
+### References
+- `backend/src/middleware/auth.js`, `backend/src/routes/admin.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #027 — Backend: Public audit-chain verification endpoints
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/feature`, `priority/medium`, `effort/medium`
+
+### Summary
+The audit chain (`backend/src/services/auditChain.js`) creates a hash chain for database rows; each row's hash includes the previous row's hash, creating a tamper-evident log. `auditRetention` manages retention. There's no public endpoint for external parties to verify the chain's integrity. The recent commits "re-anchor audit hash chain so verification survives retention" show the chain has a verification story internally, but it's not exposed.
+
+### Problem Statement
+1. **No public verifiability**: a third-party auditor cannot independently confirm chain integrity.
+2. **No chain segment reads**: no way to fetch a chain segment with hashes for offline recomputation.
+
+### Objectives
+- Implement `GET /api/audit/verify/:table` and `GET /api/audit/chain/:table?from=X&to=Y` endpoints
+- Return chain segments with hashes so anyone can recompute and verify
+- Rate-limit but do NOT require authentication (public verifiability is the point)
+
+### Scope
+- New `backend/src/routes/audit.js`, `backend/src/services/auditChain.js`
+
+### Acceptance Criteria
+- Verify chain segment integrity, verify tampered chain detection, verify pagination
+- Rate-limited public access without auth
+
+### References
+- `backend/src/services/auditChain.js`, `backend/src/services/auditAnchor.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #028 — Backend: Input sanitization middleware for Unicode/homoglyph/HTML injection across all text fields
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/security`, `priority/medium`, `effort/medium`
+
+### Summary
+The Zod schemas (`backend/src/validators/schemas.js`) validate types and lengths but don't sanitize against injection or XSS vectors: Unicode homoglyph attacks (confusable characters), bidirectional text override characters (U+202E), zero-width joiners, HTML/JavaScript fragments in text fields that could be stored and later rendered by the frontend. Project names, descriptions, profile bios, update bodies, and donation messages all accept arbitrary Unicode.
+
+### Problem Statement
+1. **XSS vector**: stored HTML/JS fragments can execute in the frontend if rendered unescaped.
+2. **Spoofing**: homoglyph project names can impersonate real projects in the donation feed.
+3. **Bidi override**: U+202E can reorder displayed text and disguise malicious links.
+
+### Objectives
+- Implement a shared `sanitize` Zod transform that:
+  - strips bidirectional control characters
+  - normalizes Unicode to NFC
+  - strips HTML tags from plain-text fields
+  - truncates at the schema-defined max length rather than rejecting
+- Apply to all text fields in `backend/src/validators/schemas.js`
+
+### Scope
+- `backend/src/validators/schemas.js`, new `backend/src/validators/sanitize.js`
+
+### Acceptance Criteria
+- Unit tests for each sanitization rule: NFC normalization, HTML stripping, bidi removal
+- Server-side only; frontend sanitization is defense-in-depth but not required
+
+### References
 - `backend/src/validators/schemas.js`
-- `backend/src/validators/schemas.test.js`
+## Issue #085 — Frontend: Internationalization (i18n) — complete the `es.json` and `fr.json` locale files
 
-### Acceptance Criteria
-- More than 10 tags rejected
-- Individual tags > 50 chars rejected
-- Empty tags rejected
-- Tests pass
-
-### Testing Requirements
-- Unit tests for the schema
-
-### CI Requirements
-- Standard backend CI
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Tag validation added
-- [ ] Tests added
-- [ ] CI green
-
-### References
-- `backend/src/validators/schemas.js` — `projectSubmissionSchema`
-- `frontend/lib/validation.ts` — `submitProjectSchema` for parity
-
----
-
-## Issue #019 — Backend: Add rate limit configuration for attestations, oracle, and map endpoints
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/improvement`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/feature`, `priority/medium`, `effort/large`
 
 ### Summary
-The rate limit configuration in `backend/src/services/rateLimitConfig.js` has per-endpoint tiers for core endpoints (donations, projects, profiles, etc.) but doesn't explicitly configure limits for newer endpoints: `/api/attestations`, `/api/oracle`, and `/api/map`. These fall back to the catch-all default, which may not be appropriate.
-
-### Background
-The rate limiting documentation in `docs/api.md` lists explicit configurations for map (`GET /api/map`, 60 req/60s) but the attestations and oracle endpoints are newer and may be using the catch-all default (150 req/900s). This is too permissive for potentially expensive attestation proof minting or oracle price serving.
-
-### Objectives
-- Add explicit rate limit entries for attestations and oracle endpoints
-- Review and adjust the map endpoint rate limit if needed
-- Update `docs/api.md` with new entries
-
-### Scope
-
-**In Scope**
-- `rateLimitConfig.js` updates
-- Documentation updates
-
-**Out of Scope**
-- Changing the rate limiting middleware itself
-
-### Implementation Plan
-1. Examine `backend/src/services/rateLimitConfig.js` (or wherever rate limit config is defined)
-2. Add entries for:
-   - `POST /api/attestations` — 10 req / 60s
-   - `GET /api/attestations` — 60 req / 60s
-   - `GET /api/oracle/price` — 60 req / 60s
-3. Update `docs/api.md` table
-
-### Expected Files or Components
-- `backend/src/services/rateLimitConfig.js`
-- `docs/api.md`
-
-### Acceptance Criteria
-- New endpoints have explicit rate limits
-- Documentation matches implementation
-- Existing rate limit tests pass
-
-### Testing Requirements
-- Verify rate limit is applied to new endpoints (extend rate limiter tests)
-
-### CI Requirements
-- Standard backend CI
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Rate limits configured
-- [ ] Docs updated
-- [ ] CI green
-
-### References
-- `docs/api.md` — rate limit table
-- `backend/src/middleware/rateLimiter.js`
-
----
-
-## Issue #020 — Backend: Standardize error response format in admin routes to use `sendAppError`
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/improvement`, `priority/low`
-
-### Summary
-Several admin route handlers in `backend/src/routes/admin.js` use inline `res.status().json()` for errors instead of the shared `sendAppError` helper, resulting in inconsistent error shapes. The main routes use `sendAppError` consistently, but some admin sub-routes don't.
-
-### Background
-`sendAppError(res, code, metadata)` from `backend/src/errors.js` produces a canonical error shape: `{ error: { code, message, ...metadata } }`. Some admin handlers return `{ error: "message" }` (a plain string) or `{ success: false, error: "..." }`.
+`frontend/locales/es.json` and `frontend/locales/fr.json` have sparse translations — most UI strings fall back to English. The `LanguageSwitcher.tsx` component lets users select a language that is only partially translated, resulting in a mix of Spanish/French navigation labels and English content. The i18n infrastructure (next-i18next or similar) exists but the locale files are incomplete.
 
 ### Problem Statement
-Inconsistent error shapes make frontend error handling fragile. The `QueryErrorFallback` component and admin error handling rely on the `{ error: { code } }` shape.
+1. **Partial translations**: language switcher gives a broken mixed-language experience.
+2. **No RTL support**: no Hebrew, Arabic, or other RTL language support.
 
 ### Objectives
-- Replace inline error responses in admin routes with `sendAppError` calls
-- Ensure all admin error responses have the canonical shape
+- Complete `es.json` and `fr.json` with translations for all UI strings (navigation, forms, buttons, error messages, notifications)
+- Add `frontend/lib/i18n.tsx` RTL detection and CSS direction switching
+- Add a CI step verifying that all locale files have the same key set as `en.json`
+- Add translation coverage metric
 
 ### Scope
-
-**In Scope**
-- `backend/src/routes/admin.js` and admin sub-routers
-
-**Out of Scope**
-- Non-admin routes (already consistent)
-- Changing error codes
-
-### Implementation Plan
-1. Audit admin routes for inline `res.status().json({ error: ... })` calls
-2. Replace with `sendAppError(res, "CODE", { ... })` using appropriate error codes
-3. Run admin route tests
-
-### Expected Files or Components
-- `backend/src/routes/admin.js`
-- `backend/src/routes/admin/*.js`
+- `frontend/locales/es.json`, `frontend/locales/fr.json`, `frontend/lib/i18n.tsx`
+- `.github/workflows/frontend.yml` — locale parity check
 
 ### Acceptance Criteria
-- All admin error responses use `sendAppError`
-- Admin route tests pass
-- Error shape is consistent
-
-### Testing Requirements
-- Existing admin route tests pass
-
-### CI Requirements
-- Standard backend CI
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Error responses standardized
-- [ ] CI green
+- Zero fallback-to-English strings in es/fr on all pages
+- CI fails when a key is present in `en.json` but missing in other locales
+- RTL layout test: mock Arabic locale → page renders right-to-left
 
 ### References
-- `backend/src/errors.js` — `sendAppError`
-- `backend/src/routes/admin.js`
+- `frontend/locales/es.json`, `frontend/locales/fr.json`, `frontend/locales/en.json`, `frontend/components/LanguageSwitcher.tsx`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #029 — Backend: Unified pg-boss DLQ monitoring with reprocess endpoint and alerting
 
-## Issue #021 — Backend: Add idempotency key format validation in donation recording middleware
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/improvement`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/reliability`, `priority/medium`, `effort/medium`
 
 ### Summary
-The idempotency middleware (`backend/src/middleware/idempotency.js`) reads the `Idempotency-Key` header but doesn't validate its format. Malformed or excessively long keys could be stored in Redis and PostgreSQL without validation.
-
-### Background
-The frontend generates idempotency keys using `safeRandomUUID()` (`frontend/utils/uuid.ts`) which produces UUIDv4 values. The backend should validate that incoming keys look like UUIDs before storing them.
+pg-boss dead-letter queues accumulate failed jobs across webhook deliveries, AI summaries, profile enrichment, CO₂ verification, and digest generation. `webhookQueue` has its own DLQ, `indexerDLQWorker.js` handles indexer dead letters, and `sorobanEventService.js` quarantines poison events. There's no unified DLQ monitoring, no automatic reprocessing strategy, and no alert when the DLQ grows beyond a threshold. The `queueMetrics.js` service tracks queue sizes but not DLQ health.
 
 ### Problem Statement
-Without format validation, a misconfigured client or malicious actor could send arbitrary strings as idempotency keys, consuming Redis memory for non-standard keys.
+1. **Siloed DLQs**: each queue manages dead letters independently with no unified view.
+2. **No reprocessing UI**: operators can't manually retry a specific failed job without DB access.
+3. **No alerting**: DLQ growth is invisible until it impacts delivery.
 
 ### Objectives
-- Add UUID format validation for the `Idempotency-Key` header
-- Reject keys that don't match UUID format with a 400 response
+- Implement `GET /api/admin/queue/dlq` listing DLQ entries across all queues with age, retry count, and error message
+- Implement `POST /api/admin/queue/dlq/reprocess` to retry specific failed jobs
+- Add Prometheus gauge `pgboss_dlq_size` per queue
+- Add Alertmanager rule when any DLQ exceeds 50 entries
 
 ### Scope
-
-**In Scope**
-- Idempotency middleware validation
-- Test updates
-
-**Out of Scope**
-- Changing key generation on the frontend
-
-### Implementation Plan
-1. In the idempotency middleware, add a check: if the key doesn't match UUID format, return 400
-2. Use the existing `UUID_RE` regex from `backend/src/validators/schemas.js`
-3. Add a test case for invalid key format
-
-### Expected Files or Components
-- `backend/src/middleware/idempotency.js` (or wherever idempotency logic lives)
-- `backend/__tests__/middleware/idempotency.test.js`
+- `backend/src/services/queueMetrics.js` (extend), `backend/src/routes/admin.js` (DLQ endpoints)
 
 ### Acceptance Criteria
-- Non-UUID idempotency keys rejected with 400
-- Valid UUID keys processed normally
-- Test passes
-
-### Testing Requirements
-- Unit test for invalid key format
-
-### CI Requirements
-- Standard backend CI
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] UUID validation added
-- [ ] Test added
-- [ ] CI green
+- Verify DLQ listing, reprocessing, and metric emission
+- Config: `PGBOSS_DLQ_ALERT_THRESHOLD` (default 50)
 
 ### References
-- `backend/src/validators/schemas.js` — `UUID_RE`
-- `backend/__tests__/middleware/idempotency.test.js`
+- `backend/src/services/queueMetrics.js`, `backend/src/routes/admin.js`, `backend/src/services/indexerDLQWorker.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #030 — Backend: ConsistentHash-aware webhook delivery for sharded receivers
 
-## Issue #022 — Backend: Add periodic cleanup job for expired token blacklist entries
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/improvement`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/architecture`, `priority/medium`, `effort/medium`
 
 ### Summary
-`blacklistAccessToken` in `backend/src/middleware/auth.js` inserts blacklist entries with `expires_at` matching the access token's natural expiry (15 minutes). Entries are filtered by `expires_at > NOW()` on lookup, but expired entries are never physically deleted. Over time, the `token_blacklist` table accumulates dead rows.
-
-### Background
-Token blacklisting is a defense-in-depth mechanism for admin logout. Each logout inserts one row; entries naturally expire after 15 minutes. With sufficient admin activity, this table grows continuously. The retention policy system already handles other tables, but `token_blacklist` is omitted.
+`backend/src/services/consistentHash.js` implements a consistent-hash ring but the webhook delivery path (`webhookQueue.js`) does not use it. If the backend ever scales to multiple instances, webhook deliveries are not pinned to a specific instance, which can cause duplicate deliveries or out-of-order delivery when multiple workers pick up the same job. The existence of `consistentHash.js` suggests it was built for a purpose (session stickiness, key routing) that is not yet wired in.
 
 ### Problem Statement
-Unbounded growth of the `token_blacklist` table wastes disk space and slows queries on the blacklist check (`isBlacklisted`).
+1. **Unused infrastructure**: `consistentHash.js` has no production caller.
+2. **Delivery ordering risk**: multiple workers can process the same endpoint's deliveries concurrently.
 
 ### Objectives
-- Add a retention policy for `token_blacklist` in `backend/src/config/retentionPolicies.js` to delete rows where `expires_at < NOW()` on a schedule (e.g., hourly)
+- Wire consistent hashing into webhook delivery so that deliveries for the same receiver (endpoint) are processed by a single worker
+- Preserve the existing 6-attempt backoff and DLQ behavior
+- Keep the change backward-compatible for single-instance deployments
 
 ### Scope
-
-**In Scope**
-- New retention policy entry
-- Registration with the retention worker
-
-**Out of Scope**
-- Changing the token blacklist mechanism itself
-
-### Implementation Plan
-1. Add a policy to `retentionPolicies.js`:
-   ```js
-   {
-     name: "token-blacklist-delete",
-     table: "token_blacklist",
-     strategy: "delete",
-     retentionPeriod: { value: 0, unit: "hours" },
-     schedule: { cron: "0 * * * *", timezone: "UTC" },
-     condition: "expires_at < NOW()",
-     description: "Purges expired access-token blacklist entries"
-   }
-   ```
-2. Add `token_blacklist` to the table allow-list in `retentionWorker.js`
-3. Add a test in `retentionWorker.test.js`
-
-### Expected Files or Components
-- `backend/src/config/retentionPolicies.js`
-- `backend/src/services/retentionWorker.js`
-- `backend/src/services/retentionWorker.test.js`
+- `backend/src/services/webhookQueue.js`, `backend/src/services/consistentHash.js`
 
 ### Acceptance Criteria
-- Expired token blacklist entries are purged on schedule
-- Retention policy test passes
-- Existing retention tests pass
-
-### Testing Requirements
-- Unit test for the new policy
-- Integration test verifying rows are deleted
-
-### CI Requirements
-- Standard backend CI
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Retention policy added
-- [ ] Table allow-listed
-- [ ] Test added
-- [ ] CI green
+- Two simulated workers process the same endpoint's jobs without overlap
+- Existing webhook delivery tests still pass
 
 ### References
-- `backend/src/config/retentionPolicies.js`
-- `backend/src/services/retentionWorker.js`
-- `backend/src/middleware/auth.js` — `blacklistAccessToken`
+- `backend/src/services/consistentHash.js`, `backend/src/services/webhookQueue.js`
+## Issue #086 — Backend: Database failover — automated health-check and primary promotion for PostgreSQL streaming replication
 
----
-
-## Issue #023 — Backend: Add minimum and maximum campaign duration validation
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/improvement`, `priority/low`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/devops`, `type/reliability`, `priority/high`, `effort/large`
 
 ### Summary
-Campaign creation (`POST /api/projects/:id/campaigns`) validates that the deadline is in the future but doesn't enforce a minimum or maximum campaign duration. A campaign with a deadline 5 minutes in the future or 100 years in the future would be accepted.
-
-### Background
-The campaign deadline is validated only as `deadlineDate.getTime() > Date.now()`. There's no minimum duration (a campaign ending in 1 minute makes no sense) and no maximum duration (a campaign ending in 2050 could cause UI issues).
+The k8s manifests (`k8s/postgres.yaml`, `k8s/postgres-standby.yaml`, `k8s/postgres-failover-job.yaml`) set up a primary + standby PostgreSQL topology with failover scripts. `scripts/setup-replication.sh` configures streaming replication. But the failover job is a Kubernetes CronJob that runs periodically — it doesn't react to primary failure in real-time. If the primary crashes between cron ticks, the platform runs with a read-only (or fully unavailable) database until the next cron execution.
 
 ### Problem Statement
-Extreme campaign durations are nonsensical and could cause display issues in campaign progress bars, matching pool logic, or subscription reminders.
+1. **Periodic failover, not reactive**: failover only happens on the cron schedule.
+2. **No health-check-driven promotion**: the standby doesn't auto-promote on primary failure.
 
 ### Objectives
-- Add a minimum campaign duration of 1 day and a maximum of 2 years
-- Return clear validation errors when these bounds are violated
+- Implement a sidecar container or daemon that runs alongside PostgreSQL, continuously health-checking the primary via `pg_isready`
+- On primary failure (3 consecutive failed checks), trigger the failover: promote the standby, update the service selector to point to the new primary
+- Implement a split-brain prevention mechanism using a Kubernetes Lease or ConfigMap lock
+- Add Prometheus alert when failover occurs (it should be an exceptional event)
 
 ### Scope
-
-**In Scope**
-- Validation logic in `POST /:id/campaigns` (or better, in the Zod schema from Issue #013)
-
-**Out of Scope**
-- Changing the campaign model
-
-### Implementation Plan
-1. If Issue #013 is also being worked on, add the constraints to `campaignSchema`:
-   - `deadline` must be at least 24 hours from now
-   - `deadline` must be at most 730 days from now
-2. Otherwise, add the checks inline
-3. Add a test case for too-short and too-far deadlines
-
-### Expected Files or Components
-- `backend/src/validators/schemas.js` (if Issue #013 done)
-- `backend/src/routes/projects.js`
-- `backend/src/routes/projects.test.js` (if tests exist)
+- `k8s/postgres-failover-job.yaml` — replace/supplement with daemon, `scripts/setup-replication.sh`
 
 ### Acceptance Criteria
-- Deadlines < 24h from now rejected
-- Deadlines > 2 years from now rejected
-- Error messages clear
-
-### Testing Requirements
-- Test cases for boundary deadlines
-
-### CI Requirements
-- Standard backend CI
-
-### Deliverables
-- Single commit (can be combined with Issue #013)
-- Changelog entry
-
-### Definition of Done
-- [ ] Duration validation added
-- [ ] Tests added
-- [ ] CI green
+- Simulate primary crash → standby promoted within 30 seconds → service routes to new primary
+- Split-brain test: two nodes both attempt promotion → only one succeeds (lock held)
 
 ### References
-- `backend/src/routes/projects.js` — campaign creation
-- `backend/src/validators/schemas.js`
+- `k8s/postgres.yaml`, `k8s/postgres-standby.yaml`, `k8s/postgres-failover-job.yaml`, `scripts/setup-replication.sh`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #031 — Frontend: Implement Service Worker with offline-first donation queue and Background Sync
 
-## Issue #024 — Backend: Add UUID validation for route parameters before database queries
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/improvement`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/feature`, `priority/high`, `effort/large`
 
 ### Summary
-Several route handlers extract path parameters (like `:id` or `:projectId`) and pass them directly to PostgreSQL queries without validating that they are valid UUIDs. PostgreSQL will reject malformed UUIDs, but the error surfaces as a generic 500 `DB_ERROR` instead of a clean 400 validation error.
-
-### Background
-The `uuid` validator from `backend/src/validators/schemas.js` is already imported in `projects.js` but only used in some places. Routes like `GET /api/projects/:id`, `POST /api/projects/:id/campaigns`, and `GET /api/jobs/:id` pass raw parameter values to SQL.
+The frontend requires an active internet connection to sign and submit Stellar transactions. Donors in low-connectivity areas (common for climate projects) cannot donate. The `frontend/components/OfflineFallback.tsx` and `ConnectivityBanner.tsx` components detect offline state but don't queue donations, and `frontend/hooks/useOnlineStatus.ts` only toggles UI — no donation queue exists.
 
 ### Problem Statement
-Malformed UUIDs in request paths cause 500 errors (with Sentry noise) instead of clean 400 validation errors.
+1. **No offline donation path**: donors in low-connectivity areas are excluded.
+2. **Offline detection is UI-only**: `ConnectivityBanner` shows a banner but doesn't buffer work.
 
 ### Objectives
-- Add `validate(paramsSchema, "params")` middleware to routes that accept UUID path parameters, where `paramsSchema` validates the `id` field
-- Or add inline checks using `uuidValidator.safeParse(req.params.id)`
+- Implement a Service Worker with offline-page caching for the project shell
+- Implement an IndexedDB-backed donation queue (`frontend/lib/offlineQueue.ts` or hook) storing unsigned transaction parameters
+- Integrate Background Sync API to submit queued donations when connectivity returns
+- Show push notification when a queued donation is confirmed on-chain
 
 ### Scope
-
-**In Scope**
-- UUID validation on route params for projects, donations, jobs, updates, and milestones
-
-**Out of Scope**
-- Query parameters
-- Body fields (already validated by Zod schemas)
-
-### Implementation Plan
-1. Define a reusable `uuidParamsSchema` in `schemas.js`:
-   ```js
-   const uuidParamsSchema = z.object({ id: uuid });
-   ```
-2. Apply `validate(uuidParamsSchema, "params")` to routes with `:id` params
-3. Add tests that send malformed UUIDs and expect 400
-
-### Expected Files or Components
-- `backend/src/validators/schemas.js`
-- `backend/src/routes/projects.js`
-- `backend/src/routes/donations.js`
-- `backend/src/routes/jobs.js`
-- `backend/src/routes/updates.js`
+- `frontend/public/sw.js` (new), `frontend/lib/offlineQueue.ts` (new), `frontend/pages/_app.tsx` (register SW)
+- `frontend/hooks/useOnlineStatus.ts` (extend), `frontend/components/OfflineFallback.tsx` (extend)
 
 ### Acceptance Criteria
-- Malformed UUID path params return 400 with structured validation error
-- Valid UUIDs pass through unaffected
-- Existing tests pass
-
-### Testing Requirements
-- Add malformed UUID test cases to existing route tests
-
-### CI Requirements
-- Standard backend CI
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] UUID validation added to all relevant routes
-- [ ] Tests added
-- [ ] CI green
+- E2E test: simulate offline → queue donation → go online → verify submission
+- SW must not store private keys; only unsigned transaction parameters
 
 ### References
-- `backend/src/validators/schemas.js` — `uuid`
-- `backend/src/middleware/validate.js`
+- `frontend/components/OfflineFallback.tsx`, `frontend/hooks/useOnlineStatus.ts`
+## Issue #087 — Contracts: Oracle — implement `get_price_at_ledger` for historical TWAP queries
 
----
-
-## Issue #025 — Backend: Add test for milestone cache invalidation on project status change
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/testing`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/feature`, `priority/medium`, `effort/medium`
 
 ### Summary
-Project milestones are cached in Redis (`cache:v1:projects:milestones:<id>`). When a project's status changes to `completed` or `paused`, the milestones cache should be invalidated so clients see the fresh status. There's no explicit test verifying that the milestones cache key is invalidated on status change.
-
-### Background
-The milestones cache has a 5-minute TTL. If a project is paused, its milestones should reflect that — but without cache invalidation, clients see stale milestone data for up to 5 minutes.
+The oracle contract stores individual `PriceObservation` entries indexed by ledger and provides `get_price()` returning the current TWAP. But there is no historical price lookup — `get_price_at_ledger(ledger)` would allow attestation settlement and dispute resolution to reference the exact price at the time of a donation rather than the current price, eliminating a source of settlement-time arbitrage.
 
 ### Problem Statement
-Cache invalidation bugs are easy to introduce and hard to notice. A test that explicitly verifies the cache key is deleted after a status change prevents regressions.
+1. **No historical prices**: all queries return current TWAP only.
+2. **Settlement-time mismatch**: attestation settlement uses current price, not donation-time price.
 
 ### Objectives
-- Add a test (or extend an existing test) that verifies `cache:v1:projects:milestones:<id>` is deleted when project status is updated
-- If the cache invalidation is missing, add it
+- Implement `get_price_at_ledger(env, ledger: u32) -> Option<i128>` returning the TWAP computed up to and including `ledger`
+- Walk back through `PriceObservation` entries from most recent to `ledger`, computing the TWAP over the window
+- Return `None` if no observations exist on or before `ledger`
 
 ### Scope
-
-**In Scope**
-- Test for milestone cache invalidation
-- Fix if missing
-
-**Out of Scope**
-- Other cache keys
-
-### Implementation Plan
-1. Check if `PATCH /:id/status` already invalidates the milestones cache (read `backend/src/routes/projects.js`)
-2. If missing, add `await invalidateCache(getProjectMilestonesCacheKey(id))` or equivalent
-3. Add a test: put a value in the cache, call the status update, assert the cache key no longer exists
-
-### Expected Files or Components
-- `backend/src/routes/projects.js`
-- `backend/src/routes/projects.test.js`
+- `contracts/oracle-contract/src/lib.rs` — new read function
 
 ### Acceptance Criteria
-- Milestone cache invalidated on status change
-- Test verifies the invalidation
-
-### Testing Requirements
-- Integration test with Redis mock
-
-### CI Requirements
-- Standard backend CI
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Cache invalidation verified/fixed
-- [ ] Test added
-- [ ] CI green
+- Unit test: record observations at ledgers 10, 20, 30 → `get_price_at_ledger(15)` returns TWAP over ledgers [10, 20]
+- Edge case: `get_price_at_ledger(5)` returns None (no observations)
 
 ### References
-- `backend/src/routes/projects.js` — milestone endpoints and cache keys
-- `backend/src/middleware/cache.js`
+- `contracts/oracle-contract/src/lib.rs` — `PriceObservation`, `get_price`, `current_price_raw`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #032 — Frontend: Virtualized donation feed with infinite scroll and cursor-based pagination
 
-## Issue #026 — Frontend: Remove duplicate donation recording call in `DonateForm`
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/bug`, `priority/high`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/performance`, `priority/medium`, `effort/medium`
 
 ### Summary
-In `frontend/components/DonateForm.tsx`, the standard payment (non-contract) flow calls `recordDonationMutation.mutateAsync(...)` followed by a duplicate `recordDonation(...)` call. This causes two API calls per donation, potentially creating duplicate donation records (the backend deduplicates by transaction hash, but the second call is wasted).
-
-### Background
-The standard payment flow in `handleDonate` has this sequence:
-```tsx
-setStep("recording");
-await recordDonationMutation.mutateAsync({...});  // first call
-// ...
-setStep("recording");   // <-- duplicate step
-await recordDonation({...});                        // second (duplicate) call
-```
-
-The contract donation flow only calls `recordDonationMutation.mutateAsync` once. This inconsistency suggests the duplicate was introduced accidentally.
+The donation feed (`frontend/components/DonationFeed.tsx`, `LiveDonationTicker.tsx`) renders all visible donations as DOM nodes. Socket.IO events push new donations in real-time, and the feed grows without bound during a session. For a popular project with 5,000+ donations, the DOM node count causes scroll jank and memory pressure.
 
 ### Problem Statement
-Every standard donation triggers two `POST /api/donations` calls. The backend deduplicates by `transactionHash`, so the second call is harmless but wasteful — it consumes network bandwidth, server resources, and rate limit budget.
+1. **DOM bloat**: unbounded DOM growth during active sessions.
+2. **No pagination**: the feed loads all donations at mount.
 
 ### Objectives
-- Remove the duplicate `recordDonation(...)` call
-- Remove the duplicate `setStep("recording")` line
-- Ensure only one recording call is made per donation
+- Implement `@tanstack/virtual` or `react-window` for virtualized list rendering
+- Integrate cursor-based pagination from the API
+- Infinite scroll loading older pages on scroll-up
+- Real-time items appended at the top without disrupting scroll position
 
 ### Scope
-
-**In Scope**
-- `DonateForm.tsx` — standard payment flow in `handleDonate`
-
-**Out of Scope**
-- Contract donation flow (already correct)
-- Offline donation flow
-
-### Implementation Plan
-1. Delete the second `setStep("recording")` and the `recordDonation(...)` call that follows it
-2. Verify the flow still works: `recordDonationMutation.mutateAsync` is the canonical path
-
-### Expected Files or Components
-- `frontend/components/DonateForm.tsx`
+- `frontend/components/DonationFeed.tsx`, `frontend/components/LiveDonationTicker.tsx`
+- A11y: virtualized list must be keyboard-navigable and screen-reader accessible
 
 ### Acceptance Criteria
-- Only one `POST /api/donations` call per standard donation
-- Donation flow still completes successfully
-- No visual or functional regression
-
-### Testing Requirements
-- Run existing DonateForm tests
-- Manual smoke test: make a testnet donation and verify only one network call
-
-### CI Requirements
-- `npm run type-check`
-- `npm run lint`
-- `npm test`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Duplicate call removed
-- [ ] CI green
+- Unit test for virtual list rendering, E2E test for infinite scroll loading
+- Memory profile shows bounded DOM node count
 
 ### References
-- `frontend/components/DonateForm.tsx` — `handleDonate` function, standard payment section
-- `frontend/lib/api.ts` — `recordDonation`
+- `frontend/components/DonationFeed.tsx`, `frontend/components/LiveDonationTicker.tsx`
+## Issue #088 — Frontend: `GlobalSearchModal` — integrate with PostgreSQL full-text search for project discovery
 
----
-
-## Issue #027 — Frontend: Add error handling for wallet disconnection during donation flow
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/bug`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/performance`, `priority/medium`, `effort/medium`
 
 ### Summary
-If the user's Freighter wallet disconnects or the user switches accounts mid-donation-flow, the `DonateForm` component doesn't handle the resulting error gracefully. The `signTransactionWithWallet` call will fail, and the error handling in the `catch` block shows a generic error message without distinguishing wallet-disconnection from other errors.
-
-### Background
-`signTransactionWithWallet` from `frontend/lib/wallet.ts` communicates with the Freighter browser extension. If the user closes Freighter, switches accounts, or the extension becomes unresponsive, the signing promise rejects. The current `catch` block shows the error message as-is without contextual guidance.
+`frontend/components/GlobalSearchModal.tsx` provides a project search interface, but it currently relies on client-side filtering of fetched project data or a simple `ILIKE` query on the backend. The database already has a `projects_search_idx` GIN index on `search_vector` (a tsvector column maintained by a trigger) and `ts_rank` capability. But the search endpoint doesn't use it — substring matching is slower and less relevant than full-text search with ranking.
 
 ### Problem Statement
-Users who accidentally disconnect mid-donation see an unhelpful error message ("An error occurred") and must reconnect manually. The flow should detect wallet disconnection and prompt reconnection.
+1. **No full-text search**: `ILIKE` substring matching ignores relevance ranking.
+2. **Unused infrastructure**: the GIN index and tsvector trigger are already built.
 
 ### Objectives
-- Detect Freighter disconnection in the `catch` block
-- Show a specific message: "Wallet disconnected. Please reconnect and try again."
-- Mark the step as `error` with clear recovery instructions
+- Update `GET /api/projects?q=...` to use `ts_rank` + `ts_query` against `search_vector` when a query is present
+- `GlobalSearchModal.tsx` shows results ranked by relevance with highlighted matching terms
+- Debounce search input by 300ms to avoid hammering the endpoint
 
 ### Scope
-
-**In Scope**
-- `DonateForm.tsx` error handling
-- Detection of wallet disconnection error
-
-**Out of Scope**
-- Auto-reconnection logic
-- Other components
-
-### Implementation Plan
-1. In the `catch` block, check if the error message includes Freighter-specific disconnection strings (e.g., "not connected", "user rejected", "Freighter")
-2. Set a specific error message for wallet disconnection
-3. Set `step` to `error` and provide a "Reconnect" button or message
-
-### Expected Files or Components
-- `frontend/components/DonateForm.tsx`
-- `frontend/lib/wallet.ts` (to check what error messages Freighter throws)
+- `backend/src/routes/projects.js` — update query, `frontend/components/GlobalSearchModal.tsx`
 
 ### Acceptance Criteria
-- Wallet disconnection shows a specific, helpful error message
-- User knows they need to reconnect
-- Other errors show generic messages
-
-### Testing Requirements
-- Unit test mocking `signTransactionWithWallet` to throw a Freighter disconnection error
-- Verify the error message is specific
-
-### CI Requirements
-- `npm run type-check`
-- `npm run lint`
-- `npm test`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Wallet disconnection handled
-- [ ] Tests added
-- [ ] CI green
+- Search "forest restoration" returns projects matching "forest" OR "restoration", ranked by relevance
+- Partial-word search still works (via `to_tsquery` prefix matching: `forest:*`)
+- Response time < 100ms (GIN-indexed)
 
 ### References
-- `frontend/components/DonateForm.tsx` — `handleDonate`
-- `frontend/lib/wallet.ts`
+- `frontend/components/GlobalSearchModal.tsx`, `backend/src/routes/projects.js`, `backend/src/db/schema.sql`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #033 — Frontend: E2E encryption for donation message field using project's Stellar public key
 
-## Issue #028 — Frontend: Add ARIA live region announcements for donation form validation errors
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/a11y`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/feature`, `priority/medium`, `effort/medium`
 
 ### Summary
-The `DonateForm` has a hidden `aria-live="polite"` region that announces step changes ("Building transaction…", "Awaiting wallet signature…"). However, validation errors (invalid amount, message too long) are only shown visually and aren't announced to screen readers.
-
-### Background
-The form uses `useFormValidation` which returns `errors` (a map of field names to error messages). Errors are displayed below inputs with `role="alert"` but the donation amount error is shown with `aria-invalid` and no live announcement.
+Donation messages are stored in plaintext and are publicly visible in the donation feed (`DonationFeed.tsx`). Donors who want to send a private message to the project owner have no option to do so privately. The frontend's `DonateForm.tsx` accepts a message field without any encryption option.
 
 ### Problem Statement
-Screen reader users don't hear validation errors when they click "Donate" with invalid input. The button stays disabled, but there's no audible feedback about what's wrong.
+1. **No private messaging**: all donation messages are public on-chain/off-chain.
+2. **Donor friction**: donors may avoid adding a message because it's public.
 
 ### Objectives
-- Add an `aria-live="assertive"` region that announces validation errors
-- Update the region with error text when validation fails
+- Add a "Private message" checkbox to `DonateForm.tsx`
+- When checked, encrypt the message using the project wallet's Stellar public key via `nacl.box` (Curve25519-XSalsa20-Poly1305)
+- Store the ciphertext in the `message` field with an `encrypted: true` flag
+- Only the project wallet owner (who holds the corresponding secret key) can decrypt
 
 ### Scope
-
-**In Scope**
-- ARIA live region for validation errors in `DonateForm`
-
-**Out of Scope**
-- Other form components
-- `FormField` component changes
-
-### Implementation Plan
-1. Add a hidden `<div aria-live="assertive" className="sr-only">` near the validation error display
-2. Populate it with the first validation error message when validation fails
-3. Use a `useEffect` to update the live region content
-
-### Expected Files or Components
-- `frontend/components/DonateForm.tsx`
+- `frontend/lib/encryption.ts` (new), `frontend/components/DonateForm.tsx`
+- Backend: message column already accepts binary; flag via existing JSON or new column
 
 ### Acceptance Criteria
-- Validation errors are announced by screen readers
-- Live region updates when user clicks "Donate" with invalid input
-- No visual change for sighted users
-
-### Testing Requirements
-- The project already has jest-axe configured. Run `npm test` to verify no a11y regressions
-- Consider adding a test that checks the live region content
-
-### CI Requirements
-- `npm run type-check`
-- `npm run lint`
-- `npm test` (includes a11y checks via jest-axe)
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] ARIA live region added
-- [ ] Tests pass
-- [ ] CI green
+- Unit test for encrypt/decrypt roundtrip, backward compatibility with plaintext messages
+- The encryption key is the project's public key — donor does not need the project's secret key
 
 ### References
-- `frontend/components/DonateForm.tsx` — existing `aria-live="polite"` pattern
-- `frontend/components/FormField.tsx` — error display pattern
+- `frontend/components/DonateForm.tsx`, `frontend/components/DonationFeed.tsx`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #034 — Frontend: Full keyboard-navigation and screen-reader WCAG 2.1 AA audit
 
-## Issue #029 — Frontend: Add debouncing for project search input on the projects page
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/improvement`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/accessibility`, `priority/high`, `effort/large`
 
 ### Summary
-The project search input on the projects listing page fires API requests on every keystroke without debouncing. This causes excessive API calls, wastes rate limit budget, and creates unnecessary load on the backend.
-
-### Background
-The search query is likely passed to `fetchProjects({ search: query })` or similar. Rapid typing (e.g., "reforestation") triggers 13 API calls in sequence. The backend has a generous rate limit for `GET /api/projects` (100 req/60s), but this is still wasteful.
+The frontend has `@axe-core/playwright` in E2E tests and `jest-axe` for unit-level checks, plus `frontend/components/SkipToContent.tsx`. However, missing coverage: focus management during route transitions (Next.js client-side navigation doesn't announce page changes), keyboard trap prevention in modals and drawers, ARIA labels on dynamically-updated content (`LiveDonationTicker.tsx`, `LeaderboardTable.tsx`), color contrast in dark mode (`ThemeToggle.tsx`), focus indicators, and form error announcement via `aria-live` regions. The `a11y-nightly.yml` workflow exists but likely only runs smoke tests.
 
 ### Problem Statement
-Excessive API calls during search typing waste bandwidth, increase latency for all users, and unnecessarily consume rate limit budget.
+1. **Partial audit**: only ~30% of WCAG 2.1 AA violations are caught.
+2. **Dynamic content**: real-time components have no ARIA live-region updates.
+3. **Focus management**: route transitions are silent to screen readers.
 
 ### Objectives
-- Add a 300ms debounce to the search input before triggering API calls
-- Use a `useDebounce` hook or implement inline
+- Add `@axe-core/playwright` checks to every E2E page test
+- Fix all violations found
+- Implement focus management on route transitions, keyboard trap prevention in all modals
+- Add `aria-live` regions to `LiveDonationTicker`, `LeaderboardTable`
+- Extend `a11y-nightly.yml` to run full axe scan against all pages
 
 ### Scope
-
-**In Scope**
-- Projects listing page search input
-- Global search modal (if applicable)
-
-**Out of Scope**
-- Other filters (category, status) — these are dropdown selections, not free-text
-
-### Implementation Plan
-1. Implement a `useDebouncedValue` hook (or use a library like `use-debounce` if already in dependencies)
-2. Apply it to the search input's value before passing to the API call
-3. Ensure the debounced value resets when the input is cleared
-
-### Expected Files or Components
-- `frontend/pages/projects/index.tsx` (or wherever the projects list/search lives)
-- `frontend/components/GlobalSearchModal.tsx`
+- `frontend/components/**/*.tsx`, `frontend/pages/**/*.tsx`, `frontend/e2e/**/*.spec.ts`
+- `.github/workflows/a11y-nightly.yml`
 
 ### Acceptance Criteria
-- API call fires at most once per 300ms during fast typing
-- No API call on every keystroke
-- Search functionality unchanged
-
-### Testing Requirements
-- Unit test verifying debounce behavior
-- Manual test: open Network tab, type quickly, verify fewer API calls
-
-### CI Requirements
-- `npm run type-check`
-- `npm run lint`
-- `npm test`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Debounce applied to search input
-- [ ] Tests pass
-- [ ] CI green
+- Zero critical/medium axe violations across all pages in CI
+- Keyboard navigation through all interactive elements without trap
 
 ### References
-- `frontend/pages/index.tsx` — main page with project listing
-- `frontend/components/GlobalSearchModal.tsx`
+- `frontend/components/SkipToContent.tsx`, `.github/workflows/a11y-nightly.yml`
+## Issue #089 — Backend: Stellar transaction — add fee-bump support for stuck donations
 
----
-
-## Issue #030 — Frontend: Move inline empty states to a shared `EmptyState` component
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/improvement`, `priority/low`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/feature`, `priority/low`, `effort/medium`
 
 ### Summary
-Multiple pages render inline empty-state messages (e.g., "No projects found", "No donations yet", "No updates posted") using ad-hoc `<div>` markup. These should be consolidated into a single accessible `EmptyState` component that supports different variants (with icon, title, description, optional CTA).
-
-### Background
-The project already has shared components like `Skeleton`, `Navbar`, `FormField`, etc. An `EmptyState` component would reduce duplication and ensure all empty states are consistent and accessible.
+During network congestion, a submitted donation transaction may sit in the mempool for minutes without inclusion because the fee is too low. Stellar supports fee bumps (a separate account can pay additional fee to accelerate an existing transaction). The backend's `recurringKeeper` submits transactions with hardcoded fees and `turrets.js` has no fee-bump capability. If a recurring donation gets stuck, it fails silently.
 
 ### Problem Statement
-Inconsistent empty states across pages create a fragmented user experience and duplicate markup that's harder to maintain.
+1. **No fee bump**: stuck transactions stay stuck.
+2. **No mempool monitoring**: the keeper doesn't know if its transaction was included.
 
 ### Objectives
-- Create an `EmptyState` component with props: `icon?`, `title`, `description?`, `action?` (a ReactNode for a CTA button)
-- Replace inline empty states in at least 3 pages/components
+- After submitting a transaction, poll `horizon.transactions().transaction(hash)` for up to 60 seconds
+- If not included after 30 seconds, build and submit a fee-bump transaction with a higher fee
+- Cap at 3 fee-bump attempts before logging as failed
+- Integration with the keeper and matching services
 
 ### Scope
-
-**In Scope**
-- New `EmptyState` component
-- Replacement in 3+ pages
-
-**Out of Scope**
-- Full page-by-page audit and replacement of ALL empty states
-
-### Implementation Plan
-1. Create `frontend/components/EmptyState.tsx`
-2. Support variants: `search` (no results), `empty` (no data), `error` (failed to load)
-3. Add Storybook story
-4. Replace inline empty states in: projects listing, donations feed, project updates
-
-### Expected Files or Components
-- `frontend/components/EmptyState.tsx` (new)
-- `frontend/pages/index.tsx` (or projects page)
-- `frontend/components/DonationFeed.tsx`
-- `frontend/components/ProjectUpdates.tsx`
+- `backend/src/services/stellar.js` — `submitWithFeeBump`, `recurringKeeper.js`, `turrets.js`
 
 ### Acceptance Criteria
-- `EmptyState` component renders with icon, title, description, optional CTA
-- At least 3 pages use the component
-- Accessible (proper heading levels, semantic HTML)
-- Storybook story exists
-
-### Testing Requirements
-- Add jest test for the component with basic props
-- Storybook smoke build succeeds
-
-### CI Requirements
-- `npm run type-check`
-- `npm run lint`
-- `npm test`
-- `npm run build-storybook`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Component created
-- [ ] 3+ usages replaced
-- [ ] Tests + Storybook added
-- [ ] CI green
+- Mock: submit tx → not included after 30s → fee-bump submitted → inclusion verified
+- Cap at 3 attempts; no infinite fee escalation
 
 ### References
-- `frontend/components/Skeleton.tsx` — example of a shared presentational component
-- `frontend/components/DonationFeed.tsx`
+- `backend/src/services/stellar.js`, `backend/src/services/recurringKeeper.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #035 — Frontend: Refactor server-state management with `@tanstack/react-query` and optimistic updates
 
-## Issue #031 — Frontend: Add keyboard accessibility for Leaflet map markers on `ProjectMap`
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/a11y`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/performance`, `priority/medium`, `effort/large`
 
 ### Summary
-The `ProjectMap` component uses Leaflet to render an interactive map with project markers. Leaflet's default markers are `<img>` elements without keyboard focus or ARIA roles, making them inaccessible to keyboard-only users and screen readers.
-
-### Background
-`ProjectMap.tsx` renders markers using `react-leaflet`. The `ProjectMapMarker` component may have custom popups, but the markers themselves aren't keyboard-focusable.
+The frontend uses a mix of `useEffect` + `fetch` for server state with no optimistic updates and no offline support. The donation flow: user signs in Freighter → transaction submitted to Stellar → frontend calls `POST /api/donations` → waits for 201 → updates UI. This means a 2-3 second delay between clicking "Donate" and seeing confirmation. The `frontend/hooks/queries.ts` file suggests some query abstraction but is minimal. `frontend/hooks/useAsyncData.ts` is a generic async wrapper without caching.
 
 ### Problem Statement
-Keyboard users can't navigate to map markers to view project details. The map is a primary discovery mechanism for projects, so this is a significant accessibility gap.
+1. **No optimistic UI**: every mutation waits for the server response before updating the UI.
+2. **No stale-while-revalidate**: every page mount refetches data unconditionally.
+3. **Manual cache management**: each component manages its own cache with `useState`.
 
 ### Objectives
-- Make map markers keyboard-focusable (add `tabIndex={0}`, `role="button"` to the marker's icon element)
-- Add `aria-label` with the project name to each marker
-- Add `Enter`/`Space` key handler to open the marker popup
-- Ensure the existing keyboard navigation (zoom, pan) remains functional
+- Implement `@tanstack/react-query` with:
+  - optimistic mutation updates (show donation in feed immediately, rollback on error)
+  - IndexedDB persistence for offline resilience
+  - automatic background refetch on window focus
+  - mutation retry with exponential backoff
+- Convert incrementally, starting with donations
 
 ### Scope
-
-**In Scope**
-- `ProjectMap.tsx` and/or `ProjectMapMarker.tsx`
-
-**Out of Scope**
-- Other Leaflet interactions (drawing, measuring)
-- Map tile accessibility (handled by Leaflet)
-
-### Implementation Plan
-1. In the marker's `icon` configuration or the `divIcon` wrapper, add `tabIndex={0}` and `role="button"`
-2. Add an `aria-label="View project: {project.name}"` attribute
-3. Handle `onKeyDown` for Enter/Space to call the same handler as `onClick`
-4. Use `react-leaflet`'s `eventHandlers` prop
-
-### Expected Files or Components
-- `frontend/components/ProjectMap.tsx`
-- `frontend/components/ProjectMapMarker.tsx`
+- New `frontend/lib/queryClient.ts`, update all data-fetching hooks in `frontend/hooks/`, update mutation callers
 
 ### Acceptance Criteria
-- All project markers are keyboard-focusable
-- Enter/Space opens the popup
-- ARIA labels present on markers
-- jest-axe pass on the map component
-- Playwright a11y scan passes
-
-### Testing Requirements
-- Jest test with jest-axe verifying no a11y violations on map
-- Manual keyboard navigation test
-
-### CI Requirements
-- `npm run type-check`
-- `npm run lint`
-- `npm test`
-- `npm run a11y:scan`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Markers keyboard accessible
-- [ ] ARIA labels added
-- [ ] Tests + a11y scan pass
-- [ ] CI green
+- Unit test for optimistic update + rollback
+- E2E test for offline → online flow
+- No regression on existing data-fetching behavior
 
 ### References
-- `frontend/components/ProjectMap.tsx`
-- `frontend/components/ProjectMapMarker.tsx`
-- `frontend/scripts/axe-scan.mjs`
+- `frontend/hooks/queries.ts`, `frontend/hooks/useAsyncData.ts`, `frontend/components/DonationForm.tsx`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #036 — Mobile: Biometric-secured transaction signing with hardware-backed key storage
 
-## Issue #032 — Frontend: Wrap interactive components in error boundaries to prevent cascade failures
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/improvement`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/mobile`, `type/security`, `priority/high`, `effort/large`
 
 ### Summary
-Several interactive components (`DonationQRCode`, `WalletConnect`, `WalletAddressQRCode`, `WorldMap`) don't have their own error boundaries. If one of these throws during rendering, the error propagates to the page-level `ErrorBoundary`, taking down the entire page.
-
-### Background
-The project has an `ErrorBoundary` component (`frontend/lib/ErrorBoundary.tsx`) and a `QueryErrorFallback` component for data-fetching errors. But there's no component-level error boundary wrapping for isolated interactive widgets.
+The mobile app uses `expo-secure-store` (`mobile/lib/secureStore.ts`) for sensitive-data storage and `useBiometricAuth` (`mobile/hooks/`). However, Stellar transaction signing happens in JavaScript using the `stellar-sdk` Keypair class — the secret key must be loaded into JS memory to sign. On a compromised or jailbroken device, this secret key is extractable. The `mobile/lib/wallet/` directory contains wallet-management code.
 
 ### Problem Statement
-A rendering error in the `WalletConnect` button (e.g., due to a malformed Stellar address) shouldn't crash the entire page. Component-level error boundaries isolate failures so the rest of the page remains functional.
+1. **Key in JS memory**: the Stellar secret key is exposed to any JS-memory scanner.
+2. **No hardware signing**: neither iOS Secure Enclave nor Android Keystore is used for Ed25519 operations.
 
 ### Objectives
-- Wrap `DonationQRCode`, `WalletConnect`, `WalletAddressQRCode`, and `WorldMap` in individual error boundaries
-- Show a lightweight fallback UI ("This component could not be loaded") on error
+- Store the Stellar secret key in iOS Secure Enclave / Android Keystore (via `expo-crypto` or native module)
+- Perform Ed25519 signing inside the HSM so the secret key never enters JS memory
+- `useBiometricAuth` hook gates access to the signing operation
 
 ### Scope
-
-**In Scope**
-- Error boundary wrapping for 4 components
-- Simple fallback UI
-
-**Out of Scope**
-- Error recovery mechanisms
-- Full-page error boundaries (already exist)
-
-### Implementation Plan
-1. Create (or reuse) a lightweight `ComponentErrorBoundary` that catches render errors and shows a fallback
-2. Wrap each of the 4 components in their parent render with the error boundary
-3. Test by intentionally breaking each component to verify isolation
-
-### Expected Files or Components
-- `frontend/lib/ErrorBoundary.tsx`
-- `frontend/components/DonationQRCode.tsx`
-- `frontend/components/WalletConnect.tsx`
-- `frontend/components/WalletAddressQRCode.tsx`
-- `frontend/components/WorldMap.tsx`
+- `mobile/lib/secureStore.ts`, new `mobile/lib/stellarSigner.ts`, `mobile/hooks/useBiometricAuth.ts`
 
 ### Acceptance Criteria
-- Component error doesn't crash the full page
-- Fallback UI is shown for the failed component
-- Rest of the page works normally
-
-### Testing Requirements
-- Unit test: render a broken child inside the error boundary, assert fallback renders
-- Existing tests continue to pass
-
-### CI Requirements
-- `npm run type-check`
-- `npm run lint`
-- `npm test`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Components wrapped in error boundaries
-- [ ] Fallback UI implemented
-- [ ] Tests pass
-- [ ] CI green
+- Signing succeeds with valid biometric; fails with invalid biometric
+- Verify secret key never appears in JS heap (memory profiling test)
 
 ### References
-- `frontend/lib/ErrorBoundary.tsx`
-- `frontend/components/WalletConnect.tsx`
+- `mobile/lib/secureStore.ts`, `mobile/lib/wallet/`
+## Issue #090 — Frontend: Storybook — add interaction tests for interactive components
 
----
-
-## Issue #033 — Frontend: Add retry configuration for React Query hooks based on endpoint characteristics
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/improvement`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/testing`, `priority/medium`, `effort/medium`
 
 ### Summary
-React Query hooks in `frontend/hooks/queries.ts` use default retry behavior (3 retries with exponential backoff) for all queries. This is inappropriate for 4xx errors (e.g., 404, 403, 422) which will never succeed on retry and waste resources.
-
-### Background
-The frontend uses `@tanstack/react-query` for data fetching. The default `retry` is 3, which applies to all failures including client errors. The `queryErrors.ts` module already classifies errors as retryable or not, but this classification isn't used in the React Query configuration.
+The frontend has 11 Storybook stories but all are display-only (autodocs). There are no `play` functions for interaction testing: clicking buttons, filling forms, toggling theme, opening modals. Storybook's `@storybook/test` and `@storybook/testing-library` support click, type, and assertion interactions directly in stories — but none are used.
 
 ### Problem Statement
-Retrying 404s and 403s wastes bandwidth, increases latency, and creates unnecessary Sentry noise from failed retries.
+1. **No interaction testing**: stories are catalog-only, not behavior verification.
+2. **Unused Storybook capability**: `play` functions and test runner not wired.
 
 ### Objectives
-- Configure React Query's `retry` to use the `classifyError` function from `queryErrors.ts`: retry network, 429, and 5xx errors; do NOT retry 4xx errors
+- Add `play` functions to interactive stories: `DonateForm` (fill form, submit), `WalletConnect` (click connect), `ThemeToggle` (click toggle), `DonationModal` (open, click share)
+- Add Storybook test runner to CI (`frontend.yml`): `npx test-storybook`
+- Stories serve as both documentation and behavior tests
 
 ### Scope
-
-**In Scope**
-- React Query default options configuration
-- Integration with `classifyError`
-
-**Out of Scope**
-- Per-query retry overrides (can be done later)
-- Mutation retry logic
-
-### Implementation Plan
-1. In the React Query `QueryClient` setup (likely in `_app.tsx` or a provider), add a `retry` function to the default options:
-   ```ts
-   retry: (failureCount, error) => {
-     const classified = classifyError(error);
-     if (!classified.retryable) return false;
-     return failureCount < 3;
-   }
-   ```
-2. Ensure `classifyError` is imported
-3. Test: mock a 404 response, verify retries don't happen
-
-### Expected Files or Components
-- `frontend/pages/_app.tsx` (or wherever `QueryClientProvider` is configured)
-- `frontend/lib/queryErrors.ts`
+- `frontend/components/*.stories.tsx`, `.github/workflows/frontend.yml`
 
 ### Acceptance Criteria
-- 4xx errors are NOT retried
-- 5xx, 429, and network errors ARE retried (up to 3 times)
-- No functional regression in data fetching
-
-### Testing Requirements
-- Unit test for the retry function
-- Verify React Query behavior with mocked API
-
-### CI Requirements
-- `npm run type-check`
-- `npm run lint`
-- `npm test`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Retry logic configured
-- [ ] Test added
-- [ ] CI green
+- CI runs storybook tests: 11 stories pass with interaction assertions
+- New interactive stories added for DonateForm, WalletConnect, ThemeToggle, DonationModal
 
 ### References
-- `frontend/lib/queryErrors.ts` — `classifyError`
-- `frontend/hooks/queries.ts` (if exists, otherwise wherever queries are defined)
+- `frontend/components/DonateForm.stories.tsx`, `frontend/components/WalletConnect.stories.tsx`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #037 — Mobile: Offline transaction building with QR-based air-gapped signing
 
-## Issue #034 — Frontend: Add i18n coverage audit and fill missing translation keys
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/improvement`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/mobile`, `type/feature`, `priority/medium`, `effort/medium`
 
 ### Summary
-The project supports English, French, and Spanish via `frontend/locales/{en,fr,es}.json`. As new components and features have been added, some UI strings may only exist in `en.json` and be missing from `fr.json` and `es.json`. The project already has a locale parity check script (`scripts/check-locale-parity.js`).
-
-### Background
-`frontend/scripts/check-locale-parity.js` checks that all locale files have the same keys. Running this script may reveal missing keys that need to be filled.
+The mobile app targets donors where internet connectivity is intermittent. `mobile/lib/offlineCache.ts` and `mobile/lib/connectivity.ts` handle offline data caching and connectivity detection, but donations still require an active connection to Horizon for account sequence number lookup and transaction submission. The `mobile/lib/offlineQueue.ts` file exists for queueing actions but does not handle Stellar transaction building.
 
 ### Problem Statement
-Missing translations cause fallback to English keys or empty strings in the French and Spanish UIs. This degrades the experience for non-English users.
+1. **Online-only donations**: sequence-number lookup requires connectivity.
+2. **No air-gapped signing**: no way to sign offline and submit later via another device.
 
 ### Objectives
-- Run `check-locale-parity.js` and identify missing keys
-- Add English fallback values for any truly new keys
-- Mark missing translations with TODO comments for community translators
-- Ensure all three locale files have identical key sets
+- Cache the account sequence number and latest ledger from the last online state
+- Allow building and signing transactions offline (the sequence number may be stale — handle this gracefully on submission)
+- Generate a QR code containing the signed transaction XDR
+- Provide a "Submit Later" queue that submits when connectivity returns
 
 ### Scope
-
-**In Scope**
-- Running the parity check script
-- Filling missing keys with English fallbacks
-
-**Out of Scope**
-- Translating ALL strings to French/Spanish (can be separate community efforts)
-- Adding new languages
-
-### Implementation Plan
-1. Run `node scripts/check-locale-parity.js`
-2. For each missing key in `fr.json` and `es.json`, add the key with the English value and a `// TODO: translate` comment
-3. Re-run the script until it passes
-
-### Expected Files or Components
-- `frontend/locales/en.json`
-- `frontend/locales/fr.json`
-- `frontend/locales/es.json`
-- `frontend/scripts/check-locale-parity.js`
+- `mobile/lib/offlineTx.ts` (new), `mobile/lib/offlineCache.ts`, `mobile/lib/offlineQueue.ts`
+- Edge cases: sequence number staleness → tx rejected, retry with new sequence
 
 ### Acceptance Criteria
-- `check-locale-parity.js` exits with 0 and no errors
-- All three locale files have identical keys
-- No broken UI in French/Spanish modes
-
-### Testing Requirements
-- Run `npm run test:i18n-parity`
-- Manual smoke test: switch to French and Spanish, browse key pages
-
-### CI Requirements
-- `npm run type-check`
-- `npm run lint`
-- `npm run test:i18n-parity`
-- `npm test`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Locale parity check passes
-- [ ] CI green
+- Build transaction offline, verify XDR is valid, simulate online submission
+- Stale sequence rejected with clear retry UX
 
 ### References
-- `frontend/locales/en.json`
-- `frontend/scripts/check-locale-parity.js`
+- `mobile/lib/offlineCache.ts`, `mobile/lib/connectivity.ts`, `mobile/lib/offlineQueue.ts`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #038 — Mobile: Deep-link routing for donation flows with universal-link fallback
 
-## Issue #035 — Frontend: Add test coverage for offline donation queuing flow in DonateForm
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/testing`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/mobile`, `type/feature`, `priority/medium`, `effort/medium`
 
 ### Summary
-The `DonateForm` component has an offline donation queue flow that saves donations to localStorage when the user is offline. This flow is implemented but has no dedicated unit tests verifying correct behavior.
-
-### Background
-When `isOnline` is false, `handleDonate` calls `queueDonation(...)` from `frontend/lib/offlineDonationQueue.ts` instead of submitting to the network. The component tests (if they exist) likely mock `isOnline` as `true` and miss the offline path entirely.
+The mobile app uses `expo-router` for file-based navigation and supports deep links for wallet connections (`freighter://tx?xdr=...`). However, project donation deep links (e.g., `indigopay://donate/project-001?amount=100`) are not implemented. `mobile/app/` directories suggest the app has donation and project pages but no deep-link registration. The `mobile/.well-known/` directory exists for universal link configuration.
 
 ### Problem Statement
-Without test coverage, a regression in the offline queuing flow could silently break the offline donation experience for users with poor connectivity.
+1. **No project deep links**: scanning a project QR code at an event doesn't open the app to the donation screen.
+2. **No universal links**: users without the app installed see a broken link.
 
 ### Objectives
-- Add a test case where `useOnlineStatus` returns `false`
-- Verify `queueDonation` is called with the correct payload
-- Verify the success message mentions offline queuing
+- Implement `indigopay://donate/:projectId` with optional `?amount=X` query param
+- Implement `indigopay://project/:projectId` for the project detail page
+- Add universal link (`https://stellarindigopay.com/donate/:projectId`) as fallback
+- Configure `app.json` associated domains
 
 ### Scope
-
-**In Scope**
-- DonateForm test for offline flow
-
-**Out of Scope**
-- Testing the `offlineDonationQueue` module itself (separate issue)
-
-### Implementation Plan
-1. Find or create the DonateForm test file
-2. Add a test: mock `useOnlineStatus` to return `false`, render DonateForm, fill in amount, click Donate, assert:
-   - `queueDonation` was called
-   - Error/success message mentions queuing
-   - No network call was made
-
-### Expected Files or Components
-- `frontend/components/__tests__/DonateForm.test.tsx` (or wherever DonateForm tests live)
-- `frontend/hooks/useOnlineStatus.ts`
-- `frontend/lib/offlineDonationQueue.ts`
+- `mobile/app/donate/[projectId].tsx` (new), `mobile/app.config.ts`
+- `mobile/.well-known/apple-app-site-association` (new)
 
 ### Acceptance Criteria
-- Test verifies offline queuing behavior
-- Test passes
-- Existing tests pass
-
-### Testing Requirements
-- One new unit test
-
-### CI Requirements
-- `npm test`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Offline queuing test added
-- [ ] CI green
+- Deep link integration test, pre-filled amount verified, fallback to web verified
 
 ### References
-- `frontend/components/DonateForm.tsx` — offline path in `handleDonate`
-- `frontend/lib/offlineDonationQueue.ts`
+- `mobile/app/`, `mobile/.well-known/`, `mobile/app.json`
+## Issue #091 — Backend: Admin audit log — record all admin actions with before/after state
 
----
-
-## Issue #036 — Frontend: Implement project map marker clustering for performance
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/improvement`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/security`, `priority/high`, `effort/medium`
 
 ### Summary
-The `ProjectMap` component renders individual markers for every project. With a growing project database (100+ projects worldwide), rendering all markers simultaneously degrades map performance and creates visual clutter in dense areas.
-
-### Background
-`react-leaflet` supports marker clustering via `react-leaflet-cluster` (or `leaflet.markercluster`). The current implementation renders each project as an individual marker without clustering.
+Admin actions (project verification approval, admin key rotation, contract upgrades, emergency withdrawals) mutate critical state. But there is no audit log recording who performed which action, when, and what changed. The existing `auditChain.js` records data changes via hash chains but only covers automated donation events — not admin-initiated changes. An insider threat or compromised admin key could make silent changes with no traceability.
 
 ### Problem Statement
-As the project count grows, the map becomes slow to render and navigate. Clusters of overlapping markers in popular regions (e.g., multiple reforestation projects in Brazil) are visually indecipherable.
+1. **No admin action log**: admin mutations are invisible in audit.
+2. **No before/after state**: hash chains don't capture the semantic change.
 
 ### Objectives
-- Integrate marker clustering into `ProjectMap`
-- Projects within close proximity should be grouped into a cluster marker showing the count
-- Clicking a cluster should zoom in to reveal individual markers
-- Backward compatible: single markers should still show their popup
+- Create `admin_audit_log` table: `id`, `admin_id`, `action` (string), `resource_type`, `resource_id`, `before_state` (JSONB), `after_state` (JSONB), `ip_address`, `user_agent`, `created_at`
+- Middleware or service wrapper that records audit entries on every admin mutation
+- `GET /api/admin/audit-log?from=X&to=Y` endpoint for review
+- Immutable: no UPDATE/DELETE on `admin_audit_log` — append-only
 
 ### Scope
-
-**In Scope**
-- `ProjectMap.tsx` clustering integration
-- Cluster styling to match the app's design system
-
-**Out of Scope**
-- Server-side spatial indexing (can be future optimization)
-- Heatmap visualization
-
-### Implementation Plan
-1. Install a clustering library compatible with `react-leaflet` v4
-2. Wrap the markers list in a cluster component
-3. Style clusters with the app's color palette
-4. Test with 50+ mock projects to verify performance improvement
-
-### Expected Files or Components
-- `frontend/components/ProjectMap.tsx`
-- `frontend/package.json` (dependency addition)
+- New migration, `backend/src/services/adminAudit.js` (new), `backend/src/routes/admin.js`
 
 ### Acceptance Criteria
-- Markers cluster when zoomed out
-- Clicking a cluster zooms in and reveals individual markers
-- Single markers still show their popup on click
-- Map performance is noticeably better with 50+ projects
-- Playwright visual regression tests still pass
-
-### Testing Requirements
-- Unit test for clustering behavior
-- Playwright test for map interaction
-
-### CI Requirements
-- `npm run type-check`
-- `npm run lint`
-- `npm test`
-- `npm run test:e2e`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Marker clustering implemented
-- [ ] Tests pass
-- [ ] CI green
+- Admin approves verification → audit row recorded with before (pending) and after (approved)
+- Audit endpoint returns paginated log
+- No UPDATE/DELETE possible on the audit log table
 
 ### References
-- `frontend/components/ProjectMap.tsx`
-- `frontend/components/ProjectMapMarker.tsx`
+- `backend/src/services/auditChain.js`, `backend/src/routes/admin.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #039 — Extension: CSP compliance for Manifest V3 with inline-script removal
 
-## Issue #037 — Frontend: Add TypeScript strict null checks in form validation hooks
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/improvement`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/extension`, `type/security`, `priority/high`, `effort/medium`
 
 ### Summary
-The `useFormValidation` hook and form components access validation results without proper null guards. For example, `errors.message` might be accessed before validation has run, or undefined fields could cause runtime errors.
-
-### Background
-Zod schemas produce `SafeParseReturnType` which includes `.success` and `.error?.issues`. The hook likely uses `safeParse` and stores results in state. TypeScript strict mode might catch some issues, but the current `tsconfig.json` may not have `strictNullChecks: true`.
+The Chrome Web Store enforces stricter Manifest V3 CSP requirements. The extension's `extension/manifest.json` specifies `manifest_version: 3` but `extension/popup.html` and `extension/settings.html` may contain inline scripts or event handlers violating CSP. The Firefox manifest (`manifest.firefox.json`) has different CSP rules. `extension/src/` contains the bundled source, and `extension/webpack.config.js` handles bundling.
 
 ### Problem Statement
-Accessing `.error.issues` or `.data.field` without checking `.success` first is a common source of runtime errors in form handling.
+1. **CSP violation risk**: inline scripts may cause Chrome Web Store rejection.
+2. **Dual-manifest divergence**: Firefox and Chrome manifests may have different CSP policies.
 
 ### Objectives
-- Audit `useFormValidation` hook for null safety
-- Add null guards before accessing parse results
-- Ensure `tsconfig.json` has `strictNullChecks: true` (or add `// @ts-expect-error` comments with justification)
+- Audit `popup.html`, `settings.html` for inline scripts and event handlers (`onclick`, `onload`)
+- Move all logic to bundled JS files loaded via `<script src="...">`
+- Add strict CSP: `"content_security_policy": { "extension_pages": "script-src 'self'; object-src 'none'" }` to both manifests
+- Add CSP lint step to `.github/workflows/extension.yml`
 
 ### Scope
-
-**In Scope**
-- `frontend/hooks/useFormValidation.ts`
-- `frontend/components/DonateForm.tsx`
-- `frontend/components/FormField.tsx`
-
-**Out of Scope**
-- Full strict mode migration
-
-### Implementation Plan
-1. Read `useFormValidation.ts` to understand the hook's return type
-2. Add null guards in both the hook and its consumers
-3. Verify type-check passes with `npm run type-check`
-
-### Expected Files or Components
-- `frontend/hooks/useFormValidation.ts`
-- `frontend/components/DonateForm.tsx`
-- `frontend/components/FormField.tsx`
-- `frontend/tsconfig.json` (check `strictNullChecks`)
+- `extension/popup.html`, `extension/settings.html`, `extension/manifest.json`, `extension/manifest.firefox.json`
 
 ### Acceptance Criteria
-- No runtime errors from null/undefined access in form validation
-- `npm run type-check` passes
-- Existing form tests pass
-
-### Testing Requirements
-- Type-check must pass
-- Existing tests pass
-
-### CI Requirements
-- `npm run type-check`
-- `npm test`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Null guards added
-- [ ] Type-check passes
-- [ ] CI green
+- CSP validation test (parse manifest, verify no inline-script allowances)
+- Chrome Web Store compliance review passes
 
 ### References
-- `frontend/hooks/useFormValidation.ts`
-- `frontend/tsconfig.json`
+- `extension/manifest.json`, `extension/manifest.firefox.json`, `extension/popup.html`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #040 — Extension: Configurable donation presets with keyboard shortcuts
 
-## Issue #038 — Frontend: Add test coverage for error boundary recovery paths
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/testing`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/extension`, `type/feature`, `priority/low`, `effort/small`
 
 ### Summary
-The `ErrorBoundary` component (`frontend/lib/ErrorBoundary.tsx`) catches render errors and shows a fallback UI, but there are no tests verifying that the fallback renders correctly and that the "Try again" button resets the error state.
-
-### Background
-The `ErrorBoundary` is a class component (React error boundaries must be class components). Testing error boundaries requires intentionally throwing in a child component and asserting the fallback renders.
+The extension popup (`extension/popup.html`, `extension/src/popup.ts`) requires the user to enter a custom donation amount each time. Power users (repeat donors) would benefit from configurable preset amounts with keyboard shortcuts. `extension/settings.html` and `extension/src/settings.ts` provide a settings UI ready for extension.
 
 ### Problem Statement
-Without tests, a change to the ErrorBoundary's fallback rendering or reset logic could break without detection.
+1. **No presets**: every donation requires manual amount entry.
+2. **No keyboard shortcuts**: no power-user efficiency for the extension surface.
 
 ### Objectives
-- Add a test that renders `ErrorBoundary` with a child that throws
-- Assert the fallback UI is shown
-- Assert the "Try again" button resets the error state and re-renders the child
+- Settings page with 4 configurable preset amounts stored in `chrome.storage.sync`
+- Popup UI showing preset buttons ("10 XLM", "50 XLM", "100 XLM", "Custom")
+- Keyboard shortcuts: Ctrl+1 through Ctrl+4 for presets, Enter to confirm
+- "Quick Donate" mode: one-click donation of default preset when a Stellar address is detected
 
 ### Scope
-
-**In Scope**
-- ErrorBoundary unit tests
-
-**Out of Scope**
-- Sentry integration testing
-
-### Implementation Plan
-1. Create a test file: `frontend/lib/__tests__/ErrorBoundary.test.tsx`
-2. Render `<ErrorBoundary><ComponentThatThrows /></ErrorBoundary>`
-3. Assert fallback renders
-4. Click "Try again", assert error state is reset
-
-### Expected Files or Components
-- `frontend/lib/ErrorBoundary.tsx`
-- `frontend/lib/__tests__/ErrorBoundary.test.tsx` (new)
+- `extension/src/popup.ts`, `extension/src/settings.ts`, `extension/settings.html`, `extension/popup.html`
 
 ### Acceptance Criteria
-- Test verifies fallback renders on error
-- Test verifies "Try again" resets the boundary
-- Test passes
-
-### Testing Requirements
-- Unit test with `@testing-library/react`
-
-### CI Requirements
-- `npm test`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Error boundary tests added
-- [ ] CI green
+- Unit test for preset storage/retrieval, E2E test for keyboard shortcut behavior
+- Presets labeled with XLM amounts and approximate fiat values
 
 ### References
-- `frontend/lib/ErrorBoundary.tsx`
-- `frontend/jest.setup.ts`
+- `extension/src/popup.ts`, `extension/src/settings.ts`, `extension/popup.html`
+## Issue #092 — Contracts: Attestation — implement `get_pending_attestations_by_chain` for relayer efficiency
 
----
-
-## Issue #039 — CI: Make contract WASM size threshold configurable via environment variable
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/ci`, `type/improvement`, `priority/low`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/performance`, `priority/medium`, `effort/medium`
 
 ### Summary
-The contracts CI workflow (`.github/workflows/contracts.yml`) hardcodes the WASM binary size threshold at 65536 bytes. As the contract grows (new features, multi-token support, oracle integration), this threshold may need adjustment. It should be configurable via a repository variable or environment variable rather than hardcoded.
-
-### Background
-The WASM size check runs after `wasm-opt -Oz` and fails the build if the optimized binary exceeds 64KB (the Soroban upload limit). The hardcoded value means any threshold change requires a PR to the workflow file.
+The attestation contract stores all attestations indexed by `id` (sequential). A relayer that monitors only Ethereum (source_chain = "ethereum") must call `get_attestation(i)` for every `i` from 1 to `total_count` to find pending Ethereum attestations — O(n) RPC calls. There is no chain-filtered pagination.
 
 ### Problem Statement
-Hardcoded thresholds in CI workflows create unnecessary friction when the contract binary size approaches the limit. A repository variable allows maintainers to adjust the threshold without workflow changes.
+1. **O(n) chain filtering**: relayers waste RPC calls scanning all chains.
+2. **No per-chain index**: attestations are only indexed by global id.
 
 ### Objectives
-- Replace the hardcoded `65536` with `${{ vars.WASM_SIZE_LIMIT || 65536 }}`
-- Update the error message to reference the variable
+- Add `DataKey::ChainIndex(source_chain, attestation_id) -> u64` mapping
+- Add `get_pending_attestations_by_chain(env, source_chain, from, count) -> Vec<Attestation>`
+- Update `record_attestation` to append to the chain index
 
 ### Scope
-
-**In Scope**
-- `.github/workflows/contracts.yml`
-
-**Out of Scope**
-- Other hardcoded values in CI
-- Changing the contract to reduce size
-
-### Implementation Plan
-1. Change `if [ $size -gt 65536 ]` to `if [ $size -gt ${WASM_SIZE_LIMIT:-65536} ]`
-2. Set the env var from `vars.WASM_SIZE_LIMIT` in the workflow
-3. Update the error message
-
-### Expected Files or Components
-- `.github/workflows/contracts.yml`
+- `contracts/attestation-contract/src/lib.rs` — new index, read function, record path update
 
 ### Acceptance Criteria
-- WASM size threshold is configurable via `vars.WASM_SIZE_LIMIT`
-- Default remains 65536 when not set
-
-### Testing Requirements
-- CI job must still run and pass
-
-### CI Requirements
-- The change is in a CI workflow — verify by running the workflow on push
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Threshold configurable
-- [ ] CI workflow runs successfully
-- [ ] CI green
+- Record attestations on ethereum and polygon → get_pending by ethereum returns only ethereum
+- Gas cost comparison: O(n) scan vs O(1) chain-filtered page
 
 ### References
-- `.github/workflows/contracts.yml` — "Check WASM size" step
+- `contracts/attestation-contract/src/lib.rs` — `record_attestation`, `get_attestation`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #041 — CI/CD: Implement automated canary analysis with a real `AnalysisTemplate` for Argo Rollouts
 
-## Issue #040 — Testing: Add integration tests for `GET /api/map` endpoint
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/testing`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/devops`, `type/feature`, `priority/high`, `effort/large`
 
 ### Summary
-The map endpoint (`GET /api/map`) serves project coordinates for the frontend map visualization. Despite being a public-facing endpoint with cache TTL of 600s, there are no dedicated integration tests for it in the test suite.
-
-### Background
-`GET /api/map` returns a list of projects with `latitude`, `longitude`, `name`, `id`, `category`, and `status`. It likely supports region filtering. The endpoint is mounted in `server.js` under the `map` route mount.
+`gitops/argo-rollouts-canary.yaml` sets up Argo Rollouts for canary deployments with Prometheus analysis, but the file references an `AnalysisTemplate` that does not exist in `gitops/`. The canary promotion therefore relies on manual review or default step logic rather than automated success criteria.
 
 ### Problem Statement
-The map endpoint is untested. A regression that breaks the coordinates format or filters would go undetected by CI.
+1. **Missing AnalysisTemplate**: canary analysis is not actually configured.
+2. **No automated rollback**: canary regressions require human detection.
 
 ### Objectives
-- Read `backend/src/routes/map.js` to understand the endpoint
-- Add integration tests covering: basic response, geo-filtering, empty result set, caching headers
+- Create a real `AnalysisTemplate` resource in `gitops/`
+- Query Prometheus for error rate and p95 latency of canary vs stable pods over a 10-minute window
+- Automated rollback if canary error rate exceeds 1.5x stable baseline or p95 increases by >20%
+- Add a Grafana dashboard panel showing canary-vs-stable metrics during rollout
 
 ### Scope
-
-**In Scope**
-- Integration tests for `GET /api/map`
-
-**Out of Scope**
-- E2E tests for the map frontend
-
-### Implementation Plan
-1. Read `backend/src/routes/map.js`
-2. Create `backend/src/routes/map.test.js` (if it doesn't exist)
-3. Add tests:
-   - Returns 200 with project coordinates
-   - Filters by region/category
-   - Returns empty array when no projects match
-   - Response includes cache headers
-
-### Expected Files or Components
-- `backend/src/routes/map.js`
-- `backend/src/routes/map.test.js` (new or updated)
+- `gitops/analysis-template.yaml` (new), `gitops/argo-rollouts-canary.yaml`
+- `monitoring/recording-rules.yml` — canary-specific recording rules
 
 ### Acceptance Criteria
-- At least 3 integration tests for the map endpoint
-- Tests pass
-- `npm test` passes
-
-### Testing Requirements
-- Integration tests with supertest and test database
-
-### CI Requirements
-- `npm run lint`
-- `npm test`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Map endpoint tests added
-- [ ] CI green
+- `helm template` dry-run validates both manifests
+- Manual canary test on staging verifies promotion/rollback based on analysis
 
 ### References
-- `backend/src/routes/map.js`
-- `backend/src/routes/projects.test.js` — example of existing route tests
+- `gitops/argo-rollouts-canary.yaml`, `monitoring/prometheus.yml`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #042 — CI/CD: Severity-gated SBOM vulnerability scanning with `.trivyignore` exceptions
 
-## Issue #041 — Testing: Add contract fuzz target for escrow milestone dispute resolution
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/testing`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/devops`, `type/security`, `priority/high`, `effort/medium`
 
 ### Summary
-The escrow contract's fuzz test (`contracts/escrow-contract/src/escrow_fuzz.rs`) covers basic job lifecycle but doesn't fuzz the milestone-level dispute and resolution flow (`dispute_milestone` + `resolve_milestone_dispute`). This path involves complex state transitions that benefit from random input testing.
-
-### Background
-The milestone dispute flow allows the admin to dispute a single milestone (not the whole job), and later resolve it with `approve` or `reject`. The state transitions involve: `Escrowed -> Disputed -> PartiallyReleased/Completed` (depending on remaining milestones). Fuzzing this path with random milestone indices and approve/reject decisions would catch edge cases.
+The `.github/workflows/sbom.yml` generates an SBOM and `.github/workflows/image-scan.yml` runs Trivy, but there's no CI gate based on vulnerability severity. A critical CVE in a base image or npm dependency can be merged without blocking CI. A `.trivyignore` file exists but its semantics are not enforced as a reviewable process.
 
 ### Problem Statement
-The milestone-level dispute flow is more complex than the whole-job dispute flow and hasn't been fuzzed. A fuzz target would increase confidence in the state machine.
+1. **No severity gate**: CRITICAL/HIGH CVEs don't fail CI.
+2. **No exception process**: `.trivyignore` entries aren't reviewed or time-boxed.
 
 ### Objectives
-- Add a fuzz target (or proptest) that randomly:
-  1. Creates a job with 1-5 milestones
-  2. Disputes a random milestone
-  3. Resolves it with random approve/reject
-  4. Asserts the final state is valid (no unreleased disputed milestones, etc.)
+- Run Trivy with `--severity CRITICAL,HIGH --exit-code 1` in CI
+- Document `.trivyignore` exceptions with justification and review requirement
+- Add a weekly SBOM diff job comparing current SBOM against previous release, flagging new dependencies
+- Auto-create GitHub issues for new CRITICAL CVEs
 
 ### Scope
-
-**In Scope**
-- New fuzz/proptest test
-
-**Out of Scope**
-- Full job lifecycle fuzzing (already exists)
-
-### Implementation Plan
-1. Extend `escrow_fuzz.rs` or create a new file
-2. Use proptest strategies to generate milestone vectors and dispute/resolution sequences
-3. Assert invariants after each step
-
-### Expected Files or Components
-- `contracts/escrow-contract/src/escrow_fuzz.rs`
+- `.github/workflows/image-scan.yml`, `.github/workflows/sbom.yml`, `.trivyignore`
 
 ### Acceptance Criteria
-- Fuzz test exercises milestone dispute/resolution with >100 random sequences
-- Test passes locally with `cargo test` (not skipped)
-- CI doesn't run fuzz tests (uses `-- --skip fuzz`)
-
-### Testing Requirements
-- New fuzz/proptest test
-
-### CI Requirements
-- `cargo test --features testutils --workspace -- --skip fuzz` (fuzz tests excluded from CI)
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Fuzz test added
-- [ ] Passes locally
-- [ ] CI green (fuzz skipped)
+- CI fails on critical CVE; `.trivyignore` exceptions work as documented
+- New CVEs in `.trivyignore` require PR review
 
 ### References
-- `contracts/escrow-contract/src/escrow_fuzz.rs`
-- `contracts/escrow-contract/proptest-regressions/escrow_fuzz.txt`
+- `.github/workflows/image-scan.yml`, `.github/workflows/sbom.yml`, `.trivyignore`
+## Issue #093 — Frontend: `ProjectMap` — cluster markers and lazy-load map tiles
 
----
-
-## Issue #042 — CI: Add husky pre-commit hook for Rust contract formatting
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/ci`, `type/improvement`, `priority/low`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/performance`, `priority/medium`, `effort/medium`
 
 ### Summary
-The project has a husky pre-commit hook (`.husky/pre-commit`) that runs checks before commits. The existing hook includes a Rust formatting check (`check-rust-fmt.sh`) but it may only exist as a stub. Ensure it runs `cargo fmt --all -- --check` on changed Rust files.
-
-### Background
-`.husky/pre-commit` runs shell commands before each commit. The `.husky/check-rust-fmt.sh` script should check formatting. If it's missing or not running, contributors can commit unformatted Rust code, which then fails in CI.
+`frontend/components/ProjectMap.tsx` renders all project markers on a world map. For 100+ projects, every marker is rendered as a DOM node (or canvas element), and the map becomes unresponsive. There is no marker clustering (grouping nearby markers into a single numbered cluster at low zoom) and no lazy tile loading.
 
 ### Problem Statement
-Unformatted Rust code committed locally causes CI failures that could have been caught pre-commit.
+1. **No marker clustering**: 100+ markers cause jank.
+2. **Eager tile loading**: all tiles load regardless of viewport.
 
 ### Objectives
-- Verify `.husky/check-rust-fmt.sh` is functional
-- Ensure it only checks staged `.rs` files (or falls back to `cargo fmt --all -- --check`)
-- If the script is missing, create it
+- Implement marker clustering (using `supercluster` or leaflet.markercluster) — nearby markers merge into a numbered cluster badge at low zoom levels
+- Implement lazy tile loading: tiles outside the viewport are not fetched
+- Add `ProjectMapMarker.tsx` (already exists) for individual project popups
 
 ### Scope
-
-**In Scope**
-- `.husky/check-rust-fmt.sh`
-- `.husky/pre-commit`
-
-**Out of Scope**
-- Adding other Rust checks (clippy) to pre-commit (that's too slow)
-
-### Implementation Plan
-1. Read `.husky/check-rust-fmt.sh` to check its current state
-2. If incomplete, implement: check that `cargo fmt --all -- --check` passes for the `contracts` directory
-3. Ensure `pre-commit` calls this script
-
-### Expected Files or Components
-- `.husky/check-rust-fmt.sh`
-- `.husky/pre-commit`
+- `frontend/components/ProjectMap.tsx`, `frontend/components/ProjectMapMarker.tsx`
 
 ### Acceptance Criteria
-- `cargo fmt` check runs on commit
-- Unformatted Rust files are caught before commit
-- Pre-commit hook doesn't slow down commits significantly
-
-### Testing Requirements
-- Manual test: make a formatting change to a `.rs` file, attempt to commit, verify hook blocks it
-
-### CI Requirements
-- Not applicable (pre-commit is local)
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Pre-commit hook catches Rust formatting issues
-- [ ] CI green (no formatting failures)
+- 200 markers at zoom level 3 → ~10 cluster badges, not 200 individual markers
+- Zoom into cluster → markers fan out
+- Map renders within 2 seconds with 200 projects
 
 ### References
-- `.husky/pre-commit`
-- `.husky/check-rust-fmt.sh`
-- `.github/workflows/contracts.yml` — formatting step
+- `frontend/components/ProjectMap.tsx`, `frontend/components/ProjectMapMarker.tsx`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #043 — CI/CD: Post-deploy contract verification with invariant smoke tests on testnet
 
-## Issue #043 — Testing: Add performance regression check for donation recording pipeline in CI
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/testing`, `type/improvement`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/devops`, `type/testing`, `priority/medium`, `effort/medium`
 
 ### Summary
-The load test script (`scripts/load-test.js`) tests the donation recording pipeline with k6 but only runs manually. A lightweight performance smoke test should run in CI to catch regressions that would cause the p95 latency to degrade below the 500ms target.
-
-### Background
-`CONTRIBUTING.md` states the donations API must sustain 100 concurrent users with p95 < 500ms. The k6 script validates this but isn't part of CI. A shorter, lower-concurrency test (e.g., 10 VUs for 30s) could run in CI without adding significant runtime.
+`.github/workflows/contract-deploy.yml` deploys contracts to testnet but does not verify post-deployment correctness beyond checking the deploy transaction succeeded. There's no automated verification that: (1) the deployed WASM hash matches the build artifact, (2) `initialize` was called with the correct admin set, (3) `register_project` succeeds, (4) `donate` succeeds and emits the expected event, (5) `get_global_stats` returns zero-state values.
 
 ### Problem Statement
-Performance regressions are only caught when someone manually runs `k6 run scripts/load-test.js`, which may not happen before PRs are merged.
+1. **Deploy ≠ correct**: a successful deploy transaction doesn't prove the contract works.
+2. **No regression signal**: contract-breaking changes reach testnet without smoke verification.
 
 ### Objectives
-- Add a CI job that runs a short load test against the backend (e.g., 10 VUs, 30s duration)
-- Set a generous threshold (p95 < 2s) for CI — the purpose is regression detection, not precision
-- The job should be informational (not block merge) initially
+- Implement a post-deploy verification script running a smoke-test sequence against the freshly deployed contract
+- Assert each step's outcome and event emissions
+- Fail the workflow if verification fails
 
 ### Scope
-
-**In Scope**
-- CI job for performance smoke test
-- k6 script with CI-friendly parameters
-
-**Out of Scope**
-- Full-scale load testing (still manual)
-- Automated performance baselining
-
-### Implementation Plan
-1. Create a `scripts/load-test-ci.js` that runs fewer iterations with a higher threshold
-2. Add a job to `.github/workflows/ci.yml` or a new workflow
-3. Use `continue-on-error: true` so it doesn't block PRs initially
-
-### Expected Files or Components
-- `scripts/load-test-ci.js` (new)
-- `.github/workflows/ci.yml`
+- `.github/workflows/contract-deploy.yml`, new `scripts/verify-deployment.sh`
 
 ### Acceptance Criteria
-- Performance smoke test runs in CI
-- Doesn't increase CI runtime by more than 2 minutes
-- Failures are visible but don't block merges
-
-### Testing Requirements
-- Verify the CI job runs and reports results
-
-### CI Requirements
-- The new CI job must not fail CI (informational only initially)
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Performance smoke test in CI
-- [ ] CI green
+- Verification script runs automatically after deployment; fails workflow on mismatch
 
 ### References
-- `scripts/load-test.js`
-- `CONTRIBUTING.md` — performance expectations
-- `docs/performance.md`
+- `.github/workflows/contract-deploy.yml`, `contracts/indigopay-contract/README.md`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #044 — CI/CD: k6 load-test regression detection with PR comments and baseline comparison
 
-## Issue #044 — Testing: Add API response shape snapshot tests for core endpoints
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/testing`, `type/improvement`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/devops`, `type/ci`, `priority/medium`, `effort/medium`
 
 ### Summary
-Core API endpoints (`GET /api/projects`, `GET /api/projects/:id`, `GET /api/leaderboard`, `GET /api/stats/global`) should have response shape snapshot tests to catch unintended changes to the JSON structure that could break frontend clients.
-
-### Background
-The backend has comprehensive integration tests that check HTTP status codes and sometimes data fields, but none use Jest snapshots to verify the entire response shape. A snapshot test would freeze the response structure and alert on any field additions/removals/renames.
+`scripts/load-test.js` k6 script enforces p95 < 500ms as a hard threshold. The load test only runs manually or in a CI smoke test (10 VUs, 10s). There's no automated regression detection: a PR that increases p50 from 82ms to 150ms (still below the 500ms threshold) merges without flagging the 83% degradation.
 
 ### Problem Statement
-API response shape changes (removing a field, renaming `raisedXLM` to `raised_xlm`, changing a type from string to number) could silently break the frontend. Snapshot tests catch these immediately.
+1. **No baseline comparison**: only hard thresholds, no relative regression detection.
+2. **Manual-only full runs**: 100 VU runs require an operator.
 
 ### Objectives
-- Add Jest snapshot tests for 4 core endpoints
-- Use the test database with seeded data for deterministic responses
+- Add a nightly load test run (100 VUs, 60s) posting results as a JSON artifact
+- Add a PR workflow comparing current results against the `main` baseline and posting a PR comment with the diff
+- Config: `LATENCY_REGRESSION_THRESHOLD_PCT` (default 20%) — PRs exceeding it get a warning comment but are not blocked
 
 ### Scope
-
-**In Scope**
-- Snapshot tests for `GET /api/projects`, `GET /api/projects/:id`, `GET /api/leaderboard`, `GET /api/stats/global`
-
-**Out of Scope**
-- Snapshot tests for all endpoints
-- Snapshot tests for error responses
-
-### Implementation Plan
-1. Pick an existing integration test and add `.toMatchSnapshot()` on the response body
-2. Seed the test database with known data so snapshots are deterministic
-3. Exclude time-varying fields (`createdAt`, `updatedAt`) from snapshots or mock them
-
-### Expected Files or Components
-- `backend/src/routes/projects.test.js`
-- `backend/src/routes/leaderboard.test.js`
-- `backend/src/routes/stats.test.js`
+- `.github/workflows/ci.yml` (nightly load-test job), new `.github/workflows/perf-regression.yml`
 
 ### Acceptance Criteria
-- 4 snapshot tests exist
-- Snapshots are deterministic
-- Changes to response shape cause test failures
-
-### Testing Requirements
-- Snapshot tests as part of the existing test suite
-
-### CI Requirements
-- `npm test`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Snapshot tests added
-- [ ] Snapshots committed
-- [ ] CI green
+- Verify regression comment appears on PR; baseline comparison logic tested
 
 ### References
-- `backend/src/routes/projects.test.js`
-- `backend/src/routes/leaderboard.test.js`
+- `scripts/load-test.js`, `.github/workflows/ci.yml`
+## Issue #094 — Backend: Email service — DKIM/SPF/DMARC validation for outbound emails
 
----
-
-## Issue #045 — Tooling: Add `typedoc` generation check to CI for backend JSDoc coverage
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/ci`, `type/improvement`, `priority/low`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/reliability`, `priority/medium`, `effort/medium`
 
 ### Summary
-The backend has a `npm run docs` script that generates TypeDoc documentation from JSDoc comments. This script is never run in CI, so undocumented exported functions or broken JSDoc syntax can go unnoticed.
-
-### Background
-`backend/package.json` has `"docs": "typedoc --options typedoc.json"` and `backend/typedoc.json` configures TypeDoc generation. Running this in CI would catch:
-- Missing JSDoc on public API functions
-- Malformed JSDoc syntax
-- Type inconsistencies in JSDoc type annotations
+`backend/src/services/email.js` sends transactional emails (digest, project updates, subscription notifications). There is no check that the sending domain has valid SPF/DKIM/DMARC records configured. Emails from misconfigured domains land in spam folders or are silently rejected by receiving mail servers — and operators have no visibility into deliverability.
 
 ### Problem Statement
-Undocumented backend functions make it harder for contributors to understand the codebase. Adding a CI check ensures new code is documented.
+1. **No domain validation**: misconfigured DNS means emails go to spam.
+2. **No deliverability metrics**: no bounce tracking or spam-report monitoring.
 
 ### Objectives
-- Add a CI step that runs `npm run docs` and fails if TypeDoc encounters errors
-- Configure TypeDoc to treat warnings as errors for CI
+- At startup (or on a health-check endpoint), verify the MAIL FROM domain has SPF and DKIM records
+- Warn on missing records; the service still runs but logs a prominent warning
+- Add a `email_delivery_status` table tracking bounces and complaints via SNS/webhook or SMTP DSN
+- `GET /api/admin/email/deliverability` showing sent/delivered/bounced/complained counts
 
 ### Scope
-
-**In Scope**
-- CI job addition
-- TypeDoc configuration for CI
-
-**Out of Scope**
-- Adding JSDoc to all existing functions (can be done incrementally)
-
-### Implementation Plan
-1. Add `--treatWarningsAsErrors` (or equivalent) to the typedoc command in CI
-2. Add a new job or step in `.github/workflows/ci.yml` to run `npm run docs`
-3. Fix any existing TypeDoc warnings that would block CI
-
-### Expected Files or Components
-- `backend/typedoc.json`
-- `.github/workflows/ci.yml`
+- `backend/src/services/email.js`, new migration, new admin endpoint
 
 ### Acceptance Criteria
-- TypeDoc runs in CI
-- Warnings fail the build
-- No existing warnings block the build after fixes
-
-### Testing Requirements
-- Verify the CI job runs and catches documentation issues
-
-### CI Requirements
-- New CI step must pass
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] TypeDoc CI check added
-- [ ] CI green
+- Startup check: missing SPF → warning logged, service starts
+- Bounce webhook integration: Gmail bounce → `email_delivery_status` row recorded
 
 ### References
-- `backend/typedoc.json`
-- `backend/package.json` — `docs` script
+- `backend/src/services/email.js`, `backend/src/services/notificationService.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #045 — CI/CD: Database restore drill with data-integrity checksum validation
 
-## Issue #046 — Extension: Add graceful error handling for Freighter API version incompatibility
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/extension`, `type/bug`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/devops`, `type/reliability`, `priority/high`, `effort/medium`
 
 ### Summary
-The browser extension (`extension/`) communicates with the Freighter wallet API. If the user has an older Freighter version that doesn't support a method the extension calls, the error handling should surface a clear "Please update Freighter" message instead of a generic error.
-
-### Background
-The extension's `manifest.json` and `popup.html` define a browser extension that facilitates donations. It calls Freighter API methods via `window.freighter`. If Freighter API changes (which it does across versions), the extension may call undefined methods.
+`.github/workflows/restore-drill.yml` runs monthly and asserts row counts after restore. Row counts alone don't catch silent data corruption — a restore that truncates all `TEXT` columns to empty strings would pass the row-count check. `scripts/backup-db.sh` handles the backup (pg_dump + S3/GCS upload) but doesn't compute a checksum of canonical row data.
 
 ### Problem Statement
-Users with outdated Freighter versions see cryptic errors instead of actionable upgrade instructions.
+1. **Row count ≠ integrity**: silent corruption passes the drill.
+2. **No checksum**: backups have no content hash to compare against after restore.
 
 ### Objectives
-- Add version detection for the Freighter API
-- Show a clear upgrade message when the API version is incompatible
-- Add minimum version requirement check
+- Compute SHA-256 of sorted, canonical-form row data for critical tables (donations, projects, donation_events) during backup
+- During restore drill, recompute checksums and compare against the backup checksum
+- Fail the drill and alert via the existing `RestoreDrillFailed` Alertmanager rule on mismatch
+- Add a `restore_drill_checksum_mismatch` Prometheus gauge
 
 ### Scope
-
-**In Scope**
-- Error handling for Freighter API calls
-- Version check logic
-
-**Out of Scope**
-- Supporting very old Freighter versions (< 1.0)
-- Extension UI overhaul
-
-### Implementation Plan
-1. Read `extension/` source files to find where Freighter API calls are made
-2. Add a `try/catch` that detects `TypeError: window.freighter.someMethod is not a function`-style errors
-3. Show a specific error message with a link to the Freighter update page
-
-### Expected Files or Components
-- `extension/popup.html` (or associated JS)
-- `extension/manifest.json`
+- `.github/workflows/restore-drill.yml`, `.github/workflows/database-backup.yml`, new `scripts/verify-restore-checksum.sh`
 
 ### Acceptance Criteria
-- Outdated Freighter shows a specific, actionable error message
-- Compatible Freighter works as before
-
-### Testing Requirements
-- Manual test with different Freighter versions
-- Jest test mocking incompatible API
-
-### CI Requirements
-- `cd extension && npm test` (if tests exist)
-- `cd extension && npm run lint`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Freighter API error handling improved
-- [ ] CI green
+- Intentional-corruption test (alter one row after restore) detected by checksum mismatch
 
 ### References
-- `extension/manifest.json`
-- `extension/package.json`
+- `.github/workflows/restore-drill.yml`, `scripts/backup-db.sh`
+## Issue #095 — Mobile: Push notification — deep-link payload handling and notification grouping
 
----
-
-## Issue #047 — Mobile: Add biometric authentication fallback for devices without biometric sensors
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/mobile`, `type/improvement`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/mobile`, `type/feature`, `priority/medium`, `effort/medium`
 
 ### Summary
-The mobile app (`mobile/`) uses `expo-local-authentication` for biometric auth. The `useBiometricAuth` hook in `mobile/hooks/useBiometricAuth.ts` should gracefully handle devices that don't have biometric sensors by falling back to device PIN/passcode or skipping biometrics entirely.
-
-### Background
-`expo-local-authentication` returns `AuthenticationType` which includes `NONE` for devices without biometrics. The hook should detect this and either:
-- Fall back to OS-level device credential (PIN/password/passcode)
-- Skip biometric auth and proceed without it
+The mobile app receives push notifications via `expo-notifications` but the notification tap handler does not parse deep links: tapping a "New donation on Project X" notification opens the home screen, not the project detail page. Additionally, multiple notifications from the same project are not grouped — the notification tray shows separate entries instead of a single expandable group.
 
 ### Problem Statement
-Users with devices that lack biometric sensors (some budget Android devices, emulators) may be unable to use the app if biometric auth is required without a fallback.
+1. **No deep-link handling**: notification taps don't navigate to the relevant screen.
+2. **No grouping**: notification tray clutter.
 
 ### Objectives
-- Check `supportedAuthenticationTypesAsync` before requiring biometrics
-- If no biometric sensor is available, attempt `SECURITY_LEVEL_DEVICE_CREDENTIAL` fallback
-- If device credential also unavailable, show a configurable bypass
+- Implement notification tap handler parsing `data.screen` and `data.params` payload
+- Navigate to the correct Expo Router screen: `donate/[projectId]`, `projects/[id]`, `leaderboard`, etc.
+- Implement Android notification grouping using `expo-notifications` category/group identifiers per project
+- iOS: use `thread-id` for grouping
 
 ### Scope
-
-**In Scope**
-- `mobile/hooks/useBiometricAuth.ts`
-- Fallback authentication flow
-
-**Out of Scope**
-- Full auth architecture redesign
-- Server-side changes
-
-### Implementation Plan
-1. Read `mobile/hooks/useBiometricAuth.ts`
-2. Add a pre-check: `const types = await LocalAuthentication.supportedAuthenticationTypesAsync()`
-3. If no biometric, try `LocalAuthentication.authenticateAsync({ disableDeviceFallback: false })` which falls back to PIN
-4. If neither works, set a "biometricsUnavailable" flag
-
-### Expected Files or Components
-- `mobile/hooks/useBiometricAuth.ts`
-- `mobile/lib/secureStore.ts`
+- `mobile/app/_layout.tsx` — notification tap handler, `mobile/app/notifications.tsx`
 
 ### Acceptance Criteria
-- App works on devices without biometric sensors
-- Falls back to device PIN when biometric is unavailable
-- Graceful message when no auth is available
-- Typescript type-check passes
-
-### Testing Requirements
-- Test with `expo-local-authentication` mocked to return no biometric types
-- Test with device credential fallback
-
-### CI Requirements
-- `cd mobile && npm run lint`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Biometric fallback implemented
-- [ ] CI green
+- Tap notification → navigates to the correct screen with params
+- Multiple notifications from same project → grouped on Android and iOS
 
 ### References
-- `mobile/hooks/useBiometricAuth.ts`
-- `mobile/lib/secureStore.ts`
-- `mobile/package.json`
+- `mobile/app/_layout.tsx`, `mobile/app/notifications.tsx`, `mobile/components/`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #046 — Monitoring: Synthetic transaction monitoring with on-chain donation simulation
 
-## Issue #048 — Docs: Add JSDoc type documentation for key backend service functions
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/docs`, `type/improvement`, `priority/low`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/monitoring`, `type/observability`, `priority/high`, `effort/large`
 
 ### Summary
-Several backend service modules lack JSDoc documentation, making it harder for contributors to understand their purpose, parameters, and return values. Targeted JSDoc additions to the most critical services would lower the contribution barrier.
-
-### Background
-The project already has TypeDoc configured (`backend/typedoc.json`) and some functions are documented (e.g., `projects.js` route handlers). Service modules like `projectionEngine.js`, `sorobanEventService.js`, `indexerService.js`, and `co2Verifier.js` would benefit from JSDoc.
+All existing monitoring (Prometheus metrics, Sentry errors, Alertmanager rules) is passive. If all real users are sleeping (off-peak) and the Soroban RPC goes down, the first alert fires when the first real donation fails — potentially hours later. The `monitoring/` directory has alert rules but no synthetic monitoring.
 
 ### Problem Statement
-Undocumented service functions increase onboarding time for new contributors and make code review harder.
+1. **Passive-only detection**: outages are detected by user impact, not proactive checks.
+2. **No end-to-end signal**: the full donation path (build tx → sign → submit → verify on-chain event → verify backend recording) is unmonitored.
 
 ### Objectives
-- Add JSDoc `@param`, `@returns`, and `@description` to exported functions in key service modules
-- At minimum: `projectionEngine.js`, `sorobanEventService.js`, `co2Verifier.js`
+- Implement a synthetic monitoring agent: dedicated Stellar testnet account with pre-funded XLM
+- Cron job (every 5 minutes) executing a full donation flow
+- Prometheus gauge `synthetic_donation_success` (1 = last attempt succeeded, 0 = failed)
+- `synthetic_donation_duration_seconds` histogram
+- Alertmanager rule firing on 2 consecutive synthetic-check failures
 
 ### Scope
-
-**In Scope**
-- JSDoc for exported functions in 3-5 service modules
-- TypeDoc generation must still pass
-
-**Out of Scope**
-- Documenting all backend modules
-- Inline code comments
-
-### Implementation Plan
-1. Select 5 service files with the most undocumented exported functions
-2. Add JSDoc comments following the pattern in already-documented functions (see `projects.js`)
-3. Run `npm run docs` to verify TypeDoc generation works
-
-### Expected Files or Components
-- `backend/src/services/projectionEngine.js`
-- `backend/src/services/sorobanEventService.js`
-- `backend/src/services/co2Verifier.js`
-- `backend/src/services/indexerService.js`
-- `backend/src/services/recurringDonationWorker.js`
+- New `scripts/synthetic-monitor.js`, `monitoring/alert-rules.yml` (new alert), `.github/workflows/synthetic-monitor.yml`
 
 ### Acceptance Criteria
-- Key exported functions have JSDoc
-- `npm run docs` succeeds
-- No TypeDoc warnings
-
-### Testing Requirements
-- `npm run docs` must exit 0
-
-### CI Requirements
-- `npm run lint`
-- `npm run docs` (if Issue #045 is also being worked on)
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] JSDoc added to 5 service modules
-- [ ] CI green
+- Verify synthetic donation succeeds end-to-end; verify alert fires on failure
+- Synthetic donor account funded automatically from faucet/pool
 
 ### References
-- `backend/src/routes/projects.js` — examples of good JSDoc
-- `backend/typedoc.json`
+- `monitoring/alert-rules.yml`, `backend/src/services/stellar.js`
 
----
+## Issue #096 — Backend: API versioning — deprecation headers and sunset timeline
 
-## Issue #049 — Backend: Add structured logging for all background worker startup and shutdown events
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/improvement`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/architecture`, `priority/medium`, `effort/medium`
 
 ### Summary
-The backend starts many background workers (`summaryQueue`, `profileQueue`, `webhookQueue`, `pushQueue`, `indexerService`, `co2Verifier`, `recurringKeeper`, `guardianService`, etc.) in `server.js`. Some log their startup with `logger.info(...)` while others are wrapped in `try/catch` and only log on failure.
-
-### Background
-The startup sequence in `backend/src/server.js` uses a mix of `try/catch` blocks with `logger.error` on failure but missing `logger.info` on success for some workers (`oracleService`, `guardianService`, `recurringKeeper`). During graceful shutdown, some services are stopped in the lifecycle handlers without logging.
+`backend/src/middleware/apiVersion.js` handles version routing but has no deprecation mechanism. If a v1 endpoint is superseded by v2, there is no way to inform API consumers: no `Deprecation` or `Sunset` HTTP headers, no warning in responses. Consumers discover the change when v1 breaks.
 
 ### Problem Statement
-Inconsistent startup/shutdown logging makes it difficult to debug production issues. When a worker silently fails to start or gets stuck during shutdown, the logs don't provide enough information.
+1. **No deprecation signal**: API consumers can't detect upcoming changes.
+2. **No sunset policy**: no documented lifecycle for API versions.
 
 ### Objectives
-- Audit the startup sequence and ensure every service/worker logs a structured `{ event: "xxx_started" }` message on successful startup
-- Ensure shutdown handlers log `{ event: "xxx_stopped" }` or `{ event: "xxx_shutdown_error" }` messages
-- Use consistent log shape: `{ event: "<service>_started" }` and `{ event: "<service>_stopped" }`
+- Add `Deprecation: true` and `Sunset: <ISO8601 date>` headers to deprecated endpoints
+- Add warning in response body: `{"warning": "This endpoint is deprecated and will be removed on 2026-12-31. Use POST /api/v2/donations instead."}`
+- `GET /api/versions` listing active, deprecated, and sunset API versions with documentation links
+- Document API version lifecycle policy in `docs/api.md`
 
 ### Scope
-
-**In Scope**
-- `backend/src/server.js` startup sequence
-- Lifecycle shutdown handlers
-- Worker service files (where appropriate)
-
-**Out of Scope**
-- Adding logging to every function call
-- Changing log format
-
-### Implementation Plan
-1. Read `server.js` and identify every service that starts but doesn't log success
-2. Add `logger.info({ event: "<service>_started" }, "<Service> started")` after each successful start
-3. Add `logger.info({ event: "<service>_stopped" }, "<Service> stopped")` in shutdown handlers
-4. Standardize the event naming convention
-
-### Expected Files or Components
-- `backend/src/server.js`
-- Individual service files (if they manage their own lifecycle)
+- `backend/src/middleware/apiVersion.js`, `backend/src/routes/metrics.js`, `docs/api.md`
 
 ### Acceptance Criteria
-- Every background worker logs startup and shutdown
-- Event naming is consistent
-- Log output is more informative during startup
-
-### Testing Requirements
-- Verify startup log output (inspect logs from a test run)
-
-### CI Requirements
-- `npm run lint`
-- `npm test`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Startup/shutdown logging added
-- [ ] CI green
+- Request to deprecated endpoint returns deprecation + sunset headers and body warning
+- `GET /api/versions` returns complete version inventory
 
 ### References
-- `backend/src/server.js` — startup sequence
-- `backend/src/logger.js`
+- `backend/src/middleware/apiVersion.js`, `docs/api.md`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
+## Issue #047 — Monitoring: Business-level metrics dashboard (donation volume, project health, donor retention)
 
-## Issue #050 — Cross-Cutting: Standardize frontend and backend validation error response shapes
-
-**Labels:** `GrantFox OSS`, `Official Campaign`, `area/cross-cutting`, `type/improvement`, `priority/medium`
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/monitoring`, `type/observability`, `priority/medium`, `effort/medium`
 
 ### Summary
-The backend Zod validation errors return `{ error: "Validation failed", details: [{ path, message }] }` (in `validate.js`). The frontend `QueryErrorFallback` and API error handling expect `{ error: { code, message } }` (the `AppError.toJSON()` shape). These two error shapes are inconsistent, making it harder to build unified error-handling logic.
-
-### Background
-- Backend Zod validation (in `validate.js`): returns HTTP 400 with `{ error: "Validation failed", details: [...] }`
-- Backend `AppError` (in `errors.js`): returns `{ error: { code, message, ...metadata } }`
-- Backend `sendAppError`: returns `{ error: { code, message } }`
-- Frontend `classifyError` in `queryErrors.ts`: expects Axios response with `status` property
-
-The root issue: Zod validation bypasses `AppError` and returns a different shape. This means the frontend can't uniformly parse `response.data.error.code`.
+Existing Grafana dashboards (`monitoring/grafana/`) focus on infrastructure (CPU, memory, latency, error rates). There's no business-level visibility: daily donation volume by project, donor retention cohort analysis, conversion rate (wallet-connect → donation), project health scores, AI summary generation costs, or CO₂ offset totals by category. The `monitoring/recording-rules.yml` has only infra rules.
 
 ### Problem Statement
-Two different error shapes require two different error-handling code paths in the frontend. This increases complexity and the likelihood of unhandled error cases.
+1. **No business KPIs**: donation volume, retention, conversion are invisible in dashboards.
+2. **No precomputed metrics**: SQL-level business queries run ad hoc.
 
 ### Objectives
-- Update `validate.js` to use `sendAppError(res, "SCHEMA_VALIDATION_ERROR", { details })` so the shape is consistent
-- OR update the frontend to handle both shapes uniformly
-- Update tests that assert on the old shape
+- Add Prometheus recording rules precomputing business metrics from the projection tables
+- New "Business Overview" Grafana dashboard: daily/monthly donation volume, active donors, top projects, retention cohorts
+- `business_metrics_exporter` cronjob querying Postgres and exposing Prometheus gauges
 
 ### Scope
-
-**In Scope**
-- `backend/src/middleware/validate.js`
-- OR `frontend/lib/queryErrors.ts` (if frontend-side change is preferred)
-- Related tests
-
-**Out of Scope**
-- Changing error codes
-- Full API error response redesign
-
-### Implementation Plan
-**Option A (Backend change):**
-1. Change `validate.js` to return:
-   ```js
-   return res.status(422).json({
-     error: { code: "SCHEMA_VALIDATION_ERROR", message: "Validation failed", details }
-   });
-   ```
-   This nests `details` inside the `error` object, matching the `AppError.toJSON()` pattern.
-
-2. Update all tests that assert on the old response shape.
-
-**Option B (Frontend change):** Handle both shapes in `classifyError`.
-
-### Expected Files or Components
-- `backend/src/middleware/validate.js`
-- `backend/src/routes/*.test.js` (tests that assert on validation error shape)
-- Optionally: `frontend/lib/queryErrors.ts`
+- `monitoring/recording-rules.yml`, new `scripts/business-metrics-exporter.js`, new Grafana dashboard JSON
 
 ### Acceptance Criteria
-- All error responses have the `{ error: { code, message, ... } }` shape
-- Frontend can parse all error types uniformly
-- Existing tests updated and passing
-
-### Testing Requirements
-- Update tests to match new error shape
-
-### CI Requirements
-- `npm run lint` (frontend and backend)
-- `npm test` (frontend and backend)
-- `npm run type-check`
-
-### Deliverables
-- Single commit
-- Changelog entry
-
-### Definition of Done
-- [ ] Error shapes standardized
-- [ ] Tests updated
-- [ ] CI green
+- Metric values match database queries; dashboard renders
+- Aggregate metrics only — no individual donor data in Prometheus
 
 ### References
-- `backend/src/middleware/validate.js`
-- `backend/src/errors.js` — `AppError.toJSON()`, `sendAppError`
-- `frontend/lib/queryErrors.ts` — `classifyError`
+- `monitoring/recording-rules.yml`, `monitoring/grafana/`, `backend/src/services/analyticsService.js`
+## Issue #097 — Contracts: IndigoPay — feature-gated test that validates every `DataKey` variant is readable after migration
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/testing`, `priority/medium`, `effort/medium`
+
+### Summary
+The contract's `migrate()` function (behind `#![cfg(feature = "upgrade")]`) handles schema migrations when the storage version changes. But there is no exhaustive test that: (1) writes a value to every `DataKey` variant, (2) bumps the storage version, (3) calls `migrate()`, and (4) verifies every value is still readable. A new storage version that accidentally corrupts a rarely-used variant (e.g., `ForceRefund` or `PathPaymentAttester`) would only be discovered when that feature is first used in production.
+
+### Problem Statement
+1. **No migration coverage for rare variants**: rarely-used keys may corrupt silently.
+2. **No full-enum coverage test**: existing migration tests only cover common paths.
+
+### Objectives
+- Write a test that exercises all feature-gated `DataKey` variants by enabling all features in the test build
+- For every variant: write a value, bump version, call `migrate()`, read back, assert equality
+- Assert the number of tested variants equals the total number of `DataKey` variants (so adding a new variant without a test entry fails CI)
+
+### Scope
+- `contracts/indigopay-contract/src/lib.rs` — new `#[cfg(test)]` module
+
+### Acceptance Criteria
+- Adding a new `DataKey` variant without adding a test entry fails the assertion on variant count
+- Migration test covers all 60+ variants
+- `cargo test --features testutils --all-features -p indigopay-contract` passes
+
+### References
+- `contracts/indigopay-contract/src/lib.rs` — `DataKey`, `migrate()`, `CURRENT_STORAGE_VERSION`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #048 — Contracts: Kani formal verification of contract-level state invariants
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/testing`, `priority/high`, `effort/large`
+
+### Summary
+The Kani verification scaffold exists at `contracts/indigopay-contract/verification/kani/` and the current harness (`verify_badge_threshold_disjointness`) only verifies basic arithmetic properties. It does not verify contract-level state invariants, and the escrow/oracle/attestation contracts have no Kani harness at all.
+
+### Problem Statement
+1. **Narrow harness**: only badge-threshold disjointness is proven.
+2. **No state invariants**: `GlobalTotalRaised == sum(project.total_raised)` and similar invariants are unproven.
+3. **No coverage of companion contracts**: escrow payout arithmetic and oracle TWAP math are unverified.
+
+### Objectives
+- Prove `GlobalTotalRaised == sum(project.total_raised for all projects)` with a Kani harness
+- Prove `DonationCount == number of DonationRecord entries`
+- Prove badge monotonicity (badge tier never decreases)
+- Prove escrow payout arithmetic: `compute_proportional_payout` never overflows and `sum(released) <= amount`
+- Prove oracle TWAP: weighted average never exceeds max observed price
+- Update `contracts/indigopay-contract/VERIFICATION.md`
+
+### Scope
+- `contracts/indigopay-contract/verification/kani/` — new harnesses
+- New harnesses for escrow and oracle contracts
+
+### Acceptance Criteria
+- `cargo kani --harness invariant_global_total` passes
+- Kani verification runs in CI (`contracts.yml`)
+
+### References
+- `contracts/indigopay-contract/verification/kani/src/lib.rs`, `contracts/indigopay-contract/VERIFICATION.md`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #049 — Cross-cutting: Dual-version webhook signing-secret rotation with `kid` header
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/security`, `priority/high`, `effort/medium`
+
+### Summary
+Webhook delivery signs payloads with HMAC-SHA256 using `signingSecretProvider` (`backend/src/services/signingSecretProvider.js`). The secret-rotation workflow exists (`.github/workflows/secret-rotation.yml`, `scripts/workflow/rotate_secrets.py` or similar) but there's no multi-version secret support in the signing provider. During rotation, there's a window where the old secret's signatures are no longer valid but the new secret hasn't propagated to all webhook receivers.
+
+### Problem Statement
+1. **Rotation gap**: signatures from the old secret become invalid before receivers learn the new one.
+2. **No versioning**: `signingSecretProvider` returns a single secret with no key ID.
+
+### Objectives
+- Dual-version signing: sign with both current and previous secret; include a `kid` (key ID) header in the signature
+- Multi-version verification: accept signatures from current, previous, and next secrets (3-version window)
+- `GET /api/webhooks/keys` endpoint for receivers to discover active key IDs
+- Automatic key-version expiry after rotation + 7-day grace period
+
+### Scope
+- `backend/src/services/signingSecretProvider.js`, `backend/src/services/webhook.js`, `.github/workflows/secret-rotation.yml`
+
+### Acceptance Criteria
+- Verify dual-version signing, verification with previous secret, 3-version window
+- Previous secret securely deleted after grace period (Kubernetes Secret update + pod restart)
+
+### References
+- `backend/src/services/signingSecretProvider.js`, `.github/workflows/secret-rotation.yml`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+## Issue #050 — Cross-cutting: API fuzz testing with automatic OpenAPI schema conformance
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/testing`, `priority/high`, `effort/large`
+
+### Summary
+The backend has extensive unit tests but no fuzz testing of the API layer. `scripts/validate-openapi.js` validates the OpenAPI spec, and `docs/api/openapi.yaml` defines endpoint schemas, but there is no fuzzing that generates random requests and verifies responses conform to the schema. Edge cases in request parsing, parameter validation, concurrent request handling, and error-recovery paths are untested.
+
+### Problem Statement
+1. **No API fuzzing**: malformed but schema-plausible inputs are untested.
+2. **No conformance gate**: responses aren't machine-verified against the OpenAPI spec.
+3. **5xx on invalid input**: some endpoints may 500 instead of 4xx on garbage input.
+
+### Objectives
+- Parse the OpenAPI spec to extract endpoint schemas
+- Generate random valid and invalid requests per endpoint (max-length strings, boundary numbers, Unicode, missing required fields, extra unknown fields, concurrent identical requests)
+- Verify all responses conform to the OpenAPI response schema
+- Verify no 5xx errors occur for invalid input (should be 4xx)
+- Run as a Jest test suite with 10,000+ iterations per endpoint, integrated into CI
+
+### Scope
+- New `backend/__tests__/fuzz/` directory, `scripts/validate-openapi.js` (extend with fuzz mode)
+
+### Acceptance Criteria
+- Fuzz harness catches at least one real bug before merging
+- CI: fast subset (100 iterations) in PR CI, full run (10,000 iterations) nightly
+
+### References
+- `docs/api/openapi.yaml`, `scripts/validate-openapi.js`, `backend/src/routes/donations.js`
+
+## Issue #098 — Backend: Admin — parameterized query builder for safe analytics exports
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/security`, `priority/medium`, `effort/medium`
+
+### Summary
+`backend/src/services/analyticsService.js` and `analyticsQueryPlans.integration.test.js` suggest analytics queries are hand-crafted with parameterized inputs. But with growing admin reporting needs, there's risk of ad-hoc SQL construction leading to injection vulnerabilities. A parameterized query builder that restricts to a safe subset of SQL operations (SELECT-only, whitelisted columns, mandatory parameterization) would prevent this.
+
+### Problem Statement
+1. **Ad-hoc SQL risk**: future analytics queries may introduce injection.
+2. **No guardrail**: any admin endpoint can execute arbitrary SQL if not careful.
+
+### Objectives
+- Implement a `SafeQueryBuilder` that:
+  - Accepts only SELECT queries (rejects INSERT/UPDATE/DELETE/DROP/ALTER)
+  - Requires a whitelisted set of columns per table
+  - Requires parameterized `$1, $2, ...` placeholders (rejects string interpolation)
+  - Enforces `LIMIT` and `OFFSET` bounds
+  - Logs all executed queries to admin audit log
+- Refactor `analyticsService.js` to use it
+
+### Scope
+- `backend/src/services/safeQueryBuilder.js` (new), `backend/src/services/analyticsService.js`
+
+### Acceptance Criteria
+- SafeQueryBuilder accepts `SELECT * FROM donations WHERE project_id = $1 LIMIT $2`
+- SafeQueryBuilder rejects `DROP TABLE donations`
+- SafeQueryBuilder rejects `SELECT * FROM donations WHERE project_id = '${unsafe}'`
+
+### References
+- `backend/src/services/analyticsService.js`, `backend/src/db/pool.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
 
 ---
 
-## Appendix: Issue Type Distribution
+## Issue #099 — Mobile: Biometric-gated wallet recovery phrase backup with Shamir's Secret Sharing
 
-| Type            | Count | Issue Numbers               |
-| --------------- | ----- | --------------------------- |
-| Bug Fix         | 9     | #001, #003, #004, #005, #014, #016, #026, #027, #046 |
-| Testing         | 12    | #002, #006, #008, #010, #011, #025, #035, #038, #040, #041, #043, #044 |
-| Improvement     | 25    | #007, #009, #012, #013, #015, #017, #018, #019, #020, #021, #022, #023, #024, #028, #029, #030, #031, #032, #033, #034, #036, #037, #045, #048, #049 |
-| Security        | 1     | #014 (also listed as bug)  |
-| Accessibility   | 2     | #028, #031                  |
-| CI/Tooling      | 5     | #039, #042, #043, #045      |
-| Cross-Cutting   | 1     | #050                        |
-| Documentation   | 1     | #048                        |
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/mobile`, `type/security`, `priority/high`, `effort/large`
 
-## Appendix: Area Distribution
+### Summary
+The mobile app stores wallet keys in `expo-secure-store` with optional biometric-gated access (`mobile/lib/secureStore.ts`). But there is no recovery mechanism: if the user loses their device, the wallet is unrecoverable because the secret key was never exported. A Shamir's Secret Sharing scheme would split the recovery phrase into N shares (stored in separate locations: iCloud, email, printed QR codes), requiring K-of-N shares to reconstruct.
 
-| Area            | Count | Issue Numbers               |
-| --------------- | ----- | --------------------------- |
-| Contracts       | 12    | #001-#012                   |
-| Backend         | 13    | #013-#025                   |
-| Frontend        | 13    | #026-#038                   |
-| CI/Tooling      | 7     | #039-#045                   |
-| Cross-Cutting   | 5     | #046-#050                   |
+### Problem Statement
+1. **No wallet recovery**: device loss = wallet loss.
+2. **No user-controlled backup**: the app doesn't help users create recoverable backups.
+
+### Objectives
+- Implement SSS key splitting: split the Stellar secret key into N shares (default 3-of-5)
+- Store shares in: SecureStore (share 1), iCloud/Google Drive (share 2), user's email (share 3)
+- Recovery flow: collect K shares → reconstruct key → verify against stored public key hash
+- Biometric-gated: splitting and recovery both require biometric authentication
+
+### Scope
+- `mobile/lib/wallet/recovery.ts` (new), `mobile/lib/secureStore.ts`, `mobile/app/settings/recovery.tsx` (new)
+
+### Acceptance Criteria
+- Split → store 5 shares → destroy original → recover with any 3 shares → key matches
+- Recovery fails with 2 shares
+- All operations biometric-gated
+
+### References
+- `mobile/lib/secureStore.ts`, `mobile/lib/wallet/`, `mobile/hooks/useBiometricAuth.ts`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Issue #100 — Cross-cutting: Chaos engineering test suite — fault injection for donation pipeline resilience
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/testing`, `type/testing`, `priority/high`, `effort/large`
+
+### Summary
+The platform has extensive unit and integration tests but no chaos engineering: there's no test that verifies the system's behavior under Redis failure, PostgreSQL primary crash, Stellar Horizon unavailability, Soroban RPC timeout, or network partition between backend and indexer. The `docker-compose.test.yml` spins up dependencies but doesn't inject faults. The resilience patterns (circuit breakers, retries, DLQ, projection catch-up) are individually tested but never tested together under cascading failures.
+
+### Problem Statement
+1. **No fault injection**: resilience patterns are tested in isolation, not under realistic cascading failures.
+2. **No recovery verification**: the system may recover from individual failures but fail under multiple simultaneous failures.
+
+### Objectives
+- Implement a chaos test suite using `docker-compose.test.yml` + fault injection (pause containers, introduce latency, drop packets, kill processes)
+- Test scenarios:
+  1. Redis crash during donation spike → verify cache degradation, no data loss
+  2. PostgreSQL primary failover during donation recording → verify no double-records, idempotency holds
+  3. Horizon 503 for 30s during recurring keeper cycle → verify retry + backoff, circuit breaker opens
+  4. Soroban RPC timeout during donation → verify retry, eventual recording
+- Run as a nightly CI job; results posted to a dashboard
+
+### Scope
+- `test/chaos/` (new), `docker-compose.chaos.yml` (new), `.github/workflows/chaos-nightly.yml` (new)
+
+### Acceptance Criteria
+- All 4 scenarios pass: system recovers, no data loss, no double-records
+- CI nightly job runs chaos tests and reports results
+
+### References
+- `docker-compose.test.yml`, `.github/workflows/ci.yml`, `backend/src/services/circuitBreaker.js`
+
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+## Summary
+
+This issue set was generated from direct code inspection and targets real, verifiable gaps in the Stellar-IndigoPay repository:
+
+- **Contract correctness & security** (#001, #003–#015): deprecated-event migration, access control, re-entrancy, TTL, MMR proofs, fuzzing, formal verification
+- **Backend reliability & observability** (#016–#030): pool metrics, cache invalidation, projection catch-up, CSRF rotation, circuit breakers, DLQ monitoring, sanitization, tracing, slow-query detection
+- **Frontend performance & a11y** (#031–#035): offline donations, virtualization, E2E-encrypted messages, accessibility, query caching
+- **Mobile & extension** (#036–#040): hardware-backed signing, offline+QR signing, deep links, CSP, donation presets
+- **DevOps, monitoring, and CI** (#041–#047): canary analysis, SBOM gates, post-deploy verification, perf regression, restore checksums, synthetic monitoring, business dashboards
+- **Cross-cutting** (#048–#050): Kani invariants, webhook key rotation, API fuzzing
+## Summary — Batch 2 (#051–#100)
+
+This second issue set targets additional real, verifiable gaps discovered through deeper code inspection:
+
+- **Backend security & correctness** (#051–#055, #060, #063, #065, #067, #072, #077, #084, #089, #091, #094, #096, #098): donorAuth replay protection, idempotency race condition, admin session management, Turrets idempotency, transaction_hash validation, Redis health check, push delivery receipts, per-endpoint rate limiting, webhook jitter, email auth, fee bumps, admin audit log, DKIM validation, API deprecation headers, safe query builder
+- **Contract security & testing** (#054, #056, #059, #069, #076, #079, #087, #092, #097): upgrade flow integration tests, per-token pause, unwrap audit, per-token deviation thresholds, DataKey discriminant ordering, escrow job pagination, historical price queries, chain-filtered attestation indexing, migration full-enum coverage test
+- **Frontend features & performance** (#057, #058, #064, #066, #071, #075, #078, #080, #083, #085, #088, #090, #093): DonateForm overhaul, DonationModal, DEX path caching, React Query adoption, visual regression tests, multi-wallet support, leaderboard time windows, aria-live regions, skeleton loading, i18n completion, full-text search, Storybook interaction tests, map marker clustering
+- **Mobile features** (#073, #095, #099): EAS OTA deployment, push notification deep links, Shamir's Secret Sharing wallet recovery
+- **DevOps & infrastructure** (#074, #081, #082, #086): migration dry-run + rollback plans, WASM size regression alerting, indexer checkpoint/rescan, automated PostgreSQL failover
+- **Cross-cutting testing** (#100): chaos engineering fault injection suite
+
+Each issue includes the files/contracts/components to change, expected behavior, edge cases, acceptance criteria, and testing requirements, and each is objectively verifiable through code review, automated tests, CI, benchmarks, or demonstrable project behavior.
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)

@@ -67,6 +67,15 @@ const DonatePage: NextPage<DonatePageProps> = ({ project, presetAmount }) => {
   const qrRef = useRef<DonationQRCodeHandle>(null);
   const [copied, setCopied] = useState(false);
 
+  // Workstream 7: on client-side route transitions (Next.js), move focus to
+  // the page heading so screen-reader users start at the page content rather
+  // than being silently dropped mid-page.  tabIndex={-1} on the heading keeps
+  // it out of the tab order while making it programmatically focusable.
+  // PageTransition (see components/PageTransition.tsx) picks up the
+  // `data-page-focus` marker on its onAnimationComplete and focuses THIS
+  // heading directly — the final target, instead of the outer motion.div
+  // (the transition container can never steal focus away from it).
+
   // Guard – project not found
   if (!project) {
     return (
@@ -394,7 +403,14 @@ const DonatePage: NextPage<DonatePageProps> = ({ project, presetAmount }) => {
           <div className="donate-card__icon">{icon}</div>
           <p className="donate-card__category">{project.category}</p>
 
-          <h1 className="donate-card__title">{project.name}</h1>
+          <h1
+            id="donate-page-title"
+            data-page-focus
+            tabIndex={-1}
+            className="donate-card__title focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#4F46E5] dark:focus-visible:outline-[#818CF8] rounded"
+          >
+            {project.name}
+          </h1>
           <GoalProgress raised={project.raisedXLM} goal={project.goalXLM} />
           {presetAmount && presetAmount > 0 && (
             <p className="donate-card__amount-chip">

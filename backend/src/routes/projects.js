@@ -24,6 +24,7 @@ const {
 const {
   getOnChainProject,
   getProjectDonationEvents,
+  getTransaction,
   CONTRACT_ID,
   server,
   NETWORK_PASSPHRASE,
@@ -846,7 +847,7 @@ router.post("/admin/confirm", adminRequired, async (req, res, next) => {
   try {
     const { transactionHash, projectId } = req.body;
 
-    const tx = await server.getTransaction(transactionHash);
+    const tx = await getTransaction(transactionHash);
     if (!tx.successful) throw new AppError("TX_FAILED");
 
     const result = await pool.query(

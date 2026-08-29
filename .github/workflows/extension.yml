@@ -21,6 +21,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Start Timer
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
 
       - name: Derive version
         id: version
@@ -46,13 +48,39 @@ jobs:
           manifest_path.write_text(json.dumps(data, indent=2) + "\n")
           PY
 
-      - uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup-node-cached
         with:
           node-version: "22"
-          cache: "npm"
-          cache-dependency-path: extension/package-lock.json
+          working-directory: extension
 
-      - run: npm ci
+      - name: Lint CSP
+        run: |
+          node -e "
+          ['manifest.json', 'manifest.firefox.json'].forEach(f => {
+            const m = require('./' + f);
+            const csp = m.content_security_policy;
+            const policy = typeof csp === 'object' ? csp.extension_pages : csp;
+            if (!policy) {
+              console.error(f + ' missing CSP');
+              process.exit(1);
+            }
+            if (policy.includes('unsafe-inline')) {
+              console.error(f + ' allows inline scripts');
+              process.exit(1);
+            }
+            if (!policy.match(/(?:^|;)\s*script-src\s+\\'self\\'\s*(?:;|$)/)) {
+              console.error(f + ' must restrict script-src to self');
+              process.exit(1);
+            }
+            if (!policy.match(/(?:^|;)\s*object-src\s+\\'none\\'\s*(?:;|$)/)) {
+              console.error(f + ' must restrict object-src to none');
+              process.exit(1);
+            }
+          });
+          "
+
+      - name: Validate Manifest V3 CSP
+        run: npm run check:csp
 
       - name: Lint
         run: npm run lint
@@ -68,8 +96,30 @@ jobs:
       - name: Verify build output
         run: test -f dist/content-script.js
 
+      - name: Package extension ZIP
+        run: npm run package
+
+      - name: Verify packaged extension
+        run: test -f greenpay-extension.zip && zipinfo -1 greenpay-extension.zip | grep -E '^(manifest\.json|popup\.html|popup\.css|settings\.html|dist/|inject/)' >/dev/null
+
+      - name: Verify reproducible package
+        run: |
+          sha256sum greenpay-extension.zip | awk '{print $1}' > /tmp/greenpay-extension-hash-1
+          rm -f greenpay-extension.zip
+          npm run package
+          sha256sum greenpay-extension.zip | awk '{print $1}' > /tmp/greenpay-extension-hash-2
+          diff -u /tmp/greenpay-extension-hash-1 /tmp/greenpay-extension-hash-2
+
       - uses: actions/upload-artifact@v4
         with:
           name: extension-dist
           path: extension/dist/
           retention-days: 7
+
+      - name: Upload extension ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: greenpay-extension-${{ steps.version.outputs.version }}
+          path: extension/greenpay-extension.zip
+          if-no-files-found: error
+          retention-days: 30

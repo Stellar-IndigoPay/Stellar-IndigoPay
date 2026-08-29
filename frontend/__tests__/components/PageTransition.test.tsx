@@ -8,7 +8,7 @@
  *  - when motion is allowed, the wrapper is present and focusable
  *    (tabindex) so post-navigation focus can move to it.
  */
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import PageTransition from "@/components/PageTransition";
 
 // Default: motion allowed.
@@ -57,5 +57,21 @@ describe("PageTransition", () => {
     );
     const motionDiv = container.firstChild as HTMLElement;
     expect(motionDiv.getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("focuses a [data-page-focus] descendant on animation complete instead of the container", async () => {
+    render(
+      <PageTransition>
+        <h1 data-page-focus tabIndex={-1}>
+          Page heading
+        </h1>
+      </PageTransition>,
+    );
+
+    // PageTransition picks up the marker in its onAnimationComplete and
+    // focuses THAT element — the donate page relies on this so the heading
+    // is the final focus target, never the outer motion div.
+    const heading = screen.getByRole("heading", { name: "Page heading" });
+    await waitFor(() => expect(heading).toHaveFocus());
   });
 });

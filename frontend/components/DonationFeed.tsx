@@ -2,13 +2,19 @@
  * components/DonationFeed.tsx
  * Recent donations for a project â€” live community feed with real-time SSE streaming.
  */
-import { useState, useEffect, useRef, useCallback } from "react";
-import { fetchProjectDonations } from "@/lib/api";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { formatXLM, timeAgo, shortenAddress } from "@/utils/format";
 import { explorerUrl, streamProjectPayments } from "@/lib/stellar";
 import type { Donation } from "@/utils/types";
 import { SkeletonList } from "./Skeleton";
 import EmptyState from "./EmptyState";
+import {
+  queryKeys,
+  useProjectDonations,
+  type ProjectDonationsPage,
+} from "@/hooks/queries";
+import { QueryErrorFallback } from "@/components/QueryErrorFallback";
 
 interface DonationFeedProps {
   projectId: string;
@@ -27,27 +33,34 @@ export default function DonationFeed({
   refreshKey = 0,
   onNewDonation,
 }: DonationFeedProps) {
-  const [donations, setDonations] = useState<Donation[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const {
+    data,
+    isLoading,
+    isFetching,
+    isError,
+    error,
+    refetch,
+    isFetchingNextPage,
+    fetchNextPage,
+    hasNextPage,
+  } = useProjectDonations(projectId, 10);
+  const donations = useMemo(
+    () => data?.pages.flatMap((page) => page.donations) ?? [],
+    [data],
+  );
+  const nextCursor = data?.pages.at(-1)?.nextCursor ?? null;
   const [newIds, setNewIds] = useState<Set<string>>(new Set());
   const latestIdRef = useRef<string | null>(null);
 
-  // Load initial donation data from the backend API
   useEffect(() => {
-    setLoading(true);
-    fetchProjectDonations(projectId, 10)
-      .then(({ donations: data, nextCursor: cursor }) => {
-        setDonations(data);
-        setNextCursor(cursor);
-        if (data.length > 0) {
-          latestIdRef.current = data[0].id;
-        }
-      })
-      .catch(console.error)
-      .finally(() => setLoading(false));
-  }, [projectId, refreshKey]);
+    if (donations.length > 0) latestIdRef.current = donations[0].id;
+  }, [donations]);
+
+  // Keep this prop for existing callers while the cache is now the source of truth.
+  useEffect(() => {
+    if (refreshKey > 0) void refetch();
+  }, [refreshKey, refetch]);
 
   // Handle incoming SSE payment
   const handleNewPayment = useCallback(
@@ -70,10 +83,30 @@ export default function DonationFeed({
         createdAt: payment.createdAt,
       };
 
-      setDonations((prev) => {
-        if (prev.some((d) => d.id === newDonation.id)) return prev;
-        return [newDonation, ...prev];
-      });
+      let wasInserted = false;
+      queryClient.setQueryData(
+        queryKeys.projectDonations(projectId, 10),
+        (previous: { pages: ProjectDonationsPage[]; pageParams: unknown[] } | undefined) => {
+          if (!previous) return previous;
+          if (previous.pages.some((page) =>
+            page.donations.some(
+              (donation) =>
+                donation.id === newDonation.id ||
+                donation.transactionHash === newDonation.transactionHash,
+            ),
+          )) return previous;
+          wasInserted = true;
+          return {
+            ...previous,
+            pages: previous.pages.map((page, index) =>
+              index === 0
+                ? { ...page, donations: [newDonation, ...page.donations] }
+                : page,
+            ),
+          };
+        },
+      );
+      if (!wasInserted) return;
 
       setNewIds((prev) => new Set(prev).add(payment.id));
       setTimeout(() => {
@@ -88,12 +121,12 @@ export default function DonationFeed({
 
       latestIdRef.current = payment.id;
     },
-    [projectId, onNewDonation],
+    [projectId, onNewDonation, queryClient],
   );
 
   // Start SSE stream once initial data is loaded
   useEffect(() => {
-    if (loading || !walletAddress) return;
+    if (isLoading || isError || !walletAddress) return;
 
     const cursor = latestIdRef.current || undefined;
     const closeStream = streamProjectPayments(
@@ -105,25 +138,25 @@ export default function DonationFeed({
     return () => {
       closeStream();
     };
-  }, [loading, walletAddress, handleNewPayment]);
+  }, [isLoading, isError, walletAddress, handleNewPayment]);
 
   const handleLoadMore = async () => {
-    if (!nextCursor || loadingMore) return;
-    setLoadingMore(true);
-    try {
-      const { donations: newDonations, nextCursor: cursor } =
-        await fetchProjectDonations(projectId, 10, nextCursor);
-      setDonations((prev) => [...prev, ...newDonations]);
-      setNextCursor(cursor);
-    } catch (error) {
-      console.error(error);
-    } finally {
-      setLoadingMore(false);
-    }
+    if (!nextCursor || isFetchingNextPage || !hasNextPage) return;
+    await fetchNextPage();
   };
 
-  if (loading)
+  if (isLoading)
     return <DonationFeedSkeleton />;
+
+  if (isError && donations.length === 0)
+    return (
+      <QueryErrorFallback
+        error={error}
+        onRetry={() => void refetch()}
+        isRetrying={isFetching}
+        title="Couldn&apos;t load recent donations"
+      />
+    );
 
   if (donations.length === 0)
     return (
@@ -234,13 +267,13 @@ export default function DonationFeed({
           </div>
         </div>
       ))}
-      {nextCursor && (
+      {nextCursor && hasNextPage && (
         <button
           onClick={handleLoadMore}
-          disabled={loadingMore}
+          disabled={isFetchingNextPage}
           className="w-full mt-4 px-4 py-2 bg-[rgba(99,102,241,0.08)] dark:bg-[rgba(129,140,248,0.10)] hover:bg-[rgba(99,102,241,0.15)] dark:hover:bg-[rgba(129,140,248,0.18)] text-[#4F46E5] dark:text-[#818CF8] rounded-lg transition-colors font-body text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          {loadingMore ? "Loading..." : "Load more donations"}
+          {isFetchingNextPage ? "Loading..." : "Load more donations"}
         </button>
       )}
 
@@ -262,4 +295,3 @@ export default function DonationFeed({
     </div>
   );
 }
-

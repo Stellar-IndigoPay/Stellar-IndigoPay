@@ -78,6 +78,8 @@ This prevents re-entrancy and ensures storage writes happen before any cross-con
 
 Orphaned storage entries (expired proposals, completed vesting schedules) are cleaned up by permissionless `cleanup_*` functions, preventing storage bloat and controlling long-term TTL extension costs.
 
+The escrow contract implements this pattern as `cleanup_completed_jobs`. Jobs that reach `Completed` status are archived once `deadline + GRACE_PERIOD` has elapsed: the `Job` entry is removed, the id is dropped from `JobIds`, and `JobCount` is decremented, reclaiming `MAX_JOBS` capacity without ever touching `FreelancerReputation`.
+
 ---
 
 ## Gas Benchmarks (Stellar Testnet)
@@ -204,7 +206,7 @@ All values are estimates based on Soroban Testnet execution. The escrow contract
 |-----------|-----------------|---------------|-------|
 | `get_job` | ~35,000 | 100 | Single job lookup with milestones |
 | `get_job_count` | ~7,000 | 100 | u32 counter read |
-| `get_job_ids` | ~18,000 | 100 | Vec<String> read |
+| `get_job_ids(from, count)` | ~18,000 | 100 | Bounded Vec<String> page, with count capped at 100 |
 | `get_admin_set` | ~12,000 | 100 | Vec<Address> read |
 | `get_admin_threshold` | ~5,000 | 100 | u32 scalar read |
 | `get_job_amendment_count` | ~10,000 | 100 | Amendment counter lookup |

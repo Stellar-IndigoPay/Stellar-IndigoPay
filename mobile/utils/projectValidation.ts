@@ -46,3 +46,24 @@ export function resolveProjectByAddress(
   }
   return { kind: "found", project };
 }
+
+/**
+ * Find the registered project whose id matches `id` (#906).
+ *
+ * Same three-way result as `resolveProjectByAddress`, used by
+ * `lib/linkRouter.ts` to confirm a project id from an inbound link/QR/
+ * notification payload against the live registry before a screen renders
+ * its (canonical) name — an inbound payload's own embedded name is never
+ * trusted.
+ */
+export function resolveProjectById(
+  projects: RegistryProject[],
+  id: string,
+): DestinationValidationResult {
+  const project = projects.find((p) => p.id === id);
+  if (!project) return { kind: "unknown" };
+  if (project.status !== ACTIVE_PROJECT_STATUS) {
+    return { kind: "inactive", project };
+  }
+  return { kind: "found", project };
+}
