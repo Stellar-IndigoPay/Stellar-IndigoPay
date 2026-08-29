@@ -68,6 +68,32 @@ function apiVersionMiddleware(req, res, next) {
     if (versionConfig.sunsetAt) {
       res.setHeader("Sunset", new Date(versionConfig.sunsetAt).toUTCString());
     }
+    if (versionConfig.successorPath) {
+      res.setHeader(
+        "Link",
+        `<${versionConfig.successorPath}>; rel="successor-version"`,
+      );
+    }
+
+    // Attach a deprecation warning to the response body. The middleware
+    // intercepts res.json so the warning is injected into any JSON response
+    // without the route handler needing to know about versioning.
+    const sunsetDate = versionConfig.sunsetAt
+      ? new Date(versionConfig.sunsetAt).toISOString().split("T")[0]
+      : "a future date";
+    const successorPath = versionConfig.successorPath || `/${LATEST_VERSION}`;
+    const warningMessage = versionConfig.deprecationMessage ||
+      `This endpoint is deprecated and will be removed on ${sunsetDate}. Use ${successorPath} instead.`;
+
+    const originalJson = res.json.bind(res);
+    res.json = function (body) {
+      let patched = body;
+      if (body && typeof body === "object" && !Array.isArray(body)) {
+        patched = { ...body, warning: warningMessage };
+      }
+      return originalJson(patched);
+    };
+
     logger.info(
       {
         event: "deprecated_api_usage",
@@ -97,6 +123,15 @@ function apiVersionMiddleware(req, res, next) {
 }
 
 function registerApiVersionDiscoveryRoutes(app) {
+  /**
+   * GET /api/versions
+   *
+   * Returns the complete version inventory: status, lifecycle dates,
+   * successor path, migration guide URL, and documentation link for every
+   * registered API version.  Consumers should poll this endpoint to detect
+   * upcoming deprecation and sunset events rather than relying on ad-hoc
+   * changelog monitoring.
+   */
   app.get("/api/versions", (_req, res) => {
     res.json({
       success: true,
@@ -108,6 +143,9 @@ function registerApiVersionDiscoveryRoutes(app) {
           deprecatedAt: config.deprecatedAt,
           sunsetAt: config.sunsetAt,
           path: config.path,
+          successorPath: config.successorPath || null,
+          migrationUrl: config.migrationUrl || null,
+          docsUrl: config.docsUrl || null,
         })),
         latest: LATEST_VERSION,
       },

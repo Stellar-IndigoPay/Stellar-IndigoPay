@@ -2,7 +2,14 @@
 
 ### Features
 
-* **backend:** admin session management endpoints + email/password login with TOTP MFA (closes #1123)
+* **backend:** append-only admin audit log with before/after state + API deprecation/sunset signaling (closes #1128)
+  - Part A: New migration `20260829000001_create_admin_audit_log.sql` — creates `admin_audit_log` table with `before_state`/`after_state` JSONB columns, `resource_type`/`resource_id` typed fields, SHA-256 hash-chain columns (`prev_hash`, `row_hash`), `ip_address`, `user_agent`; database-level immutability via `BEFORE UPDATE`/`BEFORE DELETE` triggers that raise an exception — no `UPDATE`/`DELETE` is possible at any privilege level; also creates `audit_chain_anchor` table for post-retention chain verification
+  - Part A: New `backend/src/services/adminAudit.js` — `logAdminAction({ actor, action, resourceType, resourceId, beforeState, afterState, metadata, ipAddress, userAgent })` records a single append-only audit entry with hash-chain integration; errors are swallowed (fire-and-forget) so audit outages never block admin operations; `auditMiddleware(action, resourceType)` factory wraps standard route handlers; `sanitizeBody` strips credential-like keys before storage; legacy `targetType`/`targetId` aliases accepted for backward compat with existing `audit.js` callers
+  - Part B: `backend/src/middleware/apiVersion.js` now injects a `warning` field into every deprecated-version JSON response body (e.g. `"This endpoint is deprecated and will be removed on 2026-12-31. Use /api/v2 instead."`); also sets `Link: <…>; rel="successor-version"` header when `successorPath` is configured; custom `deprecationMessage` per version overrides the generated text
+  - Part B: `backend/src/config/apiVersions.js` — adds `successorPath`, `migrationUrl`, `deprecationMessage`, and `docsUrl` fields to each version entry; `GET /api/versions` response now includes all four new fields
+  - Part B: `docs/api.md` — full API version lifecycle section documenting the four states (`preview`/`active`/`deprecated`/`sunset`), all deprecation signals (headers + body warning), version discovery endpoints, and selection priority; new Admin Audit Log section documenting table schema, all query parameters, response shape, and immutability guarantee
+
+
   - New `backend/src/routes/admin/sessions.js`: `GET /api/admin/sessions` lists active sessions (flagging the caller's), `DELETE /api/admin/sessions/:family` revokes one session family, and `DELETE /api/admin/sessions` revokes every session except the one identified by the refresh cookie
   - New `admins` table (migration 032) with bcrypt `password_hash`, base32 `mfa_secret`, and `mfa_enabled`; `POST /api/admin/auth/login` authenticates by email + password
   - `POST /api/admin/auth/mfa/setup` generates a TOTP secret with otpauth URL + QR code; `POST /api/admin/auth/mfa/verify` enables MFA after the first code verifies

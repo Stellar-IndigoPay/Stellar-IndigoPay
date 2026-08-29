@@ -12,19 +12,93 @@ All API routes are served under a version prefix: **`/api/v1`**. The version
 prefix lets us ship breaking changes in a future `/api/v2` without disrupting
 existing clients.
 
-**Policy**
+### Version lifecycle
+
+Every API version moves through four states:
+
+| State        | Meaning                                                                                   |
+| ------------ | ----------------------------------------------------------------------------------------- |
+| `preview`    | Available but not yet stable. May change without notice. Not recommended for production.  |
+| `active`     | Stable and fully supported.                                                               |
+| `deprecated` | Still functional. Consumers **must** migrate before `sunsetAt` to avoid downtime.         |
+| `sunset`     | Rejected with **HTTP 410 Gone**. All clients on this version are already broken.           |
+
+### Detecting deprecation
+
+When you call a deprecated endpoint, the response carries:
+
+| Signal                      | Where                       | Example value                                                                 |
+| --------------------------- | --------------------------- | ----------------------------------------------------------------------------- |
+| `Deprecation: true`         | Response header             | `true`                                                                        |
+| `Sunset: <HTTP-date>`       | Response header             | `Wed, 31 Dec 2026 00:00:00 GMT`                                               |
+| `Link: <…>; rel="successor-version"` | Response header  | `</api/v2>; rel="successor-version"`                                         |
+| `warning` field             | JSON response body          | `"This endpoint is deprecated and will be removed on 2026-12-31. Use /api/v2 instead."` |
+
+The `Sunset` and `Link` headers follow [RFC 8594](https://www.rfc-editor.org/rfc/rfc8594)
+so they are machine-readable — you can automate deprecation alerts from your HTTP client.
+
+### Version discovery
+
+**`GET /api/versions`** — returns the complete version inventory:
+
+```json
+{
+  "success": true,
+  "data": {
+    "versions": [
+      {
+        "version": "v1",
+        "status": "active",
+        "releasedAt": "2026-01-01",
+        "deprecatedAt": null,
+        "sunsetAt": null,
+        "path": "/api/v1",
+        "successorPath": null,
+        "migrationUrl": null,
+        "docsUrl": "/api/docs#tag/v1"
+      }
+    ],
+    "latest": "v1"
+  }
+}
+```
+
+**`GET /api/.well-known/apiversions`** — machine-readable version list
+(minimal, suitable for SDK auto-discovery):
+
+```json
+{
+  "versions": ["v1"],
+  "latest": "v1"
+}
+```
+
+Poll `/api/versions` in your CI pipeline or health check to detect version
+state changes automatically, rather than relying on changelog monitoring.
+
+### Specifying a version
+
+The middleware resolves the API version using the following priority order:
+
+1. **`Accept-Version` request header** (e.g. `Accept-Version: v1`)
+2. **URL path prefix** (e.g. `/api/v1/projects`)
+3. **`?version=` query parameter** (e.g. `?version=v1`)
+4. Falls back to the current **latest version**
+
+### Routing policy
 
 - Resource routes live under `/api/v1/<resource>` (e.g. `/api/v1/projects`).
 - `/health` is unversioned (infrastructure/liveness check).
-- New non-breaking fields may be added to a version without a bump. Breaking
-  changes (removing/renaming fields, changing semantics) introduce a new
-  version (`/api/v2`) and the previous version is supported until deprecated.
-- **Legacy redirect:** unversioned `/api/v1/*` requests are answered with a
-  `308 Permanent Redirect` to their `/api/v1/*` equivalent and carry a
-  `Deprecation: true` header plus a
-  `Link: </api/v1>; rel="successor-version"` header. The `308` status
-  preserves the HTTP method and body, so existing `POST`/`PATCH` clients keep
-  working. New clients should call `/api/v1` directly.
+- Non-breaking additions (new optional response fields) do **not** require a
+  version bump. Breaking changes (field removal/rename, semantic changes)
+  introduce a new version prefix (`/api/v2`) and the previous version enters
+  the `deprecated` state with a documented `sunsetAt` date.
+- The minimum notice period between `deprecated` announcement and `sunset`
+  enforcement is **six months** for production-impacting changes.
+- **Legacy redirect:** unversioned requests are answered with a
+  `308 Permanent Redirect` to the canonical versioned path, preserving the
+  HTTP method and body so existing `POST`/`PATCH` clients keep working. New
+  clients must use the versioned path directly.
 
 ---
 
@@ -424,6 +498,89 @@ wallet owner via the `wallet` query parameter.
 | 403    | `wallet` does not match project owner  |
 | 404    | Project not found                      |
 | 429    | Rate limit exceeded                    |
+
+---
+
+## Admin Audit Log
+
+Every admin mutation (project verification, admin key rotation, contract
+upgrades, emergency withdrawals) is recorded in an append-only, tamper-evident
+audit log. The table-level immutability trigger at the database level prevents
+`UPDATE` and `DELETE` operations, making the log forensically sound.
+
+Each entry carries:
+
+| Field           | Type        | Description                                      |
+| --------------- | ----------- | ------------------------------------------------ |
+| `id`            | UUID        | Row identifier                                   |
+| `actor`         | string      | Authenticated admin who performed the action     |
+| `action`        | string      | Namespaced verb (e.g. `project.verify`)          |
+| `resource_type` | string      | Type of the affected resource (e.g. `project`)   |
+| `resource_id`   | string      | Identifier of the affected resource              |
+| `before_state`  | JSONB       | Resource snapshot **before** the mutation        |
+| `after_state`   | JSONB       | Resource snapshot **after** the mutation         |
+| `metadata`      | JSONB       | Extra request context (method, path, IP)         |
+| `ip_address`    | string      | Client IP at time of action                      |
+| `user_agent`    | string      | Client User-Agent at time of action              |
+| `prev_hash`     | string      | SHA-256 of the previous row's `row_hash`         |
+| `row_hash`      | string      | SHA-256 of this row's canonical fields           |
+| `created_at`    | timestamptz | When the action was recorded                     |
+
+The `prev_hash` / `row_hash` chain means any retroactive edit breaks the chain
+and can be detected by calling `verifyChain()` in `services/auditChain.js`.
+
+### `GET /api/admin/audit-log`
+
+Returns a paginated list of audit entries. Requires admin JWT.
+
+**Query parameters**
+
+| Parameter       | Type   | Description                                 |
+| --------------- | ------ | ------------------------------------------- |
+| `actor`         | string | Filter by admin actor                       |
+| `action`        | string | Filter by action verb                       |
+| `targetType`    | string | Filter by resource type                     |
+| `targetId`      | string | Filter by resource ID                       |
+| `ipAddress`     | string | Filter by client IP                         |
+| `dateFrom`      | string | ISO-8601 start date (inclusive)             |
+| `dateTo`        | string | ISO-8601 end date (inclusive)               |
+| `metadataKey`   | string | JSONB key to match in the metadata field    |
+| `metadataValue` | string | Value for the `metadataKey` match           |
+| `page`          | number | Page number (default: 1)                    |
+| `pageSize`      | number | Entries per page (default: 50, max: 200)    |
+
+**Response**
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "aaaabbbb-...",
+      "actor": "admin",
+      "action": "project.verify",
+      "target_type": "project",
+      "target_id": "proj-001",
+      "metadata": { "method": "POST", "path": "/api/admin/projects/verify" },
+      "ip_address": "10.0.0.1",
+      "created_at": "2026-08-29T03:00:00.000Z",
+      "prev_hash": "deadbeef...",
+      "row_hash": "cafebabe..."
+    }
+  ],
+  "total": 42,
+  "page": 1,
+  "pageSize": 50,
+  "queryTimeMs": 12
+}
+```
+
+**Acceptance criteria (immutability)**
+
+The `admin_audit_log` table has database-level immutability enforced via a
+`BEFORE UPDATE` and `BEFORE DELETE` trigger that raises an exception.
+No application path — including a fully compromised service account — can
+silently remove or modify a historical audit entry.
 
 ---
 
