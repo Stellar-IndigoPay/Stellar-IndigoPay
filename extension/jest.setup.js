@@ -3,6 +3,10 @@
  */
 /* global jest */
 
+if (typeof globalThis.TextEncoder === "undefined") {
+  globalThis.TextEncoder = require("util").TextEncoder;
+}
+
 var mockChrome = {
   runtime: {
     onMessage: {

@@ -208,6 +208,18 @@ router.get("/", async (_req, res) => {
     checks.indexer = { status: "unknown", reason: err.message };
   }
 
+  // Worker drain states (webhook dispatcher, digest dispatcher, indexer,
+  // recurring keeper, …). Informational: a draining worker doesn't fail
+  // this process's readiness on its own — `isShuttingDown()` above
+  // already does that for the whole pod — but this surfaces per-worker
+  // drain progress for operators watching a rolling deploy.
+  try {
+    const { getWorkerDrainStates } = require("../services/workerLifecycle");
+    checks.workers = { status: "ok", drain: getWorkerDrainStates() };
+  } catch (err) {
+    checks.workers = { status: "unknown", reason: err.message };
+  }
+
   const replicaOk = checks.readReplicaLag.status !== "degraded";
   const requiredOk =
     checks.db.status === "ok" &&

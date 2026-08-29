@@ -43,8 +43,12 @@ const URLS_TO_SCAN = [
   "/impact",
   "/apply",
   // Auth-required routes (dashboard, donate, admin, freelancer profile) are
-  // skipped in v1 because they require a wallet session. Add them after we
-  // stabilize a fixture wallet cookie.
+  // intentionally NOT in this static crawl — they require a connected wallet
+  // and a mocked backend/Horizon, which this crawler does not provision.  The
+  // donation flow (issue #1096 WS7 #7: wallet picker, amount form with
+  // validation errors, transaction preview, post-donation confirmation) is
+  // covered by the dedicated e2e/a11y.spec.ts, invoked directly from
+  // a11y-nightly.yml alongside this script.
 ];
 
 const BASE_URL = process.env.BASE_URL || "http://localhost:3000";

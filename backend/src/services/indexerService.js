@@ -22,12 +22,16 @@
 
 const { server: stellarServer } = require("./stellar");
 const pool = require("../db/pool");
+const crypto = require("crypto");
 const { handleDonation, setUsdcToXlmRate } = require("./indexerDonationHandler");
 const { enqueue: enqueueDLQ } = require("./indexerDLQWorker");
 const logger = require("../logger");
 const { metrics } = require("./metrics");
 const { runBackfill } = require("./indexerBackfill");
 const DonationBatcher = require("./donationBatcher");
+const { createDrainController } = require("./workerLifecycle");
+
+const drain = createDrainController("indexer");
 
 const {
   indigopayIndexerStreamReconnectsTotal: indexerStreamReconnects,
@@ -75,10 +79,25 @@ const USDC_ASSET_CODE = "USDC";
 async function readCursor() {
   try {
     const result = await pool.query(
-      "SELECT last_processed_ledger FROM indexer_state WHERE key = 'primary'",
+      "SELECT last_processed_ledger, cursor_hash FROM indexer_state WHERE key = 'primary'",
     );
-    return result.rows[0]?.last_processed_ledger || 0;
+    if (!result.rows[0]) return 0;
+
+    const ledger = result.rows[0].last_processed_ledger;
+    const storedHash = result.rows[0].cursor_hash;
+
+    if (storedHash) {
+      const expectedHash = crypto.createHash("sha256").update(String(ledger)).digest("hex");
+      if (storedHash !== expectedHash) {
+        throw new Error(`Checkpoint corruption detected: hash mismatch for ledger ${ledger}`);
+      }
+    }
+
+    return ledger || 0;
   } catch (err) {
+    if (err.message.includes("Checkpoint corruption detected")) {
+      throw err;
+    }
     logger.warn(
       { event: "indexer_cursor_read_error", err: err.message },
       "Cannot read cursor from DB, starting from 0",
@@ -95,12 +114,14 @@ async function readCursor() {
  * @returns {Promise<void>}
  */
 async function updateCursor(client, ledger) {
+  const hash = crypto.createHash('sha256').update(String(ledger)).digest('hex');
   await client.query(
     `UPDATE indexer_state
      SET last_processed_ledger = GREATEST(last_processed_ledger, $1),
+         cursor_hash = $2,
          last_processed_at = NOW()
      WHERE key = 'primary'`,
-    [ledger],
+    [ledger, hash],
   );
 }
 
@@ -183,51 +204,52 @@ async function openStream() {
     .operations()
     .cursor(cursorStr)
     .stream({
-      onmessage: async (op) => {
-        try {
-          lastProcessedLedger = Math.max(lastProcessedLedger, op.ledger_attr);
+      onmessage: async (op) =>
+        drain.trackJob(async () => {
+          try {
+            lastProcessedLedger = Math.max(lastProcessedLedger, op.ledger_attr);
 
-          if (op.type !== "payment") return;
+            if (op.type !== "payment") return;
 
-          const isNative = op.asset_type === "native";
-          const isUSDC =
-            !isNative &&
-            op.asset_code === USDC_ASSET_CODE &&
-            usdcTokenAddress !== null &&
-            op.asset_issuer === usdcTokenAddress;
+            const isNative = op.asset_type === "native";
+            const isUSDC =
+              !isNative &&
+              op.asset_code === USDC_ASSET_CODE &&
+              usdcTokenAddress !== null &&
+              op.asset_issuer === usdcTokenAddress;
 
-          if (!isNative && !isUSDC) {
-            indexerOperationsSkipped.inc({ reason: "unsupported_asset" });
-            return;
-          }
-
-          const projectId = projectWallets.get(op.to);
-          if (projectId) {
-            const result = await handleDonation(projectId, op, { isNative, isUSDC, isBackfill: false }, {
-              onCursorUpdate: updateCursor,
-            });
-            // Batch donations for emission (not backfill/DLQ)
-            // Instead of emitting one event per donation, accumulate them
-            // and emit a single batch event after a time window (500ms by default).
-            if (donationBatcher && result) {
-              donationBatcher.addDonation({
-                projectId,
-                donorAddress: op.from,
-                amountXLM: isNative ? parseFloat(op.amount) : null,
-                amount: parseFloat(op.amount),
-                currency: isNative ? "XLM" : "USDC",
-                txHash: op.transaction_hash,
-                timestamp: new Date().toISOString(),
-              });
+            if (!isNative && !isUSDC) {
+              indexerOperationsSkipped.inc({ reason: "unsupported_asset" });
+              return;
             }
-          } else {
-            indexerOperationsSkipped.inc({ reason: "no_matching_project" });
+
+            const projectId = projectWallets.get(op.to);
+            if (projectId) {
+              const result = await handleDonation(projectId, op, { isNative, isUSDC, isBackfill: false }, {
+                onCursorUpdate: updateCursor,
+              });
+              // Batch donations for emission (not backfill/DLQ)
+              // Instead of emitting one event per donation, accumulate them
+              // and emit a single batch event after a time window (500ms by default).
+              if (donationBatcher && result) {
+                donationBatcher.addDonation({
+                  projectId,
+                  donorAddress: op.from,
+                  amountXLM: isNative ? parseFloat(op.amount) : null,
+                  amount: parseFloat(op.amount),
+                  currency: isNative ? "XLM" : "USDC",
+                  txHash: op.transaction_hash,
+                  timestamp: new Date().toISOString(),
+                });
+              }
+            } else {
+              indexerOperationsSkipped.inc({ reason: "no_matching_project" });
+            }
+          } catch (err) {
+            logger.error({ event: "indexer_op_error", err: err.message }, "Operation processing error");
+            enqueueDLQ(op.ledger_attr, op.transaction_hash, err.message).catch(() => {});
           }
-        } catch (err) {
-          logger.error({ event: "indexer_op_error", err: err.message }, "Operation processing error");
-          enqueueDLQ(op.ledger_attr, op.transaction_hash, err.message).catch(() => {});
-        }
-      },
+        }),
       onerror: (err) => {
         logger.error(
           { event: "indexer_horizon_stream_error", err: String(err) },
@@ -468,6 +490,9 @@ function getStatus() {
  * @returns {Promise<void>}
  */
 async function stop() {
+  // Stop claiming new operations first: closing the SSE stream means no
+  // further `onmessage` callbacks fire, so whatever is already in flight
+  // (tracked via `drain`) is the last of it.
   closeStream();
 
   if (reconnectTimer) {
@@ -479,6 +504,11 @@ async function stop() {
     clearInterval(projectWalletsInterval);
     projectWalletsInterval = null;
   }
+
+  // Wait for any in-flight operation processing (DB writes, cursor
+  // update) to finish before flushing/stopping the batcher, so a
+  // SIGTERM never truncates a donation write mid-flight.
+  await drain.beginDrain();
 
   // Flush any pending donations before stopping
   if (donationBatcher) {
@@ -492,7 +522,14 @@ async function stop() {
   reconnectAttempt = 0;
 }
 
+
+async function rescanRange({ fromLedger, toLedger }) {
+  const { runBackfill } = require("./indexerBackfill");
+  return runBackfill({ fromLedger, toLedger, force: true });
+}
+
 module.exports = {
+  rescanRange,
   startIndexer,
   getStatus,
   stop,
@@ -503,4 +540,6 @@ module.exports = {
   setLagRuntimeState,
   getLagRuntimeState,
   resetLagRuntimeState,
+  // Test-only: introspect drain state without a real SIGTERM.
+  _drain: drain,
 };

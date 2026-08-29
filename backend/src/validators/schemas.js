@@ -19,6 +19,7 @@
 "use strict";
 
 const { z } = require("zod");
+const { sanitizedString } = require("./sanitize");
 
 // ── Regex constants ──────────────────────────────────────────────────────────
 const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
@@ -92,10 +93,11 @@ const documentSchema = z.object({
       (val) => /^https?:\/\//i.test(val) || /^\/api\/uploads\//i.test(val),
       "document.url must be an http(s) URL or a local /api/uploads URL",
     ),
-  name: z
-    .string()
-    .min(1, "document.name must be at least 1 character")
-    .max(200, "document.name must be at most 200 characters"),
+  name: sanitizedString(200, {
+    minLength: 1,
+    minMessage: "document.name must be at least 1 character",
+    maxMessage: "document.name must be at most 200 characters",
+  }),
   size: z.number().int().nonnegative("document.size must be >= 0").optional(),
   contentType: z.string().optional(),
   backend: z.string().optional(),
@@ -104,16 +106,19 @@ const documentSchema = z.object({
 // ── Profile schema ─────────────────────────────────────────────────────────
 
 const profileSchema = z.object({
-  displayName: z
-    .string()
-    .min(2, "Display name must be between 2 and 30 characters")
-    .max(30, "Display name must be between 2 and 30 characters")
-    .regex(/^[a-zA-Z0-9_ ]+$/, "Only letters, numbers, underscores, and spaces allowed")
+  displayName: sanitizedString(30, {
+    minLength: 2,
+    minMessage: "Display name must be between 2 and 30 characters",
+    maxMessage: "Display name must be between 2 and 30 characters",
+    regex: /^[a-zA-Z0-9_ ]+$/,
+    regexMessage: "Only letters, numbers, underscores, and spaces allowed",
+    rejectHtml: true,
+  })
     .optional()
     .or(z.literal("")),
-  bio: z
-    .string()
-    .max(300, "Bio must be at most 300 characters")
+  bio: sanitizedString(300, {
+    maxMessage: "Bio must be at most 300 characters",
+  })
     .optional()
     .or(z.literal("")),
 });
@@ -121,38 +126,47 @@ const profileSchema = z.object({
 // ── Project submission schema ───────────────────────────────────────────────
 
 const projectSubmissionSchema = z.object({
-  name: z
-    .string()
-    .min(3, "name must be between 3 and 120 characters")
-    .max(120, "name must be between 3 and 120 characters"),
+  name: sanitizedString(120, {
+    minLength: 3,
+    minMessage: "name must be between 3 and 120 characters",
+    maxMessage: "name must be between 3 and 120 characters",
+  }),
   category: z.enum(PROJECT_CATEGORIES, {
     errorMap: () => ({
       message: `category must be one of: ${PROJECT_CATEGORIES.join(", ")}`,
     }),
   }),
-  description: z
-    .string()
-    .min(10, "description must be between 10 and 5000 characters")
-    .max(5000, "description must be between 10 and 5000 characters"),
-  location: z
-    .string()
-    .min(2, "location must be between 2 and 200 characters")
-    .max(200, "location must be between 2 and 200 characters"),
+  description: sanitizedString(5000, {
+    minLength: 10,
+    minMessage: "description must be between 10 and 5000 characters",
+    maxMessage: "description must be between 10 and 5000 characters",
+  }),
+  location: sanitizedString(200, {
+    minLength: 2,
+    minMessage: "location must be between 2 and 200 characters",
+    maxMessage: "location must be between 2 and 200 characters",
+  }),
   goalXLM: positiveNumberString,
   walletAddress: stellarAddress,
   organization: z.object({
-    name: z.string().min(1, "Organization name is required"),
+    name: sanitizedString(200, {
+      minLength: 1,
+      minMessage: "Organization name is required",
+    }),
     website: z
       .string()
       .url("Organization website must be a valid URL")
       .optional()
       .or(z.literal("")),
-    country: z.string().optional(),
+    country: sanitizedString(80).optional(),
     contactEmail: z.string().email("Contact email must be a valid email"),
   }),
   co2Methodology: z.object({
-    name: z.string().min(1, "Methodology name is required"),
-    verificationBody: z.string().optional(),
+    name: sanitizedString(200, {
+      minLength: 1,
+      minMessage: "Methodology name is required",
+    }),
+    verificationBody: sanitizedString(200).optional(),
     annualTonnesCO2: positiveNumberString,
     documentUrl: z
       .string()
@@ -160,18 +174,23 @@ const projectSubmissionSchema = z.object({
       .optional()
       .or(z.literal("")),
   }),
-  impactMetrics: z.array(z.string()).optional().default([]),
+  impactMetrics: z
+    .array(sanitizedString(200))
+    .optional()
+    .default([]),
   // Tags are stored as a Postgres TEXT[] and feed full-text search, so both
   // the array length and each entry's length are bounded to prevent database
   // and search-index bloat. `.trim()` runs before the length checks, so
   // whitespace-only tags are rejected as empty.
   tags: z
     .array(
-      z
-        .string()
-        .trim()
-        .min(1, "each tag must be a non-empty string")
-        .max(50, "each tag must be at most 50 characters"),
+      sanitizedString(50, {
+        minLength: 1,
+        trim: true,
+        truncate: false,
+        minMessage: "each tag must be a non-empty string",
+        maxMessage: "each tag must be at most 50 characters",
+      }),
     )
     .max(10, "tags must contain at most 10 entries")
     .optional()
@@ -179,11 +198,12 @@ const projectSubmissionSchema = z.object({
 });
 
 const campaignSchema = z.object({
-  title: z
-    .string()
-    .trim()
-    .min(3, "title must be between 3 and 120 characters")
-    .max(120, "title must be between 3 and 120 characters"),
+  title: sanitizedString(120, {
+    minLength: 3,
+    trim: true,
+    minMessage: "title must be between 3 and 120 characters",
+    maxMessage: "title must be between 3 and 120 characters",
+  }),
   goalXLM: positiveNumberString,
   deadline: z
     .string()
@@ -195,10 +215,10 @@ const campaignSchema = z.object({
       const deadlineDate = new Date(value);
       return deadlineDate.getTime() > Date.now();
     }, "deadline must be in the future"),
-  description: z
-    .string()
-    .trim()
-    .max(500, "description must be 500 characters or fewer")
+  description: sanitizedString(500, {
+    trim: true,
+    maxMessage: "description must be 500 characters or fewer",
+  })
     .optional()
     .or(z.literal("")),
 });
@@ -211,46 +231,51 @@ const donationSchema = z.object({
   transactionHash,
   amountXLM: xlmAmount,
   currency: z.enum(DONATION_CURRENCIES).optional().default("XLM"),
-  message: z.string().max(100, "Message must be at most 100 characters").optional(),
+  message: sanitizedString(100, {
+    maxMessage: "Message must be at most 100 characters",
+  }).optional(),
   anonymous: z.boolean().optional().default(false),
 });
 
 // ── Verification request schema ──────────────────────────────────────────────
 
 const verificationSchema = z.object({
-  organizationName: z
-    .string()
-    .min(2, "organizationName must be 2-200 characters")
-    .max(200, "organizationName must be 2-200 characters"),
+  organizationName: sanitizedString(200, {
+    minLength: 2,
+    minMessage: "organizationName must be 2-200 characters",
+    maxMessage: "organizationName must be 2-200 characters",
+  }),
   organizationWebsite: z
     .string()
     .url("organizationWebsite must be a valid http(s) URL")
     .max(500, "organizationWebsite must be a string up to 500 characters")
     .optional()
     .or(z.literal("")),
-  organizationCountry: z
-    .string()
-    .max(80, "organizationCountry must be a string up to 80 characters")
+  organizationCountry: sanitizedString(80, {
+    maxMessage: "organizationCountry must be a string up to 80 characters",
+  })
     .optional()
     .or(z.literal("")),
   contactEmail: z.string().email("contactEmail must be a valid email"),
   walletAddress: stellarAddress,
-  projectName: z
-    .string()
-    .min(2, "projectName must be 2-200 characters")
-    .max(200, "projectName must be 2-200 characters"),
+  projectName: sanitizedString(200, {
+    minLength: 2,
+    minMessage: "projectName must be 2-200 characters",
+    maxMessage: "projectName must be 2-200 characters",
+  }),
   projectCategory: z.enum(PROJECT_CATEGORIES, {
     errorMap: () => ({
       message: `projectCategory must be one of: ${PROJECT_CATEGORIES.join(", ")}`,
     }),
   }),
-  projectLocation: z
-    .string()
-    .min(2, "projectLocation must be 2-200 characters")
-    .max(200, "projectLocation must be 2-200 characters"),
-  projectDescription: z
-    .string()
-    .max(5000, "projectDescription must be a string up to 5000 characters")
+  projectLocation: sanitizedString(200, {
+    minLength: 2,
+    minMessage: "projectLocation must be 2-200 characters",
+    maxMessage: "projectLocation must be 2-200 characters",
+  }),
+  projectDescription: sanitizedString(5000, {
+    maxMessage: "projectDescription must be a string up to 5000 characters",
+  })
     .optional()
     .or(z.literal("")),
   co2PerXLM: nonNegativeNumberString,
@@ -262,9 +287,9 @@ const verificationSchema = z.object({
     .max(20, "supportingDocuments must contain at most 20 entries")
     .optional()
     .default([]),
-  notes: z
-    .string()
-    .max(2000, "notes must be a string up to 2000 characters")
+  notes: sanitizedString(2000, {
+    maxMessage: "notes must be a string up to 2000 characters",
+  })
     .optional()
     .or(z.literal("")),
 });

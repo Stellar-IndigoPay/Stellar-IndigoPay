@@ -31,22 +31,27 @@ describe("Notification Utilities", () => {
   });
 
   describe("parseDeepLinkUrl", () => {
-    it("parses indigopay://project/123 -> /projects/123", () => {
-      (Linking.parse as jest.Mock).mockReturnValueOnce({ path: "project/123" });
+    // #906: parseDeepLinkUrl now delegates to the shared, validated
+    // lib/linkRouter.ts pipeline instead of parsing ad hoc with
+    // expo-linking's `Linking.parse` — see
+    // lib/__tests__/linkRouterConvergence.test.ts for the spy-based proof
+    // that this call site actually goes through the router.
+    it("parses indigopay://project/123 -> /project/123", () => {
       const result = parseDeepLinkUrl("indigopay://project/123");
-      expect(result).toBe("/projects/123");
-      expect(Linking.parse).toHaveBeenCalledWith("indigopay://project/123");
+      expect(result).toBe("/project/123");
     });
 
     it("parses indigopay://donate/456 -> /donate/456", () => {
-      (Linking.parse as jest.Mock).mockReturnValueOnce({ path: "donate/456" });
       const result = parseDeepLinkUrl("indigopay://donate/456");
       expect(result).toBe("/donate/456");
     });
 
     it("returns null for invalid/unknown paths", () => {
-      (Linking.parse as jest.Mock).mockReturnValueOnce({ path: "unknown/segment" });
       expect(parseDeepLinkUrl("indigopay://unknown/segment")).toBeNull();
+    });
+
+    it("returns null for a disallowed scheme", () => {
+      expect(parseDeepLinkUrl("javascript://project/123")).toBeNull();
     });
   });
 
@@ -64,7 +69,7 @@ describe("Notification Utilities", () => {
         { type: "donation_receipt", projectId: "proj-1" },
         mockPush,
       );
-      expect(mockPush).toHaveBeenCalledWith("/projects/proj-1");
+      expect(mockPush).toHaveBeenCalledWith("/project/proj-1");
     });
 
     it("routes project_update and milestone_reached to projects screen", () => {
@@ -72,13 +77,13 @@ describe("Notification Utilities", () => {
         { type: "project_update", projectId: "proj-1" },
         mockPush,
       );
-      expect(mockPush).toHaveBeenCalledWith("/projects/proj-1");
+      expect(mockPush).toHaveBeenCalledWith("/project/proj-1");
 
       navigateToNotification(
         { type: "milestone_reached", projectId: "proj-2" },
         mockPush,
       );
-      expect(mockPush).toHaveBeenCalledWith("/projects/proj-2");
+      expect(mockPush).toHaveBeenCalledWith("/project/proj-2");
     });
 
     it("routes subscription_due to donate screen", () => {
@@ -104,7 +109,7 @@ describe("Notification Utilities", () => {
         { type: "unknown", url: "indigopay://project/111" },
         mockPush,
       );
-      expect(mockPush).toHaveBeenCalledWith("/projects/111");
+      expect(mockPush).toHaveBeenCalledWith("/project/111");
     });
 
     it("handles external web url using RN Linking.openURL", async () => {

@@ -28,6 +28,7 @@ import {
   followProject,
   unfollowProject,
 } from "@/lib/api";
+import type { Donation } from "@/utils/types";
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 jest.mock("@/lib/api", () => ({
@@ -268,6 +269,7 @@ describe("useRecordDonation", () => {
       donorAddress: "GABC123",
       amountXLM: "100",
       transactionHash: "tx1",
+      idempotencyKey: "test-key-1",
     });
 
     expect(mockRecordDonation).toHaveBeenCalled();
@@ -293,6 +295,239 @@ describe("useRecordDonation", () => {
     expect(donorHistoryState?.isInvalidated).toBe(true);
     expect(leaderboardState?.isInvalidated).toBe(true);
     expect(globalStatsState?.isInvalidated).toBe(true);
+  });
+
+  it("updates visible donation/project caches optimistically", async () => {
+    let resolveDonation!: (value: unknown) => void;
+    mockRecordDonation.mockReturnValue(
+      new Promise((resolve) => {
+        resolveDonation = resolve;
+      }),
+    );
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    queryClient.setQueryData(queryKeys.donorHistory("GABC123"), donationsFixture);
+    queryClient.setQueryData(queryKeys.project("p1"), {
+      id: "p1",
+      raisedXLM: "10",
+      donorCount: 2,
+    });
+    queryClient.setQueryData(queryKeys.projectDonations("p1"), {
+      pages: [{ donations: [], nextCursor: null }],
+      pageParams: [undefined],
+    });
+
+    function Wrapper({ children }: { children: React.ReactNode }) {
+      return (
+        <QueryClientProvider client={queryClient}>
+          {children}
+        </QueryClientProvider>
+      );
+    }
+
+    const { result } = renderHook(() => useRecordDonation(), {
+      wrapper: Wrapper,
+    });
+    const pending = result.current.mutateAsync({
+      projectId: "p1",
+      donorAddress: "GABC123",
+      amountXLM: "5",
+      transactionHash: "tx-optimistic",
+      idempotencyKey: "test-key-optimistic",
+    });
+
+    await waitFor(() => {
+      expect(queryClient.getQueryData(queryKeys.donorHistory("GABC123"))).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ transactionHash: "tx-optimistic" }),
+        ]),
+      );
+    });
+    expect(queryClient.getQueryData(queryKeys.project("p1"))).toMatchObject({
+      raisedXLM: "15",
+      donorCount: 2,
+    });
+    expect(
+      queryClient.getQueryData(queryKeys.projectDonations("p1")),
+    ).toMatchObject({
+      pages: [
+        {
+          donations: [expect.objectContaining({ transactionHash: "tx-optimistic" })],
+        },
+      ],
+    });
+
+    resolveDonation({ id: "d2" });
+    await pending;
+  });
+
+  it("rolls back optimistic donation changes when recording fails", async () => {
+    const failure = new Error("recording failed");
+    mockRecordDonation.mockRejectedValue(failure);
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    queryClient.setQueryData(queryKeys.donorHistory("GABC123"), donationsFixture);
+    queryClient.setQueryData(queryKeys.project("p1"), {
+      id: "p1",
+      raisedXLM: "10",
+      donorCount: 2,
+    });
+
+    function Wrapper({ children }: { children: React.ReactNode }) {
+      return (
+        <QueryClientProvider client={queryClient}>
+          {children}
+        </QueryClientProvider>
+      );
+    }
+
+    const { result } = renderHook(() => useRecordDonation(), {
+      wrapper: Wrapper,
+    });
+    await expect(
+      result.current.mutateAsync({
+        projectId: "p1",
+        donorAddress: "GABC123",
+        amountXLM: "5",
+        transactionHash: "tx-failed",
+        idempotencyKey: "test-key-failed",
+      }),
+    ).rejects.toBe(failure);
+
+    expect(queryClient.getQueryData(queryKeys.donorHistory("GABC123"))).toEqual(
+      donationsFixture,
+    );
+    expect(queryClient.getQueryData(queryKeys.project("p1"))).toMatchObject({
+      raisedXLM: "10",
+      donorCount: 2,
+    });
+  });
+
+  it("rolls back only the failed donation during concurrent mutations", async () => {
+    let rejectFirst!: (reason?: unknown) => void;
+    let rejectSecond!: (reason?: unknown) => void;
+    mockRecordDonation.mockImplementation(({ transactionHash }) => {
+      return new Promise((_resolve, reject) => {
+        if (transactionHash === "tx-first") rejectFirst = reject;
+        else rejectSecond = reject;
+      });
+    });
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    queryClient.setQueryData(queryKeys.donorHistory("GABC123"), []);
+    queryClient.setQueryData(queryKeys.project("p1"), {
+      id: "p1",
+      raisedXLM: "10",
+      donorCount: 2,
+    });
+
+    function Wrapper({ children }: { children: React.ReactNode }) {
+      return (
+        <QueryClientProvider client={queryClient}>
+          {children}
+        </QueryClientProvider>
+      );
+    }
+
+    const { result } = renderHook(() => useRecordDonation(), {
+      wrapper: Wrapper,
+    });
+    const first = result.current.mutateAsync({
+      projectId: "p1",
+      donorAddress: "GABC123",
+      amountXLM: "5",
+      transactionHash: "tx-first",
+      idempotencyKey: "first-key",
+    });
+    const second = result.current.mutateAsync({
+      projectId: "p1",
+      donorAddress: "GABC123",
+      amountXLM: "7",
+      transactionHash: "tx-second",
+      idempotencyKey: "second-key",
+    });
+
+    await waitFor(() => {
+      const donations = queryClient.getQueryData<Donation[]>(
+        queryKeys.donorHistory("GABC123"),
+      );
+      expect(donations).toHaveLength(2);
+      expect(queryClient.getQueryData(queryKeys.project("p1"))).toMatchObject({
+        raisedXLM: "22",
+      });
+    });
+
+    rejectFirst(new Error("first failed"));
+    await expect(first).rejects.toThrow("first failed");
+    expect(queryClient.getQueryData<Donation[]>(queryKeys.donorHistory("GABC123"))).toEqual(
+      [expect.objectContaining({ transactionHash: "tx-second" })],
+    );
+    expect(queryClient.getQueryData(queryKeys.project("p1"))).toMatchObject({
+      raisedXLM: "17",
+      donorCount: 2,
+    });
+    expect(queryClient.getQueryState(queryKeys.project("p1"))?.isInvalidated).toBe(
+      false,
+    );
+
+    rejectSecond(new Error("second failed"));
+    await expect(second).rejects.toThrow("second failed");
+    expect(queryClient.getQueryData(queryKeys.donorHistory("GABC123"))).toEqual([]);
+    expect(queryClient.getQueryData(queryKeys.project("p1"))).toMatchObject({
+      raisedXLM: "10",
+      donorCount: 2,
+    });
+  });
+
+  it("does not put a USDC amount in amountXLM optimistically", async () => {
+    let resolveDonation!: (value: unknown) => void;
+    mockRecordDonation.mockReturnValue(
+      new Promise((resolve) => {
+        resolveDonation = resolve;
+      }),
+    );
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    queryClient.setQueryData(queryKeys.donorHistory("GABC123"), []);
+
+    function Wrapper({ children }: { children: React.ReactNode }) {
+      return (
+        <QueryClientProvider client={queryClient}>
+          {children}
+        </QueryClientProvider>
+      );
+    }
+
+    const { result } = renderHook(() => useRecordDonation(), {
+      wrapper: Wrapper,
+    });
+    const pending = result.current.mutateAsync({
+      projectId: "p1",
+      donorAddress: "GABC123",
+      amount: "5",
+      currency: "USDC",
+      transactionHash: "tx-usdc",
+      idempotencyKey: "test-key-usdc",
+    });
+
+    await waitFor(() => {
+      const donation = queryClient.getQueryData<Donation[]>(
+        queryKeys.donorHistory("GABC123"),
+      )?.[0];
+      expect(donation).toMatchObject({ amount: "5", currency: "USDC" });
+      expect(donation?.amountXLM).toBeUndefined();
+    });
+
+    resolveDonation({ id: "d-usdc" });
+    await pending;
   });
 });
 
