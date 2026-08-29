@@ -19,7 +19,11 @@
  *   - Batch commit: accumulate up to BATCH_SIZE events, then commit in a
  *     single DB transaction.
  *   - Failed events written to `soroban_event_dlq` with error details.
- *   - Prometheus metrics for throughput, lag, and failures.
+ *   - DLQ retries use exponential backoff with jitter; entries that exhaust
+ *     `DLQ_MAX_RETRIES` are quarantined (terminal state) so a permanently
+ *     malformed ("poison") event stops consuming pipeline capacity and
+ *     flooding logs, and is observable via a dedicated metric.
+ *   - Prometheus metrics for throughput, lag, failures, and quarantines.
  */
 "use strict";
 
@@ -30,6 +34,7 @@ const {
 } = require("./stellar");
 const { xdr, scValToNative } = require("@stellar/stellar-sdk");
 const pool = require("../db/pool");
+const crypto = require("crypto");
 const logger = require("../logger");
 const { registry } = require("./metrics");
 const { Counter, Gauge } = require("prom-client");
@@ -48,6 +53,22 @@ const {
 const POLL_INTERVAL_MS = 5_000; // 5 seconds
 const BATCH_SIZE = 50;
 const DLQ_MAX_RETRIES = 3;
+
+// DLQ retry policy: exponential backoff with jitter, then a terminal
+// quarantine once `DLQ_MAX_RETRIES` attempts are exhausted.
+const DLQ_BACKOFF_BASE_MS = Number(
+  process.env.SOROBAN_DLQ_BACKOFF_BASE_MS || 30_000, // 30 s
+);
+const DLQ_BACKOFF_MAX_MS = Number(
+  process.env.SOROBAN_DLQ_BACKOFF_MAX_MS || 8 * 60 * 60 * 1000, // 8 h cap
+);
+const DLQ_JITTER_MAX_MS = Number(
+  process.env.SOROBAN_DLQ_JITTER_MAX_MS || 5_000, // +/- 5 s
+);
+const DLQ_POLL_INTERVAL_MS = Number(
+  process.env.SOROBAN_DLQ_POLL_INTERVAL_MS || 60_000, // 1 min
+);
+const DLQ_BATCH_SIZE = Number(process.env.SOROBAN_DLQ_BATCH_SIZE || 10);
 
 // ── Prometheus metrics ──────────────────────────────────────────────────────
 
@@ -76,10 +97,18 @@ const sorobanEventsBatchDurationSeconds = new Gauge({
   registers: [registry],
 });
 
+const sorobanEventsDlqQuarantinedTotal = new Counter({
+  name: "indigopay_soroban_events_dlq_quarantined_total",
+  help: "Total Soroban event DLQ entries quarantined after exhausting retries, labelled by event_type.",
+  labelNames: ["event_type"],
+  registers: [registry],
+});
+
 // ── State ───────────────────────────────────────────────────────────────────
 
 let isRunning = false;
 let pollingTimer = null;
+let dlqTimer = null;
 let currentCursor = "";
 /** @type {import("socket.io").Server|null} */
 let io = null;
@@ -244,12 +273,25 @@ async function cleanupOldProcessedEvents() {
 async function loadCursor() {
   try {
     const result = await pool.query(
-      "SELECT value FROM indexer_state WHERE key = 'soroban_event_cursor'",
+      "SELECT value, cursor_hash FROM indexer_state WHERE key = 'soroban_event_cursor'",
     );
     if (result.rows.length > 0 && result.rows[0].value) {
-      return result.rows[0].value;
+      const cursor = result.rows[0].value;
+      const storedHash = result.rows[0].cursor_hash;
+
+      if (storedHash) {
+        const expectedHash = crypto.createHash("sha256").update(String(cursor)).digest("hex");
+        if (storedHash !== expectedHash) {
+          throw new Error(`Checkpoint corruption detected: hash mismatch for cursor ${cursor}`);
+        }
+      }
+
+      return cursor;
     }
   } catch (err) {
+    if (err.message.includes("Checkpoint corruption detected")) {
+      throw err;
+    }
     logger.error(
       { event: "soroban_events_cursor_load_error", err: err.message },
       "Failed to load cursor from indexer_state",
@@ -266,11 +308,12 @@ async function loadCursor() {
 async function saveCursor(cursor, client) {
   const db = client || pool;
   try {
+    const hash = crypto.createHash('sha256').update(String(cursor)).digest('hex');
     await db.query(
-      `INSERT INTO indexer_state (key, value, updated_at)
-       VALUES ('soroban_event_cursor', $1, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
-      [cursor],
+      `INSERT INTO indexer_state (key, value, cursor_hash, updated_at)
+       VALUES ('soroban_event_cursor', $1, $2, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = $1, cursor_hash = $2, updated_at = NOW()`,
+      [cursor, hash],
     );
   } catch (err) {
     logger.error(
@@ -283,7 +326,29 @@ async function saveCursor(cursor, client) {
 // ── DLQ ─────────────────────────────────────────────────────────────────────
 
 /**
- * Write a failed event to the dead-letter queue.
+ * Compute the delay for the next retry attempt using exponential backoff
+ * with jitter.
+ *
+ * At retry_count=0 the base delay is 30s, 60s at 1, 120s at 2, etc., capped
+ * at `DLQ_BACKOFF_MAX_MS` and padded with up to `DLQ_JITTER_MAX_MS` of
+ * randomness so a batch of failed events doesn't retry in lock-step.
+ *
+ * @param {number} retryCount — Number of attempts already made (0-based).
+ * @returns {number} Delay in milliseconds before the next attempt.
+ */
+function calculateBackoff(retryCount) {
+  const exponential = DLQ_BACKOFF_BASE_MS * Math.pow(2, retryCount);
+  const capped = Math.min(exponential, DLQ_BACKOFF_MAX_MS);
+  const jitter = Math.floor(Math.random() * (DLQ_JITTER_MAX_MS + 1));
+  return capped + jitter;
+}
+
+/**
+ * Write a failed event to the dead-letter queue with initial retry state.
+ * Re-enqueuing the same event (same paging token) that is still pending or
+ * retrying refreshes the error details without resetting its retry ladder,
+ * so a poison event keeps climbing toward quarantine instead of looping.
+ *
  * @param {object} evt — Raw event object
  * @param {string} eventType
  * @param {Error} error
@@ -294,8 +359,15 @@ async function writeToDLQ(evt, eventType, error, attemptCount = DLQ_MAX_RETRIES)
   try {
     await pool.query(
       `INSERT INTO soroban_event_dlq
-         (event_type, contract_id, paging_token, event_data, error_message, error_stack, attempt_count)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+         (event_type, contract_id, paging_token, event_data, error_message,
+          error_stack, attempt_count, retry_count, max_retries, next_attempt_at, status)
+       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, 0, $8, NOW(), 'pending')
+       ON CONFLICT (paging_token) WHERE status IN ('pending', 'retrying')
+       DO UPDATE SET
+         error_message = EXCLUDED.error_message,
+         error_stack = EXCLUDED.error_stack,
+         next_attempt_at = NOW(),
+         updated_at = NOW()`,
       [
         eventType,
         CONTRACT_ID,
@@ -304,6 +376,7 @@ async function writeToDLQ(evt, eventType, error, attemptCount = DLQ_MAX_RETRIES)
         error.message || "Unknown error",
         error.stack || null,
         attemptCount,
+        DLQ_MAX_RETRIES,
       ],
     );
   } catch (err) {
@@ -311,6 +384,150 @@ async function writeToDLQ(evt, eventType, error, attemptCount = DLQ_MAX_RETRIES)
       { event: "soroban_events_dlq_write_error", err: err.message },
       "Failed to write event to DLQ",
     );
+  }
+}
+
+/**
+ * Re-run the handler for a single DLQ entry.
+ *
+ * On success the entry is marked `resolved`. On failure the retry ladder
+ * climbs: if `retry_count` reaches `max_retries` the entry is moved to the
+ * terminal `quarantined` state and the quarantine metric is incremented;
+ * otherwise `next_attempt_at` is scheduled with exponential backoff + jitter.
+ *
+ * @param {object} entry — Row from `soroban_event_dlq`.
+ * @returns {Promise<{ outcome: "resolved"|"retrying"|"quarantined", retryCount?: number }>}
+ */
+async function retryDLQEntry(entry) {
+  const { id, event_type, event_data, retry_count, max_retries } = entry;
+
+  let evt;
+  try {
+    evt = typeof event_data === "string" ? JSON.parse(event_data) : event_data;
+  } catch (err) {
+    logger.error(
+      { event: "soroban_events_dlq_undecodable", id, event_type, err: err.message },
+      "DLQ entry event data is not valid JSON — quarantining",
+    );
+    await pool.query(
+      `UPDATE soroban_event_dlq
+       SET retry_count = $2, status = 'quarantined', quarantined_at = NOW(), updated_at = NOW()
+       WHERE id = $1`,
+      [id, max_retries],
+    );
+    sorobanEventsDlqQuarantinedTotal.inc({ event_type });
+    return { outcome: "quarantined", retryCount: max_retries };
+  }
+
+  const handler = HANDLERS[event_type] || handleOtherEvent; // eslint-disable-line security/detect-object-injection
+
+  try {
+    const topics = extractTopics(evt);
+    const value = extractValue(evt);
+    await handler(evt, topics, value);
+
+    await pool.query(
+      `UPDATE soroban_event_dlq
+       SET status = 'resolved', resolved_at = NOW(), updated_at = NOW()
+       WHERE id = $1`,
+      [id],
+    );
+    logger.info(
+      { event: "soroban_events_dlq_resolved", id, eventType: event_type },
+      "DLQ entry reprocessed successfully",
+    );
+    return { outcome: "resolved" };
+  } catch (err) {
+    const nextRetryCount = retry_count + 1;
+
+    if (nextRetryCount >= max_retries) {
+      await pool.query(
+        `UPDATE soroban_event_dlq
+         SET retry_count = $2, status = 'quarantined', quarantined_at = NOW(), updated_at = NOW()
+         WHERE id = $1`,
+        [id, nextRetryCount],
+      );
+      sorobanEventsDlqQuarantinedTotal.inc({ event_type });
+      logger.error(
+        {
+          event: "soroban_events_dlq_quarantined",
+          id,
+          eventType: event_type,
+          retryCount: nextRetryCount,
+          err: err.message,
+        },
+        `DLQ entry exhausted ${max_retries} retries — quarantined as poison message`,
+      );
+      return { outcome: "quarantined", retryCount: nextRetryCount };
+    }
+
+    const nextAttemptAt = new Date(Date.now() + calculateBackoff(nextRetryCount));
+    await pool.query(
+      `UPDATE soroban_event_dlq
+       SET retry_count = $2, status = 'retrying', next_attempt_at = $3,
+           error_message = $4, updated_at = NOW()
+       WHERE id = $1`,
+      [id, nextRetryCount, nextAttemptAt, err.message || "Unknown error"],
+    );
+    logger.warn(
+      {
+        event: "soroban_events_dlq_retry_scheduled",
+        id,
+        eventType: event_type,
+        retryCount: nextRetryCount,
+        nextAttemptAt,
+        err: err.message,
+      },
+      `DLQ entry failed — scheduled retry with backoff`,
+    );
+    return { outcome: "retrying", retryCount: nextRetryCount };
+  }
+}
+
+/**
+ * Poll the DLQ for entries whose backoff window has elapsed and re-attempt
+ * them. Entries at the retry cap are quarantined by `retryDLQEntry`.
+ *
+ * @returns {Promise<{processed: number, resolved: number, retrying: number, quarantined: number}>}
+ */
+async function pollDLQ() {
+  try {
+    const result = await pool.query(
+      `SELECT id, event_type, event_data, retry_count, max_retries
+       FROM soroban_event_dlq
+       WHERE status IN ('pending', 'retrying')
+         AND retry_count < max_retries
+         AND next_attempt_at <= NOW()
+       ORDER BY next_attempt_at ASC
+       LIMIT $1`,
+      [DLQ_BATCH_SIZE],
+    );
+
+    const summary = { processed: result.rows.length, resolved: 0, retrying: 0, quarantined: 0 };
+    for (const entry of result.rows) {
+      const res = await retryDLQEntry(entry);
+      summary[res.outcome] = (summary[res.outcome] || 0) + 1;
+    }
+
+    if (result.rows.length > 0) {
+      logger.info(
+        {
+          event: "soroban_events_dlq_poll",
+          processed: summary.processed,
+          resolved: summary.resolved,
+          retrying: summary.retrying,
+          quarantined: summary.quarantined,
+        },
+        `DLQ retry cycle complete: ${summary.resolved} resolved, ${summary.retrying} retrying, ${summary.quarantined} quarantined`,
+      );
+    }
+    return summary;
+  } catch (err) {
+    logger.error(
+      { event: "soroban_events_dlq_poll_error", err: err.message },
+      "DLQ poll failed",
+    );
+    return { processed: 0, resolved: 0, retrying: 0, quarantined: 0 };
   }
 }
 
@@ -991,16 +1208,16 @@ async function handlePropNew(evt, topics, value) {
  * sub_creat, sub_canc.
  * These are logged but don't currently require database mutations.
  */
-async function handleOtherEvent(evt, eventType, topics, value) {
+async function handleOtherEvent(evt, topics, value) {
   logger.info(
     {
       event: "soroban_events_other",
-      eventType,
+      eventType: extractEventType(evt),
       topics: topics.slice(0, 5), // avoid logging huge arrays
       value: typeof value === "object" ? "[object]" : String(value).slice(0, 200),
       ledger: evt.ledger,
     },
-    `Soroban contract event "${eventType}" observed`,
+    "Soroban contract event observed",
   );
   return { action: "logged" };
 }
@@ -1280,6 +1497,20 @@ async function start(socketIo) {
   if (typeof pollingTimer.unref === "function") {
     pollingTimer.unref();
   }
+
+  // Schedule DLQ retry cycles with exponential backoff
+  dlqTimer = setInterval(() => {
+    pollDLQ().catch((err) =>
+      logger.error(
+        { event: "soroban_events_dlq_poll_loop_error", err: err.message },
+        "DLQ retry cycle failed",
+      ),
+    );
+  }, DLQ_POLL_INTERVAL_MS);
+
+  if (typeof dlqTimer.unref === "function") {
+    dlqTimer.unref();
+  }
 }
 
 /**
@@ -1296,6 +1527,11 @@ async function stop() {
   if (pollingTimer) {
     clearInterval(pollingTimer);
     pollingTimer = null;
+  }
+
+  if (dlqTimer) {
+    clearInterval(dlqTimer);
+    dlqTimer = null;
   }
 
   io = null;
@@ -1363,7 +1599,60 @@ async function rescan(fromCursor) {
   return { message: "Rescan initiated — check logs for results" };
 }
 
+
+async function rescanRange({ fromLedger, toLedger }) {
+  let startLedger = fromLedger;
+  let hasMore = true;
+  let cursor = null; // We can use pagination if we want, but startLedger sets the initial bounds.
+  // We can just loop and fetch events
+  while (hasMore) {
+    const request = {
+      filters: [{ type: "contract", contractIds: [CONTRACT_ID] }],
+      limit: 50,
+      startLedger
+    };
+    if (cursor) {
+      request.cursor = cursor;
+      delete request.startLedger;
+    }
+
+    const response = await withRetry(() => rpcServer.getEvents(request));
+    if (!response || !response.events || response.events.length === 0) {
+      hasMore = false;
+      break;
+    }
+    
+    for (const evt of response.events) {
+      if (toLedger && evt.ledger > toLedger) {
+        hasMore = false;
+        break;
+      }
+      
+      const eventType = extractEventType(evt);
+      const handler = HANDLERS[eventType] || handleOtherEvent;
+      
+      // Check deduplication
+      const isDuplicate = await isEventProcessed(evt.pagingToken, pool);
+      if (!isDuplicate) {
+        try {
+          const topics = extractTopics(evt);
+          const value = extractValue(evt);
+          await handler(evt, topics, value);
+          await markEventProcessed(evt.pagingToken, eventType, evt.ledger, evt.txHash, pool);
+        } catch (err) {
+          logger.error({ err: err.message, eventType }, "Error processing backfill event");
+        }
+      }
+    }
+    
+    if (response.events.length > 0) {
+      cursor = response.events[response.events.length - 1].pagingToken;
+    }
+  }
+}
+
 module.exports = {
+  rescanRange,
   start,
   stop,
   getStatus,
@@ -1374,4 +1663,8 @@ module.exports = {
   extractValue,
   pollEvents,
   HANDLERS,
+  writeToDLQ,
+  retryDLQEntry,
+  pollDLQ,
+  calculateBackoff,
 };

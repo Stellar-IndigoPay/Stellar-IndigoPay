@@ -24,7 +24,13 @@ module.exports = {
   transformIgnorePatterns: [
     "node_modules/(?!(uuid|@stellar/stellar-sdk|pino|pino-http|prom-client)/)",
   ],
-  testPathIgnorePatterns: ["/node_modules/", "/scripts/load-modules.js"],
+  testPathIgnorePatterns: [
+    "/node_modules/",
+    "/scripts/load-modules.js",
+    // Chaos harness runs only when CHAOS_TEST=1 (see test/chaos/workerChaos.test.js).
+    // Exclude it from the regular test run so it never runs without the flag.
+    ...(!process.env.CHAOS_TEST ? ["/test/chaos/"] : []),
+  ],
   collectCoverageFrom: [
     "src/errors.js",
     "src/config/apiVersions.js",

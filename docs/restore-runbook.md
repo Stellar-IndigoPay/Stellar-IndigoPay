@@ -10,17 +10,22 @@ the running cluster.
 
 When `postgres.failover.enabled` is `true` in the Helm values, the
 primary StatefulSet includes a `postgres-healthcheck` sidecar that
-continuously polls `pg_isready` every 5 seconds. After 6 consecutive
-failures (30 seconds), the sidecar:
+continuously polls `pg_isready` every 5 seconds. After 3 consecutive
+failures (15 seconds), the sidecar:
 
 1. Creates a `postgres-failover` Job via the Kubernetes API
-2. The Job promotes the standby (`pg_ctl promote`)
-3. Patches `postgres-svc` and `postgres-primary-svc` Service selectors
+2. The Job acquires a split-brain prevention lock (a ConfigMap named
+   `postgres-failover-lock`) — only one failover can hold the lock at a
+   time, so a racing manual or duplicate Job aborts instead of promoting
+   a second writable primary
+3. The Job promotes the standby (`pg_ctl promote`)
+4. Patches `postgres-svc` and `postgres-primary-svc` Service selectors
    to point at the new primary (standby pod)
-4. Updates the `stellar-indigopay-config` ConfigMap with the new
+5. Updates the `stellar-indigopay-config` ConfigMap with the new
    `POSTGRES_PRIMARY_HOST`
-5. Triggers a rolling restart of the `backend` Deployment
-6. Sends a Slack notification (if `SLACK_WEBHOOK_URL` is set)
+6. Triggers a rolling restart of the `backend` Deployment
+7. Releases the failover lock and sends a Slack notification (if
+   `SLACK_WEBHOOK_URL` is set)
 
 Alerts that fire during automated failover:
 - `PostgresFailoverInitiated` (severity: critical) — failover started

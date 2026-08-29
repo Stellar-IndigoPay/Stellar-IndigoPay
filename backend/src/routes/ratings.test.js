@@ -13,7 +13,7 @@ function buildApp() {
   app.use(express.json());
   app.use("/api/ratings", ratingsRouter);
   app.use((err, _req, res, _next) => {
-    if (err instanceof AppError) {
+    if (typeof err.toJSON === "function") {
       return res.status(err.status).json(err.toJSON());
     }
     res.status(err.status || 500).json({ error: err.message });

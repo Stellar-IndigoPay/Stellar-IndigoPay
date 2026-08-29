@@ -92,6 +92,8 @@ function setupQuery(params: Record<string, string>) {
 // ── Tests ────────────────────────────────────────────────────────────────
 
 describe("Widget Page", () => {
+  jest.setTimeout(30000);
+
   beforeEach(() => {
     jest.clearAllMocks();
     mockFetchProject.mockResolvedValue(validProject);

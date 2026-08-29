@@ -109,4 +109,42 @@ describe("LiveDonationTicker", () => {
 
     expect(screen.getByText("Amazon Tree Restoration")).toBeInTheDocument();
   });
+
+  // Workstream 7: the sr-only live region announces NEW donations (the
+  // newest by createdAt), never re-announces the same donation, and ignores
+  // the rotation (the visible ticker content is not a live region).
+  it("announces the newest donation to screen readers exactly once", () => {
+    render(<LiveDonationTicker donations={mockDonations} />);
+
+    const live = screen.getByTestId("ticker-announcement");
+    expect(live).toHaveAttribute("aria-live", "polite");
+    // don-3 is the newest (latest createdAt) even though it is last in the
+    // array — announcement picks by createdAt, not array position.
+    expect(live).toHaveTextContent(
+      /New donation: 25\.5 XLM to Ocean Cleanup Array/,
+    );
+  });
+
+  it("does not re-announce the same donation on rerender", () => {
+    const { rerender } = render(<LiveDonationTicker donations={mockDonations} />);
+
+    const live = screen.getByTestId("ticker-announcement");
+    expect(live).toHaveTextContent(/New donation: 25\.5 XLM/);
+
+    // Same data re-rendered (e.g. a polling refresh) must stay silent.
+    rerender(<LiveDonationTicker donations={[...mockDonations]} />);
+    expect(live).toHaveTextContent(/New donation: 25\.5 XLM/);
+  });
+
+  it("clears the announcement after the display window", () => {
+    render(<LiveDonationTicker donations={mockDonations} />);
+
+    const live = screen.getByTestId("ticker-announcement");
+    expect(live).toHaveTextContent(/New donation: 25\.5 XLM/);
+
+    act(() => {
+      jest.advanceTimersByTime(4100);
+    });
+    expect(live).toHaveTextContent("");
+  });
 });

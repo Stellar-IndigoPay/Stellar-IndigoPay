@@ -49,9 +49,38 @@ test.describe("Visual regression", () => {
 
   test("dashboard snapshot", async ({ page }) => {
     await page.goto("/dashboard");
-    await page.getByTestId("wallet-connect-button").click();
+    await page
+      .locator('[data-testid="wallet-connect-button"][data-wallet-id="freighter"]')
+      .click();
     await expect(page.getByTestId("donation-history")).toBeVisible();
     await expect(page).toHaveScreenshot("dashboard.png", {
+      fullPage: true,
+      animations: "disabled",
+    });
+  });
+
+  // Issue #1096 shared AC: visual-regression baselines for the donation-flow
+  // pages in DARK mode as well as light. The theme is applied pre-hydration
+  // via localStorage (the FOUC inline script in _document.tsx reads the same
+  // key), so the captured page is the real dark rendering.
+  test("project detail snapshot (dark mode)", async ({ page }) => {
+    await page.addInitScript(() => {
+      try {
+        window.localStorage.setItem("stellar-indigopay-theme", "dark");
+      } catch {
+        // about:blank has no origin — re-set after first load below.
+      }
+    });
+    await page.goto(`/projects/${PRIMARY_PROJECT.id}`);
+    await expect(
+      page.getByRole("heading", { name: PRIMARY_PROJECT.name }),
+    ).toBeVisible();
+    // Confirm the theme actually applied before capturing — a silent failure
+    // would otherwise baseline the light theme against the dark filename.
+    await page.waitForFunction(() =>
+      document.documentElement.classList.contains("dark"),
+    );
+    await expect(page).toHaveScreenshot("project-detail-dark.png", {
       fullPage: true,
       animations: "disabled",
     });

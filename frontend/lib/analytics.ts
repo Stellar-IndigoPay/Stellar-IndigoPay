@@ -1,10 +1,15 @@
-import posthog from "posthog-js";
+import type { PostHog } from "posthog-js";
 
-export function initAnalytics() {
+let posthogInstance: PostHog | null = null;
+
+export async function initAnalytics() {
   if (typeof window === "undefined") return;
   if (process.env.NODE_ENV !== "production" || !process.env.NEXT_PUBLIC_POSTHOG_KEY) return;
 
-  posthog.init(process.env.NEXT_PUBLIC_POSTHOG_KEY || "", {
+  const posthogModule = await import("posthog-js");
+  posthogInstance = posthogModule.default as unknown as PostHog;
+
+  posthogInstance.init(process.env.NEXT_PUBLIC_POSTHOG_KEY || "", {
     api_host:
       process.env.NEXT_PUBLIC_POSTHOG_HOST || "https://app.posthog.com",
     capture_pageview: false,
@@ -36,14 +41,18 @@ export function trackEvent(
   properties?: Record<string, any>,
 ) {
   if (process.env.NODE_ENV !== "production") return;
-  posthog.capture(name, properties);
+  if (posthogInstance) {
+    posthogInstance.capture(name, properties);
+  }
 }
 
 export function setAnalyticsConsent(hasConsented: boolean) {
-  if (hasConsented) {
-    posthog.set_config({ persistence: "cookie" });
-  } else {
-    posthog.set_config({ persistence: "memory" });
+  if (posthogInstance) {
+    if (hasConsented) {
+      posthogInstance.set_config({ persistence: "cookie" });
+    } else {
+      posthogInstance.set_config({ persistence: "memory" });
+    }
   }
 }
 

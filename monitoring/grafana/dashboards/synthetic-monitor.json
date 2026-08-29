@@ -1,0 +1,90 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "row",
+      "title": "Synthetic Donation Monitor",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "id": 1,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Last synthetic donation",
+      "id": 2,
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "synthetic_donation_success", "refId": "A", "legendFormat": "success" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          },
+          "mappings": [
+            { "options": { "0": { "text": "FAILING", "color": "red" }, "1": { "text": "OK", "color": "green" } }, "type": "value" }
+          ]
+        }
+      },
+      "description": "1 = last synthetic donation succeeded; 0 = failed (SyntheticDonationFailed alert fires after 2 consecutive failures)."
+    },
+    {
+      "type": "timeseries",
+      "title": "Donation duration (s)",
+      "id": 3,
+      "gridPos": { "h": 8, "w": 9, "x": 6, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(synthetic_donation_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95", "refId": "A" },
+        { "expr": "synthetic_donation_duration_seconds_sum / synthetic_donation_duration_seconds_count", "legendFormat": "avg", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "type": "stat",
+      "title": "Failed checks (total)",
+      "id": 4,
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "increase(synthetic_donation_failures_total[24h])", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": { "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Step gauge (1..7)",
+      "id": 5,
+      "gridPos": { "h": 8, "w": 9, "x": 15, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "synthetic_donation_step", "legendFormat": "step", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "min": 0, "max": 7, "custom": { "drawStyle": "steps" } } },
+      "description": "Which of the 7 synthetic-donation steps was reached. A value stuck below 7 with success=0 pinpoints the failing layer (1 wallet, 2 build, 3 sign, 4 submit, 5 on-chain event, 6 backend record, 7 leaderboard)."
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["indigopay", "synthetic", "monitoring"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Synthetic Donation Monitor",
+  "uid": "synthetic-monitor",
+  "version": 1
+}

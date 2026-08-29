@@ -6,7 +6,11 @@ import {
   StyleSheet,
   TouchableOpacity,
   ActivityIndicator,
+  LayoutAnimation,
+  Platform,
+  UIManager,
 } from "react-native";
+
 import { useRouter } from "expo-router";
 import { useTheme } from "./theme";
 import {
@@ -23,6 +27,51 @@ export default function NotificationsScreen() {
   const router = useRouter();
   const [notifications, setNotifications] = useState<InboxNotification[]>([]);
   const [loading, setLoading] = useState(true);
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+
+  if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+    UIManager.setLayoutAnimationEnabledExperimental(true);
+  }
+
+  const toggleGroup = (projectId: string) => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setExpandedGroups(prev => ({ ...prev, [projectId]: !prev[projectId] }));
+  };
+
+  const groupedNotifications = React.useMemo(() => {
+    const groups: Record<string, InboxNotification[]> = {};
+    const others: InboxNotification[] = [];
+    
+    notifications.forEach(n => {
+      const key = n.projectId || 'other';
+      if (key === 'other') {
+        others.push(n);
+      } else {
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(n);
+      }
+    });
+    
+    const result: any[] = [];
+    Object.entries(groups).forEach(([projectId, items]) => {
+      if (items.length === 1) {
+        result.push({ type: 'item', item: items[0] });
+      } else {
+        result.push({ type: 'group', projectId, items });
+      }
+    });
+    others.forEach(item => result.push({ type: 'item', item }));
+    
+    // Sort by most recent
+    result.sort((a, b) => {
+      const tsA = a.type === 'group' ? Math.max(...a.items.map((i: any) => i.timestamp)) : a.item.timestamp;
+      const tsB = b.type === 'group' ? Math.max(...b.items.map((i: any) => i.timestamp)) : b.item.timestamp;
+      return tsB - tsA;
+    });
+    
+    return result;
+  }, [notifications]);
+
 
   async function loadNotifications() {
     setLoading(true);
@@ -87,8 +136,7 @@ export default function NotificationsScreen() {
     });
   };
 
-  const renderItem = ({ item }: { item: InboxNotification }) => {
-    return (
+  const renderItemContent = (item: InboxNotification) => (
       <TouchableOpacity
         onPress={() => handleTapNotification(item)}
         style={[
@@ -127,6 +175,46 @@ export default function NotificationsScreen() {
           {item.body || "No details provided."}
         </Text>
       </TouchableOpacity>
+  );
+
+  const renderItem = ({ item }: { item: any }) => {
+    if (item.type === 'item') {
+      return renderItemContent(item.item);
+    }
+    
+    // Group
+    const isExpanded = expandedGroups[item.projectId];
+    const unreadCount = item.items.filter((i: any) => !i.read).length;
+    
+    return (
+      <View style={{ marginBottom: 12 }}>
+        <TouchableOpacity
+          onPress={() => toggleGroup(item.projectId)}
+          style={[styles.groupHeader, { backgroundColor: colors.surface, borderColor: colors.border }]}
+        >
+          <Text style={{ flex: 1, fontWeight: 'bold', color: colors.text }}>
+            Project Updates ({item.items.length})
+          </Text>
+          {unreadCount > 0 && (
+            <View style={styles.groupBadge}>
+              <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>{unreadCount}</Text>
+            </View>
+          )}
+          <Text style={{ color: colors.secondaryText, fontSize: 12 }}>
+            {isExpanded ? 'Collapse ▲' : 'Expand ▼'}
+          </Text>
+        </TouchableOpacity>
+        
+        {isExpanded ? (
+          <View style={{ paddingLeft: 12, borderLeftWidth: 2, borderLeftColor: colors.border, marginLeft: 8 }}>
+            {item.items.map((i: any) => (
+              <View key={i.id} style={{ marginBottom: -8 }}>
+                {renderItemContent(i)}
+              </View>
+            ))}
+          </View>
+        ) : null}
+      </View>
     );
   };
 
@@ -166,8 +254,8 @@ export default function NotificationsScreen() {
       </View>
 
       <FlatList
-        data={notifications}
-        keyExtractor={(item) => item.id}
+        data={groupedNotifications}
+        keyExtractor={(item) => item.type === "group" ? "group_" + item.projectId : item.item.id}
         renderItem={renderItem}
         contentContainerStyle={styles.list}
         ListEmptyComponent={
@@ -261,4 +349,19 @@ const styles = StyleSheet.create({
     fontSize: 14,
     textAlign: "center",
   },
+  groupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  groupBadge: {
+    backgroundColor: '#008080',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    marginRight: 8,
+  },
+
 });

@@ -12,6 +12,15 @@ import { toHaveNoViolations } from "jest-axe";
 expect.extend(toHaveNoViolations as any);
 
 // ── JSDOM polyfills ─────────────────────────────────────────────────────
+// The jsdom test environment does not expose Node's structuredClone global,
+// which fake-indexeddb relies on to clone stored records. Polyfill it with a
+// JSON round-trip — sufficient for the plain-JSON objects we persist.
+if (!globalThis.structuredClone) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  globalThis.structuredClone = ((value: any) =>
+    JSON.parse(JSON.stringify(value))) as typeof structuredClone;
+}
+
 // jsdom does not implement ResizeObserver or a layout engine, so
 // el.offsetParent is always null. Polyfill both so components and
 // focus-trap logic work correctly in tests.

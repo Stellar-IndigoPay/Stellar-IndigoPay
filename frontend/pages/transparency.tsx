@@ -19,7 +19,6 @@
  */
 import { useMemo, useEffect, useState, useRef } from "react";
 import dynamic from "next/dynamic";
-import type { GetServerSideProps } from "next";
 import PageMeta from "@/components/PageMeta";
 import HealthBanner from "@/components/HealthBanner";
 import StatCard, { StatCardSkeleton } from "@/components/StatCard";
@@ -482,7 +481,3 @@ function RecentDonationsFeed({
   );
 }
 
-// Forces per-request SSR so middleware.ts can apply the CSP nonce.
-export const getServerSideProps: GetServerSideProps = async () => {
-  return { props: {} };
-};
