@@ -18,7 +18,7 @@ import { ThemeProvider } from "../app/theme";
 
 jest.mock("expo-router", () => ({
   useRouter: () => ({ push: jest.fn() }),
-  useLocalSearchParams: () => ({ id: "proj-1" }),
+  useLocalSearchParams: () => ({ projectId: "proj-1" }),
   useFocusEffect: (cb: () => void) => {
     cb();
   },
@@ -65,7 +65,7 @@ jest.mock("@stellar/stellar-sdk", () => ({
 }));
 
 const MOCK_PROJECT = {
-  id: "proj-1",
+  projectId: "proj-1",
   name: "Amazon Reforestation",
   description: "Planting trees.",
   category: "Reforestation",
@@ -151,7 +151,7 @@ describe("ProjectDetailScreen — accessibility", () => {
   });
 
   it("share button has accessibilityLabel and role=button", async () => {
-    const ProjectDetailScreen = require("../app/projects/[id]").default;
+    const ProjectDetailScreen = require("../app/project/[projectId]").default;
     const { getByLabelText } = render(wrap(<ProjectDetailScreen />));
 
     await waitFor(() => {
@@ -162,7 +162,7 @@ describe("ProjectDetailScreen — accessibility", () => {
   });
 
   it("donate button has accessibilityLabel and role=button", async () => {
-    const ProjectDetailScreen = require("../app/projects/[id]").default;
+    const ProjectDetailScreen = require("../app/project/[projectId]").default;
     const { getByLabelText } = render(wrap(<ProjectDetailScreen />));
 
     await waitFor(() => {
@@ -173,7 +173,7 @@ describe("ProjectDetailScreen — accessibility", () => {
   });
 
   it("all buttons have non-empty accessibilityLabel", async () => {
-    const ProjectDetailScreen = require("../app/projects/[id]").default;
+    const ProjectDetailScreen = require("../app/project/[projectId]").default;
     const { getAllByRole } = render(wrap(<ProjectDetailScreen />));
 
     await waitFor(() => {

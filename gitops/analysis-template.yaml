@@ -1,0 +1,94 @@
+# gitops/analysis-template.yaml
+#
+# Argo Rollouts AnalysisTemplate for automated canary promotion / rollback
+# (Workstream 2 of #1100).
+#
+# This template compares the canary revision against the stable revision using
+# real Prometheus metrics and decides, within a 10-minute analysis window,
+# whether to promote (metrics within thresholds) or roll back (any regression):
+#
+#   Condition 1 — canary error rate must not exceed 1.5× the stable baseline.
+#   Condition 2 — canary p95 latency must not increase by more than 20% over stable.
+#
+# Metrics used (the backend exports method/route/status_code on
+# http_requests_total and http_request_duration_seconds_bucket):
+#   - Error rate  : rate(http_requests_total{version="canary",status_code=~"5.."}[5m])
+#                   / rate(http_requests_total{version="canary"}[5m])
+#   - p95 latency : histogram_quantile(0.95,
+#                   rate(http_request_duration_seconds_bucket{version="canary"}[5m]))
+#
+# The Rollout in gitops/argo-rollouts-canary.yaml references this template,
+# evaluating it every 30 s for 10 minutes. On `Failed` the Rollout aborts and
+# traffic reverts to stable; on `Successful` it promotes to the next canary
+# step (ultimately 100%).
+#
+# NOTE: successCondition evaluates the RESULT VECTOR produced by the provider
+# `query` above (not a separate PromQL expression), so each metric computes its
+# own decision value and checks it against 0 via `result[0]`. The queries compare
+# the canary revision against the stable revision on the `version` label, which
+# MUST be exported by the backend's HTTP metrics (method/route/status_code are)
+# and set to "canary"/"stable" by the Rollout. If the backend does not yet
+# export `version`, a Prometheus relabel/recording rule must derive it before
+# this analysis can discriminate canary from stable.
+
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: backend-canary-analysis
+  namespace: stellar-indigopay
+  labels:
+    app: backend
+    component: canary-analysis
+spec:
+  args:
+    # Resolved from the Argo Rollouts' canaryService / stableService when
+    # referenced by a Rollout. Defaults are safe for local dry-run.
+    - name: service-name
+      value: backend-svc
+    - name: prometheus-address
+      value: http://prometheus-operated.monitoring.svc:9090
+  metrics:
+    # ── Canary error rate vs stable baseline ──────────────────────
+    # The provider query returns (canary error rate) − (1.5 × stable error rate),
+    # so a value > 0 means the canary is regressing beyond the allowed factor.
+    # successCondition checks result[0] against 0.
+    - name: canary-error-rate
+      interval: 30s
+      count: 20  # 20 × 30 s = 10-minute analysis window
+      successCondition: "result[0] <= 0"
+      failureLimit: 3
+      provider:
+        prometheus:
+          address: http://prometheus-operated.monitoring.svc:9090
+          query: |
+            (
+              sum(rate(http_requests_total{version="canary",status_code=~"5.."}[5m]))
+                / clamp_min(
+                    sum(rate(http_requests_total{version="canary"}[5m])), 0.001)
+            )
+              -
+            (
+              (sum(rate(http_requests_total{version="stable",status_code=~"5.."}[5m]))
+                / clamp_min(
+                    sum(rate(http_requests_total{version="stable"}[5m])), 0.001)) * 1.5
+            )
+
+    # ── Canary p95 latency regression check ──────────────────────
+    # Provider query returns (canary p95) − (1.2 × stable p95); a value > 0 means
+    # the canary's latency regressed beyond the allowed 20%.
+    - name: canary-p95-latency
+      interval: 30s
+      count: 20
+      successCondition: "result[0] <= 0"
+      failureLimit: 3
+      provider:
+        prometheus:
+          address: http://prometheus-operated.monitoring.svc:9090
+          query: |
+            histogram_quantile(0.95,
+              sum by (le) (rate(http_request_duration_seconds_bucket{version="canary"}[5m]))
+            )
+              -
+            histogram_quantile(0.95,
+              sum by (le) (rate(http_request_duration_seconds_bucket{version="stable"}[5m]))
+            ) * 1.2

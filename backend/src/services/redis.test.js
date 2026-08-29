@@ -64,6 +64,9 @@ function resetModule() {
   delete process.env.REDIS_SENTINELS;
   delete process.env.REDIS_SENTINEL_MASTER_NAME;
   delete process.env.REDIS_SENTINEL_PASSWORD;
+  delete process.env.REDIS_PASSWORD;
+  delete process.env.REDIS_PASSWORD_PREVIOUS;
+  delete process.env.CLIENTSIDE_REDIS_PASSWORD_PREVIOUS;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -235,6 +238,87 @@ describe("Sharded Redis service", () => {
 
     const client = redisService.getClient("any-key");
     expect(client).toBe(mockRedisInstances[0]);
+  });
+
+  // ── Dual-version AUTH fallback (WS3 / #1100) ───────────────────────────
+  test("WRONGPASS error triggers fallback to the previous password", () => {
+    process.env.REDIS_URL = "redis://host:6379";
+    process.env.REDIS_PASSWORD = "current-password";
+    process.env.REDIS_PASSWORD_PREVIOUS = "previous-password";
+    const RedisMock = require("ioredis");
+    redisService = require("./redis");
+    redisService.initRedis();
+
+    expect(mockRedisConstructorCallCount).toBe(1);
+
+    // Grab the "error" handler ioredis registered on the initial client.
+    const errHandler = mockRedisInstances[0].on.mock.calls.find(
+      (c) => c[0] === "error",
+    )?.[1];
+    expect(errHandler).toBeDefined();
+
+    // Redis 7 replies WRONGPASS for a bad AUTH credential.
+    errHandler(new Error("WRONGPASS invalid username-password pair or user is disabled"));
+
+    // A fallback client must have been constructed with the previous password.
+    expect(mockRedisConstructorCallCount).toBe(2);
+    // new Redis(url, options) — options are the 2nd constructor arg.
+    const fallbackOpts = RedisMock.mock.calls[1][1];
+    expect(fallbackOpts.password).toBe("previous-password");
+    // The box-level client must now point at the working fallback.
+    expect(redisService.getClient()).toBe(mockRedisInstances[1]);
+  });
+
+  test("WRONGPASS fallback keeps swapping to the newest working client", () => {
+    process.env.REDIS_URL = "redis://host:6379";
+    process.env.REDIS_PASSWORD = "current-password";
+    process.env.REDIS_PASSWORD_PREVIOUS = "previous-password";
+    redisService = require("./redis");
+    redisService.initRedis();
+
+    const errHandler = mockRedisInstances[0].on.mock.calls.find(
+      (c) => c[0] === "error",
+    )?.[1];
+    errHandler(new Error("WRONGPASS "));
+    expect(redisService.getClient()).toBe(mockRedisInstances[1]);
+
+    // A second auth failure on the initial client re-triggers the fallback and
+    // must not blow up or create an unbounded number of clients.
+    errHandler(new Error("WRONGPASS again"));
+    // At minimum the box-level client now references one of the fallbacks.
+    expect(redisService.getClient()).toBe(mockRedisInstances[1]);
+  });
+
+  test("NOAUTH error also triggers the previous-password fallback", () => {
+    process.env.REDIS_URL = "redis://host:6379";
+    process.env.REDIS_PASSWORD = "current-password";
+    process.env.REDIS_PASSWORD_PREVIOUS = "previous-password";
+    redisService = require("./redis");
+    redisService.initRedis();
+
+    const errHandler = mockRedisInstances[0].on.mock.calls.find(
+      (c) => c[0] === "error",
+    )?.[1];
+    errHandler(new Error("NOAUTH Authentication required."));
+
+    expect(mockRedisConstructorCallCount).toBe(2);
+    expect(redisService.getClient()).toBe(mockRedisInstances[1]);
+  });
+
+  test("non-auth errors do not trigger a password fallback", () => {
+    process.env.REDIS_URL = "redis://host:6379";
+    process.env.REDIS_PASSWORD = "current-password";
+    process.env.REDIS_PASSWORD_PREVIOUS = "previous-password";
+    redisService = require("./redis");
+    redisService.initRedis();
+
+    const errHandler = mockRedisInstances[0].on.mock.calls.find(
+      (c) => c[0] === "error",
+    )?.[1];
+    errHandler(new Error("ECONNREFUSED connection refused"));
+
+    expect(mockRedisConstructorCallCount).toBe(1);
+    expect(redisService.getClient()).toBe(mockRedisInstances[0]);
   });
 });
 

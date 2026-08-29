@@ -5,12 +5,16 @@
 # stepped rollout via pod replacement (20% → 50% → 100% of new-revision
 # pods, with 5-min analysis pauses between steps).
 #
-# IMPORTANT — this is Argo Rollouts' DEFAULT mode. Both `canaryService`
-# and `stableService` point at the same `backend-svc`, so the Rollout
-# does NOT split live HTTP traffic between two Service revisions. It
-# replaces pods in-place at each `setWeight` step. For real traffic-
-# split canary (e.g. 5% of user traffic to the new revision), add a
-# `trafficRouting` block — Istio, NGINX, ALB, or Ambassador. The
+# IMPORTANT — this is Argo Rollouts' BASIC canary mode (no trafficRouting).
+# Both `canaryService` and `stableService` point at the same `backend-svc`,
+# which is the correct and supported configuration for pod-replacement
+# canaries: Argo Rollouts only REQUIRES two distinct Services when a
+# `trafficRouting` block is present (Istio/NGINX/ALB/Ambassador traffic split).
+# The controller flips pod weights between the stable and canary ReplicaSets,
+# and the analysis (backend-canary-analysis) compares the two revisions via
+# the backend `version` metric label. For real traffic-split canary (e.g. 5%
+# of user traffic to the new revision), add a `trafficRouting` block AND two
+# distinct canary/stable Services — Istio, NGINX, ALB, or Ambassador. The
 # bottom of this file has an Istio example commented out.
 #
 # Each new release:
@@ -57,13 +61,19 @@ spec:
         - setWeight: 100
       analysis:
         templates:
-          - templateName: backend-success-rate
+          # Real Prometheus-backed canary analysis comparing canary vs stable
+          # error rate and p95 latency (see gitops/analysis-template.yaml).
+          # On `Failed` Argo Rollouts aborts the rollout and traffic reverts
+          # to stable automatically (WS2 / #1100).
+          - templateName: backend-canary-analysis
         startingStep: 1
         # Re-run analysis on each weight step. If the template returns
         # `Failed`, the rollout aborts and traffic reverts to stable.
         args:
           - name: service-name
             value: backend-svc
+          - name: prometheus-address
+            value: http://prometheus-operated.monitoring.svc:9090
   template:
     metadata:
       labels:
@@ -127,21 +137,54 @@ spec:
 apiVersion: argoproj.io/v1alpha1
 kind: AnalysisTemplate
 metadata:
-  name: backend-success-rate
+  name: backend-canary-analysis
   namespace: stellar-indigopay
+  labels:
+    app: backend
+    component: canary-analysis
 spec:
   args:
     - name: service-name
+      value: backend-svc
+    - name: prometheus-address
+      value: http://prometheus-operated.monitoring.svc:9090
   metrics:
-    - name: http-success-rate
-      interval: 60s
-      count: 5
-      successCondition: result[0] >= 0.99
-      failureLimit: 2
+    # Canary error rate must not exceed 1.5× the stable baseline (WS2 / #1100).
+    # The query returns (canary rate) − (1.5 × stable rate); result[0] > 0 means
+    # the canary is regressing beyond the allowed factor. successCondition
+    # evaluates the provider's result vector (that is, `result[0]`), not a
+    # separate recording-rule name.
+    - name: canary-error-rate
+      interval: 30s
+      count: 20
+      successCondition: "result[0] <= 0"
+      failureLimit: 3
       provider:
         prometheus:
           address: http://prometheus-operated.monitoring.svc:9090
           query: |
-            sum(rate(http_requests_total{job="stellar-indigopay-backend",status_code!~"5.."}[2m]))
+            sum(rate(http_requests_total{version="canary",status_code=~"5.."}[5m]))
               /
-            sum(rate(http_requests_total{job="stellar-indigopay-backend"}[2m]))
+            clamp_min(sum(rate(http_requests_total{version="canary"}[5m])), 0.001)
+            -
+            sum(rate(http_requests_total{version="stable",status_code=~"5.."}[5m]))
+              /
+            clamp_min(sum(rate(http_requests_total{version="stable"}[5m])), 0.001) * 1.5
+    # Canary p95 latency must not increase by >20% over stable (WS2 / #1100).
+    # Provider query returns (canary p95) − (1.2 × stable p95).
+    - name: canary-p95-latency
+      interval: 30s
+      count: 20
+      successCondition: "result[0] <= 0"
+      failureLimit: 3
+      provider:
+        prometheus:
+          address: http://prometheus-operated.monitoring.svc:9090
+          query: |
+            histogram_quantile(0.95,
+              sum by (le) (rate(http_request_duration_seconds_bucket{version="canary"}[5m]))
+            )
+              -
+            histogram_quantile(0.95,
+              sum by (le) (rate(http_request_duration_seconds_bucket{version="stable"}[5m]))
+            ) * 1.2

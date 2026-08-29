@@ -2,6 +2,28 @@
 
 This document lists all events emitted by the Stellar IndigoPay Soroban smart contracts.
 
+## Donation messages & `msg_hash` semantics (issue #1104)
+
+Every donate entrypoint (`donate`, `donate_token`, `donate_usdc`, `donate_asset`,
+`donate_anonymous`, `donate_vested`, and the stealth paths) accepts a **fixed-size**
+`msg_hash: u32` (stealth paths use `BytesN<32>`) — the raw donation message is
+**never** accepted on-chain as a `String`. On-chain processing cost is therefore
+constant in the original message length; no arbitrary-length input is hashed
+inside the contract.
+
+- **Message cap.** Clients MUST enforce `MAX_DONATION_MSG_LEN` (**140 bytes**) on the
+  message *before* hashing it into `msg_hash`. The constant is defined on-chain
+  (`contracts/indigopay-contract/src/lib.rs`) as the documented policy; the on-chain
+  input surface is already bounded by type.
+- **Normalization.** Clients MUST trim whitespace and reject control characters
+  before hashing, so identical visible messages produce identical `msg_hash` values.
+- **Collision caveat.** `msg_hash` is a 32-bit digest. At ~10,000 donations the
+  birthday bound is ~2^16, so two different messages will collide with
+  non-negligible probability. `msg_hash` MUST NOT be used as a unique message
+  identifier, a dedup key, or a message-identity assertion — treat the raw message
+  (stored/transported off-chain) as the source of truth. `msg_hash` is an
+  attribution hint only.
+
 ## Event Schema Format
 
 | Event Name | Topics | Data | When Emitted |
@@ -568,6 +590,62 @@ model.
 
 ---
 
+## 41. `tok_susp` (Token Suspended)
+
+**Description**: Emitted when a routine admin suspends a specific token
+(WS3). Suspended tokens reject inbound donations (`donate_token`,
+`donate_usdc`, `donate_anonymous`, `donate_stealth_integrated`,
+`execute_recurring`, `donate_vested`) while every other token keeps operating
+normally.
+
+| Event Name | Topics                  | Data            | When Emitted                        |
+| ---------- | ----------------------- | --------------- | ----------------------------------- |
+| `tok_susp` | `["tok_susp", token]`   | `()`            | When admin calls `suspend_token`    |
+
+- Outflow paths (`approve_refund`, `withdraw_stealth_integrated`, force-refund
+  execution) are deliberately **not** gated on suspension, so a suspended
+  token can never trap funds.
+- Calling `suspend_token` on an already-suspended token panics with
+  `TokenAlreadySuspended`, so the flag flips exactly once per admin action.
+
+---
+
+## 42. `tok_resm` (Token Resumed)
+
+**Description**: Emitted when a routine admin clears a token's suspension
+flag (WS3).
+
+| Event Name | Topics                  | Data            | When Emitted                        |
+| ---------- | ----------------------- | --------------- | ----------------------------------- |
+| `tok_resm` | `["tok_resm", token]`   | `()`            | When admin calls `resume_token`     |
+
+- Calling `resume_token` on a not-suspended token panics with
+  `TokenNotSuspended`.
+
+---
+
+## 43. `ttl_ext` (TTL Batch Extended)
+
+**Description**: Emitted by the permissionless `bump_ttl` keep-alive helper
+(WS6) after each batch. Anyone can call `bump_ttl` — the caller pays the
+gas. `extended` is the number of persistent entries whose TTL was actually
+extended in this batch (≤ the requested batch size; the scan window is
+bounded so the transaction footprint stays within the per-transaction
+ledger-entry budget).
+
+| Event Name | Topics                              | Data              | When Emitted                     |
+| ---------- | ----------------------------------- | ----------------- | -------------------------------- |
+| `ttl_ext`  | `["ttl_ext", from: u32, count: u32]` | `extended: u32`   | When anyone calls `bump_ttl`     |
+
+- Instance-storage entries (projects, donation records, donor stats,
+  configuration) share the contract-instance TTL and are extended in the
+  same call via `ensure_min_ttl`; the `ttl_ext` event only reports the
+  persistent-entry count.
+- The resume cursor (`DataKey::TtlBumpCursor`) records how far the scan got,
+  so operators call again with `from = cursor` to continue.
+
+---
+
 ## 51. `rcpt_gen` (Donation Receipt Generated)
 
 **Description**: Emitted when a donor generates a cryptographic receipt for one
@@ -772,6 +850,150 @@ event — no tokens moved on Stellar.
 
 ---
 
+## `att_settle`
+
+**Description**: Emitted by `IndigoPayContract.settle_attestation` after a
+verified cross-chain attestation is credited. Same shared-path events
+(`nft_mint`/`camp_goal`) may follow; no `donated` event is emitted.
+
+| Event Name     | Topics                                  | Data                                                        | When Emitted |
+| -------------- | --------------------------------------- | ----------------------------------------------------------- | ------------ |
+| `att_settle`   | `["att_settle", donor, project_id]`    | `(attestation_id: u64, amount_xlm: i128, co2_increment: i128, donation_index: u32)` | Attestation credited |
+
+---
+
+## `rep_add`
+
+**Description**: Emitted by `SimpleOracle.add_reporter` after a reporter is
+authorised.
+
+| Event Name | Topics                    | Data           | When Emitted |
+| ---------- | ------------------------- | -------------- | ------------ |
+| `rep_add`  | `["rep_add", admin]`     | `reporter: Address` | Reporter authorised |
+
+## `rep_rem`
+
+**Description**: Emitted by `SimpleOracle.remove_reporter` after a reporter is
+de-authorised.
+
+| Event Name | Topics                    | Data           | When Emitted |
+| ---------- | ------------------------- | -------------- | ------------ |
+| `rep_rem`  | `["rep_rem", admin]`     | `reporter: Address` | Reporter removed |
+
+## `stake_dep`
+
+**Description**: Emitted by `SimpleOracle.stake` after a reporter's stake is
+deposited and credited.
+
+| Event Name  | Topics                     | Data                                            | When Emitted |
+| ----------- | -------------------------- | ----------------------------------------------- | ------------ |
+| `stake_dep` | `["stake_dep", reporter]` | `(amount: i128, updated: i128, available_at: u32)` | Stake deposited |
+
+## `stake_wdr`
+
+**Description**: Emitted by `SimpleOracle.unstake` after a matured stake is
+withdrawn.
+
+| Event Name  | Topics                     | Data            | When Emitted |
+| ----------- | -------------------------- | --------------- | ------------ |
+| `stake_wdr` | `["stake_wdr", reporter]` | `amount: i128`  | Stake withdrawn |
+
+## `stake_slash`
+
+**Description**: Emitted by `SimpleOracle.slash` after a reporter's stake is
+reduced for invalid reporting.
+
+| Event Name     | Topics                     | Data                                             | When Emitted |
+| -------------- | -------------------------- | ------------------------------------------------ | ------------ |
+| `stake_slash`  | `["stake_slash", reporter]` | `(amount: i128, remaining: i128, reason: String)` | Stake slashed |
+
+## `price_rejected`
+
+**Description**: Emitted by `SimpleOracle.report_price` when a submitted price
+exceeds the configured deviation threshold and is rejected.
+
+| Event Name        | Topics                        | Data                                                          | When Emitted |
+| ----------------- | ----------------------------- | ------------------------------------------------------------- | ------------ |
+| `price_rejected`  | `["price_rejected", reporter]` | `(price: i128, current_price: i128, deviation_bps: u32)`     | Price rejected |
+
+## `price_upd`
+
+**Description**: Emitted by `SimpleOracle.report_price` after a price
+observation is recorded.
+
+| Event Name   | Topics                     | Data                                              | When Emitted |
+| ------------ | -------------------------- | ------------------------------------------------- | ------------ |
+| `price_upd`  | `["price_upd", reporter]` | `(price: i128, ledger: u32, token: Address)`      | Price recorded |
+
+## `twap_win`
+
+**Description**: Emitted by `SimpleOracle.set_twap_window` after the TWAP
+window is reconfigured.
+
+| Event Name  | Topics                | Data            | When Emitted |
+| ----------- | --------------------- | --------------- | ------------ |
+| `twap_win`  | `["twap_win", admin]` | `window: u32`   | TWAP window set |
+
+## `stale_th`
+
+**Description**: Emitted by `SimpleOracle.set_staleness_threshold` after the
+staleness threshold is reconfigured.
+
+| Event Name  | Topics                | Data               | When Emitted |
+| ----------- | --------------------- | ------------------ | ------------ |
+| `stale_th`  | `["stale_th", admin]` | `threshold: u32`   | Staleness threshold set |
+
+## `src_unhealthy`
+
+**Description**: Emitted by the oracle aggregation loop when a source oracle
+crosses the consecutive-failure threshold and is marked unhealthy.
+
+| Event Name       | Topics                          | Data                        | When Emitted |
+| ---------------- | ------------------------------- | --------------------------- | ------------ |
+| `src_unhealthy`  | `["src_unhealthy", source]`    | `consecutive_failures: u32` | Source marked unhealthy |
+
+## `src_recover`
+
+**Description**: Emitted by the oracle aggregation loop when a previously
+unhealthy source oracle returns a valid price and is marked healthy again.
+
+| Event Name      | Topics                         | Data   | When Emitted |
+| --------------- | ------------------------------ | ------ | ------------ |
+| `src_recover`   | `["src_recover", source]`     | `()`   | Source recovered |
+
+---
+
+## `StelthDn`
+
+**Description**: Emitted by the `DonationContract` after a stealth donation is
+recorded.
+
+| Event Name  | Topics                         | Data                                                        | When Emitted |
+| ----------- | ------------------------------ | ----------------------------------------------------------- | ------------ |
+| `StelthDn`  | `["StelthDn", project_wallet]` | `(donation_id: u64, amount: i128, ephemeral_pubkey: BytesN<33>, msg_hash: BytesN<32>, timestamp: u64)` | Stealth donation recorded |
+
+## `StlthScn`
+
+**Description**: Emitted when an authenticated project wallet scans for its
+stealth donations, including scans that find no donations.
+
+| Event Name  | Topics                         | Data                                      | When Emitted |
+| ----------- | ------------------------------ | ----------------------------------------- | ------------ |
+| `StlthScn`  | `["StlthScn", project_wallet]` | `(donation_count: u32, timestamp: u64)`   | After `scan_stealth_donations` completes |
+
+## `StlthWdr`
+
+**Description**: Emitted by the `DonationContract` when a project wallet
+withdraws stealth-donated funds to its own wallet. `remaining_balance` lets
+indexers reconcile on-chain `total_raised` with funds actually received by
+the project.
+
+| Event Name  | Topics                         | Data                                                            | When Emitted |
+| ----------- | ------------------------------ | --------------------------------------------------------------- | ------------ |
+| `StlthWdr`  | `["StlthWdr", project_wallet]` | `(token: Address, amount: i128, remaining_balance: i128, timestamp: u64)` | After `withdraw_stealth_donations` transfers the tokens |
+
+---
+
 ## Usage Notes
 
 - All events follow Soroban's standard event format: `topics: Vec<Val>`, `data: Val`.
@@ -779,4 +1001,4 @@ event — no tokens moved on Stellar.
 - Events can be queried via Horizon or Soroban RPC tools.
 - Frontend / backend should listen to these for real-time updates, notifications, and leaderboard.
 
-**Last Updated**: August 16, 2026
+**Last Updated**: August 28, 2026

@@ -48,6 +48,7 @@ function makeWalletAdapter(overrides: Record<string, unknown> = {}) {
     description: "The most popular Stellar wallet.",
     installUrl: "https://freighter.app",
     isInstalled: jest.fn().mockResolvedValue(true),
+    connect: jest.fn().mockResolvedValue(undefined),
     getPublicKey: jest.fn().mockResolvedValue("GABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890"),
     signTransaction: jest.fn().mockResolvedValue("signed-xdr"),
     ...overrides,
@@ -77,7 +78,7 @@ describe("WalletConnect", () => {
     // Shows install links for other wallets
     expect(screen.getByText(/Albedo/)).toBeInTheDocument();
     expect(screen.getByText(/xBull/)).toBeInTheDocument();
-    expect(screen.getByText(/Rabet/)).toBeInTheDocument();
+    expect(screen.getByText(/WalletConnect/)).toBeInTheDocument();
   });
 
   it("renders wallet options when wallets are available", async () => {
@@ -108,7 +109,7 @@ describe("WalletConnect", () => {
 
     await user.click(screen.getByTestId("wallet-connect-button"));
 
-    expect(adapter.getPublicKey).toHaveBeenCalledTimes(1);
+    expect(adapter.connect).toHaveBeenCalledTimes(1);
     await waitFor(() => {
       expect(onConnect).toHaveBeenCalledWith(
         "GABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890",
@@ -119,7 +120,7 @@ describe("WalletConnect", () => {
   it("shows error message when wallet connection fails", async () => {
     const user = userEvent.setup();
     const adapter = makeWalletAdapter({
-      getPublicKey: jest.fn().mockRejectedValue(new Error("Connection rejected.")),
+      connect: jest.fn().mockRejectedValue(new Error("Connection rejected.")),
     });
     mockGetAvailableWallets.mockResolvedValue([adapter]);
 
