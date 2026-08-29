@@ -51,6 +51,7 @@ done
 
 log_info()  { echo "[setup-replication] $(date '+%H:%M:%S') ℹ️  $1"; }
 log_ok()    { echo "[setup-replication] $(date '+%H:%M:%S') ✅ $1"; }
+log_warn()  { echo "[setup-replication] $(date '+%H:%M:%S') ⚠️  $1"; }
 log_err()   { echo "[setup-replication] $(date '+%H:%M:%S') ❌ $1" >&2; }
 run_cmd()   { if $DRY_RUN; then echo "  [dry-run] $*"; else eval "$@"; fi; }
 
@@ -162,6 +163,22 @@ else
   log_info "Check standby logs: kubectl logs -n $NAMESPACE $STANDBY_POD"
   log_info "Check primary logs: kubectl logs -n $NAMESPACE $PRIMARY_POD"
   exit 1
+fi
+
+# ── Step 10: Health-check integration (WS1 / #1100) ──────────────────────
+# The postgres-healthcheck-daemon sidecar health-checks the primary from the
+# standby every 5 s and, on 3 consecutive failures, wins the
+# postgres-primary-lock Lease before promoting. Verify the standby can reach
+# the primary over the very path the daemon will probe.
+log_info "Verifying health-check path: standby → primary pg_isready..."
+HC_RESULT=$(kexec_standby sh -c "\
+  pg_isready -h ${PRIMARY_POD}.postgres-primary-svc.${NAMESPACE}.svc.cluster.local -U ${REPLICATION_USER} -d postgres -t 5 && echo OK || echo FAIL" 2>/dev/null || echo "FAIL")
+
+if [ "$HC_RESULT" = "OK" ]; then
+  log_ok "Health-check path OK — standby can reach primary via pg_isready."
+else
+  log_warn "Health-check path from standby to primary returned: $HC_RESULT"
+  log_warn "The failover daemon will report the primary down until this resolves."
 fi
 
 log_ok "✅ Streaming replication setup complete!"

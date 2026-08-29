@@ -47,6 +47,11 @@ rules:
     resources: ["deployments"]
     resourceNames: ["backend"]
     verbs: ["update"]
+  # Split-brain prevention: promote only while holding the Lease (#1100 WS1).
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["postgres-primary-lock"]
+    verbs: ["get", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -76,6 +81,11 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list"]
+  # The healthcheck daemon owns the split-brain Lease (#1100 WS1).
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["postgres-primary-lock"]
+    verbs: ["get", "create", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

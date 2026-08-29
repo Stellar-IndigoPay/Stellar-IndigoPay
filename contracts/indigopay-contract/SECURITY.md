@@ -371,3 +371,57 @@ also mean the donation amount is recoverable from the public commitment.
 - **CEI & Transfer Ordering.** Per-recipient fee transfers execute within the Checks-Effects-Interactions pattern during donation processing before remaining funds are transferred to the project.
 - **Backward Compatibility.** Deployments with legacy single-treasury configuration (`DataKey::PlatformTreasury`) lazily fall back to a single 100% recipient share until `set_platform_fee_recipients` is invoked.
 
+
+## Per-Token Suspension (#1095, WS3)
+
+### Trust model
+
+`suspend_token` and `resume_token` require `require_admin_for_routine`
+(1-of-N routine admin signature under the Phase B multi-sig model). This
+matches the risk profile: suspending a token halts *inbound* donations in that
+asset but never traps funds, so a routine-admin single signature is the same
+trust assumption as `set_usdc_token` / `set_oracle`.
+
+Suspension is stored as a boolean under `DataKey::SuspendToken(Address)`
+(instance storage, append-only enum variant) and is read-only queryable via
+`is_token_suspended`. No token can be suspended before it has been seen — the
+flag applies to any `Address`, including tokens not yet registered.
+
+### Invariants
+
+1. **All inbound donation paths gate on suspension.** Every entrypoint that
+   accepts a `token: Address` and moves funds out of the donor calls
+   `require_token_not_suspended` immediately after `require_not_paused` and
+   before any transfer:
+
+   | Entrypoint                        | Gate |
+   | --------------------------------- | ---- |
+   | `donate` / `donate_with_privacy`  | ✅   |
+   | `donate_token` / `donate_token_with_privacy` | ✅ |
+   | `donate_usdc` / `donate_usdc_with_privacy`   | ✅ |
+   | `donate_anonymous`                | ✅   |
+   | `donate_stealth_integrated`       | ✅   |
+   | `execute_recurring`               | ✅   |
+   | `donate_vested`                   | ✅   |
+
+   Entrypoints that carry no token address (`donate_asset*` path-payment
+   attestation records, `donate_anonymous_zk` XLM-denominated ZK records)
+   have no token to gate on and are unaffected by suspension.
+
+2. **Outflow paths are deliberately ungated.** `approve_refund`,
+   `withdraw_stealth_integrated`, and force-refund execution never check
+   suspension, so a suspended token can still be returned to donors and
+   project wallets. Suspension blocks new inbound donations only — it cannot
+   trap funds.
+
+3. **Idempotency.** `suspend_token` on an already-suspended token and
+   `resume_token` on a not-suspended token both panic with
+   `TokenAlreadySuspended` / `TokenNotSuspended`, so the flag flips exactly
+   once per admin action.
+
+### Event audit trail
+
+| Event topic | Trigger                              |
+| ----------- | ------------------------------------ |
+| `tok_susp`  | `suspend_token` flagged a token      |
+| `tok_resm`  | `resume_token` cleared the flag      |

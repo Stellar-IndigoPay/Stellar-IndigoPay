@@ -17,6 +17,7 @@ servers:
   - url: https://api.stellarindigopay.com
     description: Production server
 tags:
+  - name: Auth
   - name: Projects
   - name: Donations
   - name: Profiles
@@ -1049,6 +1050,39 @@ components:
           type: string
           format: date-time
 paths:
+  /api/auth/challenge:
+    get:
+      tags: [Auth]
+      summary: Issue donor-auth challenge nonce
+      operationId: getDonorAuthChallenge
+      description: |
+        Issues a single-use, expiring nonce for the challenge/response donor
+        authentication flow. The donor signs `nonce + method + path` with their
+        Stellar keypair and sends the result via the `X-Donor-Address`,
+        `X-Donor-Nonce` and `X-Donor-Signature` headers on every
+        donor-authenticated request (issue #1102 Part A).
+      responses:
+        "200":
+          description: A fresh nonce to sign.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    required: [nonce, expiresAt]
+                    properties:
+                      nonce:
+                        type: string
+                        description: Single-use nonce to include in the signed payload.
+                      expiresAt:
+                        type: string
+                        format: date-time
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/projects/featured:
     get:
       tags: [Projects]
@@ -2485,6 +2519,58 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AdminMeResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/admin/secrets/status:
+    get:
+      tags: [Admin]
+      summary: Get secret rotation status
+      operationId: getAdminSecretsStatus
+      description: >-
+        Report the live rotation status of every secret the backend consumes:
+        current/previous/next key fingerprints (SHA-256), the last successful
+        rotation timestamp, and the next scheduled rotation. Returns fingerprints
+        only, never secret values. Requires admin authentication.
+      responses:
+        "200":
+          description: Secret rotation status for all configured secrets.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    description: One entry per configured secret.
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                          description: Canonical secret name.
+                        currentKid:
+                          type: string
+                          nullable: true
+                          description: Fingerprint of the current issuing key.
+                        previousKid:
+                          type: string
+                          nullable: true
+                          description: Fingerprint of the previous (verify-only) key, if any.
+                        nextKid:
+                          type: string
+                          nullable: true
+                          description: Fingerprint of the next (verify+promote) key, if any.
+                        lastRotatedAt:
+                          type: string
+                          format: date-time
+                          nullable: true
+                          description: When the last rotation completed.
+                        nextScheduledAt:
+                          type: string
+                          format: date-time
+                          description: When the next automated rotation is expected.
         "401":
           $ref: "#/components/responses/Unauthorized"
   /api/admin/audit-log:

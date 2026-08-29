@@ -2,6 +2,7 @@
 
 const {
   buildMerkleTree,
+  buildMerkleTreeStreaming,
   generateMerkleProof,
   verifyMerkleProof,
 } = require("../services/merkleTree");
@@ -126,5 +127,56 @@ describe("merkleTree.verifyMerkleProof", () => {
     const { leaf, proof } = generateMerkleProof(tree, 0);
     expect(verifyMerkleProof(leaf, proof, root, 0)).toBe(false);
     expect(verifyMerkleProof(leaf, proof, root, 2.5)).toBe(false);
+  });
+});
+
+describe("merkleTree.buildMerkleTreeStreaming", () => {
+  async function* entriesIterator(entries) {
+    for (const e of entries) {
+      yield e;
+    }
+  }
+
+  it("produces the same root as buildMerkleTree for the same inputs", async () => {
+    const entries = [entry(1), entry(2), entry(3), entry(4), entry(5)];
+    const regular = buildMerkleTree(entries);
+    const streaming = await buildMerkleTreeStreaming(entriesIterator(entries));
+    expect(streaming.root.equals(regular.root)).toBe(true);
+    expect(streaming.leafCount).toBe(regular.leafCount);
+    expect(streaming.height).toBe(regular.height);
+  });
+
+  it("produces proofs that match the regular tree for every leaf", async () => {
+    const entries = Array.from({ length: 8 }, (_, i) => entry(i + 1));
+    const regular = buildMerkleTree(entries);
+    const streaming = await buildMerkleTreeStreaming(entriesIterator(entries));
+
+    for (let i = 0; i < entries.length; i += 1) {
+      const regProof = generateMerkleProof(regular.tree, i);
+      const streamProof = generateMerkleProof(streaming.tree, i);
+      expect(streamProof.proof).toEqual(regProof.proof);
+      expect(verifyMerkleProof(streamProof.leaf, streamProof.proof, streaming.root, streaming.leafCount)).toBe(true);
+    }
+  });
+
+  it("rejects an empty iterator", async () => {
+    await expect(buildMerkleTreeStreaming(entriesIterator([]))).rejects.toThrow(/without entries/);
+  });
+
+  it("builds a 100,000-entry tree without exceeding 256 MB heap", async () => {
+    const count = 100000;
+    async function* bigIterator() {
+      for (let i = 0; i < count; i += 1) {
+        yield entry(i + 1);
+      }
+    }
+    const before = process.memoryUsage().heapUsed;
+    const { root, leafCount } = await buildMerkleTreeStreaming(bigIterator());
+    const after = process.memoryUsage().heapUsed;
+    expect(leafCount).toBe(count);
+    expect(Buffer.isBuffer(root)).toBe(true);
+    // Allow generous slack for the test harness itself; the tree construction
+    // itself should stay well under 256 MB.
+    expect(after - before).toBeLessThan(256 * 1024 * 1024);
   });
 });

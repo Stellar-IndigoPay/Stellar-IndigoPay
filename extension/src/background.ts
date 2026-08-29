@@ -19,6 +19,7 @@ import {
   subscribeBreakerEvents,
   type BreakerSnapshot,
 } from "./lib/apiClient";
+import { validateDonationRequest } from "./lib/donation";
 
 // ── constants ────────────────────────────────────────────────────────
 
@@ -158,6 +159,24 @@ chrome.runtime.onMessage.addListener(
   },
 );
 
+
+// ── global keyboard shortcuts ────────────────────────────────────────
+
+if (chrome.commands) {
+  chrome.commands.onCommand.addListener(async (command) => {
+    const match = command.match(/^preset-(\d+)$/);
+    if (match) {
+      const idx = parseInt(match[1], 10) - 1;
+      const settings = await loadSettings();
+      if (idx >= 0 && idx < settings.donationPresets.length) {
+        chrome.storage.local.set({ pendingDonationPreset: settings.donationPresets[idx] }, () => {
+          openPopup();
+        });
+      }
+    }
+  });
+}
+
 // ── project lookup ───────────────────────────────────────────────────
 
 interface ProjectResult {
@@ -250,15 +269,8 @@ async function submitDonation(
     // The actual signing happens in the content script's injected
     // script context. Here we validate the params and return a
     // success response to trigger further processing.
-    if (!destination || !/^G[A-Z2-7]{55}$/.test(destination.trim())) {
-      throw new Error("Invalid destination address");
-    }
-    if (!amount || amount < 0.1) {
-      throw new Error("Minimum donation is 0.1 XLM");
-    }
-    if (memo && memo.length > 28) {
-      throw new Error("Memo must be 28 characters or fewer");
-    }
+    const validationError = validateDonationRequest(destination, amount, memo);
+    if (validationError) throw new Error(validationError);
 
     // The on-chain donation itself doesn't depend on the IndigoPay API
     // (Freighter signs and submits directly to Horizon), so an API

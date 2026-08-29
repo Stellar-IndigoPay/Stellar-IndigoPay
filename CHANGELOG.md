@@ -265,6 +265,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **backend/testing:** add chaos harness (`backend/test/chaos/`) for worker crash-safety and partial-failure recovery — 8 scenarios covering kill-after-claim/lease-reclaim, DB-commit/queue-ack gap with idempotent dedup, queue-store outage with backoff/resume, two recovery paths racing on a stranded job, deliberate idempotency-guard removal regression detection, crash-during-DLQ-replay nested fault, batch lease-expiry cycle (no loss/no dup), and DLQ poison isolation + targeted replay; includes `FaultInjector`, `FakeConsumer`, assertion helpers, CI `chaos` job (10 min bounded), and `docs/chaos-harness.md` (closes #939)
+
 ### Fixed
 - **indigopay-contract:** Reconciled the campaign escrow custody model by funding the escrow job directly from `ProjectContractBalance(project, token)` instead of `project.total_raised`. This prevents escrow creation failures when donations bypass the contract (e.g. direct-to-wallet) and correctly rejects funding with `InsufficientContractBalanceForEscrow` if the contract holds insufficient funds.
 - **backend:** Serialize migration runs across replicas with a Postgres advisory lock so concurrent boot (k8s HPA min 2) can never apply the same migrations twice (closes #640). Also fixes the migration chain so a fresh database can be bootstrapped end-to-end: `002` drops `CREATE INDEX CONCURRENTLY` (invalid inside the runner's transaction), a new `010_admin_audit_log` migration creates the audit table `011` depends on, `011`'s hash-chain backfill is repaired (uuid/json casts, missing CTE column, `pgcrypto` extension), `021` uses drop-then-add for its CHECK constraint, and `027` guards its example `credits` migration against a missing table. Adds a testcontainers concurrency test proving two concurrent `runMigrations()` calls apply each migration exactly once.

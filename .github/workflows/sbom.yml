@@ -57,3 +57,105 @@ jobs:
           artifact-name: sbom-${{ matrix.service }}.cdx.json
           path: ./${{ matrix.service }}
           output-format: github
+
+  # ── New-dependency flagging (WS5 / #1100) ─────────────────────────────────
+  # On every PR, diff the PR's SBOM against `main` and post a comment listing
+  # newly added / removed / changed dependencies. Any NEW dependency carrying a
+  # CRITICAL or HIGH CVE fails CI (new deps are NOT suppressible via .trivyignore).
+  sbom-diff:
+    name: Flag new dependencies
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    needs: sbom
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Generate head SBOM
+        uses: anchore/sbom-action@v0.16.0
+        with:
+          format: cyclonedx-json
+          path: ./${{ matrix.service }}
+          output-file: /tmp/sbom-head-${{ matrix.service }}.cdx.json
+
+      - name: Generate base SBOM from main
+        run: |
+          mkdir -p /tmp/base-${{ matrix.service }}
+          git archive origin/main | tar -x -C /tmp/base-${{ matrix.service }}
+
+      - name: Generate main-line SBOM
+        uses: anchore/sbom-action@v0.16.0
+        with:
+          format: cyclonedx-json
+          path: /tmp/base-${{ matrix.service }}
+          output-file: /tmp/sbom-base-${{ matrix.service }}.cdx.json
+
+      - name: Scan head SBOM with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: sbom
+          scan-ref: /tmp/sbom-head-${{ matrix.service }}.cdx.json
+          format: json
+          output: /tmp/trivy-${{ matrix.service }}.json
+          exit-code: "0"  # Scan results drive the gate in sbom-diff; always produce findings.
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Run SBOM diff (enforce CRITICAL/HIGH CVE gate on new deps)
+        id: diff
+        run: |
+          # --trivy feeds the head findings to sbom-diff so a NEW dependency
+          # carrying a CRITICAL/HIGH CVE exits 1 (--exit-on-critical) and fails
+          # CI. New deps are not suppressible via .trivyignore (WS5 / #1100).
+          node scripts/sbom-diff.js \
+            --base /tmp/sbom-base-${{ matrix.service }}.cdx.json \
+            --head /tmp/sbom-head-${{ matrix.service }}.cdx.json \
+            --trivy '/tmp/trivy-${{ matrix.service }}.json' \
+            --exit-on-critical \
+            --format table > /tmp/sbom-diff-report.txt
+          cat /tmp/sbom-diff-report.txt
+
+      - name: Post dependency-diff comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/sbom-diff-report.txt', 'utf8');
+            const label = '# New-dependency SBOM diff (`' + '${{ matrix.service }}' + '`)';
+            const comment = '\n```\n' + body + '\n```';
+            try {
+              const existing = await github.rest.issues.listComments({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number,
+              });
+              const marker = '### SBOM Diff — ' + '${{ matrix.service }}';
+              const previous = existing.data.find((c) => c.body && c.body.includes(marker));
+              if (previous) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  comment_id: previous.id,
+                  body: marker + '\n' + comment,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body: marker + '\n' + comment,
+                });
+              }
+            } catch (e) {
+              core.warning('Could not post SBOM diff comment: ' + e.message);
+            }

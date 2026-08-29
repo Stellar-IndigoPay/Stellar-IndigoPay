@@ -1,7 +1,7 @@
 /**
  * pages/dashboard.tsx — Donor impact dashboard
  */
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
 import WalletConnect from "@/components/WalletConnect";
 import EditProfileForm from "@/components/EditProfileForm";
@@ -11,7 +11,6 @@ import ProjectRating from "@/components/ProjectRating";
 import Tabs from "@/components/Tabs";
 import RecurringDonationsTab from "@/components/RecurringDonationsTab";
 import EmptyState from "@/components/EmptyState";
-import { fetchProfile, fetchDonorHistory, fetchProjects } from "@/lib/api";
 import {
   getDueMonthlySubscriptionsForDonor,
   type OnChainSubscription,
@@ -21,6 +20,8 @@ import {
   useDonorHistory,
   useDonorProfile,
   useImpactDonor,
+  useProjects,
+  usePendingRating,
 } from "@/hooks/queries";
 import {
   formatXLM,
@@ -32,18 +33,13 @@ import {
   calculateStreak,
 } from "@/utils/format";
 import { explorerUrl } from "@/lib/stellar";
-import type {
-  ClimateProject,
-  MonthlySubscription,
-} from "@/utils/types";
+import type { MonthlySubscription } from "@/utils/types";
 import { useWishlist } from "@/hooks/useWishlist";
 import { QueryErrorFallback } from "@/components/QueryErrorFallback";
 export default function Dashboard() {
   const [publicKey, setPublicKey] = useState<string | null>(null);
   const [balance, setBalance] = useState<string | null>(null);
   const [isUnfunded, setIsUnfunded] = useState(false);
-  const [allProjects, setAllProjects] = useState<ClimateProject[]>([]);
-  const [savedProjects, setSavedProjects] = useState<ClimateProject[]>([]);
   const [friendbotState, setFriendbotState] = useState<
     "idle" | "loading" | "success" | "error"
   >("idle");
@@ -53,10 +49,9 @@ export default function Dashboard() {
   >([]);
   const { wishlist } = useWishlist();
   const [showCertificate, setShowCertificate] = useState(false);
-  const [pendingRating, setPendingRating] = useState<{
-    id: string;
-    name: string;
-  } | null>(null);
+  const [dismissedRatingId, setDismissedRatingId] = useState<string | null>(
+    null,
+  );
 
   // React Query hooks for server-state data
   const {
@@ -82,6 +77,13 @@ export default function Dashboard() {
     refetch: refetchImpact,
   } = useImpactDonor(publicKey);
 
+  const { data: allProjects = [] } = useProjects({}, !!publicKey);
+  const { data: pendingRating } = usePendingRating(publicKey);
+  const savedProjects = useMemo(
+    () => allProjects.filter((project) => wishlist.includes(project.id)),
+    [allProjects, wishlist],
+  );
+
   // Determine if any data queries are loading
   const loading = (profileLoading || donationsLoading || impactLoading) && !!publicKey;
 
@@ -96,19 +98,6 @@ export default function Dashboard() {
     refetchImpact();
   };
 
-  // Fetch projects (not part of React Query yet — out of scope for this issue)
-  useEffect(() => {
-    if (!publicKey) return;
-    fetchProjects()
-      .then((projects) => {
-        setAllProjects(projects);
-        setSavedProjects(
-          projects.filter((proj) => wishlist.includes(proj.id)),
-        );
-      })
-      .catch(() => {});
-  }, [publicKey, wishlist]);
-
   // Fetch XLM balance from Stellar (not part of React Query)
   useEffect(() => {
     if (!publicKey) return;
@@ -121,21 +110,6 @@ export default function Dashboard() {
         setIsUnfunded(true);
         setBalance(null);
       });
-  }, [publicKey]);
-
-  // Fetch pending rating
-  useEffect(() => {
-    if (!publicKey) return;
-    fetch(
-      `${process.env.NEXT_PUBLIC_API_URL || ""}/api/v1/ratings/pending?donorAddress=${publicKey}`,
-    )
-      .then((r) => r.json())
-      .then((res) => {
-        if (res?.success && res.data) {
-          setPendingRating(res.data);
-        }
-      })
-      .catch(() => {});
   }, [publicKey]);
 
   // Due monthly subscriptions
@@ -256,13 +230,13 @@ export default function Dashboard() {
         />
       ) : (
         <div className="contents">
-          {pendingRating && publicKey && (
+          {pendingRating && pendingRating.id !== dismissedRatingId && publicKey && (
             <ProjectRating
               projectId={pendingRating.id}
               projectName={pendingRating.name}
               donorAddress={publicKey}
-              onSuccess={() => setPendingRating(null)}
-              onCancel={() => setPendingRating(null)}
+              onSuccess={() => setDismissedRatingId(pendingRating.id)}
+              onCancel={() => setDismissedRatingId(pendingRating.id)}
             />
           )}
 
@@ -654,4 +628,3 @@ export default function Dashboard() {
     </div>
   );
 }
-

@@ -4,21 +4,63 @@ const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const pool = require("../db/pool");
 const { sendAppError } = require("../errors");
+const {
+  currentKey: currentJwtSecret,
+  keysForAcceptance: jwtAcceptanceKeys,
+} = require("../services/signingSecretProvider");
 
 const ACCESS_TOKEN_EXPIRY = "15m";
 const ACCESS_TOKEN_EXPIRY_SECONDS = 900;
 const REFRESH_TOKEN_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * Resolve the JWT signing secret.
+ *
+ * The multi-version provider (WS3 / #1100) is the source of truth when a
+ * current key is configured. We keep the legacy fallback so dev environments
+ * and tests that set JWT_SECRET directly continue to work unchanged.
+ */
 function getSecret() {
-  return process.env.JWT_SECRET || "dev-secret-do-not-use-in-prod";
+  try {
+    return currentJwtSecret("JWT_SECRET");
+  } catch {
+    return process.env.JWT_SECRET || "dev-secret-do-not-use-in-prod";
+  }
 }
 
+/**
+ * Sign a token using ONLY the current key. Old/next versions must not be used
+ * to issue new credentials — that would make rotated-out secrets valid forever.
+ */
 function signToken(payload, expiresIn) {
-  return jwt.sign(payload, getSecret(), { expiresIn });
+  const secret = getSecret();
+  const { keyIdFor } = require("../services/signingSecretProvider");
+  const header = { kid: keyIdFor(secret) };
+  return jwt.sign(payload, secret, { expiresIn, header });
 }
 
+/**
+ * Verify a token against the current key and any still-valid rotated versions
+ * (previous/next). During a zero-downtime rotation window a token that was
+ * signed with the old key must still verify, but a token signed with a secret
+ * we no longer know must be rejected. This is the dual-version acceptance
+ * guarantee from WS3 / #1100.
+ */
 function verifyToken(token) {
-  return jwt.verify(token, getSecret());
+  const keys = jwtAcceptanceKeys("JWT_SECRET");
+  const candidates =
+    keys.length > 0
+      ? keys.map((k) => k.key)
+      : [process.env.JWT_SECRET || "dev-secret-do-not-use-in-prod"];
+  let lastError;
+  for (const candidate of candidates) {
+    try {
+      return jwt.verify(token, candidate);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError || new Error("jwt malformed or no secret configured");
 }
 
 function generateAccessToken(adminId, role = "admin") {
