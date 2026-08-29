@@ -13,7 +13,7 @@ inputs:
   legacy-peer-deps:
     description: 'Use --legacy-peer-deps on npm ci'
     required: false
-    default: 'false'
+    default: 'true'
   ignore-scripts:
     description: 'Use --ignore-scripts on npm ci'
     required: false

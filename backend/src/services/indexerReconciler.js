@@ -81,10 +81,19 @@ async function runReconciliation() {
   try {
     // 1. Get current indexer state
     const stateResult = await pool.query(
-      "SELECT last_processed_ledger, backfill_in_progress FROM indexer_state WHERE key = 'primary'",
+      "SELECT last_processed_ledger, backfill_in_progress, cursor_hash FROM indexer_state WHERE key = 'primary'",
     );
     const lastProcessedLedger = stateResult.rows[0]?.last_processed_ledger || 0;
     const backfillInProgress = stateResult.rows[0]?.backfill_in_progress || false;
+    const storedHash = stateResult.rows[0]?.cursor_hash;
+
+    if (storedHash && lastProcessedLedger > 0) {
+      const crypto = require('crypto');
+      const expectedHash = crypto.createHash("sha256").update(String(lastProcessedLedger)).digest("hex");
+      if (storedHash !== expectedHash) {
+        throw new Error(`Checkpoint corruption detected: hash mismatch for ledger ${lastProcessedLedger}`);
+      }
+    }
 
     // 2. Get latest on-chain ledger from Horizon
     let latestLedger = 0;

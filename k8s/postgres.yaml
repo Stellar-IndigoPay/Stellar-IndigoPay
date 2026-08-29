@@ -32,6 +32,13 @@ data:
     max_replication_slots = 5
     hot_standby = on
 
+    # ── Zero write loss on failover ──────────────────────────────
+    # Guarantee every committed transaction on the primary is durably
+    # applied on the standby before the primary acknowledges a commit,
+    # so a failover never loses acknowledged writes (#1100 / WS1).
+    synchronous_commit = remote_apply
+    synchronous_standby_names = 'standby'
+
     # ── WAL Archiving to S3 (fallback for standby) ─────────────
     archive_mode = on
     archive_command = '/usr/local/bin/archive-wal.sh %p %f'
@@ -118,6 +125,57 @@ spec:
                   2>/dev/null | grep -cE '"active":1|"succeeded":1' || echo 0
               }
 
+              # ── Helper: acquire the postgres-primary-lock Lease (#1100 WS1) ──
+              # Only the Lease holder may create the failover Job. This is the
+              # distributed split-brain guard: if another node already holds a
+              # fresh Lease then we cannot promote, so we back off instead of
+              # creating a competing failover Job.
+              acquire_primary_lease() {
+                local lease_url="$API/apis/coordination.k8s.io/v1/namespaces/$NAMESPACE/leases/postgres-primary-lock"
+                local holder="healthcheck-${HOSTNAME:-unknown}"
+                local now="$(date -u -Iseconds)"
+                local get_body rv holder_cur renew_cur http_code
+
+                get_body=$(curl -sS --cacert "$CACERT" \
+                  -H "Authorization: Bearer $TOKEN" \
+                  "$lease_url" 2>/dev/null || true)
+
+                if ! echo "$get_body" | grep -q '"kind"'; then
+                  # Lease does not exist → create it atomically.
+                  http_code=$(curl -sS --cacert "$CACERT" \
+                    -H "Authorization: Bearer $TOKEN" \
+                    -H "Content-Type: application/json" \
+                    -X POST -o /dev/null -w "%{http_code}" "$lease_url" \
+                    -d "{\"apiVersion\":\"coordination.k8s.io/v1\",\"kind\":\"Lease\",\"metadata\":{\"name\":\"postgres-primary-lock\",\"namespace\":\"$NAMESPACE\"},\"spec\":{\"holderIdentity\":\"$holder\",\"leaseDurationSeconds\":30,\"renewTime\":\"$now\"}}")
+                  [ "$http_code" = "201" ] || [ "$http_code" = "200" ]
+                  return $?
+                fi
+
+                holder_cur=$(echo "$get_body" | sed -n 's/.*"holderIdentity":"\([^"]*\)".*/\1/p' | head -1)
+                renew_cur=$(echo "$get_body" | sed -n 's/.*"renewTime":"\([^"]*\)".*/\1/p' | head -1)
+                rv=$(echo "$get_body" | sed -n 's/.*"resourceVersion":"\([^"]*\)".*/\1/p' | head -1)
+
+                # If someone else holds a still-fresh lease, we cannot promote.
+                if [ -n "$holder_cur" ] && [ "$holder_cur" != "$holder" ]; then
+                  local now_epoch renew_epoch age
+                  now_epoch=$(date +%s)
+                  renew_epoch=$(date -d "$renew_cur" +%s 2>/dev/null || echo 0)
+                  age=$(( now_epoch - renew_epoch ))
+                  if [ "$age" -lt 30 ]; then
+                    echo "$(date -Iseconds)  healthcheck  Lease held by $holder_cur — backing off (split-brain guard)."
+                    return 1
+                  fi
+                fi
+
+                # Update (or take over) the Lease with the current resourceVersion.
+                http_code=$(curl -sS --cacert "$CACERT" \
+                  -H "Authorization: Bearer $TOKEN" \
+                  -H "Content-Type: application/json" \
+                  -X PUT -o /dev/null -w "%{http_code}" "$lease_url" \
+                  -d "{\"apiVersion\":\"coordination.k8s.io/v1\",\"kind\":\"Lease\",\"metadata\":{\"name\":\"postgres-primary-lock\",\"namespace\":\"$NAMESPACE\",\"resourceVersion\":\"$rv\"},\"spec\":{\"holderIdentity\":\"$holder\",\"leaseDurationSeconds\":30,\"acquireTime\":\"$now\",\"renewTime\":\"$now\"}}")
+                [ "$http_code" -lt 300 ]
+              }
+
               FAIL_COUNT=0
               while true; do
                 if pg_isready -h localhost -p 5432 -U "${POSTGRES_USER:-postgres}" > /dev/null 2>&1; then
@@ -132,6 +190,14 @@ spec:
                     ACTIVE=$(has_active_failover)
                     if [ "$ACTIVE" -gt 0 ]; then
                       echo "$(date -Iseconds)  healthcheck  Failover Job already active/completed — skipping."
+                      FAIL_COUNT=0
+                      sleep 60
+                      continue
+                    fi
+
+                    # Split-brain guard: acquire the Lease before creating the Job.
+                    if ! acquire_primary_lease; then
+                      echo "$(date -Iseconds)  healthcheck  Could not acquire primary Lease — backing off."
                       FAIL_COUNT=0
                       sleep 60
                       continue

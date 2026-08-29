@@ -384,6 +384,7 @@ export async function recordDonation(payload: {
   amount?: string;
   currency?: "XLM" | "USDC";
   message?: string;
+  encrypted?: boolean;
   transactionHash: string;
   idempotencyKey?: string;
 }) {
@@ -398,6 +399,25 @@ export async function recordDonation(payload: {
     { headers },
   );
   return data.data;
+}
+
+/**
+ * Ask the backend whether an idempotency key was already processed within the
+ * 24-hour window.  Used by the offline queue (issue #1096, Workstream 2) to
+ * skip re-submitting a queued donation that another tab or a background-sync
+ * attempt already recorded — the server-side dedup guarantee.
+ *
+ * @param idempotencyKey - The UUID the donation was submitted with.
+ * @returns True when the server already recorded a response for this key.
+ * @throws When the request fails (callers treat this as "not sure", and fall
+ *         through to the normal processor path).
+ */
+export async function checkIdempotency(idempotencyKey: string): Promise<boolean> {
+  const { data } = await api.get<{
+    success: boolean;
+    data: { exists: boolean; status: number | null };
+  }>(`/api/donations/check-idempotency/${encodeURIComponent(idempotencyKey)}`);
+  return data.data.exists;
 }
 
 /**

@@ -61,9 +61,14 @@ jobs:
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
         run: |
           set -euo pipefail
-          LATEST=$(aws s3 ls "s3://${S3_BUCKET}/backups/" --recursive | sort | tail -1 | awk '{print $4}')
+          # Filter the listing to the backup artifact itself (.sql.gz). The
+          # .sha256 / .rowchecksums.json sidecars must NOT be eligible to
+          # become LATEST or gunzip below would fail before the restore starts.
+          LATEST=$(aws s3 ls "s3://${S3_BUCKET}/backups/" --recursive \
+            | awk '$4 ~ /\.sql\.gz$/ { print $4 }' \
+            | sort | tail -1)
           if [ -z "$LATEST" ]; then
-            echo "::error::No backups found in s3://${S3_BUCKET}/backups/"
+            echo "::error::No .sql.gz backups found in s3://${S3_BUCKET}/backups/"
             exit 1
           fi
           echo "Restoring from $LATEST"
@@ -80,6 +85,23 @@ jobs:
         run: |
           psql -h localhost -p 5433 -U postgres -d stellar_indigopay_drill \
             -f /tmp/backup.sql
+
+      - name: Verify restore integrity (row checksums + DB objects)
+        if: always()
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          # The download step requires the .rowchecksums.json sidecar, so it is
+          # guaranteed to be present here.
+          if [ ! -f /tmp/backup.rowchecksums.json ]; then
+            echo "::error::No .rowchecksums.json sidecar found — cannot run row-level integrity checks."
+            exit 1
+          fi
+          bash scripts/verify-restore-checksum.sh \
+            --backup /tmp/backup.sql.gz \
+            --row-checksums /tmp/backup.rowchecksums.json \
+            --db-url "postgres://postgres:postgres@localhost:5433/stellar_indigopay_drill"
 
       - name: Assert row counts
         env:

@@ -44,14 +44,24 @@ jobs:
       - name: Start Next.js server in background
         working-directory: frontend
         run: |
-          nohup npm run start > next-start.log 2>&1 &
+          E2E_TESTING=true nohup npm run start > next-start.log 2>&1 &
           # Wait up to 60s for the server to respond.
           timeout 60 bash -c 'until curl -fs http://localhost:3000 > /dev/null; do sleep 2; done'
           echo "Next.js server is up."
 
-      - name: Run axe-core scan
+      - name: Run axe-core scan (public pages)
         working-directory: frontend
         run: npm run a11y:scan
+
+      # Issue #1096 (WS7 #7): the donation flow (wallet picker, amount form
+      # with validation errors, transaction preview, and post-donation
+      # confirmation) needs a connected wallet and mocked backend/Horizon, so
+      # it cannot be covered by the static `axe-scan.mjs` crawler. It is
+      # scanned by the dedicated e2e/a11y.spec.ts (self-mocking via page.route),
+      # which runs against the same production `next start` server above.
+      - name: Run donation-flow accessibility scan (issue #1096 WS7)
+        working-directory: frontend
+        run: npx playwright test -c playwright.v2.config.ts e2e/a11y.spec.ts --reporter=line
 
       - name: Upload a11y report
         if: always()

@@ -15,6 +15,7 @@ import { useRouter } from "next/router";
 import Head from "next/head";
 import Link from "next/link";
 import AdminLayout from "@/components/admin/AdminLayout";
+import { safeHref } from "@/lib/sanitize";
 import {
   STATUS_LABELS,
   STATUS_COLORS,
@@ -401,7 +402,7 @@ export default function VerificationDetailPage() {
                     (doc: { name?: string; url?: string; size?: number }, i: number) => (
                       <a
                         key={i}
-                        href={doc.url}
+                        href={safeHref(doc.url)}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="flex items-center gap-3 p-3 rounded-xl bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)] hover:bg-[rgba(99,102,241,0.08)] dark:hover:bg-[rgba(129,140,248,0.10)] transition-all border border-[rgba(99,102,241,0.08)] dark:border-[rgba(129,140,248,0.10)] group"
@@ -615,7 +616,7 @@ function DetailItem({
           {label}
         </p>
         <a
-          href={href}
+          href={safeHref(href)}
           target="_blank"
           rel="noopener noreferrer"
           className="text-sm text-[var(--primary)] hover:underline font-body truncate block"
@@ -633,7 +634,7 @@ function DetailItem({
           {label}
         </p>
         <a
-          href={value}
+          href={safeHref(value)}
           target="_blank"
           rel="noopener noreferrer"
           className="text-sm text-[var(--primary)] hover:underline font-body truncate block"

@@ -191,6 +191,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
         id = resolved.id;
       }
 
+      await adapter.connect();
       const pk = await adapter.getPublicKey();
       if (!pk) {
         throw new Error("Wallet did not return a public key.");
