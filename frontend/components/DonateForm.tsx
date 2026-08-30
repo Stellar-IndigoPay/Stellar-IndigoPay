@@ -51,7 +51,7 @@ type Step =
 const PRESETS_XLM = ["10", "25", "50", "100", "250"];
 const PRESETS_USDC = ["5", "10", "25", "50", "100"];
 
-const FREQUENCY_LEDGERS: Record<string, number> = {
+export const FREQUENCY_LEDGERS: Record<string, number> = {
   weekly: 120960,
   monthly: 518400,
   quarterly: 1555200,

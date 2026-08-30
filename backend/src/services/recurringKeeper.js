@@ -27,6 +27,8 @@ const {
 const { metrics } = require("./metrics");
 const { getSigningSecret } = require("./signingSecretProvider");
 
+const KEEPER_DUE_TOLERANCE_MINUTES = 2;
+
 let intervalId = null;
 let isExecuting = false;
 
@@ -151,7 +153,7 @@ async function fetchDueSchedules() {
   const result = await pool.query(
     `SELECT donor_address, recurring_id, project_id, amount, currency, keeper_incentive 
      FROM recurring_donations 
-     WHERE active = TRUE AND next_execution_at <= NOW()
+     WHERE active = TRUE AND next_execution_at <= NOW() + INTERVAL '${KEEPER_DUE_TOLERANCE_MINUTES} minutes'
      ORDER BY next_execution_at ASC`
   );
   return result.rows;

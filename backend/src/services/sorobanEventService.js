@@ -35,6 +35,7 @@ const { registry } = require("./metrics");
 const { Counter, Gauge } = require("prom-client");
 const { v4: uuid } = require("uuid");
 const { computeBadges } = require("./store");
+const { ledgerToMs } = require("../lib/ledgerTime");
 const {
   insertEvent,
   processEvent,
@@ -574,8 +575,8 @@ async function handleRecCr(evt, topics, value) {
 
   const amount = parseFloat(amountStroops) / 10_000_000;
   const keeperIncentive = parseFloat(keeperIncentiveStroops) / 10_000_000;
-  const intervalSeconds = intervalLedgers * 5;
-  const nextExecutionAt = new Date(Date.now() + intervalSeconds * 1000);
+  const intervalMs = ledgerToMs(intervalLedgers, process.env.STELLAR_NETWORK || "testnet");
+  const nextExecutionAt = new Date(Date.now() + intervalMs);
 
   const client = await pool.connect();
   try {
@@ -689,6 +690,7 @@ async function handleRecExec(evt, topics, value) {
     }
 
     const { project_id: projectId, interval_seconds: intervalSeconds } = recurringRes.rows[0];
+    const network = process.env.STELLAR_NETWORK || "testnet";
 
     // 2. Dedup by transaction hash to avoid duplicate recording
     if (txHash) {
@@ -755,8 +757,42 @@ async function handleRecExec(evt, topics, value) {
       [donor, newTotal.toFixed(7), projectsSupported, JSON.stringify(badges)]
     );
 
-    // 6. Update recurring donation next execution timestamp
-    const nextExecutionAt = new Date(Date.now() + intervalSeconds * 1000);
+    // 6. Update recurring donation next execution timestamp.
+    // Prefer the contract's own next_execution_ledger anchored to the event's
+    // ledger-close timestamp; fall back to the interval estimate only when that
+    // ledger value is absent or unusable.
+    let nextExecutionAt = new Date(Date.now() + intervalSeconds * 1000);
+    const eventLedgerTimestamp = evt.ledgerClosedAt ? new Date(evt.ledgerClosedAt).getTime() : Date.now();
+    if (Number.isFinite(nextExecutionLedger) && nextExecutionLedger > 0) {
+      const deltaLedgers = Math.max(0, nextExecutionLedger - Number(evt.ledger || 0));
+      const derivedMs = ledgerToMs(deltaLedgers, network);
+      if (derivedMs >= 0) {
+        nextExecutionAt = new Date(eventLedgerTimestamp + derivedMs);
+      } else {
+        logger.warn(
+          {
+            event: "soroban_events_rec_exec_ledger_fallback",
+            donor,
+            recurringId,
+            nextExecutionLedger,
+            eventLedger: evt.ledger,
+            deltaLedgers,
+          },
+          "next_execution_ledger was not usable for rec_exec scheduling; falling back to interval-based estimate",
+        );
+      }
+    } else {
+      logger.warn(
+        {
+          event: "soroban_events_rec_exec_missing_next_ledger",
+          donor,
+          recurringId,
+          nextExecutionLedger,
+          eventLedger: evt.ledger,
+        },
+        "rec_exec event missing next_execution_ledger; falling back to interval-based estimate",
+      );
+    }
     await client.query(
       `UPDATE recurring_donations
        SET next_execution_at = $1,

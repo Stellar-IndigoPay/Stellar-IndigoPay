@@ -144,6 +144,16 @@ describe("recurringKeeper Service", () => {
     expect(server.loadAccount).not.toHaveBeenCalled();
   });
 
+  test("queries a 2 minute tolerance window for due schedules", async () => {
+    pool.query.mockResolvedValueOnce({ rows: [] });
+
+    await recurringKeeper.runKeeperCycle();
+
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining("NOW() + INTERVAL '2 minutes'"),
+    );
+  });
+
   test("executes matured recurring donation schedule successfully", async () => {
     pool.query.mockResolvedValueOnce({ rows: [dueSchedule()] });
 
