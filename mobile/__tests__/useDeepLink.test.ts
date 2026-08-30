@@ -31,7 +31,7 @@ test("navigates to project screen on cold start", async () => {
   mockGetInitialURL.mockResolvedValueOnce("indigopay://project/42");
   const { unmount } = renderHook(() => useDeepLink());
   await act(async () => {});
-  expect(mockPush).toHaveBeenCalledWith("/projects/42");
+  expect(mockPush).toHaveBeenCalledWith("/project/42");
   unmount();
 });
 
@@ -56,7 +56,7 @@ test("handles warm-start url event for project", async () => {
   await act(async () => {
     urlHandler?.({ url: "indigopay://project/99" });
   });
-  expect(mockPush).toHaveBeenCalledWith("/projects/99");
+  expect(mockPush).toHaveBeenCalledWith("/project/99");
   unmount();
 });
 

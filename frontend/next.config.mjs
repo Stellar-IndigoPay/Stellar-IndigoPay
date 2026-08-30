@@ -3,6 +3,7 @@ import withBundleAnalyzer from "@next/bundle-analyzer";
 
 const withBundleAnalyzerConfig = withBundleAnalyzer({
   enabled: process.env.ANALYZE === "true",
+  openAnalyzer: false,
 });
 
 /** @type {import('next').NextConfig} */
@@ -68,7 +69,9 @@ function buildStaticCsp(allowFraming = false) {
 
 const nextConfig = {
   reactStrictMode: true,
+  staticPageGenerationTimeout: 300,
   experimental: {
+
     optimizePackageImports: ["@sentry/nextjs"],
   },
   images: {

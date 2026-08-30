@@ -177,4 +177,64 @@ describe("DonationBatcher", () => {
     expect(batch.batchId).toMatch(/^[0-9a-f-]{36}$/); // UUID v4 format
     expect(new Date(batch.timestamp).getTime()).toBeTruthy();
   });
+
+  test("drops oldest donations beyond maxPendingDonations and increments drop counter", () => {
+    const overflowBatcher = new DonationBatcher(mockIo, {
+      batchWindowMs: 100,
+      maxBatchSize: 1000,
+      maxPendingDonations: 5,
+    });
+
+    for (let i = 0; i < 8; i++) {
+      overflowBatcher.addDonation({
+        projectId: `proj-${i}`,
+        donorAddress: `GADR${i}`,
+        amount: "10",
+      });
+    }
+
+    // 8 added, cap 5 → 3 dropped
+    expect(overflowBatcher.getPendingCount()).toBe(5);
+    const stats = overflowBatcher.getStats();
+    expect(stats.totalDropped).toBe(3);
+    expect(stats.pending).toBe(5);
+
+    // The oldest donations (proj-0, proj-1, proj-2) should have been dropped.
+    overflowBatcher.flush();
+    const batch = mockIo.emit.mock.calls[0][1];
+    expect(batch.donations[0].projectId).toBe("proj-3");
+    expect(batch.donations[4].projectId).toBe("proj-7");
+  });
+
+  test("getStats exposes pending, totalFlushed and totalDropped", () => {
+    batcher.addDonation({ projectId: "proj-1", donorAddress: "GAAA", amount: "10" });
+    expect(batcher.getStats()).toEqual({ pending: 1, totalFlushed: 0, totalDropped: 0 });
+
+    jest.advanceTimersByTime(150);
+    expect(batcher.getStats()).toEqual({ pending: 0, totalFlushed: 1, totalDropped: 0 });
+  });
+
+  test("pauses accumulation when Socket.IO adapter is disconnected", () => {
+    const adapter = { on: jest.fn() };
+    const ioWithAdapter = {
+      emit: jest.fn(),
+      of: () => ({ adapter }),
+    };
+    const disconnectBatcher = new DonationBatcher(ioWithAdapter, {
+      batchWindowMs: 100,
+      maxBatchSize: 1000,
+    });
+
+    // Capture the disconnect handler
+    const disconnectHandler = adapter.on.mock.calls.find(([evt]) => evt === "disconnect")[1];
+    const connectHandler = adapter.on.mock.calls.find(([evt]) => evt === "connect")[1];
+
+    disconnectHandler();
+    disconnectBatcher.addDonation({ projectId: "proj-1", donorAddress: "GAAA", amount: "10" });
+    expect(disconnectBatcher.getPendingCount()).toBe(0);
+
+    connectHandler();
+    disconnectBatcher.addDonation({ projectId: "proj-2", donorAddress: "GBBB", amount: "20" });
+    expect(disconnectBatcher.getPendingCount()).toBe(1);
+  });
 });

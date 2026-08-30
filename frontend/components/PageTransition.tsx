@@ -55,10 +55,20 @@ export default function PageTransition({ children }: PageTransitionProps) {
         },
   };
 
-  // Move focus to the new page once it has entered the DOM. Skipped when
-  // the user prefers reduced motion to avoid surprising focus jumps, but
-  // we still set the container as a focus target for keyboard users.
+  // Move focus to the new page once it has entered the DOM.  A page may mark
+  // a descendant with `data-page-focus` (e.g. its h1) to become the focus
+  // target instead of the outer container — used by the donate page so
+  // onAnimationComplete leaves its heading focused rather than the motion
+  // div.  Reduced motion skips the CONTAINER focus (to avoid surprising
+  // focus jumps) but still honours an explicit page-level focus target,
+  // which is the same behaviour the donate page had before the move.
   const handleEntered = () => {
+    const pageFocusTarget =
+      containerRef.current?.querySelector<HTMLElement>("[data-page-focus]");
+    if (pageFocusTarget) {
+      pageFocusTarget.focus({ preventScroll: true });
+      return;
+    }
     if (reduceMotion) return;
     containerRef.current?.focus({ preventScroll: true });
   };

@@ -57,6 +57,12 @@ const RATE_LIMIT_TIERS = {
   "POST /api/notifications":               { points: 30,  duration: 60   },
   "POST /api/subscriptions":               { points: 20,  duration: 60   },
 
+  // ── Public audit-chain verification (no auth, public verifiability) ──
+  // Both the unversioned /api/audit/* and versioned /api/v1/audit/* paths
+  // must be covered; the router is mounted under both prefixes.
+  "GET /api/audit/*":                      { points: 30,  duration: 60   },  // 30 req / min
+  "GET /api/v1/audit/*":                   { points: 30,  duration: 60   },  // 30 req / min
+
   // ── Default (catch-all fallback) ───────────────────────────────────────
   default:                                 { points: 150, duration: 900  },  // 150 req / 15 min
 };

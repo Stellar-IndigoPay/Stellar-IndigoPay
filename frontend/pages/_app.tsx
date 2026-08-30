@@ -3,7 +3,7 @@ import type { AppProps } from "next/app";
 import Head from "next/head";
 import { useRouter } from "next/router";
 import { AnimatePresence } from "framer-motion";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client";
 import SkipToContent from "@/components/SkipToContent";
 import PageTransition from "@/components/PageTransition";
 import CookieConsent from "@/components/CookieConsent";
@@ -13,16 +13,20 @@ import { I18nProvider } from "@/lib/i18n";
 import { PriceProvider } from "@/lib/priceContext";
 import { WalletProvider } from "@/lib/WalletProvider";
 import { ErrorBoundary } from "@/lib/ErrorBoundary";
-import { queryRetryPolicy } from "@/lib/queryRetry";
+import {
+  createQueryClient,
+  indexedDbPersister,
+  QUERY_CACHE_MAX_AGE,
+  shouldDehydrateMutation,
+} from "@/lib/queryClient";
 import useOnlineStatus from "@/hooks/useOnlineStatus";
 import useShortcuts from "@/hooks/useShortcuts";
 import GlobalSearchModal from "@/components/GlobalSearchModal";
 import ConnectivityBanner from "@/components/ConnectivityBanner";
 import OfflineFallback from "@/components/OfflineFallback";
 import InstallPrompt from "@/components/InstallPrompt";
-import { syncQueuedDonations } from "@/lib/offlineDonationQueue";
-import { recordDonation } from "@/lib/api";
 import { initAnalytics, trackEvent } from "@/lib/analytics";
+import useOfflineQueueSync from "@/hooks/useOfflineQueueSync";
 import { inter, display } from "@/lib/fonts";
 import "@/styles/globals.css";
 
@@ -61,18 +65,7 @@ export default function App({ Component, pageProps }: AppProps) {
   }, [router]);
 
   // Create QueryClient once per session so cache survives page navigations.
-  const [queryClient] = useState(
-    () =>
-      new QueryClient({
-        defaultOptions: {
-          queries: {
-            staleTime: 30_000, // 30s default
-            retry: queryRetryPolicy,
-            refetchOnWindowFocus: true,
-          },
-        },
-      }),
-  );
+  const [queryClient] = useState(createQueryClient);
 
   useEffect(() => {
     initAnalytics();
@@ -88,40 +81,33 @@ export default function App({ Component, pageProps }: AppProps) {
     };
   }, [router.events]);
 
+  // Issue #1129: drain the offline donation queue on load, on reconnect, and
+  // on Service Worker Background Sync nudges (public/sw.js posts the plain
+  // string "indigopay-queue-sync") — with the server idempotency pre-check,
+  // the conflict toast, and the confirmation notification wired in.
+  useOfflineQueueSync();
+
+  // Register the Service Worker for offline app-shell caching (public/sw.js).
   useEffect(() => {
     if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
-
-    const handleOnlineSync = () => {
-      void syncQueuedDonations(async (payload) => {
-        try {
-          await recordDonation({
-            ...payload,
-            transactionHash: payload.transactionHash || "queued-offline",
-          });
-          return true;
-        } catch {
-          return false;
-        }
-      });
-    };
-
     navigator.serviceWorker.register("/sw.js").catch(() => undefined);
-    navigator.serviceWorker.addEventListener("message", (event) => {
-      if (event.data?.type === "sync-queued-donations") {
-        handleOnlineSync();
-      }
-    });
-    window.addEventListener("online", handleOnlineSync);
-
-    handleOnlineSync();
-
-    return () => {
-      window.removeEventListener("online", handleOnlineSync);
-    };
   }, []);
   return (
     <ErrorBoundary>
-      <QueryClientProvider client={queryClient}>
+      <PersistQueryClientProvider
+        client={queryClient}
+        persistOptions={{
+          persister: indexedDbPersister,
+          maxAge: QUERY_CACHE_MAX_AGE,
+          buster: "indigopay-query-cache-v1",
+          dehydrateOptions: {
+            // Donation recording is already covered by the durable offline
+            // queue. Do not persist a paused mutation that could outlive the
+            // signed transaction flow or resume after a reload.
+            shouldDehydrateMutation,
+          },
+        }}
+      >
         <ThemeProvider>
           <I18nProvider>
             <PriceProvider>
@@ -168,7 +154,7 @@ export default function App({ Component, pageProps }: AppProps) {
             </PriceProvider>
           </I18nProvider>
         </ThemeProvider>
-      </QueryClientProvider>
+      </PersistQueryClientProvider>
     </ErrorBoundary>
   );
 }

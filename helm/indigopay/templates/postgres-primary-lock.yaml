@@ -1,0 +1,17 @@
+{{- if .Values.postgres.failover.enabled }}
+# helm/indigopay/templates/postgres-primary-lock.yaml
+# Distributed split-brain lock for PostgreSQL failover (#1100 WS1).
+# Only the node holding this Lease may promote the standby to primary.
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: postgres-primary-lock
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: postgres
+    component: healthcheck
+    role: split-brain-lock
+spec:
+  holderIdentity: ""
+  leaseDurationSeconds: {{ .Values.postgres.failover.leaseDurationSeconds | default 30 }}
+{{- end }}

@@ -3,6 +3,9 @@
 const {
   computeRowHash,
   getPrevHash,
+  getAnchorHash,
+  recordAnchor,
+  clearAnchor,
   verifyChain,
   GENESIS_PREV_HASH,
 } = require("../services/auditChain");
@@ -23,6 +26,32 @@ function makeFakeClient(rows = []) {
     },
     _lastQuery: () => lastQuery,
     _lastValues: () => lastValues,
+  };
+}
+
+/**
+ * A fake client that routes queries: any query touching `audit_chain_anchor`
+ * returns `anchorRows`; everything else returns the audit-log `rows`.
+ */
+function makeChainClient(rows = [], anchorRows = []) {
+  return {
+    query(text) {
+      if (text.includes("audit_chain_anchor")) {
+        return Promise.resolve({ rows: anchorRows, rowCount: anchorRows.length });
+      }
+      return Promise.resolve({ rows, rowCount: rows.length });
+    },
+  };
+}
+
+function makeCapturingClient() {
+  const calls = [];
+  return {
+    calls,
+    query(text, values) {
+      calls.push({ text, values });
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    },
   };
 }
 
@@ -98,6 +127,33 @@ describe("auditChain.getPrevHash", () => {
   });
 });
 
+describe("auditChain.getAnchorHash", () => {
+  it("returns null when no anchor has been recorded", async () => {
+    const client = makeChainClient([], []);
+    expect(await getAnchorHash(client)).toBeNull();
+  });
+
+  it("returns the recorded anchor hash", async () => {
+    const client = makeChainClient([], [{ anchor_hash: "abc" }]);
+    expect(await getAnchorHash(client)).toBe("abc");
+  });
+});
+
+describe("auditChain.recordAnchor / clearAnchor", () => {
+  it("upserts the anchor into the singleton row", async () => {
+    const client = makeCapturingClient();
+    await recordAnchor(client, "hash123", "r5", "retention");
+    expect(client.calls[0].text).toMatch(/INSERT INTO audit_chain_anchor/);
+    expect(client.calls[0].values).toEqual([1, "hash123", "r5", "retention"]);
+  });
+
+  it("deletes the anchor row", async () => {
+    const client = makeCapturingClient();
+    await clearAnchor(client);
+    expect(client.calls[0].text).toMatch(/DELETE FROM audit_chain_anchor/);
+  });
+});
+
 describe("auditChain.verifyChain", () => {
   function buildChain() {
     // Build a valid 3-row chain using the real helper.
@@ -163,5 +219,42 @@ describe("auditChain.verifyChain", () => {
     const result = await verifyChain(client);
     expect(result.valid).toBe(false);
     expect(result.firstInvalidId).toBe("r1");
+  });
+
+  it("resumes verification from a recorded anchor after pruning the prefix", async () => {
+    const chain = buildChain();
+    // Simulate pruning the genesis row (r1): r2 becomes the oldest survivor.
+    const pruned = chain.slice(1);
+    const anchor = pruned[0].prev_hash;
+    const client = makeChainClient(pruned, [{ anchor_hash: anchor }]);
+
+    const result = await verifyChain(client);
+    expect(result.valid).toBe(true);
+    expect(result.checked).toBe(2);
+    expect(result.anchored).toBe(true);
+  });
+
+  it("rejects a pruned chain when the anchor does not match the surviving head", async () => {
+    const chain = buildChain();
+    const pruned = chain.slice(1);
+    const client = makeChainClient(pruned, [{ anchor_hash: "0".repeat(64) }]);
+
+    const result = await verifyChain(client);
+    expect(result.valid).toBe(false);
+    expect(result.firstInvalidId).toBe("r2");
+    expect(result.anchored).toBe(true);
+  });
+
+  it("rejects a pruned chain when no anchor has been recorded", async () => {
+    const chain = buildChain();
+    const pruned = chain.slice(1);
+    // No anchor row → verifyChain falls back to genesis '0', which must fail
+    // because r2's prev_hash points at the deleted r1.
+    const client = makeChainClient(pruned, []);
+
+    const result = await verifyChain(client);
+    expect(result.valid).toBe(false);
+    expect(result.firstInvalidId).toBe("r2");
+    expect(result.anchored).toBe(false);
   });
 });

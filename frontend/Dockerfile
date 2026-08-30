@@ -24,7 +24,7 @@ ENV NODE_ENV production
 
 # Copy package files and install only production dependencies
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --legacy-peer-deps
 
 # Copy built assets and configuration from builder
 COPY --from=builder /app/next.config.mjs ./

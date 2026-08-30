@@ -107,6 +107,15 @@ const dbQueryDurationSeconds = new client.Histogram({
   registers: [registry],
 });
 
+// Idempotency-key INSERT races (issue #1102): counted with outcome=won when
+// this instance's INSERT won the ON CONFLICT race, outcome=lost when it
+// re-read and returned the winner's stored response.
+const idempotencyRaceWinsTotal = new client.Counter({
+  name: "idempotency_race_wins_total",
+  help: "Count of idempotency-key races won or lost (outcome=won|lost)",
+  labelNames: ["outcome"],
+});
+
 const cacheOperationsTotal = new client.Counter({
   name: "cache_operations_total",
   help: "Cache operations, labelled by cache (memory|redis), op (get|set|delete), and result (hit|miss|error|ok).",
@@ -211,6 +220,17 @@ const webhookDeliveriesTotal = new client.Counter({
   registers: [registry],
 });
 
+const dsrExportCompleted = new client.Counter({
+  name: "dsr_export_completed",
+  help: "Total number of completed DSR export requests.",
+  registers: [registry],
+});
+
+const dsrErasureCompleted = new client.Counter({
+  name: "dsr_erasure_completed",
+  help: "Total number of completed DSR erasure requests.",
+  registers: [registry],
+});
 const webhookAttemptsTotal = new client.Counter({
   name: "webhook_attempts_total",
   help: "Number of webhook HTTP attempts, labelled by event_type.",
@@ -223,6 +243,20 @@ const webhookAttemptDurationSeconds = new client.Histogram({
   help: "Duration of webhook HTTP attempts in seconds, labelled by outcome (success|failure).",
   labelNames: ["outcome"],
   buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  registers: [registry],
+});
+
+const webhookRetryCount = new client.Counter({
+  name: "webhook_retry_count",
+  help: "Number of webhook retries scheduled, labelled by event_type.",
+  labelNames: ["event_type"],
+  registers: [registry],
+});
+
+const webhookJitterSeconds = new client.Histogram({
+  name: "webhook_jitter_seconds",
+  help: "Jittered backoff delay in seconds applied to webhook retries.",
+  buckets: [30, 60, 120, 300, 600, 1800, 3600, 7200, 21600],
   registers: [registry],
 });
 
@@ -326,6 +360,13 @@ const projectionRebuildLastEvents = new client.Gauge({
   registers: [registry],
 });
 
+const projectionAutoCatchupRuns = new client.Counter({
+  name: "indigopay_projection_auto_catchup_runs_total",
+  help: "Total number of automatic projection catch-up runs, labelled by outcome (success|skipped|error).",
+  labelNames: ["outcome"],
+  registers: [registry],
+});
+
 const projectionRebuildInProgress = new client.Gauge({
   name: "indigopay_projection_rebuild_in_progress",
   help: "1 while a projection rebuild is running, 0 otherwise.",
@@ -355,6 +396,15 @@ const postgresFailoverTotal = new client.Counter({
   name: "indigopay_postgres_failover_total",
   help: "Total number of Postgres failover events, labelled by outcome.",
   labelNames: ["outcome"], // initiated, succeeded, failed
+  registers: [registry],
+});
+
+// ── Redis Sentinel failover metrics ────────────────────────────────────────
+
+const redisSentinelFailoverTotal = new client.Counter({
+  name: "indigopay_redis_sentinel_failover_total",
+  help: "Redis Sentinel failover / reconnection events, labelled by outcome (subscribed|reconnecting|ready).",
+  labelNames: ["outcome"], // subscribed, reconnecting, ready
   registers: [registry],
 });
 
@@ -541,6 +591,23 @@ const bulkOpDurationSeconds = new client.Histogram({
   help: "Duration of a bulk operation from confirm to finish, labelled by op type.",
   labelNames: ["type"],
   buckets: [0.1, 0.5, 1, 5, 10, 30, 60, 300, 900],
+const donationBatcherDropTotal = new client.Counter({
+  name: "donation_batcher_drop_total",
+  help: "Total number of donations dropped due to backpressure overflow.",
+  registers: [registry],
+});
+
+const donationBatchSize = new client.Histogram({
+  name: "donation_batch_size",
+  help: "Distribution of donation batch sizes emitted by the donation batcher.",
+  buckets: [1, 5, 10, 25, 50, 100, 250, 500],
+  registers: [registry],
+});
+
+const donationBatchFlushDurationSeconds = new client.Histogram({
+  name: "donation_batch_flush_duration_seconds",
+  help: "Duration in seconds of donation batch flush operations.",
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1],
   registers: [registry],
 });
 
@@ -560,7 +627,10 @@ const metrics = {
   cacheHits,
   cacheMisses,
   cacheCoalesced,
+  idempotencyRaceWinsTotal,
   queueJobsTotal,
+  dsrExportCompleted,
+  dsrErasureCompleted,
   indexerLagSeconds,
   indexerRunning,
   workerDraining,
@@ -569,6 +639,8 @@ const metrics = {
   webhookDeliveriesTotal,
   webhookAttemptsTotal,
   webhookAttemptDurationSeconds,
+  webhookRetryCount,
+  webhookJitterSeconds,
   aiSummaryTokensTotal,
   aiSummaryCostUsdTotal,
   aiSummaryLatencySeconds,
@@ -582,6 +654,7 @@ const metrics = {
   pushSentTotal,
   pushLatencySeconds,
   postgresFailoverTotal,
+  redisSentinelFailoverTotal,
   projectionEventsProcessedTotal,
   projectionLagEvents,
   projectionRebuildDurationSeconds,
@@ -590,11 +663,15 @@ const metrics = {
   bulkOpRowOutcomesTotal,
   bulkOpsTotal,
   bulkOpDurationSeconds,
+  donationBatcherDropTotal,
+  donationBatchSize,
+  donationBatchFlushDurationSeconds,
 };
 
 module.exports = {
   registry,
   metrics,
+  idempotencyRaceWinsTotal,
   cacheHits,
   cacheMisses,
   cacheCoalesced,
@@ -605,4 +682,7 @@ module.exports = {
   bulkOpRowOutcomesTotal,
   bulkOpsTotal,
   bulkOpDurationSeconds,
+  donationBatcherDropTotal,
+  donationBatchSize,
+  donationBatchFlushDurationSeconds,
 };

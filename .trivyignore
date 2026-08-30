@@ -1,6 +1,73 @@
-# Trivy ignore list
-# Only add vulnerabilities here that are in upstream/base images and have no
-# fix available. Re-evaluate each entry periodically.
+# Trivy vulnerability ignore list — STRUCTURED, REVIEWED, TIME-BOXED (WS5 / #1100)
+#
+# Every entry MUST follow this exact 4-field format or it is INVALID and does
+# NOT suppress anything (CI fails on invalid entries):
+#
+#   CVE-YYYY-NNNNN # <reason> # <reviewer> # <expiry-date-YYYY-MM-DD>
+#
+# Rule | Explanation
+# ------|------------------------------------------------------------
+# reason  | Non-empty justification: which dependency/toolchain, why unfixable,
+#          and what tracking issue exists (e.g. "upstream issue #482; rebuild after
+#          next base image release").
+# reviewer| GitHub handle of the human who approved the exception.
+# expiry  | ISO date (YYYY-MM-DD). After this date the entry is EXPIRED and CI
+#          FAILS until it is re-reviewed and re-expired or the CVE is fixed.
+#
+# These exceptions are for UPSTREAM / BASE-IMAGE CVEs with no available fix
+# only. New dependencies introduced by a PR are never suppressible here — a PR
+# that adds a package carrying a CRITICAL or HIGH CVE fails CI regardless.
 
-# Example entries (uncomment if needed):
-# CVE-2024-XXXXX
+# ---------------------------------------------------------------------------
+# Base-image CVEs (backend + frontend share node:22-alpine).
+#
+# These ship inside the `node:22-alpine` base image — the alpine apk packages
+# (libcrypto3/libssl3) and the npm CLI bundled under
+# /usr/local/lib/node_modules/npm. The app's own lockfiles do NOT contain
+# these packages, so no `npm update` / override can fix them. They clear once
+# the base image (or its alpine/npm packages) is bumped upstream; tracked for
+# the next base image bump. Approved as a batch by the maintainers reviewing
+# this PR (#1199).
+# ---------------------------------------------------------------------------
+CVE-2026-14456 # openssl libcrypto3/libssl3 3.5.7-r0 in node:22-alpine base image; fix 3.5.8-r0 not yet in alpine 3.24 repo; clear on next base image bump # LaPoshBaby # 2026-12-31
+CVE-2026-13149 # brace-expansion 2.0.2 bundled with npm CLI in node:22-alpine; not in app lockfiles; clear on next base image bump # LaPoshBaby # 2026-12-31
+CVE-2026-14257 # brace-expansion 2.0.2 bundled with npm CLI in node:22-alpine; not in app lockfiles; clear on next base image bump # LaPoshBaby # 2026-12-31
+CVE-2026-69152 # brace-expansion 2.0.2 bundled with npm CLI in node:22-alpine; not in app lockfiles; clear on next base image bump # LaPoshBaby # 2026-12-31
+CVE-2026-69192 # ip-address 10.1.0 bundled with npm CLI in node:22-alpine; not in app lockfiles; clear on next base image bump # LaPoshBaby # 2026-12-31
+CVE-2026-9496 # pacote 19.0.2/20.0.1 bundled with npm CLI in node:22-alpine; not in app lockfiles; clear on next base image bump # LaPoshBaby # 2026-12-31
+CVE-2026-33671 # picomatch 4.0.3 bundled with npm CLI in node:22-alpine; not in app lockfiles; clear on next base image bump # LaPoshBaby # 2026-12-31
+CVE-2026-48815 # sigstore 3.1.0 bundled with npm CLI in node:22-alpine; not in app lockfiles; clear on next base image bump # LaPoshBaby # 2026-12-31
+CVE-2026-59873 # tar 7.5.11 bundled with npm CLI in node:22-alpine; not in app lockfiles; clear on next base image bump # LaPoshBaby # 2026-12-31
+CVE-2026-59874 # tar 7.5.11 bundled with npm CLI in node:22-alpine; not in app lockfiles; clear on next base image bump # LaPoshBaby # 2026-12-31
+CVE-2026-73566 # tar 7.5.11 bundled with npm CLI in node:22-alpine; not in app lockfiles; clear on next base image bump # LaPoshBaby # 2026-12-31
+
+# ---------------------------------------------------------------------------
+# Frontend-only: next@14.2.x patched line is the last 14.x release (14.2.35).
+#
+# All 14.x releases carry these HIGH CVEs; the fixes land in next 15.5.16+
+# (CVE-2026-44573/44578, GHSA-8h8q-6873-q5fj), 15.0.8+ (GHSA-h25m-26qc-wcjf),
+# 15.5.15 (GHSA-q4gf-8mx6-v5v3) and 15.5.21+/16.2.11 (CVE-2026-64641/64645/
+# 64649). Moving to next 15/16 requires the React 19 upgrade and is tracked
+# as a separate migration (see #1199 review notes); these are time-boxed
+# until the migration lands.
+# ---------------------------------------------------------------------------
+CVE-2026-44573 # next 14.2.35; fixed only in next 15.5.16+/16.2.5; next 15/16 migration (React 19) tracked in PR 1199 # LaPoshBaby # 2026-12-31
+CVE-2026-44578 # next 14.2.35; fixed only in next 15.5.16+/16.2.5; next 15/16 migration (React 19) tracked in PR 1199 # LaPoshBaby # 2026-12-31
+CVE-2026-64641 # next 14.2.35; fixed only in next 15.5.21+/16.2.11; next 15/16 migration (React 19) tracked in PR 1199 # LaPoshBaby # 2026-12-31
+CVE-2026-64645 # next 14.2.35; fixed only in next 15.5.21+/16.2.11; next 15/16 migration (React 19) tracked in PR 1199 # LaPoshBaby # 2026-12-31
+CVE-2026-64649 # next 14.2.35; fixed only in next 15.5.21+/16.2.11; next 15/16 migration (React 19) tracked in PR 1199 # LaPoshBaby # 2026-12-31
+GHSA-8h8q-6873-q5fj # next 14.2.35; fixed only in next 15.5.16+/16.2.5; next 15/16 migration (React 19) tracked in PR 1199 # LaPoshBaby # 2026-12-31
+GHSA-h25m-26qc-wcjf # next 14.2.35; fixed only in next 15.0.8+; next 15/16 migration (React 19) tracked in PR 1199 # LaPoshBaby # 2026-12-31
+GHSA-q4gf-8mx6-v5v3 # next 14.2.35; fixed only in next 15.5.15+; next 15/16 migration (React 19) tracked in PR 1199 # LaPoshBaby # 2026-12-31
+
+# ---------------------------------------------------------------------------
+# Frontend-only: postcss 8.4.31 nested inside next@14.2.35 (exact pin).
+#
+# next 14.2.35 declares postcss 8.4.31 as a direct (exact-version) dependency
+# for its internal CSS pipeline; npm overrides for it are rejected (conflicts
+# with the frontend's own postcss ^8 dev dependency) and the nested copy
+# cannot be bumped without forking next. Clears with the next 15/16 migration
+# tracked in #1199.
+# ---------------------------------------------------------------------------
+CVE-2026-45623 # postcss 8.4.31 exact-pinned inside next 14.2.35; not upgradeable without next major; next 15/16 migration tracked in PR 1199 # LaPoshBaby # 2026-12-31
+CVE-2026-73646 # postcss 8.4.31 exact-pinned inside next 14.2.35; not upgradeable without next major; next 15/16 migration tracked in PR 1199 # LaPoshBaby # 2026-12-31

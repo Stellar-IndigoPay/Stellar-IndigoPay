@@ -503,9 +503,58 @@ function escHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
+async function sendErasureOtpEmail({ to, otp }) {
+  if (!RESEND_API_KEY) {
+    if (process.env.NODE_ENV !== "test") {
+      console.warn("[email] RESEND_API_KEY not set — skipping OTP email");
+    }
+    return;
+  }
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<body style="margin:0;padding:32px;font-family:'Inter',sans-serif;color:#334155;background:#FAFAFE;">
+  <h1 style="color:#0F172A;font-size:22px;margin-bottom:16px;">Data Erasure Request</h1>
+  <p style="font-size:15px;line-height:1.6;margin-bottom:24px;">
+    We received a request to permanently delete your data from Stellar-IndigoPay. 
+    To confirm this request, please use the following one-time code:
+  </p>
+  <div style="background:#F1F5F9;padding:16px;border-radius:8px;font-size:24px;font-weight:700;letter-spacing:4px;text-align:center;color:#0F172A;margin-bottom:24px;">
+    ${escHtml(otp)}
+  </div>
+  <p style="font-size:14px;color:#64748B;">This code will expire in 15 minutes. If you did not request this, you can safely ignore this email.</p>
+</body>
+</html>`;
+
+  const text = `Data Erasure Request\n\nWe received a request to permanently delete your data from Stellar-IndigoPay. To confirm this request, please use the following one-time code:\n\n${otp}\n\nThis code will expire in 15 minutes. If you did not request this, you can safely ignore this email.`;
+
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: FROM_ADDRESS,
+      to: [to],
+      subject: "Stellar-IndigoPay Data Erasure Confirmation",
+      html,
+      text,
+    }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Resend OTP email failed: ${errBody}`);
+  }
+
+  return await res.json();
+}
+
 module.exports = {
   sendUpdateNotifications,
   sendAdminVerificationNotification,
   sendOnboardingEmail,
   sendDigestEmail,
+  sendErasureOtpEmail,
 };
