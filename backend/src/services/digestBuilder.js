@@ -237,6 +237,7 @@ async function buildDigests(type, now = new Date()) {
       walletAddress: row.donor_address,
     }),
     recentDonations: [],
+    recentUpdates: [],
   }));
 
   if (digests.length === 0) {
@@ -290,6 +291,57 @@ async function buildDigests(type, now = new Date()) {
 
   for (const digest of digests) {
     digest.recentDonations = donationsByDonor.get(digest.donorAddress) || [];
+  }
+
+  // Recent project updates from the projects each recipient supported, for
+  // the same window. Only `live` updates qualify — the moderation_status
+  // filter is what makes digest suppression a single, testable condition:
+  // removed/quarantined/pending updates never reach a digest.
+  const updatesResult = await pool.query(
+    `SELECT pm.donor_address,
+            pu.id,
+            pu.title,
+            pu.body,
+            pu.moderation_status,
+            to_char(pu.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at,
+            p.name AS project_name
+       FROM (SELECT DISTINCT d.donor_address, d.project_id
+               FROM donations d
+              WHERE d.created_at >= $1
+                AND d.created_at < $2
+                AND d.donor_address = ANY($3::text[])) pm
+       JOIN projects p ON p.id = pm.project_id
+       JOIN project_updates pu ON pu.project_id = p.id
+      WHERE pu.created_at >= $1
+        AND pu.created_at < $2
+        AND pu.moderation_status = 'live'
+      ORDER BY pm.donor_address ASC, pu.created_at DESC`,
+    [start.toISOString(), end.toISOString(), donorAddresses],
+  );
+
+  const updatesByDonor = new Map();
+  for (const row of updatesResult.rows) {
+    // Belt-and-suspenders on top of the SQL filter: a row that somehow slips
+    // through as non-live is dropped here so a removed/quarantined update can
+    // never reach a digest (issue #935 — digest suppression).
+    if (row.moderation_status !== "live") continue;
+    if (!updatesByDonor.has(row.donor_address)) {
+      updatesByDonor.set(row.donor_address, []);
+    }
+    const queue = updatesByDonor.get(row.donor_address);
+    if (queue.length < 3) {
+      queue.push({
+        id: row.id,
+        projectName: row.project_name,
+        title: row.title,
+        body: row.body,
+        createdAt: row.created_at,
+      });
+    }
+  }
+
+  for (const digest of digests) {
+    digest.recentUpdates = updatesByDonor.get(digest.donorAddress) || [];
   }
 
   logger.info(

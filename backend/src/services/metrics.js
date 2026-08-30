@@ -289,6 +289,38 @@ const aiSummaryOutcomesTotal = new client.Counter({
   registers: [registry],
 });
 
+// Project-update moderation (issue #935). "False-positive rates are
+// measurable" = decisions_total lets operators compare quarantine counts
+// against review-approvals for the same screening window.
+const updateModerationDecisionsTotal = new client.Counter({
+  name: "update_moderation_decisions_total",
+  help: "Automated moderation outcomes for project updates, labelled by decision (live|quarantined|removed) and reason (rules_clean|ai_clean|rule_hard_violation|ai_hard_flag|ai_flag|ai_unavailable_degraded|admin_approve|admin_quarantine|admin_remove).",
+  labelNames: ["decision", "reason"],
+  registers: [registry],
+});
+
+const updateModerationAiOutcomesTotal = new client.Counter({
+  name: "update_moderation_ai_outcomes_total",
+  help: "AI moderation screening outcomes, labelled by verdict and outcome (success|cache_hit|error).",
+  labelNames: ["verdict", "outcome"],
+  registers: [registry],
+});
+
+const updateModerationAiLatencySeconds = new client.Histogram({
+  name: "update_moderation_ai_latency_seconds",
+  help: "End-to-end latency of the AI moderation call in seconds, labelled by outcome (success|error).",
+  labelNames: ["outcome"],
+  buckets: [0.25, 0.5, 1, 2, 4, 8, 16, 32],
+  registers: [registry],
+});
+
+const updateModerationAlertsTotal = new client.Counter({
+  name: "update_moderation_alerts_total",
+  help: "Total moderation alerts raised for hard-violation auto-quarantines, labelled by reason.",
+  labelNames: ["reason"],
+  registers: [registry],
+});
+
 const queueDepth = new client.Gauge({
   name: "queue_depth",
   help: "Total number of jobs waiting or active in the queue.",
@@ -625,6 +657,10 @@ const metrics = {
   aiSummaryCostUsdTotal,
   aiSummaryLatencySeconds,
   aiSummaryOutcomesTotal,
+  updateModerationDecisionsTotal,
+  updateModerationAiOutcomesTotal,
+  updateModerationAiLatencySeconds,
+  updateModerationAlertsTotal,
   queueDepth,
   queueActive,
   queueWaiting,
@@ -659,4 +695,8 @@ module.exports = {
   donationBatcherDropTotal,
   donationBatchSize,
   donationBatchFlushDurationSeconds,
+  updateModerationDecisionsTotal,
+  updateModerationAiOutcomesTotal,
+  updateModerationAiLatencySeconds,
+  updateModerationAlertsTotal,
 };

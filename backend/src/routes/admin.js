@@ -279,6 +279,7 @@ router.use("/secrets", require("./admin/secrets"));
 router.use("/metrics", require("./admin/metrics"));
 router.use("/failover-metric", require("./admin/failoverMetric"));
 router.use("/matches", require("./admin/matches"));
+router.use("/updates/moderation", require("./admin/updatesModeration"));
 
 // Session management (issue #1123 Part A) and password/MFA auth
 // (issue #1123 Part B) live in their own routers.

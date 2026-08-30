@@ -265,6 +265,17 @@ function mapProjectUpdateRow(row) {
     title: row.title,
     body: row.body,
     createdAt: toIso(row.created_at),
+    moderationStatus: row.moderation_status || "pending-screening",
+    moderationScreening: row.moderation_screening || null,
+    moderationScreenedAt: row.moderation_screened_at
+      ? toIso(row.moderation_screened_at)
+      : null,
+    moderationReviewedBy: row.moderation_reviewed_by || null,
+    moderationReviewedAt: row.moderation_reviewed_at
+      ? toIso(row.moderation_reviewed_at)
+      : null,
+    moderationRationale: row.moderation_rationale || null,
+    moderationAlerted: Boolean(row.moderation_alerted),
   };
 }
 

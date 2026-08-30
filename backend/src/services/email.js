@@ -248,6 +248,21 @@ function buildDigestHtml({ digest, dashboardUrl, unsubscribeUrl }) {
     ? `<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-top:20px;"><thead><tr><th align="left" style="padding:8px 0;color:#0F172A;font-size:13px;border-bottom:1px solid #E2E8F0;">Project</th><th align="right" style="padding:8px 0;color:#0F172A;font-size:13px;border-bottom:1px solid #E2E8F0;">Amount</th><th align="right" style="padding:8px 0;color:#0F172A;font-size:13px;border-bottom:1px solid #E2E8F0;">CO₂</th></tr></thead><tbody>${donationRows}</tbody></table>`
     : "";
 
+  const updateBlocks = (digest.recentUpdates || [])
+    .map(
+      (u) =>
+        `<div style="margin-top:16px;padding:16px;background:#F8FAFC;border-radius:12px;border-left:3px solid #4F46E5;">
+           <p style="margin:0 0 4px;font-size:12px;color:#64748B;">${escHtml(u.projectName)}</p>
+           <h3 style="margin:0 0 8px;font-size:15px;color:#0F172A;">${escHtml(u.title)}</h3>
+           <p style="margin:0;font-size:14px;color:#334155;line-height:1.6;">${escHtml(u.body)}</p>
+         </div>`,
+    )
+    .join("");
+  const updatesSection =
+    (digest.recentUpdates || []).length
+      ? `<p style="margin:24px 0 0;font-size:13px;color:#0F172A;font-weight:700;">Updates from supported projects</p>${updateBlocks}`
+      : "";
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -282,6 +297,8 @@ function buildDigestHtml({ digest, dashboardUrl, unsubscribeUrl }) {
 
           ${donationTable}
 
+          ${updatesSection}
+
           <p style="margin:24px 0 0;font-size:14px;color:#334155;line-height:1.6;">Manage your giving and notification settings anytime on your dashboard.</p>
           <p style="margin:8px 0 24px;font-size:14px;color:#334155;line-height:1.6;"><a href="${dashboardUrl}" style="color:#4F46E5;text-decoration:underline;">Open dashboard</a></p>
           <p style="margin:0;font-size:12px;color:#94A3B8;">If you'd like to stop receiving digest summaries, <a href="${unsubscribeUrl}" style="color:#4F46E5;text-decoration:underline;">click here to unsubscribe</a>.</p>
@@ -312,6 +329,13 @@ function buildDigestText({ digest, dashboardUrl, unsubscribeUrl }) {
     }
   } else {
     lines.push("- No donations in this period.");
+  }
+
+  if (digest.recentUpdates && digest.recentUpdates.length) {
+    lines.push("", "Updates from supported projects:");
+    for (const update of digest.recentUpdates) {
+      lines.push(`- [${update.projectName}] ${update.title}: ${update.body}`);
+    }
   }
 
   lines.push("", `Manage your account: ${dashboardUrl}`);

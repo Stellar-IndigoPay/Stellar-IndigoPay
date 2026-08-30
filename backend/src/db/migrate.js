@@ -233,8 +233,8 @@ async function seedDatabase() {
 
     for (const update of seedProjectUpdates) {
       await client.query(
-        `INSERT INTO project_updates (id, project_id, title, body, created_at)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO project_updates (id, project_id, title, body, created_at, moderation_status)
+         VALUES ($1, $2, $3, $4, $5, 'live')
          ON CONFLICT (id) DO NOTHING`,
         [
           update.id,
