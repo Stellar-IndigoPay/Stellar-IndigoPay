@@ -53,6 +53,15 @@ export const MOCK_DONATION = {
   createdAt: "2026-07-17T12:00:00Z"
 };
 
+// Matches lib/api.ts ImpactDonorStats — kept consistent with MOCK_PROFILE
+// so the dashboard renders deterministically in e2e.
+export const MOCK_IMPACT = {
+  totalDonatedXLM: "500",
+  co2OffsetKg: 6000,
+  projectsSupported: 1,
+  topCategory: "Reforestation",
+};
+
 export const MOCK_ANALYTICS = {
   trends: [
     { day: "2026-07-17", donationCount: 1, totalXLM: "50", uniqueDonors: 1, avgDonationXLM: "50" }
@@ -188,6 +197,19 @@ export async function mockApi(page: Page) {
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({ success: true, data: [MOCK_DONATION] }),
+    });
+  });
+
+  // Donor impact stats — the dashboard's loadError state is driven by the
+  // impact query, so without this mock the request falls through to the
+  // mock API server (404 locally, connection-refused in CI) and the
+  // dashboard e2e passes/fails depending on the environment instead of the
+  // code. Fulfilling it makes the test deterministic anywhere.
+  await page.route("**/api/v1/impact/donor/*", (route: Route) => {
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ success: true, data: MOCK_IMPACT }),
     });
   });
 

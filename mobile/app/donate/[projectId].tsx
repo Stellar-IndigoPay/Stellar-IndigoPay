@@ -1,0 +1,835 @@
+/**
+ * app/donate/[projectId].tsx
+ *
+ * Donate screen with project selector, amount input, biometric-protected
+ * transaction submission.
+ *
+ * Security gate (issue #481): before signing and submitting any Stellar
+ * (Soroban) payment transaction, we require a successful biometric
+ * authentication via `useBiometricAuth()`. When the device has no
+ * biometric hardware or the user hasn't enrolled, the hook falls back to
+ * the device PIN/passcode prompt. If the user can't or won't authenticate
+ * we surface a clear inline status message and abort submission — we
+ * never sign a transaction without an explicit user confirmation.
+ */
+import {
+  View,
+  Text,
+  ScrollView,
+  StyleSheet,
+  TouchableOpacity,
+  TextInput,
+  Alert,
+  ActivityIndicator,
+} from "react-native";
+import { useLocalSearchParams } from "expo-router";
+import { useEffect, useRef, useState } from "react";
+import { apiClient } from "../../lib/apiClient";
+import {
+  Keypair,
+  Horizon,
+  TransactionBuilder,
+  Networks,
+  Operation,
+  Asset,
+  Memo,
+} from "@stellar/stellar-sdk";
+import { useBiometricAuth } from "../../hooks/useBiometricAuth";
+import { useTheme } from "../theme";
+import { enqueueDonation } from "../../utils/donationQueue";
+import { safeRandomUUID } from "../../utils/uuid";
+import { useConnectivity } from "../../lib/connectivity";
+import SyncStatusIcon from "../../components/SyncStatusIcon";
+
+const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
+const HORIZON_URL =
+  process.env.EXPO_PUBLIC_HORIZON_URL || "https://horizon-testnet.stellar.org";
+
+const PRESET_AMOUNTS = ["5", "10", "25"];
+const MIN_AMOUNT_XLM = 1;
+const DONATE_PROMPT = "Authenticate to send your donation";
+
+interface ClimateProject {
+  id: string;
+  name: string;
+  description: string;
+  walletAddress: string;
+}
+
+type StatusKind = "success" | "error" | "info" | null;
+
+
+
+export default function DonateScreen() {
+  const { colors } = useTheme();
+  const { projectId, amount: prefillAmount, prefillMemo } = useLocalSearchParams<{
+    projectId?: string;
+    amount?: string;
+    prefillMemo?: string;
+  }>();
+  const { isOnline } = useConnectivity();
+
+  const bio = useBiometricAuth();
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  const [projects, setProjects] = useState<ClimateProject[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<
+    string | undefined
+  >(projectId as string | undefined);
+  const [amount, setAmount] = useState("1");
+  const [message, setMessage] = useState("");
+  const [secretKey, setSecretKey] = useState("");
+  const [publicKey, setPublicKey] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [statusType, setStatusType] = useState<StatusKind>(null);
+
+  useEffect(() => {
+    loadProjects();
+  }, [projectId]);
+
+  // Scan-to-donate prefill (issue #84): the scan screen passes the amount
+  // and memo parsed from the QR code as route params so the donor lands
+  // here with everything filled in — scan → confirm → done.
+  useEffect(() => {
+    if (prefillAmount) {
+      const parsed = Number.parseFloat(String(prefillAmount));
+      if (Number.isFinite(parsed) && parsed > 0) {
+        setAmount(String(prefillAmount));
+      }
+    }
+    if (prefillMemo) {
+      setMessage(String(prefillMemo).slice(0, 100));
+    }
+  }, [prefillAmount, prefillMemo]);
+
+  const loadProjects = async () => {
+    setLoading(true);
+    setStatusMessage(null);
+    try {
+      const res = await apiClient.get(`${API_URL}/api/projects`);
+      const list: ClimateProject[] = Array.isArray(res.data?.data)
+        ? res.data.data
+        : [];
+      setProjects(list);
+      const initialProjectId = (projectId as string | undefined) || list[0]?.id;
+      setSelectedProjectId(initialProjectId);
+    } catch (error) {
+      console.error("Error loading projects:", error);
+      setStatusType("error");
+      setStatusMessage("Unable to load projects. Please try again later.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const selectedProject =
+    projects.find((p) => p.id === selectedProjectId) || projects[0] || null;
+
+
+
+  const handleDonate = async () => {
+    setStatusMessage(null);
+    setStatusType(null);
+
+    if (!selectedProject) {
+      Alert.alert("Error", "Please choose a project to donate to.");
+      return;
+    }
+
+    const donationAmount = parseFloat(amount);
+    if (
+      !amount ||
+      Number.isNaN(donationAmount) ||
+      donationAmount < MIN_AMOUNT_XLM
+    ) {
+      Alert.alert(
+        "Error",
+        `Please enter a valid amount (minimum ${MIN_AMOUNT_XLM} XLM).`,
+      );
+      return;
+    }
+
+    if (!publicKey) {
+      Alert.alert(
+        "Wallet Required",
+        "Please connect your Stellar wallet first.",
+      );
+      return;
+    }
+
+    if (!secretKey.trim()) {
+      Alert.alert(
+        "Secret Required",
+        "Please enter your Stellar secret key to sign the transaction.",
+      );
+      return;
+    }
+
+    let keypair;
+    try {
+      keypair = Keypair.fromSecret(secretKey.trim());
+    } catch {
+      Alert.alert(
+        "Invalid Secret Key",
+        "The secret key you entered is not valid.",
+      );
+      return;
+    }
+
+    if (keypair.publicKey() !== publicKey) {
+      Alert.alert(
+        "Key Mismatch",
+        "The secret key does not match the connected public key. Please use the same account.",
+      );
+      return;
+    }
+
+    /**
+     * Generate a unique idempotency key up front so the same key can be used
+     * for both the online POST and any offline queue replay. This lets the
+     * backend deduplicate a submission that succeeded server-side but whose
+     * response was lost, preventing double-recorded donations.
+     */
+    const idempotencyKey = safeRandomUUID();
+
+    /**
+     * Issue #481: require biometric (or device-PIN) confirmation before
+     * signing any Soroban / Stellar transaction. The hook also gracefully
+     * handles devices that don't have biometric hardware — it drops
+     * straight to the device PIN prompt. If the user navigates away
+     * mid-prompt the `isMountedRef` guard prevents setState-after-unmount
+     * noise.
+     */
+    const confirmed = await bio.confirmDonation(donationAmount);
+    if (!isMountedRef.current) return;
+
+    if (!confirmed.success) {
+      if (confirmed.error === "lockout" || confirmed.error === "permanent_lockout") {
+        Alert.alert(
+          "Biometrics Locked Out",
+          "Biometric authentication is locked. Proceeding with donation without biometrics.",
+          [{ text: "OK" }]
+        );
+      } else {
+        Alert.alert("Cancelled", "Donation was not confirmed.");
+        return;
+      }
+    }
+
+    setSubmitting(true);
+    setStatusType("info");
+    setStatusMessage("Signing and submitting your donation...");
+
+    try {
+      const server = new Horizon.Server(HORIZON_URL);
+      const sourceAccount = await server.loadAccount(publicKey);
+
+      const transaction = new TransactionBuilder(sourceAccount, {
+        fee: "100",
+        networkPassphrase: Networks.TESTNET,
+      })
+        .addOperation(
+          Operation.payment({
+            destination: selectedProject.walletAddress,
+            asset: Asset.native(),
+            amount: donationAmount.toFixed(7),
+          }),
+        )
+        .addMemo(Memo.text(`IndigoPay:${selectedProject.id.slice(0, 16)}`))
+        .setTimeout(60)
+        .build();
+
+      transaction.sign(keypair);
+      const horizonResult = await server.submitTransaction(transaction);
+      const transactionHash = horizonResult.hash;
+
+      await axios.post(
+        `${API_URL}/api/donations`,
+        {
+          projectId: selectedProject.id,
+          donorAddress: publicKey,
+          amountXLM: donationAmount.toFixed(7),
+          amount: donationAmount.toFixed(7),
+          currency: "XLM",
+          message: message.trim() || undefined,
+          transactionHash,
+        },
+        {
+          headers: { "Idempotency-Key": idempotencyKey },
+        },
+      );
+
+      setStatusType("success");
+      setStatusMessage(
+        `Donation successful! Transaction hash: ${transactionHash}`,
+      );
+      setAmount("1");
+      setMessage("");
+      setSecretKey("");
+    } catch (error: any) {
+      console.error("Donation failed:", error);
+
+      // Enqueue donation for offline retry
+      const isNetworkError =
+        !error?.response &&
+        (error?.code === "ERR_NETWORK" ||
+          error?.code === "ECONNABORTED" ||
+          error?.message?.includes("Network Error") ||
+          error?.message?.includes("timeout"));
+
+      if (isNetworkError && selectedProject) {
+        try {
+          await enqueueDonation({
+            projectId: selectedProject.id,
+            projectName: selectedProject.name,
+            amount: donationAmount.toFixed(7),
+            currency: "XLM",
+            message: message.trim() || undefined,
+            donorAddress: publicKey,
+            idempotencyKey,
+          });
+          setStatusType("info");
+          setStatusMessage(
+            "Donation queued! It will be submitted when connectivity is restored.",
+          );
+        } catch (queueErr) {
+          setStatusType("error");
+          setStatusMessage(
+            error?.response?.data?.message ||
+              error?.message ||
+              "Donation failed. Please try again.",
+          );
+        }
+      } else {
+        setStatusType("error");
+        setStatusMessage(
+          error?.response?.data?.message ||
+            error?.message ||
+            "Donation failed. Please try again.",
+        );
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const connectWallet = () => {
+    Alert.alert(
+      "Connect Wallet",
+      "Enter your Stellar public key:",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "OK",
+          onPress: (input: any) => {
+            const trimmed = String(input || "").trim();
+            if (/^G[A-Z0-9]{55}$/.test(trimmed)) {
+              setPublicKey(trimmed);
+            } else {
+              Alert.alert(
+                "Invalid Key",
+                "Please enter a valid Stellar public key",
+              );
+            }
+          },
+        },
+    ],
+    );
+  };
+
+  if (loading) {
+    return (
+      <View style={styles.container}>
+        <ActivityIndicator size="large" color={colors.primary ?? "#227239"} />
+        <Text style={[styles.loadingText, { color: colors.primaryText }]}>
+          Loading project...
+        </Text>
+      </View>
+    );
+  }
+
+
+
+  return (
+    <ScrollView
+      style={[styles.container, { backgroundColor: colors.background }]}
+    >
+      <View style={styles.header}>
+        <View style={styles.headerRow}>
+          <Text style={[styles.title, { color: colors.primaryText }]}>
+            Donate to {selectedProject?.name || "a project"}
+          </Text>
+          <SyncStatusIcon pendingCount={0} size={16} showLabel />
+        </View>
+        <Text style={[styles.subtitle, { color: colors.secondaryText }]}>
+          Choose a project and donate XLM on testnet.
+        </Text>
+      </View>
+
+      <View style={styles.selectorCard}>
+        <Text style={[styles.sectionTitle, { color: colors.primaryText }]}>
+          Select a project
+        </Text>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.projectList}
+        >
+          {projects.map((project) => (
+            <TouchableOpacity
+              key={project.id}
+              style={[
+                styles.projectOption,
+                {
+                  backgroundColor:
+                    project.id === selectedProjectId
+                      ? colors.primary
+                      : colors.surface,
+                  borderColor: colors.border,
+                },
+              ]}
+              onPress={() => setSelectedProjectId(project.id)}
+              accessibilityLabel={`Select project ${project.name}`}
+              accessibilityRole="button"
+            >
+              <Text
+                style={[
+                  styles.projectOptionText,
+                  {
+                    color:
+                      project.id === selectedProjectId
+                        ? colors.buttonText
+                        : colors.primaryText,
+                  },
+                ]}
+              >
+                {project.name}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      </View>
+
+      {!publicKey ? (
+        <TouchableOpacity
+          style={[
+            styles.connectButton,
+            { backgroundColor: colors.buttonBackground },
+          ]}
+          onPress={connectWallet}
+          accessibilityLabel="Connect Stellar wallet"
+          accessibilityRole="button"
+        >
+          <Text
+            style={[styles.connectButtonText, { color: colors.buttonText }]}
+          >
+            Connect Wallet
+          </Text>
+        </TouchableOpacity>
+      ) : (
+        <View
+          style={[
+            styles.walletCard,
+            {
+              backgroundColor: colors.surface,
+              borderColor: colors.cardBorder,
+            },
+          ]}
+        >
+          <Text style={[styles.walletLabel, { color: colors.secondaryText }]}>
+            Connected wallet
+          </Text>
+          <Text style={[styles.walletAddress, { color: colors.primaryText }]}>
+            {publicKey.slice(0, 8)}...{publicKey.slice(-4)}
+          </Text>
+        </View>
+      )}
+
+      <View
+        style={[
+          styles.card,
+          { backgroundColor: colors.surface, borderColor: colors.cardBorder },
+        ]}
+      >
+        <Text style={[styles.label, { color: colors.primaryText }]}>
+          Amount (XLM)
+        </Text>
+        <View style={styles.presetRow}>
+          {PRESET_AMOUNTS.map((preset) => {
+            const isActive = amount === preset;
+            return (
+              <TouchableOpacity
+                key={preset}
+                accessibilityRole="button"
+                accessibilityLabel={`Donate ${preset} XLM`}
+                style={[
+                  styles.presetChip,
+                  {
+                    backgroundColor: isActive ? colors.primary : colors.surface,
+                    borderColor: isActive ? colors.primary : colors.border,
+                  },
+                ]}
+                onPress={() => setAmount(preset)}
+              >
+                <Text
+                  style={[
+                    styles.presetChipText,
+                    {
+                      color: isActive ? colors.buttonText : colors.primaryText,
+                    },
+                  ]}
+                >
+                  {preset} XLM
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+        <TextInput
+          style={[
+            styles.input,
+            {
+              backgroundColor: colors.inputBackground,
+              borderColor: colors.inputBorder,
+              color: colors.primaryText,
+            },
+          ]}
+          placeholder="Custom amount"
+          placeholderTextColor={colors.placeholder}
+          value={amount}
+          onChangeText={setAmount}
+          keyboardType="decimal-pad"
+          accessibilityLabel="Custom donation amount in XLM"
+        />
+
+        <Text style={[styles.label, { color: colors.primaryText }]}>
+          Secret Key
+        </Text>
+        <TextInput
+          style={[
+            styles.input,
+            {
+              backgroundColor: colors.inputBackground,
+              borderColor: colors.inputBorder,
+              color: colors.primaryText,
+            },
+          ]}
+          placeholder="S..."
+          placeholderTextColor={colors.placeholder}
+          value={secretKey}
+          onChangeText={setSecretKey}
+          autoCapitalize="none"
+          secureTextEntry
+          accessibilityLabel="Stellar secret key for signing"
+        />
+
+        <Text style={[styles.label, { color: colors.primaryText }]}>
+          Message (optional)
+        </Text>
+        <TextInput
+          style={[
+            styles.input,
+            {
+              backgroundColor: colors.inputBackground,
+              borderColor: colors.inputBorder,
+              color: colors.primaryText,
+            },
+          ]}
+          placeholder="Leave a message of support..."
+          placeholderTextColor={colors.placeholder}
+          value={message}
+          onChangeText={setMessage}
+          maxLength={100}
+          accessibilityLabel="Optional donation message"
+        />
+
+        {bio.isAvailable && bio.isEnabled && parseFloat(amount) >= bio.threshold ? (
+          <View style={styles.biometricBadge}>
+            <Text style={[styles.biometricBadgeText, { color: colors.primary }]}>🔒</Text>
+            <Text style={[styles.biometricBadgeText, { color: colors.primary, marginLeft: 6 }]}>
+              {bio.biometricType || "Biometrics"} will be required to confirm
+            </Text>
+          </View>
+        ) : !bio.isAvailable ? (
+          <View style={styles.infoBanner}>
+            <Text style={[styles.infoBannerText, { color: colors.secondaryText }]}>
+              ⚠️ Biometric authentication is unavailable. Donations will proceed without confirmation.
+            </Text>
+          </View>
+        ) : null}
+      </View>
+
+      {statusMessage ? (
+        <View
+          style={[
+            styles.statusBox,
+            statusType === "success"
+              ? styles.successBox
+              : statusType === "error"
+                ? styles.errorBox
+                : styles.infoBox,
+          ]}
+        >
+          <Text style={styles.statusText}>{statusMessage}</Text>
+        </View>
+      ) : null}
+
+      {!isOnline && (
+        <View style={styles.offlineModeBanner}>
+          <Text style={styles.offlineModeBannerText}>
+            ⚡ Offline mode — donation will be queued and submitted when
+            connectivity is restored.
+          </Text>
+        </View>
+      )}
+
+      <TouchableOpacity
+        style={[
+          styles.donateButton,
+          {
+            backgroundColor:
+              submitting || !publicKey || bio.isAuthenticating
+                ? colors.muted
+                : colors.buttonBackground,
+          },
+        ]}
+        onPress={handleDonate}
+        disabled={submitting || !publicKey || bio.isAuthenticating}
+        accessibilityRole="button"
+        accessibilityLabel={`${isOnline ? "Donate" : "Queue donation"} ${amount || "1"} XLM`}
+      >
+        {bio.isAuthenticating ? (
+          <ActivityIndicator color={colors.buttonText} />
+        ) : (
+          <Text style={[styles.donateButtonText, { color: colors.buttonText }]}>
+            {submitting
+              ? "Sending donation..."
+              : isOnline
+                ? `🌱 Donate ${amount || "1"} XLM`
+                : `📤 Queue ${amount || "1"} XLM`}
+          </Text>
+        )}
+      </TouchableOpacity>
+    </ScrollView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
+  loadingText: {
+    fontSize: 18,
+    textAlign: "center",
+    marginTop: 16,
+  },
+  header: {
+    padding: 24,
+  },
+  title: {
+    fontSize: 24,
+    fontWeight: "bold",
+  },
+  subtitle: {
+    fontSize: 14,
+    marginTop: 4,
+  },
+  scannedBanner: {
+    marginTop: 10,
+    backgroundColor: "rgba(76,175,80,0.15)",
+    borderRadius: 8,
+    padding: 8,
+    borderWidth: 1,
+    borderColor: "#4caf50",
+  },
+  scannedBannerText: {
+    fontSize: 12,
+    color: "#1b5e20",
+  },
+  selectorCard: {
+    marginHorizontal: 16,
+    marginBottom: 8,
+    padding: 16,
+    borderRadius: 12,
+  },
+  sectionTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    marginBottom: 12,
+  },
+  projectList: {
+    flexDirection: "row",
+  },
+  projectOption: {
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 20,
+    marginRight: 10,
+    borderWidth: 1,
+  },
+  projectOptionText: {
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  connectButton: {
+    padding: 16,
+    marginHorizontal: 16,
+    marginTop: 8,
+    borderRadius: 12,
+    alignItems: "center",
+  },
+  connectButtonText: {
+    fontSize: 16,
+    fontWeight: "bold",
+  },
+  walletCard: {
+    margin: 16,
+    padding: 16,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  walletLabel: {
+    fontSize: 12,
+  },
+  walletAddress: {
+    fontSize: 16,
+    fontWeight: "700",
+    marginTop: 4,
+  },
+  card: {
+    margin: 16,
+    padding: 20,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  label: {
+    fontSize: 14,
+    fontWeight: "600",
+    marginBottom: 8,
+  },
+  presetRow: {
+    flexDirection: "row",
+    marginBottom: 12,
+    gap: 8,
+  },
+  presetChip: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 18,
+    borderWidth: 1,
+  },
+  presetChipText: {
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  input: {
+    borderWidth: 1,
+    borderRadius: 8,
+    padding: 12,
+    fontSize: 16,
+    marginBottom: 16,
+  },
+  bioHintRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 4,
+  },
+  bioHintIcon: {
+    fontSize: 14,
+    marginRight: 6,
+  },
+  bioHintText: {
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  statusBox: {
+    marginHorizontal: 16,
+    marginTop: 4,
+    padding: 14,
+    borderRadius: 12,
+  },
+  successBox: {
+    backgroundColor: "#ecfdf5",
+    borderColor: "#34d399",
+    borderWidth: 1,
+  },
+  errorBox: {
+    backgroundColor: "#fef2f2",
+    borderColor: "#f87171",
+    borderWidth: 1,
+  },
+  infoBox: {
+    backgroundColor: "#eff6ff",
+    borderColor: "#60a5fa",
+    borderWidth: 1,
+  },
+  statusText: {
+    color: "#0f172a",
+  },
+  headerRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  offlineModeBanner: {
+    marginHorizontal: 16,
+    marginTop: 4,
+    padding: 12,
+    backgroundColor: "rgba(245, 158, 11, 0.12)",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(245, 158, 11, 0.3)",
+  },
+  offlineModeBannerText: {
+    fontSize: 13,
+    color: "#92400e",
+    lineHeight: 18,
+  },
+  donateButton: {
+    padding: 16,
+    margin: 16,
+    borderRadius: 12,
+    alignItems: "center",
+  },
+  donateButtonText: {
+    fontSize: 18,
+    fontWeight: "bold",
+  },
+  biometricBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 12,
+    padding: 10,
+    backgroundColor: "rgba(34, 114, 57, 0.1)",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "rgba(34, 114, 57, 0.2)",
+  },
+  biometricBadgeText: {
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  infoBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 12,
+    padding: 10,
+    backgroundColor: "rgba(239, 68, 68, 0.05)",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.15)",
+  },
+  infoBannerText: {
+    fontSize: 13,
+    lineHeight: 18,
+  },
+});

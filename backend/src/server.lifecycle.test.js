@@ -22,6 +22,7 @@ const STARTED_SERVICES = [
   "match_expiry",
   "retention_worker",
   "digest_queue",
+  "dsr_queue",
   "indexer",
   "indexer_reconciler",
   "indexer_dlq_worker",
@@ -33,6 +34,7 @@ const STARTED_SERVICES = [
   "database_pool",
   "redis",
   "sentry",
+  "otel_tracing",
   "db_pool_metrics",
   "turrets_server",
 ];

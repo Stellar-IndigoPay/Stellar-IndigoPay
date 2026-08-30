@@ -38,6 +38,23 @@
         </div>
       </header>
 
+      <!-- API degraded / connecting state -->
+      <div
+        id="api-status-banner"
+        class="api-status-banner hidden"
+        role="status"
+        aria-live="polite"
+      >
+        <span id="api-status-text" class="api-status-text"></span>
+        <button
+          id="api-status-retry"
+          class="btn api-status-retry-btn hidden"
+          type="button"
+        >
+          Retry
+        </button>
+      </div>
+
       <!-- Top Projects -->
       <main>
         <div class="section-header">
@@ -46,6 +63,7 @@
         </div>
 
         <!-- Project Search -->
+        <input type="hidden" id="destination" />
         <div class="search-wrapper" id="search-wrapper">
           <span class="search-icon">🔍</span>
           <input
@@ -73,12 +91,13 @@
         <section class="glass-panel donate-section">
           <h3>Quick Donate</h3>
           <p class="subtitle">Support your active project directly.</p>
-          <div class="preset-amounts">
-            <button class="btn preset-btn" data-amount="1">1 XLM</button>
-            <button class="btn preset-btn" data-amount="5">5 XLM</button>
-            <button class="btn preset-btn" data-amount="10">10 XLM</button>
+          <div id="active-project" class="active-project" aria-live="polite">
+            Select a project or detected address first.
           </div>
-          <div class="custom-donate">
+          <div id="preset-amounts" class="preset-amounts">
+            <!-- Presets are rendered from chrome.storage.sync. -->
+          </div>
+          <div class="custom-donate" id="custom-donate-container" style="display: none;">
             <div class="input-wrapper">
               <input
                 type="number"
@@ -89,10 +108,11 @@
               />
               <span class="currency">XLM</span>
             </div>
-            <button id="donate-submit" class="btn donate-btn" disabled>
+            <button id="donate-submit" class="btn donate-btn" type="button" disabled>
               Donate
             </button>
           </div>
+          <div id="custom-amount-fiat" class="amount-fiat" aria-live="polite"></div>
           <div id="status-message" class="status-message"></div>
         </section>
       </main>

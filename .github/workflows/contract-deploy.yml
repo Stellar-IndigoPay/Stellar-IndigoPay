@@ -53,14 +53,21 @@ jobs:
             -o contracts/target/wasm32v1-none/release/indigopay_contract.opt.wasm
 
       - name: Check WASM size
+        env:
+          WASM_SIZE_LIMIT: ${{ vars.WASM_SIZE_LIMIT || 65536 }}
         run: |
           size=$(stat -c%s contracts/target/wasm32v1-none/release/indigopay_contract.opt.wasm)
-          echo "Optimized WASM size: $size bytes"
-          if [ $size -gt 65536 ]; then
-            echo "::error title=WASM size exceeded::Optimized WASM is $size bytes (limit: 65536)"
+          echo "Optimized WASM size: $size bytes (limit: $WASM_SIZE_LIMIT)"
+          if ! [[ "$WASM_SIZE_LIMIT" =~ ^[0-9]+$ ]] || [ "$WASM_SIZE_LIMIT" -le 0 ]; then
+            echo "::error title=Invalid WASM_SIZE_LIMIT::WASM_SIZE_LIMIT must be a positive integer byte limit"
+            exit 1
+          fi
+          if [ "$size" -gt "$WASM_SIZE_LIMIT" ]; then
+            echo "::error title=WASM size exceeded::Optimized WASM is $size bytes (limit: $WASM_SIZE_LIMIT)"
             exit 1
           fi
           echo "WASM_SIZE=$size" >> $GITHUB_ENV
+          echo "WASM_SIZE_LIMIT=$WASM_SIZE_LIMIT" >> $GITHUB_ENV
 
       - name: Install Stellar CLI (pre-built binary)
         run: |
@@ -159,4 +166,4 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Set the \`STELLAR_DEPLOYER_SECRET\` repository secret to enable automated contract deployment." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**WASM build:** ✅ $WASM_SIZE bytes (within 64KB limit)" >> $GITHUB_STEP_SUMMARY
+          echo "**WASM build:** ✅ $WASM_SIZE bytes (within $WASM_SIZE_LIMIT-byte limit)" >> $GITHUB_STEP_SUMMARY

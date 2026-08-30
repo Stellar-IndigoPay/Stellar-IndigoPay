@@ -25,3 +25,5 @@ resources:
   - postgres-failover-script.yaml
   - postgres-failover-job.yaml
   - postgres-failover-rbac.yaml
+  - prometheus-adapter-configmap.yaml
+  - hpa-backend.yaml

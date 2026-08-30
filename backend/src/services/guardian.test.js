@@ -1,7 +1,17 @@
-const { buildExtendAllTtlTransaction, runGuardian, start, stop } = require("./guardian");
+const { buildExtendAllTtlTransaction, runGuardian, runGuardianCycle, start, stop } = require("./guardian");
 const { submitTransaction } = require("./stellar");
 const { Keypair } = require("@stellar/stellar-sdk");
 const logger = require("../logger");
+
+// The real advisory lock helper talks to Postgres; pass the guarded work
+// straight through so `runGuardian` stays under test, and assert the lock is
+// requested with the right key separately.
+jest.mock("./advisoryLock", () => ({
+  LOCK_KEYS: { guardian: "worker:guardian" },
+  withAdvisoryLock: jest.fn(async (_lockName, fn) => fn()),
+}));
+
+const { withAdvisoryLock, LOCK_KEYS } = require("./advisoryLock");
 
 jest.mock("./stellar", () => ({
   submitTransaction: jest.fn(),
@@ -52,6 +62,29 @@ describe("Guardian Service", () => {
     it("should return a base64 XDR string on success", async () => {
       const txXdr = await buildExtendAllTtlTransaction();
       expect(typeof txXdr).toBe("string");
+    });
+  });
+
+  describe("runGuardianCycle", () => {
+    it("acquires the guardian advisory lock around runGuardian", async () => {
+      submitTransaction.mockResolvedValue({ status: "SUCCESS" });
+
+      await runGuardianCycle();
+
+      expect(withAdvisoryLock).toHaveBeenCalledWith(
+        LOCK_KEYS.guardian,
+        runGuardian,
+      );
+      expect(submitTransaction).toHaveBeenCalled();
+    });
+
+    it("returns false without submitting when the lock is not acquired", async () => {
+      withAdvisoryLock.mockResolvedValueOnce(false);
+
+      const result = await runGuardianCycle();
+
+      expect(result).toBe(false);
+      expect(submitTransaction).not.toHaveBeenCalled();
     });
   });
 

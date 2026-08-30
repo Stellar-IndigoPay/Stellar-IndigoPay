@@ -27,6 +27,7 @@ contract-only events that the Horizon stream cannot see.
 | `voted`     | `vote_verify_project()`| Logged for audit                                    |
 | `proj_ver`  | Governance resolution | Updates `projects.on_chain_verified = TRUE`         |
 | `prop_rej`  | Proposal rejection    | Logged for audit                                    |
+| `prop_noq`  | Proposal rejected — quorum not met | Logged for audit (distinct from `prop_rej`) |
 | `prop_veto` | Admin veto            | Logged for audit                                    |
 | `prop_new`  | Proposal creation     | Logged for audit                                    |
 | `deact_all` | Bulk deactivation     | Logged for audit                                    |

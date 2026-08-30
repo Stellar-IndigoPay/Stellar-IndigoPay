@@ -947,6 +947,7 @@ version = "0.1.0"
 dependencies = [
  "attestation-contract",
  "proptest",
+ "serde_json",
  "soroban-sdk",
 ]
 

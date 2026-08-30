@@ -1,0 +1,19 @@
+# Repository-root test image: backend tests also validate root-level manifests.
+FROM node:22-alpine
+
+WORKDIR /app
+
+COPY package*.json /
+RUN cd / && npm ci --ignore-scripts
+
+COPY backend/package*.json ./
+RUN npm ci
+
+COPY backend/ ./
+COPY scripts/ /scripts/
+COPY k8s/ /k8s/
+COPY helm/ /helm/
+COPY monitoring/ /monitoring/
+COPY docs/ /docs/
+
+CMD ["npm", "test"]

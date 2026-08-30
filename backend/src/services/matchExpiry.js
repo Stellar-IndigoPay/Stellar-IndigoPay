@@ -12,6 +12,7 @@
 
 const pool = require("../db/pool");
 const logger = require("../logger");
+const { withAdvisoryLock, LOCK_KEYS } = require("./advisoryLock");
 
 const INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 
@@ -64,14 +65,22 @@ async function checkAndExpireMatches() {
 let _intervalHandle = null;
 
 /**
+ * Match expiry cycle guarded by a per-worker Postgres advisory lock so only
+ * one replica deactivates pools at a time (issue #677).
+ */
+async function runMatchExpiryCycle() {
+  return withAdvisoryLock(LOCK_KEYS.matchExpiry, checkAndExpireMatches);
+}
+
+/**
  * Start the match expiry background cron.
  * Runs immediately on start, then every INTERVAL_MS (15 minutes).
  */
 function start() {
   if (_intervalHandle) return; // already running
   // Run once immediately on startup
-  checkAndExpireMatches().catch(() => {});
-  _intervalHandle = setInterval(checkAndExpireMatches, INTERVAL_MS);
+  runMatchExpiryCycle().catch(() => {});
+  _intervalHandle = setInterval(runMatchExpiryCycle, INTERVAL_MS);
 }
 
 /**
@@ -84,4 +93,4 @@ function stop() {
   }
 }
 
-module.exports = { checkAndExpireMatches, start, stop };
+module.exports = { checkAndExpireMatches, runMatchExpiryCycle, start, stop };

@@ -7,17 +7,38 @@
  * project's own oracle (a core v2.0 feature) and removes CoinGecko as a hard
  * dependency.
  *
- * Returns `null` when the oracle is unavailable so callers can render without
- * a USD equivalent rather than failing the page.
+ * Returns structured metadata including the price, oracle source, and timestamp
+ * so the PriceProvider can compute staleness from oracle-side timestamps rather
+ * than the client clock — guarding against clock skew.
+ *
+ * Returns a {@link FetchPriceResult} with `price: null` when the oracle is
+ * unavailable; callers render without a USD equivalent rather than failing.
  */
 
 export interface OraclePriceResponse {
   success: boolean;
   data: {
     price: number | null;
-    updatedAt: number | null;
+    updatedAt: number | null; // epoch ms from oracle
     source: string;
   };
+}
+
+/**
+ * Result returned by {@link fetchXlmPrice}.
+ *
+ * `price` is the XLM/USD rate, or `null` when unavailable.
+ * `updatedAt` is the oracle-side epoch-ms timestamp (preferred over client
+ * clock for staleness computation to handle clock skew).
+ * `source` identifies the oracle data source.
+ * `fetchedAt` is the local epoch-ms at the moment the response arrived —
+ * used as a fallback when `updatedAt` is null.
+ */
+export interface FetchPriceResult {
+  price: number | null;
+  updatedAt: number | null;
+  source: string;
+  fetchedAt: number;
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
@@ -25,21 +46,37 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 /**
  * Fetch the current XLM/USD price from the backend oracle.
  *
+ * Always resolves (never rejects): network or parse errors produce a result
+ * with `price: null` so callers can render without a USD equivalent instead
+ * of showing an error page.
+ *
  * @param signal - Optional AbortSignal to cancel the in-flight request.
- * @returns The XLM/USD price, or `null` if it is unavailable or invalid.
+ * @returns Structured price result; `price` is `null` when unavailable.
  */
 export async function fetchXlmPrice(
   signal?: AbortSignal,
-): Promise<number | null> {
+): Promise<FetchPriceResult> {
+  const fetchedAt = Date.now();
   try {
     const res = await fetch(`${API_BASE}/api/oracle/price`, { signal });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      return { price: null, updatedAt: null, source: "oracle", fetchedAt };
+    }
 
     const body = (await res.json()) as Partial<OraclePriceResponse>;
-    const price = body?.data?.price;
-    return typeof price === "number" && price > 0 ? price : null;
+    const data = body?.data;
+    const price =
+      typeof data?.price === "number" && data.price > 0 ? data.price : null;
+    const updatedAt =
+      typeof data?.updatedAt === "number" ? data.updatedAt : null;
+    const source =
+      typeof data?.source === "string" && data.source.length > 0
+        ? data.source
+        : "oracle";
+
+    return { price, updatedAt, source, fetchedAt };
   } catch {
     // Oracle unavailable — callers render without a USD equivalent.
-    return null;
+    return { price: null, updatedAt: null, source: "oracle", fetchedAt };
   }
 }

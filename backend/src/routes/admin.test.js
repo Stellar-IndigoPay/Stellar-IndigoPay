@@ -3,6 +3,7 @@ const crypto = require("crypto");
 const express = require("express");
 const cookieParser = require("cookie-parser");
 const jwt = require("jsonwebtoken");
+const bcrypt = require("bcryptjs");
 const request = require("supertest");
 
 jest.mock("../middleware/rateLimiter", () => ({
@@ -12,12 +13,35 @@ jest.mock("../middleware/rateLimiter", () => ({
 // In-memory stand-in for the two session tables. Route tests across this repo
 // mock db/pool rather than spin up Postgres; the rotation flow is stateful, so
 // this fake keeps the rows instead of replaying a fixed response sequence.
-const mockDb = { refreshTokens: [], blacklist: [] };
+const mockDb = { refreshTokens: [], blacklist: [], admins: [] };
 
-function mockQuery(sql, values = []) {
+// When set, the fake holds the next refresh-token INSERT until the gate is
+// resolved. That lets a test fire a second /refresh after the winner's
+// compare-and-swap claim but before its replacement token exists — the same
+// interleaving Postgres would surface under a real concurrent replay.
+let insertGate;
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+async function waitFor(predicate, tries = 100) {
+  for (let i = 0; i < tries; i++) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 1));
+  }
+  throw new Error("waitFor: condition never became true");
+}
+
+async function mockQuery(sql, values = []) {
   const text = String(sql).replace(/\s+/g, " ").trim();
 
   if (text.startsWith("INSERT INTO refresh_tokens")) {
+    if (insertGate) await insertGate.promise;
     const [id, adminId, tokenHash, family, expiresAt] = values;
     mockDb.refreshTokens.push({
       id,
@@ -60,6 +84,43 @@ function mockQuery(sql, values = []) {
       r.revoked_at = new Date();
     });
     return Promise.resolve({ rows: [], rowCount: rows.length });
+  }
+
+  if (text.startsWith("UPDATE refresh_tokens SET revoked = true, revoked_at = NOW() WHERE admin_id")) {
+    // revokeAllSessionsExcept: `family IS DISTINCT FROM $2` keeps the caller's
+    // own family (values[1]) alive when it is non-null.
+    const [adminId, exceptFamily] = values;
+    const rows = mockDb.refreshTokens.filter(
+      (r) =>
+        r.admin_id === adminId &&
+        !r.revoked &&
+        r.family !== exceptFamily,
+    );
+    rows.forEach((r) => {
+      r.revoked = true;
+      r.revoked_at = new Date();
+    });
+    return Promise.resolve({ rows: [], rowCount: rows.length });
+  }
+
+  if (text.startsWith("SELECT id, email, password_hash, mfa_secret, mfa_enabled, created_at FROM admins")) {
+    const [lookup] = values;
+    const rows = mockDb.admins.filter((a) => a.id === lookup || a.email === lookup);
+    return Promise.resolve({ rows, rowCount: rows.length });
+  }
+
+  if (text.startsWith("UPDATE admins SET mfa_secret = $1 WHERE id = $2")) {
+    const [secret, id] = values;
+    const row = mockDb.admins.find((a) => a.id === id);
+    if (row) row.mfa_secret = secret;
+    return Promise.resolve({ rows: [], rowCount: row ? 1 : 0 });
+  }
+
+  if (text.startsWith("UPDATE admins SET mfa_enabled = true WHERE id = $1")) {
+    const [id] = values;
+    const row = mockDb.admins.find((a) => a.id === id);
+    if (row) row.mfa_enabled = true;
+    return Promise.resolve({ rows: [], rowCount: row ? 1 : 0 });
   }
 
   if (text.startsWith("SELECT family, created_at, expires_at, revoked FROM refresh_tokens")) {
@@ -107,9 +168,37 @@ process.env.JWT_SECRET = "test-secret-for-jest";
 const {
   signToken,
   generateAccessToken,
+  computeTotpCode,
   adminRequired,
   adminKeyRequired,
 } = require("../middleware/auth");
+
+/**
+ * Seed the fake admins table with a bcrypt-hashed password. Returns the row
+ * so tests can read back the generated MFA secret etc.
+ */
+function seedAdmin({
+  email = "admin@example.com",
+  password = "Strong-Pass-123!",
+  mfaEnabled = false,
+  mfaSecret = null,
+} = {}) {
+  const admin = {
+    id: crypto.randomUUID(),
+    email: email.toLowerCase(),
+    password_hash: bcrypt.hashSync(password, 4),
+    mfa_secret: mfaSecret,
+    mfa_enabled: mfaEnabled,
+    created_at: new Date(),
+  };
+  mockDb.admins.push(admin);
+  return admin;
+}
+
+/** TOTP code valid for the current 30-second window (verify allows ±1 step). */
+function totpCode(secret) {
+  return computeTotpCode(secret);
+}
 
 function buildApp() {
   const app = express();
@@ -146,6 +235,8 @@ async function login(app) {
 beforeEach(() => {
   mockDb.refreshTokens.length = 0;
   mockDb.blacklist.length = 0;
+  mockDb.admins.length = 0;
+  insertGate = null;
 });
 
 describe("POST /api/admin/login", () => {
@@ -315,6 +406,141 @@ describe("POST /api/admin/refresh", () => {
 
     expect(res.status).toBe(401);
   });
+
+  it("does not hand out a new access token or cookie when reuse is detected", async () => {
+    const loginRes = await login(app);
+    const stolenToken = refreshCookieValue(loginRes);
+
+    await request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${stolenToken}`);
+
+    const res = await request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${stolenToken}`);
+
+    expect(res.status).toBe(401);
+    expect(res.body.data?.token).toBeUndefined();
+    // The attacker's cookie must not be quietly replaced with a live one.
+    expect(refreshCookieHeader(res)).toContain("refresh_token=;");
+  });
+
+  it("still detects reuse of a token that was revoked by logout", async () => {
+    const loginRes = await login(app);
+    const refreshToken = refreshCookieValue(loginRes);
+
+    await request(app)
+      .post("/api/admin/logout")
+      .set("Authorization", `Bearer ${loginRes.body.data.token}`)
+      .set("Cookie", `refresh_token=${refreshToken}`);
+
+    const res = await request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${refreshToken}`);
+
+    expect(res.status).toBe(401);
+    // The spent cookie must be classified as reuse, not as a plain
+    // invalid token: the response carries the family-revocation code.
+    expect(res.body.error.code).toBe("TOKEN_REVOKED");
+    expect(mockDb.refreshTokens.every((r) => r.revoked)).toBe(true);
+  });
+
+  it("does not revoke an unrelated family when one family sees reuse", async () => {
+    const firstLogin = await login(app);
+    const secondLogin = await login(app);
+    const firstFamily = mockDb.refreshTokens[0].family;
+
+    const stolenToken = refreshCookieValue(firstLogin);
+    await request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${stolenToken}`);
+    const res = await request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${stolenToken}`);
+
+    expect(res.status).toBe(401);
+    const affected = mockDb.refreshTokens.filter(
+      (r) => r.family === firstFamily,
+    );
+    const untouched = mockDb.refreshTokens.filter(
+      (r) => r.family !== firstFamily,
+    );
+    expect(affected.every((r) => r.revoked)).toBe(true);
+    expect(untouched).toHaveLength(1);
+    expect(untouched[0].revoked).toBe(false);
+    // The second admin keeps working with the token it just got.
+    const stillValid = await request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${refreshCookieValue(secondLogin)}`);
+    expect(stillValid.status).toBe(200);
+  });
+
+  it("kills the replacement token minted just before the old one is replayed", async () => {
+    const loginRes = await login(app);
+    const sharedToken = refreshCookieValue(loginRes);
+
+    // Attacker and victim both hold the same cookie. The victim rotates
+    // first, so the attacker's replay trips the reuse alarm — and the
+    // token the victim just minted must die with the family too.
+    const victimRes = await request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${sharedToken}`);
+    expect(victimRes.status).toBe(200);
+    const victimToken = refreshCookieValue(victimRes);
+
+    const attackerRes = await request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${sharedToken}`);
+    expect(attackerRes.status).toBe(401);
+
+    const afterRace = await request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${victimToken}`);
+    expect(afterRace.status).toBe(401);
+    expect(mockDb.refreshTokens.every((r) => r.revoked)).toBe(true);
+  });
+
+  it("keeps the compare-and-swap honest when two refreshes overlap", async () => {
+    const loginRes = await login(app);
+    const sharedToken = refreshCookieValue(loginRes);
+    const originalRow = () => mockDb.refreshTokens[0];
+
+    // The winner claims the shared token, then stalls before inserting
+    // its replacement; the loser arrives mid-rotation and replays a
+    // token the winner has already spent. Attaching the handlers starts
+    // the request immediately, so the claim lands while we hold the gate.
+    insertGate = deferred();
+    const winner = request(app)
+      .post("/api/admin/refresh")
+      .set("Cookie", `refresh_token=${sharedToken}`)
+      .then(
+        (r) => r,
+        (e) => {
+          throw e;
+        },
+      );
+    await waitFor(() => originalRow().revoked === true);
+
+    try {
+      const loser = await request(app)
+        .post("/api/admin/refresh")
+        .set("Cookie", `refresh_token=${sharedToken}`);
+      expect(loser.status).toBe(401);
+      expect(loser.body.error.code).toBe("TOKEN_REVOKED");
+    } finally {
+      insertGate.resolve();
+    }
+
+    const winnerRes = await winner;
+    expect(winnerRes.status).toBe(200);
+    expect(refreshCookieValue(winnerRes)).not.toBe(sharedToken);
+
+    // The spent token is dead and the family alarm fired; the
+    // replacement row lands only after the alarm, so the fake shows the
+    // documented ordering rather than a second family sweep.
+    expect(originalRow().revoked).toBe(true);
+    expect(mockDb.refreshTokens).toHaveLength(2);
+  });
 });
 
 describe("POST /api/admin/logout", () => {
@@ -459,7 +685,7 @@ describe("GET /api/admin/sessions", () => {
   });
 });
 
-describe("POST /api/admin/sessions/:id/revoke", () => {
+describe("DELETE /api/admin/sessions/:family", () => {
   let app;
 
   beforeEach(() => {
@@ -472,10 +698,11 @@ describe("POST /api/admin/sessions/:id/revoke", () => {
     const doomedFamily = mockDb.refreshTokens[1].family;
 
     const res = await request(app)
-      .post(`/api/admin/sessions/${doomedFamily}/revoke`)
+      .delete(`/api/admin/sessions/${doomedFamily}`)
       .set("Authorization", `Bearer ${keep.body.data.token}`);
 
     expect(res.status).toBe(200);
+    expect(res.body.data.revoked).toBe(1);
     expect(
       mockDb.refreshTokens.find(
         (r) => r.token_hash === sha256(refreshCookieValue(doomed)),
@@ -488,10 +715,10 @@ describe("POST /api/admin/sessions/:id/revoke", () => {
     ).toBe(false);
   });
 
-  it("returns 400 for a malformed session id", async () => {
+  it("returns 400 for a malformed session family", async () => {
     const loginRes = await login(app);
     const res = await request(app)
-      .post("/api/admin/sessions/not-a-uuid/revoke")
+      .delete("/api/admin/sessions/not-a-uuid")
       .set("Authorization", `Bearer ${loginRes.body.data.token}`);
     expect(res.status).toBe(400);
   });
@@ -499,9 +726,80 @@ describe("POST /api/admin/sessions/:id/revoke", () => {
   it("returns 404 for a session that is not active", async () => {
     const loginRes = await login(app);
     const res = await request(app)
-      .post(`/api/admin/sessions/${crypto.randomUUID()}/revoke`)
+      .delete(`/api/admin/sessions/${crypto.randomUUID()}`)
       .set("Authorization", `Bearer ${loginRes.body.data.token}`);
     expect(res.status).toBe(404);
+  });
+
+  it("accepts the same shape as the issue's acceptance criteria: create 2, list both, revoke one", async () => {
+    const first = await login(app);
+    await login(app);
+    const doomedFamily = mockDb.refreshTokens[1].family;
+
+    const listed = await request(app)
+      .get("/api/admin/sessions")
+      .set("Authorization", `Bearer ${first.body.data.token}`)
+      .set("Cookie", `refresh_token=${refreshCookieValue(first)}`);
+    expect(listed.body.data).toHaveLength(2);
+
+    await request(app)
+      .delete(`/api/admin/sessions/${doomedFamily}`)
+      .set("Authorization", `Bearer ${first.body.data.token}`);
+
+    const remaining = await request(app)
+      .get("/api/admin/sessions")
+      .set("Authorization", `Bearer ${first.body.data.token}`)
+      .set("Cookie", `refresh_token=${refreshCookieValue(first)}`);
+    expect(remaining.body.data).toHaveLength(1);
+    expect(remaining.body.data[0].id).toBe(mockDb.refreshTokens[0].family);
+  });
+});
+
+describe("DELETE /api/admin/sessions (revoke all except current)", () => {
+  let app;
+
+  beforeEach(() => {
+    app = buildApp();
+  });
+
+  it("revokes every session except the caller's own family", async () => {
+    const keep = await login(app);
+    await login(app);
+    await login(app);
+
+    const res = await request(app)
+      .delete("/api/admin/sessions")
+      .set("Authorization", `Bearer ${keep.body.data.token}`)
+      .set("Cookie", `refresh_token=${refreshCookieValue(keep)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.revoked).toBe(2);
+
+    const kept = mockDb.refreshTokens.find(
+      (r) => r.token_hash === sha256(refreshCookieValue(keep)),
+    );
+    expect(kept.revoked).toBe(false);
+    expect(
+      mockDb.refreshTokens.filter((r) => !r.revoked),
+    ).toHaveLength(1);
+  });
+
+  it("revokes everything when no refresh cookie can identify the current session", async () => {
+    const keep = await login(app);
+    await login(app);
+
+    const res = await request(app)
+      .delete("/api/admin/sessions")
+      .set("Authorization", `Bearer ${keep.body.data.token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.revoked).toBe(2);
+    expect(mockDb.refreshTokens.every((r) => r.revoked)).toBe(true);
+  });
+
+  it("requires a valid access token", async () => {
+    const res = await request(app).delete("/api/admin/sessions");
+    expect(res.status).toBe(401);
   });
 });
 
@@ -595,5 +893,301 @@ describe("adminKeyRequired middleware", () => {
       .send({});
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
+  });
+});
+
+describe("POST /api/admin/auth/login (password auth)", () => {
+  let app;
+
+  beforeEach(() => {
+    app = buildApp();
+  });
+
+  it("returns 401 with a generic message for an unknown email", async () => {
+    const res = await request(app)
+      .post("/api/admin/auth/login")
+      .send({ email: "nobody@example.com", password: "whatever" });
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe("UNAUTHORIZED");
+    expect(res.body.error.reason).toBe("Invalid credentials");
+  });
+
+  it("returns 401 for a wrong password without revealing the account exists", async () => {
+    seedAdmin({ email: "admin@example.com", password: "right-pass" });
+    const res = await request(app)
+      .post("/api/admin/auth/login")
+      .send({ email: "admin@example.com", password: "wrong-pass" });
+    expect(res.status).toBe(401);
+    expect(res.body.error.reason).toBe("Invalid credentials");
+  });
+
+  it("opens a session for valid credentials when MFA is disabled", async () => {
+    const admin = seedAdmin({ email: "Admin@Example.com", password: "right-pass" });
+    const res = await request(app)
+      .post("/api/admin/auth/login")
+      .send({ email: "admin@example.com", password: "right-pass" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.token).toBeDefined();
+    expect(res.body.data.expiresIn).toBe(900);
+    expect(res.headers["set-cookie"][0]).toContain("refresh_token=");
+    // Email matching is case-insensitive; the session is tied to the admin id.
+    const decoded = jwt.verify(res.body.data.token, "test-secret-for-jest");
+    expect(decoded.sub).toBe(admin.id);
+    expect(mockDb.refreshTokens[0].admin_id).toBe(admin.id);
+  });
+
+  it("asks for a TOTP code when MFA is enabled and hands out a challenge token", async () => {
+    const admin = seedAdmin({
+      email: "admin@example.com",
+      password: "right-pass",
+      mfaEnabled: true,
+      mfaSecret: "JBSWY3DPEHPK3PXP",
+    });
+    const res = await request(app)
+      .post("/api/admin/auth/login")
+      .send({ email: "admin@example.com", password: "right-pass" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.mfaRequired).toBe(true);
+    expect(res.body.data.mfaChallenge).toBeDefined();
+    expect(res.body.data.token).toBeUndefined();
+    expect(mockDb.refreshTokens).toHaveLength(0);
+
+    const decoded = jwt.verify(res.body.data.mfaChallenge, "test-secret-for-jest");
+    expect(decoded.type).toBe("mfa-challenge");
+    expect(decoded.sub).toBe(admin.id);
+  });
+
+  it("completes the MFA login with the challenge token and a valid TOTP code", async () => {
+    const admin = seedAdmin({
+      email: "admin@example.com",
+      password: "right-pass",
+      mfaEnabled: true,
+      mfaSecret: "JBSWY3DPEHPK3PXP",
+    });
+    const first = await request(app)
+      .post("/api/admin/auth/login")
+      .send({ email: "admin@example.com", password: "right-pass" });
+    const challenge = first.body.data.mfaChallenge;
+
+    const res = await request(app)
+      .post("/api/admin/auth/login")
+      .send({ mfaChallenge: challenge, totpCode: totpCode(admin.mfa_secret) });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.token).toBeDefined();
+    expect(mockDb.refreshTokens).toHaveLength(1);
+    expect(mockDb.refreshTokens[0].admin_id).toBe(admin.id);
+  });
+
+  it("rejects the MFA login with a wrong TOTP code", async () => {
+    seedAdmin({
+      email: "admin@example.com",
+      password: "right-pass",
+      mfaEnabled: true,
+      mfaSecret: "JBSWY3DPEHPK3PXP",
+    });
+    const first = await request(app)
+      .post("/api/admin/auth/login")
+      .send({ email: "admin@example.com", password: "right-pass" });
+
+    const res = await request(app)
+      .post("/api/admin/auth/login")
+      .send({ mfaChallenge: first.body.data.mfaChallenge, totpCode: "000000" });
+    expect(res.status).toBe(401);
+    expect(res.body.error.reason).toBe("Invalid TOTP code");
+    expect(mockDb.refreshTokens).toHaveLength(0);
+  });
+
+  it("rejects a forged or expired MFA challenge token", async () => {
+    const admin = seedAdmin({
+      email: "admin@example.com",
+      password: "right-pass",
+      mfaEnabled: true,
+      mfaSecret: "JBSWY3DPEHPK3PXP",
+    });
+    const forged = signToken(
+      { sub: admin.id, type: "mfa-challenge" },
+      "1m",
+    );
+    const res = await request(app)
+      .post("/api/admin/auth/login")
+      .send({ mfaChallenge: forged, totpCode: "000000" });
+    // A forged token signed with the same secret is structurally valid but
+    // the code is wrong → 401. A garbage token fails verification → 401 too.
+    expect(res.status).toBe(401);
+
+    const garbage = await request(app)
+      .post("/api/admin/auth/login")
+      .send({ mfaChallenge: "not-a-jwt", totpCode: "123456" });
+    expect(garbage.status).toBe(401);
+  });
+
+  it("accepts password + TOTP code in a single request when MFA is enabled", async () => {
+    const admin = seedAdmin({
+      email: "admin@example.com",
+      password: "right-pass",
+      mfaEnabled: true,
+      mfaSecret: "JBSWY3DPEHPK3PXP",
+    });
+    const res = await request(app)
+      .post("/api/admin/auth/login")
+      .send({
+        email: "admin@example.com",
+        password: "right-pass",
+        totpCode: totpCode(admin.mfa_secret),
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.data.token).toBeDefined();
+  });
+
+  it("never lets an mfa-challenge token act as an access token", async () => {
+    seedAdmin({
+      email: "admin@example.com",
+      password: "right-pass",
+      mfaEnabled: true,
+      mfaSecret: "JBSWY3DPEHPK3PXP",
+    });
+    const first = await request(app)
+      .post("/api/admin/auth/login")
+      .send({ email: "admin@example.com", password: "right-pass" });
+
+    const res = await request(app)
+      .get("/api/admin/me")
+      .set("Authorization", `Bearer ${first.body.data.mfaChallenge}`);
+    expect(res.status).toBe(401);
+    expect(res.body.error.reason).toBe("Invalid token");
+  });
+});
+
+describe("POST /api/admin/auth/mfa/setup", () => {
+  let app;
+
+  beforeEach(() => {
+    app = buildApp();
+  });
+
+  it("requires a valid access token", async () => {
+    const res = await request(app).post("/api/admin/auth/mfa/setup");
+    expect(res.status).toBe(401);
+  });
+
+  it("generates a secret, otpauth URL and QR code, without enabling MFA yet", async () => {
+    const admin = seedAdmin({ email: "admin@example.com", password: "right-pass" });
+    const loginRes = await request(app)
+      .post("/api/admin/auth/login")
+      .send({ email: "admin@example.com", password: "right-pass" });
+
+    const res = await request(app)
+      .post("/api/admin/auth/mfa/setup")
+      .set("Authorization", `Bearer ${loginRes.body.data.token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.secret).toMatch(/^[A-Z2-7]+$/);
+    expect(res.body.data.otpauthUrl).toContain("otpauth://totp/");
+    expect(res.body.data.otpauthUrl).toContain(`secret=${res.body.data.secret}`);
+    expect(res.body.data.qrCode).toMatch(/^data:image\/png;base64,/);
+    expect(mockDb.admins.find((a) => a.id === admin.id).mfa_secret).toBe(
+      res.body.data.secret,
+    );
+    expect(mockDb.admins.find((a) => a.id === admin.id).mfa_enabled).toBe(false);
+  });
+
+  it("returns 404 when the authenticated principal has no password account", async () => {
+    // Earlier tests mutate ADMIN_API_KEY; restore it so the key path authenticates.
+    process.env.ADMIN_API_KEY = "test-admin-key";
+    delete process.env.ADMIN_API_KEYS;
+    const res = await request(app)
+      .post("/api/admin/auth/mfa/setup")
+      .set("X-Admin-Key", "test-admin-key");
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 409 when MFA is already enabled", async () => {
+    const admin = seedAdmin({
+      email: "admin@example.com",
+      password: "right-pass",
+      mfaEnabled: true,
+      mfaSecret: "JBSWY3DPEHPK3PXP",
+    });
+    const loginRes = await request(app)
+      .post("/api/admin/auth/login")
+      .send({ email: "admin@example.com", password: "right-pass", totpCode: totpCode(admin.mfa_secret) });
+
+    const res = await request(app)
+      .post("/api/admin/auth/mfa/setup")
+      .set("Authorization", `Bearer ${loginRes.body.data.token}`);
+    expect(res.status).toBe(409);
+  });
+});
+
+describe("POST /api/admin/auth/mfa/verify", () => {
+  let app;
+
+  beforeEach(() => {
+    app = buildApp();
+  });
+
+  it("requires a valid access token", async () => {
+    const res = await request(app)
+      .post("/api/admin/auth/mfa/verify")
+      .send({ totpCode: "123456" });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 409 when no pending secret exists", async () => {
+    seedAdmin({ email: "admin@example.com", password: "right-pass" });
+    const loginRes = await request(app)
+      .post("/api/admin/auth/login")
+      .send({ email: "admin@example.com", password: "right-pass" });
+    const res = await request(app)
+      .post("/api/admin/auth/mfa/verify")
+      .set("Authorization", `Bearer ${loginRes.body.data.token}`)
+      .send({ totpCode: "123456" });
+    expect(res.status).toBe(409);
+  });
+
+  it("enables MFA after a correct code, completing the setup roundtrip", async () => {
+    const admin = seedAdmin({ email: "admin@example.com", password: "right-pass" });
+    const loginRes = await request(app)
+      .post("/api/admin/auth/login")
+      .send({ email: "admin@example.com", password: "right-pass" });
+    const setup = await request(app)
+      .post("/api/admin/auth/mfa/setup")
+      .set("Authorization", `Bearer ${loginRes.body.data.token}`);
+    const secret = setup.body.data.secret;
+
+    const res = await request(app)
+      .post("/api/admin/auth/mfa/verify")
+      .set("Authorization", `Bearer ${loginRes.body.data.token}`)
+      .send({ totpCode: totpCode(secret) });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.mfaEnabled).toBe(true);
+    expect(mockDb.admins.find((a) => a.id === admin.id).mfa_enabled).toBe(true);
+
+    // A subsequent login now demands the second factor.
+    const nextLogin = await request(app)
+      .post("/api/admin/auth/login")
+      .send({ email: "admin@example.com", password: "right-pass" });
+    expect(nextLogin.body.data.mfaRequired).toBe(true);
+  });
+
+  it("rejects a wrong code and keeps MFA disabled", async () => {
+    const admin = seedAdmin({ email: "admin@example.com", password: "right-pass" });
+    const loginRes = await request(app)
+      .post("/api/admin/auth/login")
+      .send({ email: "admin@example.com", password: "right-pass" });
+    await request(app)
+      .post("/api/admin/auth/mfa/setup")
+      .set("Authorization", `Bearer ${loginRes.body.data.token}`);
+
+    const res = await request(app)
+      .post("/api/admin/auth/mfa/verify")
+      .set("Authorization", `Bearer ${loginRes.body.data.token}`)
+      .send({ totpCode: "000000" });
+    expect(res.status).toBe(401);
+    expect(mockDb.admins.find((a) => a.id === admin.id).mfa_enabled).toBe(false);
   });
 });

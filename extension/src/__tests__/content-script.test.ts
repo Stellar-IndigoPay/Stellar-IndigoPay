@@ -33,6 +33,7 @@ import {
   freighterSectionHTML,
   updateSubmitBtn,
   buildBodyContent,
+  handleDonateClick,
 } from "../content-script-logic";
 
 // Mock the overlay module
@@ -361,6 +362,42 @@ describe("Overlay lifecycle", () => {
       done();
     }, 50);
   });
+
+  test("does not overwrite overlay if older request completes after newer request", () => {
+    // Simulate B-then-A callback ordering
+    let cbA: Function | undefined;
+    let cbB: Function | undefined;
+
+    (chrome.runtime.sendMessage as jest.Mock).mockImplementation(
+      (_msg: any, callback?: Function) => {
+        if (_msg.address === "GA_ADDRESS") cbA = callback;
+        if (_msg.address === "GB_ADDRESS") cbB = callback;
+      }
+    );
+
+    document.body.innerHTML = `
+      <div id="indigopay-overlay"><div class="igp-body"></div></div>
+    `;
+
+    // Fire request A
+    handleDonateClick("GA_ADDRESS");
+    // Fire request B immediately after
+    handleDonateClick("GB_ADDRESS");
+
+    // Resolve B first
+    if (cbB) {
+      cbB({ project: { name: "Project B", category: "test" } });
+    }
+    
+    // Resolve A later
+    if (cbA) {
+      cbA({ project: { name: "Project A", category: "test" } });
+    }
+
+    // The body should have Project B's content (not Project A)
+    const bodyEl = document.querySelector(".igp-body");
+    expect(bodyEl?.innerHTML).not.toContain("Project A");
+  });
 });
 
 // ── 7. SPA navigation resilience ────────────────────────────────────
@@ -557,6 +594,7 @@ describe("buildBodyContent", () => {
       null,
       false,
       "",
+      ["10", "50", "100", "500"],
     );
     expect(result.renderDirectDonateViewStr).toContain("igp-direct-section");
     expect(result.renderDirectDonateViewStr).toContain("doesn't match a registered");
@@ -576,6 +614,7 @@ describe("buildBodyContent", () => {
       },
       false,
       "",
+      ["10", "50", "100", "500"],
     );
     expect(result.renderProjectViewStr).toContain("Amazon Reforestation");
     expect(result.renderProjectViewStr).toContain("Brazil");
@@ -589,6 +628,7 @@ describe("buildBodyContent", () => {
       null,
       true,
       "GDFJEGWQOEPLIRVHKVNGCFQBZQNBDWUYOSRYLKKBOPFEBFHIYNDMKKHG",
+      ["10", "50", "100", "500"],
     );
     expect(result.renderDirectDonateViewStr).toContain("igp-freighter-connected");
   });

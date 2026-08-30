@@ -20,6 +20,7 @@ import { useRouter } from "next/router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useI18n } from "@/lib/i18n";
+import { safeHref } from "@/lib/sanitize";
 import { PROJECT_CATEGORIES } from "@/utils/format";
 import {
   submitVerificationRequest,
@@ -650,7 +651,7 @@ export default function ApplyPage() {
                       </p>
                     </div>
                     <a
-                      href={doc.url}
+                      href={safeHref(doc.url)}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-xs text-[#4F46E5] dark:text-[#818CF8] hover:underline font-body"

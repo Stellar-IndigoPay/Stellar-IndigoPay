@@ -1,9 +1,10 @@
 /**
  * @jest-environment jsdom
  */
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import ProjectDetail from "@/pages/projects/[id]";
 import type { ClimateProject } from "@/utils/types";
+import { renderWithProviders } from "@/__tests__/test-utils";
 
 // Mock next/router
 const mockPush = jest.fn();
@@ -80,7 +81,7 @@ describe("Active Matches Banner in Project Detail Page", () => {
     ];
     mockFetchProjectMatches.mockResolvedValue(mockMatches);
 
-    render(<ProjectDetail />);
+    renderWithProviders(<ProjectDetail />);
 
     // Wait for async load to finish and state to update
     await waitFor(() => {
@@ -94,7 +95,7 @@ describe("Active Matches Banner in Project Detail Page", () => {
   test("does not render banner when no matches exist", async () => {
     mockFetchProjectMatches.mockResolvedValue([]);
 
-    render(<ProjectDetail />);
+    renderWithProviders(<ProjectDetail />);
 
     await waitFor(() => {
       expect(screen.queryByText(/Amazon Conservation/i)).toBeTruthy();
@@ -121,7 +122,7 @@ describe("Active Matches Banner in Project Detail Page", () => {
     ];
     mockFetchProjectMatches.mockResolvedValue(mockMatches);
 
-    render(<ProjectDetail />);
+    renderWithProviders(<ProjectDetail />);
 
     await waitFor(() => {
       expect(screen.queryByText(/Amazon Conservation/i)).toBeTruthy();
@@ -148,7 +149,7 @@ describe("Active Matches Banner in Project Detail Page", () => {
     ];
     mockFetchProjectMatches.mockResolvedValue(mockMatches);
 
-    render(<ProjectDetail />);
+    renderWithProviders(<ProjectDetail />);
 
     await waitFor(() => {
       expect(screen.queryByText(/Amazon Conservation/i)).toBeTruthy();
