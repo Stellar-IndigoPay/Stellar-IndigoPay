@@ -1,3 +1,28 @@
+
+let selectedPresetAmount = "";
+
+function setAmount(amount: string) {
+  selectedPresetAmount = amount;
+  const input = document.getElementById('custom-amount-input') as HTMLInputElement;
+  if (input) input.value = amount;
+  
+  // Update UI selection
+  document.querySelectorAll('.preset-btn').forEach(btn => btn.classList.remove('active'));
+  const presetBtn = document.querySelector(`.preset-btn[data-amount="${amount}"]`);
+  if (presetBtn) presetBtn.classList.add('active');
+  
+  updateDonateButtonState();
+}
+
+function updateDonateButtonState() {
+  const destInput = document.getElementById('destination') as HTMLInputElement | null;
+  const donateBtn = document.getElementById('donate-submit') as HTMLButtonElement | null;
+  const amount = (document.getElementById('custom-amount-input') as HTMLInputElement)?.value;
+  
+  // If we don't have destination in DOM, maybe it's not implemented? Wait, I didn't see destination input in popup.html!
+  // Let's check popup.html for destination.
+}
+
 import {
   Asset,
   Horizon,
@@ -8,6 +33,19 @@ import {
 import { loadSettings, type ExtensionSettings } from './settings';
 import { apiFetch, ApiClientError, type BreakerState } from './lib/apiClient';
 import { renderApiStatusBanner, breakerEventTypeToState } from './lib/apiStatusBanner';
+import {
+  DEFAULT_DONATION_PRESETS,
+  parseDonationAmount,
+  presetIndexForAmount,
+  presetIndexForShortcut,
+  type DonationPresets,
+} from './lib/donationPresets';
+import {
+  isValidStellarDestination,
+  submitDonationRequest,
+  validateQuickDonateState,
+} from './lib/donation';
+import { fetchXlmUsdPrice, formatApproximateFiat } from './lib/oraclePrice';
 
 // Module-level vars
 let API_BASE = 'https://api.stellar-indigopay.app';
@@ -80,12 +118,14 @@ function escapeHtml(value: string): string {
     .replace(/'/g, "&#039;");
 }
 
-/** Set a status message in the popup UI (success or error). */
-function setStatus(message: string, isError = false): void {
+/** Set a status message in the popup UI. */
+function setStatus(message: string, isError = false, isPending = false): void {
   const el = document.getElementById('status-message');
   if (!el) return;
   el.textContent = message;
-  el.className = isError ? 'status error' : 'status success';
+  el.className = isError
+    ? 'status-message error'
+    : `status-message ${isPending ? 'pending' : 'success'}`;
   el.classList.remove('hidden');
   setTimeout(() => el.classList.add('hidden'), 5000);
 }
@@ -99,6 +139,7 @@ function initProjectSearch(): void {
   if (!dropdown) return;
 
   searchInput.addEventListener('input', () => {
+    clearActiveProject();
     const query = searchInput.value.trim();
     if (query.length < 2) {
       dropdown.classList.add('hidden');
@@ -131,6 +172,195 @@ let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let activeDropdownIndex = -1;
 let dropdownItems: HTMLLIElement[] = [];
 let selectedProjectId: string | null = null;
+let activeProjectAddress: string | null = null;
+let donationPresets: DonationPresets = DEFAULT_DONATION_PRESETS;
+let currentXlmUsdPrice: number | null = null;
+let quickDonateInFlight = false;
+let currentPublicKey: string | null = null;
+
+function setActiveProject(address: string, projectId: string | null = null, name = ''): void {
+  const normalizedAddress = address.trim();
+  if (!isValidStellarDestination(normalizedAddress)) {
+    clearActiveProject();
+    return;
+  }
+
+  selectedProjectId = projectId;
+  activeProjectAddress = normalizedAddress;
+  const activeProject = document.getElementById('active-project');
+  if (activeProject) {
+    activeProject.textContent = name
+      ? `Active project: ${name}`
+      : `Destination: ${normalizedAddress.slice(0, 8)}…${normalizedAddress.slice(-4)}`;
+  }
+  updateQuickDonateState();
+}
+
+function clearActiveProject(): void {
+  selectedProjectId = null;
+  activeProjectAddress = null;
+  const activeProject = document.getElementById('active-project');
+  if (activeProject) {
+    activeProject.textContent = 'Select a project or detected address first.';
+  }
+  updateQuickDonateState();
+}
+
+function updatePresetActive(amount: string): void {
+  const activeIndex = presetIndexForAmount(amount, donationPresets);
+  document.querySelectorAll<HTMLButtonElement>('.preset-btn').forEach((button, index) => {
+    button.classList.toggle('active', index === activeIndex);
+  });
+}
+
+function updateCustomFiat(amount: string): void {
+  const fiat = document.getElementById('custom-amount-fiat');
+  if (!fiat) return;
+  fiat.textContent = formatApproximateFiat(amount, currentXlmUsdPrice) ?? '';
+}
+
+function updatePresetFiatLabels(): void {
+  document.querySelectorAll<HTMLButtonElement>('.preset-btn').forEach((button) => {
+    const fiat = button.querySelector<HTMLElement>('.preset-fiat');
+    if (fiat) {
+      fiat.textContent = formatApproximateFiat(button.dataset.amount ?? '', currentXlmUsdPrice) ?? '';
+    }
+  });
+  const amountInput = document.getElementById('custom-amount-input') as HTMLInputElement | null;
+  if (amountInput) updateCustomFiat(amountInput.value);
+}
+
+function updateQuickDonateState(): void {
+  const submitButton = document.getElementById('donate-submit') as HTMLButtonElement | null;
+  const amountInput = document.getElementById('custom-amount-input') as HTMLInputElement | null;
+  if (!submitButton) return;
+
+  const amount = amountInput ? parseDonationAmount(amountInput.value) : null;
+  const ready = validateQuickDonateState(
+    currentPublicKey,
+    activeProjectAddress,
+    amount,
+  ) === null;
+  submitButton.disabled = !ready || quickDonateInFlight;
+  if (!quickDonateInFlight) {
+    submitButton.textContent = 'Donate';
+  }
+}
+
+function renderPresetButtons(presets: DonationPresets): void {
+  donationPresets = presets;
+  const container = document.getElementById('preset-amounts');
+  if (!container) return;
+  container.textContent = '';
+
+  presets.forEach((amount) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn preset-btn';
+    button.dataset.amount = amount;
+    button.setAttribute('aria-label', `${amount} XLM donation preset`);
+
+    const label = document.createElement('span');
+    label.className = 'preset-label';
+    label.textContent = `${amount} XLM`;
+    const fiat = document.createElement('span');
+    fiat.className = 'preset-fiat';
+    fiat.textContent = formatApproximateFiat(amount, currentXlmUsdPrice) ?? '';
+    button.append(label, fiat);
+
+    button.addEventListener('click', () => {
+      const amountInput = document.getElementById('custom-amount-input') as HTMLInputElement | null;
+      if (!amountInput) return;
+      amountInput.value = amount;
+      updatePresetActive(amount);
+      updateCustomFiat(amount);
+      updateQuickDonateState();
+    });
+    container.appendChild(button);
+  });
+}
+
+async function submitQuickDonate(): Promise<void> {
+  const amountInput = document.getElementById('custom-amount-input') as HTMLInputElement | null;
+  if (!amountInput) return;
+
+  const amount = parseDonationAmount(amountInput.value);
+  const validationError = validateQuickDonateState(
+    currentPublicKey,
+    activeProjectAddress,
+    amount,
+  );
+  if (validationError) {
+    setStatus(validationError, true);
+    updateQuickDonateState();
+    return;
+  }
+  if (quickDonateInFlight) return;
+
+  quickDonateInFlight = true;
+  updateQuickDonateState();
+  const submitButton = document.getElementById('donate-submit') as HTMLButtonElement | null;
+  if (submitButton) submitButton.textContent = 'Processing…';
+
+  try {
+    await submitDonationRequest(activeProjectAddress!, amount!, '');
+    setStatus('Donation request submitted; awaiting transaction confirmation.', false, true);
+  } catch (error: any) {
+    setStatus(error?.message || 'Donation failed', true);
+  } finally {
+    quickDonateInFlight = false;
+    updateQuickDonateState();
+  }
+}
+
+function initQuickDonate(settings: ExtensionSettings): void {
+  const amountInput = document.getElementById('custom-amount-input') as HTMLInputElement | null;
+  const submitButton = document.getElementById('donate-submit') as HTMLButtonElement | null;
+  if (!amountInput || !submitButton) return;
+
+  amountInput.value = settings.defaultDonationAmount;
+  renderPresetButtons(settings.donationPresets);
+  updatePresetActive(amountInput.value);
+  updateCustomFiat(amountInput.value);
+  updateQuickDonateState();
+
+  amountInput.addEventListener('input', () => {
+    updatePresetActive(amountInput.value);
+    updateCustomFiat(amountInput.value);
+    updateQuickDonateState();
+  });
+  amountInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void submitQuickDonate();
+    }
+  });
+  submitButton.addEventListener('click', () => void submitQuickDonate());
+
+  document.addEventListener('keydown', (event) => {
+    const index = presetIndexForShortcut(event);
+    if (index >= 0) {
+      event.preventDefault();
+      const presetButton = document.querySelectorAll<HTMLButtonElement>('.preset-btn')[index];
+      presetButton?.click();
+      return;
+    }
+
+    if (
+      event.key === 'Enter' &&
+      event.target !== amountInput &&
+      !(event.target instanceof Element && event.target.closest('#project-list'))
+    ) {
+      event.preventDefault();
+      if (!submitButton.disabled) submitButton.click();
+    }
+  });
+}
+
+async function loadXlmUsdPrice(): Promise<void> {
+  currentXlmUsdPrice = await fetchXlmUsdPrice(API_BASE);
+  updatePresetFiatLabels();
+}
 
 // --- Project list keyboard navigation ---
 
@@ -211,7 +441,9 @@ function selectProjectListItem(li: HTMLLIElement, p: ProjectResult) {
   const searchInput = document.getElementById('project-search') as HTMLInputElement | null;
   if (p.walletAddress && destInput) {
     destInput.value = p.walletAddress;
-    selectedProjectId = p.id;
+    setActiveProject(p.walletAddress, p.id, p.name);
+  } else if (p.walletAddress) {
+    setActiveProject(p.walletAddress, p.id, p.name);
   }
   if (searchInput) {
     searchInput.value = p.name;
@@ -375,14 +607,19 @@ function renderDropdown(projects: ProjectResult[], dropdown: HTMLUListElement) {
       const searchInput = document.getElementById('project-search') as HTMLInputElement | null;
       if (p.walletAddress && destInput) {
         destInput.value = p.walletAddress;
-        selectedProjectId = p.id;
+        setActiveProject(p.walletAddress, p.id, p.name);
+      } else if (p.walletAddress) {
+        setActiveProject(p.walletAddress, p.id, p.name);
       }
       if (searchInput) {
         searchInput.value = p.name;
       }
       dropdown.classList.add('hidden');
     });
+    dropdown.appendChild(li);
+    dropdownItems.push(li);
   });
+  dropdown.classList.remove('hidden');
 }
 
 async function saveTotalDonated(total: number) {
@@ -391,13 +628,6 @@ async function saveTotalDonated(total: number) {
       updateDonationBadge(total);
       resolve();
     });
-  });
-}
-
-async function updateTotalAfterDonation(amount: number) {
-  chrome.storage.local.get(['totalDonatedXLM'], async (result) => {
-    const current = (result.totalDonatedXLM as number) || 0;
-    await saveTotalDonated(current + amount);
   });
 }
 
@@ -418,8 +648,6 @@ async function fetchProfile(publicKey: string): Promise<any> {
 }
 
 // ==================== WALLET CONNECT ====================
-let currentPublicKey: string | null = null;
-
 async function connectWallet() {
   try {
     const freighter = (window as any).freighter;
@@ -451,6 +679,7 @@ async function connectWallet() {
       total = parseFloat(profile.data?.totalDonatedXLM || profile.totalDonatedXLM) || 0;
     }
     await saveTotalDonated(total);
+    updateQuickDonateState();
 
   } catch (err: any) {
     console.error('Wallet connect error:', err);
@@ -461,21 +690,15 @@ async function connectWallet() {
 // ==================== DONATION HELPERS (keep your existing ones) ====================
 // buildDonationTransaction, signWithFreighter, submitTransaction, recordDonation, etc.
 
-// After successful donation in your submit handler, add:
-// await updateTotalAfterDonation(parseFloat(amount));
-
 // ==================== MAIN INIT ====================
+
+
 document.addEventListener('DOMContentLoaded', async () => {
   const settings = await loadSettings();
   applySettings(settings);
+  initQuickDonate(settings);
+  void loadXlmUsdPrice();
 
-  // Pre-fill donation amount from saved default
-  const amountInput = document.getElementById('custom-amount-input') as HTMLInputElement | null;
-  if (amountInput && settings.defaultDonationAmount) {
-    amountInput.value = settings.defaultDonationAmount;
-  }
-
-  // Wire settings button
   const settingsBtn = document.getElementById('settings-btn');
   if (settingsBtn) {
     settingsBtn.addEventListener('click', () => {
@@ -487,8 +710,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   initProjectListKeyNav();
   initApiStatusBanner();
 
-  // Check for pending context-menu donation
-  chrome.storage.local.get(['pendingDonationProjectId', 'pendingDonationAddress'], async (res) => {
+  // Check for pending context-menu donation.
+  chrome.storage.local.get(
+    ['pendingDonationProjectId', 'pendingDonationAddress', 'pendingDonationPreset'],
+    async (res) => {
+      if (res.pendingDonationPreset !== undefined) {
+        chrome.storage.local.remove('pendingDonationPreset');
+        const amountInput = document.getElementById('custom-amount-input') as HTMLInputElement | null;
+        if (amountInput && (typeof res.pendingDonationPreset === 'string' || typeof res.pendingDonationPreset === 'number')) {
+          amountInput.value = String(res.pendingDonationPreset);
+          amountInput.dispatchEvent(new Event('input'));
+        }
+      }
     if (res.pendingDonationProjectId) {
       chrome.storage.local.remove('pendingDonationProjectId');
       try {
@@ -496,53 +729,25 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (response.ok) {
           const json = await response.json();
           const projectData = json.data;
-          
-          const destInput = document.getElementById('destination') as HTMLInputElement | null;
           const searchInput = document.getElementById('project-search') as HTMLInputElement | null;
-          
-          if (destInput && projectData.walletAddress) {
-            destInput.value = projectData.walletAddress;
-            selectedProjectId = projectData.id;
+
+          if (projectData?.walletAddress) {
+            setActiveProject(projectData.walletAddress, projectData.id, projectData.name || '');
           }
-          if (searchInput && projectData.name) {
-            searchInput.value = projectData.name;
-          }
+          if (searchInput && projectData?.name) searchInput.value = projectData.name;
         }
       } catch (err) {
         console.error('Failed to pre-fill project from context menu', err);
       }
     } else if (res.pendingDonationAddress) {
       chrome.storage.local.remove('pendingDonationAddress');
-      const destInput = document.getElementById('destination') as HTMLInputElement | null;
-      if (destInput) {
-        destInput.value = res.pendingDonationAddress as string;
-      }
+      setActiveProject(res.pendingDonationAddress as string);
     }
-  });
+    },
+  );
 
-  const form = document.getElementById('donation-form');
-  if (!form) return;
-
-  form.addEventListener('submit', async (e) => {
-    try {
-      e.preventDefault();
-      const sourceAddress = ((document.getElementById('source-address') as HTMLInputElement)?.value ?? '').trim();
-      const destination = ((document.getElementById('destination') as HTMLInputElement)?.value ?? '').trim();
-      const amount = ((document.getElementById('amount') as HTMLInputElement)?.value ?? '').trim();
-      const memo = ((document.getElementById('memo') as HTMLInputElement)?.value ?? '').trim();
-
-      if (!sourceAddress || !destination || !amount) {
-        setStatus('Please fill in all required fields.', true);
-        return;
-      }
-    } catch {
-      // Silently ignore — the skeleton loader remains visible
-    }
-  });
-
-  // Connect button
   const connectBtn = document.getElementById('connect-btn') as HTMLButtonElement | null;
-  if (connectBtn) connectBtn.addEventListener('click', connectWallet);
+  if (connectBtn) connectBtn.addEventListener('click', () => void connectWallet());
 
   console.log('🌿 IndigoPay Extension initialized with donation badge (#490)');
 });

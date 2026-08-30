@@ -5,7 +5,7 @@
 import FormField from "@/components/FormField";
 import { useFormValidation } from "@/hooks/useFormValidation";
 import { donationSchema } from "@/lib/validation/schemas";
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   buildDonationTransaction,
   buildContractDonationTransaction,
@@ -31,13 +31,9 @@ import {
 } from "@/lib/stellar";
 import { Asset, Transaction } from "@stellar/stellar-sdk";
 import { signTransactionWithWallet } from "@/lib/wallet";
-import { recordDonation, checkIdempotency } from "@/lib/api";
 import { useRecordDonation } from "@/hooks/queries";
 import useOnlineStatus from "@/hooks/useOnlineStatus";
-import {
-  queueDonation,
-  syncQueuedDonations,
-} from "@/lib/offlineDonationQueue";
+import { queueDonation } from "@/lib/offlineDonationQueue";
 import { formatXLM, formatCO2, formatUSDEquivalent } from "@/utils/format";
 import { trackEvent } from "@/lib/analytics";
 import { safeRandomUUID } from "@/utils/uuid";
@@ -68,6 +64,10 @@ type Step =
   | "success"
   | "unknown"
   | "error";
+
+function isDonationProcessingError(error: unknown): boolean {
+  return error instanceof Error && error.name === "DonationProcessingError";
+}
 
 const PRESETS_XLM = ["10", "25", "50", "100", "250"];
 const PRESETS_USDC = ["5", "10", "25", "50", "100"];
@@ -306,62 +306,11 @@ export default function DonateForm({
     return "text-[#4F46E5] dark:text-[#818CF8]";
   };
 
-  // Drain the offline queue with the idempotency pre-check wired in. Used by
-  // the online listener below AND by the service-worker nudge message, so a
-  // background-sync event and an open tab both run the exact same routine
-  // (BroadcastChannel tab lock + server-side dedup).
-  const drainQueuedDonations = useCallback(() => {
-    if (!isOnline) return;
-
-    // A rejection here (e.g. IndexedDB unavailable so openDatabase throws) is
-    // consumed rather than becoming an unhandled promise rejection — the queue
-    // simply retries on the next reconnect / sync nudge.
-    void syncQueuedDonations(
-      async (payload) => {
-        try {
-          await recordDonation({
-            ...payload,
-            transactionHash: payload.transactionHash || "queued-offline",
-          });
-          return true;
-        } catch {
-          return false;
-        }
-      },
-      {
-        // Workstream 2: never re-submit a donation another tab or a
-        // background-sync attempt already recorded — the server dedupes by
-        // idempotency key, so check before submitting and drop the queue item.
-        checkAlreadyProcessed: async (payload) =>
-          payload.idempotencyKey
-            ? checkIdempotency(payload.idempotencyKey).catch(() => false)
-            : false,
-      },
-    ).catch(() => {
-      // The queue is unavailable (no IndexedDB) — retry on the next reconnect.
-    });
-  }, [isOnline]);
-
-  // Drain when connectivity returns.
-  useEffect(() => {
-    drainQueuedDonations();
-  }, [drainQueuedDonations]);
-
-  // Drain when the service worker wakes us with a background-sync nudge
-  // (public/sw.js — "indigopay-queue-sync" message).
-  useEffect(() => {
-    if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
-      return;
-    }
-    const onMessage = (event: MessageEvent) => {
-      if (event.data === "indigopay-queue-sync") {
-        drainQueuedDonations();
-      }
-    };
-    navigator.serviceWorker.addEventListener("message", onMessage);
-    return () =>
-      navigator.serviceWorker.removeEventListener("message", onMessage);
-  }, [drainQueuedDonations]);
+  // Draining the offline queue lives in the app-level useOfflineQueueSync
+  // hook (_app.tsx) — a single routine for load / reconnect / service-worker
+  // nudges, with the idempotency pre-check, conflict toast, and confirmation
+  // notification.  The cross-tab drain lease keeps the queue exactly-once, so
+  // a duplicate per-form drain would only add nondeterministic feedback.
 
   // The build parameters are kept between the preview step and the confirm
   // step so the transaction is REBUILT fresh at confirm time — the donor
@@ -449,7 +398,7 @@ export default function DonateForm({
    */
   const submitStandardPayment = async (
     tx: Transaction,
-    idempotencyKey?: string,
+    idempotencyKey: string,
   ) => {
     // Transaction.hash() returns a Buffer — hex-encode it so the recovery
     // path polls and persists the required 64-character hexadecimal hash.
@@ -514,6 +463,7 @@ export default function DonateForm({
     // duplicate idempotency key from an earlier retry) must never surface as
     // an error after the on-chain payment already succeeded — the chain is
     // the source of truth.
+    let donationStillProcessing = false;
     await recordDonationMutation.mutateAsync({
       projectId: project.id,
       donorAddress: publicKey,
@@ -523,9 +473,14 @@ export default function DonateForm({
       encrypted: pendingMessageRef.current.encrypted,
       transactionHash: result?.hash ?? expectedTxHash,
       idempotencyKey,
-    }).catch(() => {
+    }).catch((error: unknown) => {
       // Backend recording failure — the donation is already on-chain.
+      donationStillProcessing = isDonationProcessingError(error);
     });
+    if (donationStillProcessing) {
+      setStep("unknown");
+      return;
+    }
 
     trackEvent("donation_confirmed", {
       projectId: project.id,
@@ -548,10 +503,9 @@ export default function DonateForm({
     setError(null);
     try {
       const freshTx = await buildDonationTransaction(pendingParamsRef.current);
-      await submitStandardPayment(
-        freshTx,
-        pendingIdempotencyRef.current ?? undefined,
-      );
+      const idempotencyKey = pendingIdempotencyRef.current;
+      if (!idempotencyKey) throw new Error("Missing donation idempotency key");
+      await submitStandardPayment(freshTx, idempotencyKey);
     } catch (err: unknown) {
       await handleDonationError(err);
     }
@@ -736,7 +690,10 @@ export default function DonateForm({
           setDonorBadge(badgeNames[stats.badge] || null);
         }
 
-        // Still record in backend for feed/analytics
+        // Still record in backend for feed/analytics. Match the standard
+        // path: a 202 means the on-chain payment may already be recorded, so
+        // do not present a completed donation that could be submitted again.
+        let donationStillProcessing = false;
         await recordDonationMutation.mutateAsync({
           projectId: project.id,
           donorAddress: publicKey,
@@ -746,7 +703,13 @@ export default function DonateForm({
           encrypted: isEncrypted,
           transactionHash: result.hash,
           idempotencyKey,
+        }).catch((error: unknown) => {
+          donationStillProcessing = isDonationProcessingError(error);
         });
+        if (donationStillProcessing) {
+          setStep("unknown");
+          return;
+        }
 
         trackEvent("donation_confirmed", {
           projectId: project.id,

@@ -9,7 +9,7 @@
  * - Preset amount buttons + active class
  * - Copy address button (clipboard and fallback)
  * - Freighter connect/disconnect
- * - Submit donation (success, error, minimum validation)
+ * - Submit donation (pending acknowledgement, error, minimum validation)
  * - Custom amount input
  * - Project with description renders
  * - Unverified project badge
@@ -270,7 +270,7 @@ describe("mountDonateOverlay", () => {
     expect(presetBtns.length).toBeGreaterThanOrEqual(4);
 
     const fiveBtn = Array.from(presetBtns).find(
-      (b) => b.getAttribute("data-amount") === "5",
+      (b) => b.getAttribute("data-amount") === "50",
     ) as HTMLButtonElement;
     expect(fiveBtn).not.toBeNull();
     fiveBtn.click();
@@ -278,7 +278,7 @@ describe("mountDonateOverlay", () => {
     const amountInput = document.getElementById(
       "igp-amount-input",
     ) as HTMLInputElement;
-    expect(amountInput.value).toBe("5");
+    expect(amountInput.value).toBe("50");
 
     cleanup();
   });
@@ -689,7 +689,7 @@ describe("mountDonateOverlay", () => {
     cleanup();
   });
 
-  test("shows success message after donation", async () => {
+  test("shows pending request message after acknowledgement", async () => {
     const onDonate = jest.fn().mockResolvedValue(undefined);
     const opts = createOptions({
       project: {
@@ -721,8 +721,11 @@ describe("mountDonateOverlay", () => {
     await jest.runAllTimersAsync();
 
     const statusEl = document.getElementById("igp-donate-status");
-    expect(statusEl!.textContent).toContain("Donation submitted successfully");
-    expect(submitBtn.textContent).toBe("✅ Done");
+    expect(statusEl!.textContent).toContain(
+      "Donation request submitted; awaiting transaction confirmation",
+    );
+    expect(statusEl!.className).toContain("igp-status-pending");
+    expect(submitBtn.textContent).toBe("✅ Request sent");
 
     cleanup();
   });
@@ -748,7 +751,7 @@ describe("mountDonateOverlay", () => {
     // First click a preset to make it active
     const presetBtns = document.querySelectorAll(".igp-preset-btn");
     const fiveBtn = Array.from(presetBtns).find(
-      (b) => b.getAttribute("data-amount") === "5",
+      (b) => b.getAttribute("data-amount") === "50",
     ) as HTMLButtonElement;
     fiveBtn.click();
     expect(fiveBtn.classList.contains("active")).toBe(true);

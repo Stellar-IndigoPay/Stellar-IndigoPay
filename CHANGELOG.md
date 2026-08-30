@@ -2,6 +2,15 @@
 
 ### Features
 
+* **backend:** admin session management endpoints + email/password login with TOTP MFA (closes #1123)
+  - New `backend/src/routes/admin/sessions.js`: `GET /api/admin/sessions` lists active sessions (flagging the caller's), `DELETE /api/admin/sessions/:family` revokes one session family, and `DELETE /api/admin/sessions` revokes every session except the one identified by the refresh cookie
+  - New `admins` table (migration 032) with bcrypt `password_hash`, base32 `mfa_secret`, and `mfa_enabled`; `POST /api/admin/auth/login` authenticates by email + password
+  - `POST /api/admin/auth/mfa/setup` generates a TOTP secret with otpauth URL + QR code; `POST /api/admin/auth/mfa/verify` enables MFA after the first code verifies
+  - MFA logins are two-leg: the password leg returns a short-lived `mfa-challenge` token that is exchanged (with the TOTP code) at the same endpoint, so the password is never re-sent; `adminRequired` rejects `mfa-challenge` tokens outright
+  - Existing `X-Admin-Key` header auth and the env-credential `/api/admin/login` path are unchanged
+  - Session endpoints moved from `admin.js` into the new router; the old `POST /api/admin/sessions/:id/revoke` is replaced by `DELETE /api/admin/sessions/:family`
+  - New tests: 25 admin auth/session tests covering list/revoke acceptance criteria, MFA setup-verify roundtrip, and challenge-token rejection (62 total in `admin.test.js`)
+
 * **monitoring:** synthetic on-chain transaction monitoring + business-level metrics dashboards (closes #1144)
   - Part A: Add `scripts/synthetic-monitor.js` — proactive 5-minute full-path check (Horizon + Soroban RPC + `sendTransaction` + `getTransaction` confirmation) with Prometheus metrics (`synthetic_donation_success`, `synthetic_donation_duration_seconds`, `synthetic_donation_checks_total`, `synthetic_donation_last_timestamp`)
   - Part A: Add `.github/workflows/synthetic-monitor.yml` — scheduled GitHub Actions workflow (every 5 min, explicit `contents: read` + `issues: write` permissions); auto-creates GitHub issue on failure
@@ -255,6 +264,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Added
+- **backend/testing:** add chaos harness (`backend/test/chaos/`) for worker crash-safety and partial-failure recovery — 8 scenarios covering kill-after-claim/lease-reclaim, DB-commit/queue-ack gap with idempotent dedup, queue-store outage with backoff/resume, two recovery paths racing on a stranded job, deliberate idempotency-guard removal regression detection, crash-during-DLQ-replay nested fault, batch lease-expiry cycle (no loss/no dup), and DLQ poison isolation + targeted replay; includes `FaultInjector`, `FakeConsumer`, assertion helpers, CI `chaos` job (10 min bounded), and `docs/chaos-harness.md` (closes #939)
 
 ### Fixed
 - **indigopay-contract:** Reconciled the campaign escrow custody model by funding the escrow job directly from `ProjectContractBalance(project, token)` instead of `project.total_raised`. This prevents escrow creation failures when donations bypass the contract (e.g. direct-to-wallet) and correctly rejects funding with `InsufficientContractBalanceForEscrow` if the contract holds insufficient funds.

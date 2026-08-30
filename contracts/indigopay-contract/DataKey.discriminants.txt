@@ -1,0 +1,76 @@
+# Soroban #[contracttype] union case order for DataKey.
+#
+# Each line is: <generated case index> <variant name>(<payload types>)
+# Unit variants omit the empty parentheses. This is the generated source-order
+# case index, not a Rust enum cast or an integer tag in the serialized ScVal.
+0 AdminSet
+1 AdminThreshold
+2 Project(String)
+3 ProjectIds
+4 ProjectCount
+5 DonorStats(Address)
+6 ImpactNFT(Address, BadgeTier)
+7 DonationCount
+8 AnonymousDonationCount
+9 DonationRecord(U32)
+10 GlobalTotalRaised
+11 GlobalCO2OffsetGrams
+12 HasDonated(String, Address)
+13 Proposal(String)
+14 HasVoted(String, Address)
+15 VoterCredits(Address)
+16 VoterAllocation(String, Address)
+17 DonorProjectTotal(String, Address)
+18 DonorRateLimit(Address, String, Address)
+19 DonationRateLimitMax
+20 DonationRateLimitWindow
+21 ProjectMilestoneNFT(String, Address)
+22 USDCTokenAddress
+23 OracleAddress
+24 VoterList(String)
+25 ProjectIdsAll
+26 SubProjectIds(String)
+27 PendingAdmin
+28 ContractPaused
+29 PendingUpgrade
+30 UpgradeEffectiveAt
+31 VestingSchedule(Address, U32)
+32 DonorVestingCount(Address)
+33 LastExecutedUpgrade
+34 EmergencyWithdrawal(String, Address)
+35 EmergencyWithdrawalTokens(String)
+36 RefundRequest(U32)
+37 RefundCount
+38 RefundForDonation(U32)
+39 DonationCO2Offset(U32)
+40 DonationReceiptNFT(Address, U32)
+41 ProjectContractBalance(String, Address)
+42 RecurringDonation(Address, U32)
+43 DonorRecurringCount(Address)
+44 VoteDelegation(Address)
+45 DelegatedWeight(Address)
+46 NativeTokenAddress
+47 ZkVerificationKey
+48 Nullifier(BytesN<32>)
+49 ZkDonationRecord(U32)
+50 PlatformFeeBps
+51 PlatformTreasury
+52 ChallengeThreshold
+53 DonationChallenge(U32)
+54 StealthDonationContract
+55 VoteCredits(String, Address)
+56 TokenConfig(Address)
+57 TokenList
+58 DonorRateLimitPerToken(Address, String, Address)
+59 ForceRefund(U32)
+60 TokenRateLimitMax(Address)
+61 TokenRateLimitWindow(Address)
+62 PlatformFeeRecipients
+63 EscrowContractAddress
+64 CampaignEscrowMilestones(String)
+65 CampaignEscrowJobId(String)
+66 AnonymousCommitment(U32)
+67 AttestationContract
+68 ReentrancyGuard
+69 SuspendToken(Address)
+70 TtlBumpCursor

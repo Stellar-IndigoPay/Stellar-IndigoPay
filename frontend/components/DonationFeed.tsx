@@ -26,20 +26,19 @@
  *   - A visible "Load more donations" button remains as a non-scroll
  *     fallback for keyboard/AT users.
  */
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { fetchProjectDonations } from "@/lib/api";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { formatXLM, timeAgo, shortenAddress } from "@/utils/format";
 import { explorerUrl, streamProjectPayments } from "@/lib/stellar";
 import type { Donation } from "@/utils/types";
 import { SkeletonList } from "./Skeleton";
 import EmptyState from "./EmptyState";
+import {
+  queryKeys,
+  useProjectDonations,
+  type ProjectDonationsPage,
+} from "@/hooks/queries";
+import { QueryErrorFallback } from "@/components/QueryErrorFallback";
 
 // ── Tunables ──────────────────────────────────────────────────────────────────
 
@@ -78,10 +77,23 @@ export default function DonationFeed({
   refreshKey = 0,
   onNewDonation,
 }: DonationFeedProps) {
-  const [donations, setDonations] = useState<Donation[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const {
+    data,
+    isLoading,
+    isFetching,
+    isError,
+    error,
+    refetch,
+    isFetchingNextPage,
+    fetchNextPage,
+    hasNextPage,
+  } = useProjectDonations(projectId, 10);
+  const donations = useMemo(
+    () => data?.pages.flatMap((page) => page.donations) ?? [],
+    [data],
+  );
+  const nextCursor = data?.pages.at(-1)?.nextCursor ?? null;
   const [newIds, setNewIds] = useState<Set<string>>(new Set());
   const latestIdRef = useRef<string | null>(null);
   // Mirror of `donations` for use inside the (stable) SSE callback so the
@@ -113,19 +125,14 @@ export default function DonationFeed({
     getItemKey: (index) => donations[index]?.id ?? `donation-${index}`,
   });
 
-  // Load initial donation data from the backend API
   useEffect(() => {
-    setLoading(true);
-    pendingScrollResetRef.current = true;
-    fetchProjectDonations(projectId, PAGE_SIZE)
-      .then(({ donations: data, nextCursor: cursor }) => {
-        setDonations(data);
-        setNextCursor(cursor);
-        latestIdRef.current = data[0]?.id ?? null;
-      })
-      .catch(console.error)
-      .finally(() => setLoading(false));
-  }, [projectId, refreshKey]);
+    if (donations.length > 0) latestIdRef.current = donations[0].id;
+  }, [donations]);
+
+  // Keep this prop for existing callers while the cache is now the source of truth.
+  useEffect(() => {
+    if (refreshKey > 0) void refetch();
+  }, [refreshKey, refetch]);
 
   // When a fresh initial page lands (project change / manual refresh), jump
   // back to the newest donation at the top of the feed.
@@ -195,40 +202,30 @@ export default function DonationFeed({
         createdAt: payment.createdAt,
       };
 
-      // Capture the viewport anchor BEFORE the state update so we can re-pin
-      // it after the new donation is prepended. Anchor on the first row that
-      // actually intersects the viewport (overscan rows above it are ignored).
-      const scrollOffset = rowVirtualizer.scrollOffset ?? 0;
-      const firstVisible = rowVirtualizer
-        .getVirtualItems()
-        .find((item) => item.end > scrollOffset);
-      if (firstVisible) {
-        const anchorId = donationsRef.current[firstVisible.index]?.id;
-        if (anchorId) {
-          if (firstVisible.index === 0 && scrollOffset <= PINNED_TO_TOP_OFFSET) {
-            // Pinned at the top: stay pinned so the newest donation slides
-            // into view above instead of being pushed off-screen.
-            anchorRef.current = {
-              donationId: anchorId,
-              offsetFromTop: 0,
-              pinTop: true,
-            };
-          } else {
-            anchorRef.current = {
-              donationId: anchorId,
-              // May be negative when the anchor's top edge is already scrolled
-              // slightly above the viewport — preserve that exact position.
-              offsetFromTop: firstVisible.start - scrollOffset,
-              pinTop: false,
-            };
-          }
-        }
-      }
-
-      setDonations((prev) => {
-        if (prev.some((d) => d.id === newDonation.id)) return prev;
-        return [newDonation, ...prev];
-      });
+      let wasInserted = false;
+      queryClient.setQueryData(
+        queryKeys.projectDonations(projectId, 10),
+        (previous: { pages: ProjectDonationsPage[]; pageParams: unknown[] } | undefined) => {
+          if (!previous) return previous;
+          if (previous.pages.some((page) =>
+            page.donations.some(
+              (donation) =>
+                donation.id === newDonation.id ||
+                donation.transactionHash === newDonation.transactionHash,
+            ),
+          )) return previous;
+          wasInserted = true;
+          return {
+            ...previous,
+            pages: previous.pages.map((page, index) =>
+              index === 0
+                ? { ...page, donations: [newDonation, ...page.donations] }
+                : page,
+            ),
+          };
+        },
+      );
+      if (!wasInserted) return;
 
       setNewIds((prev) => new Set(prev).add(payment.id));
       setTimeout(() => {
@@ -243,12 +240,12 @@ export default function DonationFeed({
 
       latestIdRef.current = payment.id;
     },
-    [projectId, onNewDonation, rowVirtualizer],
+    [projectId, onNewDonation, queryClient],
   );
 
   // Start SSE stream once initial data is loaded
   useEffect(() => {
-    if (loading || !walletAddress) return;
+    if (isLoading || isError || !walletAddress) return;
 
     const cursor = latestIdRef.current || undefined;
     const closeStream = streamProjectPayments(
@@ -260,31 +257,25 @@ export default function DonationFeed({
     return () => {
       closeStream();
     };
-  }, [loading, walletAddress, handleNewPayment]);
+  }, [isLoading, isError, walletAddress, handleNewPayment]);
 
-  // Re-pin the viewport after real-time donations are prepended at the top.
-  useLayoutEffect(() => {
-    const anchor = anchorRef.current;
-    if (!anchor) return;
-    anchorRef.current = null;
+  const handleLoadMore = async () => {
+    if (!nextCursor || isFetchingNextPage || !hasNextPage) return;
+    await fetchNextPage();
+  };
 
-    const newIndex = donations.findIndex((d) => d.id === anchor.donationId);
-    if (newIndex === -1) return;
+  if (isLoading)
+    return <DonationFeedSkeleton />;
 
-    if (anchor.pinTop) {
-      rowVirtualizer.scrollToOffset(0);
-      return;
-    }
-
-    const positioned = rowVirtualizer.getOffsetForIndex(newIndex, "start");
-    if (!positioned) return;
-    const [itemStartOffset] = positioned;
-    rowVirtualizer.scrollToOffset(
-      Math.max(0, itemStartOffset - anchor.offsetFromTop),
+  if (isError && donations.length === 0)
+    return (
+      <QueryErrorFallback
+        error={error}
+        onRetry={() => void refetch()}
+        isRetrying={isFetching}
+        title="Couldn&apos;t load recent donations"
+      />
     );
-  }, [donations, rowVirtualizer]);
-
-  if (loading) return <DonationFeedSkeleton />;
 
   if (donations.length === 0)
     return (
@@ -438,15 +429,14 @@ export default function DonationFeed({
             );
           })}
         </div>
-      </div>
-
-      {nextCursor && (
+      ))}
+      {nextCursor && hasNextPage && (
         <button
-          onClick={loadMore}
-          disabled={loadingMore}
+          onClick={handleLoadMore}
+          disabled={isFetchingNextPage}
           className="w-full mt-4 px-4 py-2 bg-[rgba(99,102,241,0.08)] dark:bg-[rgba(129,140,248,0.10)] hover:bg-[rgba(99,102,241,0.15)] dark:hover:bg-[rgba(129,140,248,0.18)] text-[#4F46E5] dark:text-[#818CF8] rounded-lg transition-colors font-body text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          {loadingMore ? "Loading..." : "Load more donations"}
+          {isFetchingNextPage ? "Loading..." : "Load more donations"}
         </button>
       )}
 

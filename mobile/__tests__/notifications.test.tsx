@@ -31,22 +31,27 @@ describe("Notification Utilities", () => {
   });
 
   describe("parseDeepLinkUrl", () => {
+    // #906: parseDeepLinkUrl now delegates to the shared, validated
+    // lib/linkRouter.ts pipeline instead of parsing ad hoc with
+    // expo-linking's `Linking.parse` — see
+    // lib/__tests__/linkRouterConvergence.test.ts for the spy-based proof
+    // that this call site actually goes through the router.
     it("parses indigopay://project/123 -> /project/123", () => {
-      (Linking.parse as jest.Mock).mockReturnValueOnce({ path: "project/123" });
       const result = parseDeepLinkUrl("indigopay://project/123");
       expect(result).toBe("/project/123");
-      expect(Linking.parse).toHaveBeenCalledWith("indigopay://project/123");
     });
 
     it("parses indigopay://donate/456 -> /donate/456", () => {
-      (Linking.parse as jest.Mock).mockReturnValueOnce({ path: "donate/456" });
       const result = parseDeepLinkUrl("indigopay://donate/456");
       expect(result).toBe("/donate/456");
     });
 
     it("returns null for invalid/unknown paths", () => {
-      (Linking.parse as jest.Mock).mockReturnValueOnce({ path: "unknown/segment" });
       expect(parseDeepLinkUrl("indigopay://unknown/segment")).toBeNull();
+    });
+
+    it("returns null for a disallowed scheme", () => {
+      expect(parseDeepLinkUrl("javascript://project/123")).toBeNull();
     });
   });
 

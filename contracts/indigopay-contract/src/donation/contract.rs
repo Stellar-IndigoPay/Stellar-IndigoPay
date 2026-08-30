@@ -11,6 +11,7 @@ use crate::donation::{
     },
     types::{DonationError, StealthDonation},
 };
+use crate::ContractError;
 
 #[contract]
 pub struct DonationContract;
@@ -95,7 +96,9 @@ impl DonationContract {
         let donation_ids = get_project_donations(&env, &project_wallet);
         let mut donations = Vec::new(&env);
         for i in 0..donation_ids.len() {
-            let id = donation_ids.get(i).unwrap();
+            let id = donation_ids
+                .get(i)
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::StorageMissing));
             if let Some(donation) = get_stealth_donation(&env, id) {
                 donations.push_back(donation);
             }
@@ -167,6 +170,7 @@ impl DonationContract {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     use soroban_sdk::{
