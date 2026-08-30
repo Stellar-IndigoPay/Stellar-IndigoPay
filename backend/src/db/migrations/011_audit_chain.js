@@ -17,9 +17,7 @@ module.exports = {
   name: "011_audit_chain",
 
   async up(client) {
-    // digest()/sha256() come from pgcrypto.
     await client.query("CREATE EXTENSION IF NOT EXISTS pgcrypto");
-
     await client.query(
       "ALTER TABLE admin_audit_log ADD COLUMN IF NOT EXISTS prev_hash TEXT",
     );

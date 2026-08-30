@@ -10,6 +10,12 @@
       "ios": {
         "simulator": true
       }
+    },
+    "staging": {
+      "channel": "staging"
+    },
+    "production": {
+      "channel": "production"
     }
   }
 }

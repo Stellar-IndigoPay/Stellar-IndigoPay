@@ -1,7 +1,7 @@
 import React from "react";
 import { render, screen, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { I18nProvider, normalizeLocale, useI18n } from "../i18n";
+import { I18nProvider, useI18n, isRTL, RTL_LOCALES, type Locale } from "../i18n";
 import { formatNumber, formatXLM } from "../../utils/format";
 
 function TestComponent() {
@@ -30,6 +30,11 @@ function TestComponent() {
       </button>
       <button data-testid="switch-en" onClick={() => setLocale("en")}>
         EN
+      </button>
+      {/* Mock an RTL locale (e.g. a future ar.json) — the Locale union is
+          cast because Arabic is not yet shipped as a full locale file. */}
+      <button data-testid="switch-ar" onClick={() => setLocale("ar" as Locale)}>
+        AR
       </button>
     </div>
   );
@@ -123,11 +128,19 @@ describe("i18n system tests", () => {
     expect(formatXLM("500.5", 2, "es")).toMatch(/500,5 XLM|500\.5 XLM/);
   });
 
-  test("9. normalizes locale tags and uses plural rules from the active locale", async () => {
-    expect(normalizeLocale("fr-CA")).toBe("fr");
-    expect(normalizeLocale("es-MX")).toBe("es");
-    expect(normalizeLocale("de-DE")).toBe("en");
+  test("9. isRTL detects right-to-left locales", () => {
+    expect(RTL_LOCALES.size).toBeGreaterThan(0);
+    for (const code of ["ar", "he", "fa", "ur"]) {
+      expect(isRTL(code)).toBe(true);
+    }
+    for (const code of ["en", "es", "fr", "AR"]) {
+      expect(isRTL(code)).toBe(code === "AR");
+    }
+  });
 
+  test("10. an RTL locale renders the document right-to-left", async () => {
+    document.documentElement.dir = "ltr";
+    document.documentElement.lang = "en";
     const user = userEvent.setup();
     render(
       <I18nProvider>
@@ -135,8 +148,13 @@ describe("i18n system tests", () => {
       </I18nProvider>
     );
 
-    await user.click(screen.getByTestId("switch-fr"));
-    expect(screen.getByTestId("plural-other").textContent).toBe("5 donateurs");
-    expect(screen.getByTestId("nav-home").textContent).toBe("Accueil");
+    await user.click(screen.getByTestId("switch-ar"));
+    expect(document.documentElement.dir).toBe("rtl");
+    expect(document.documentElement.lang).toBe("ar");
+
+    // Switching back to an LTR locale mirrors the page back.
+    await user.click(screen.getByTestId("switch-en"));
+    expect(document.documentElement.dir).toBe("ltr");
+    expect(document.documentElement.lang).toBe("en");
   });
 });

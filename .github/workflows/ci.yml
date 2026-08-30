@@ -15,26 +15,57 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Start Timer
+        working-directory: .
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
+      - uses: ./.github/actions/setup-node-cached
         with:
           node-version: "22"
-          cache: "npm"
-          cache-dependency-path: backend/package-lock.json
-      - run: npm ci
+          working-directory: backend
       - run: npm run lint
       - run: npm run migration:lint
       - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7
         with:
-          context: ./backend
-          file: ./backend/Dockerfile
-          target: test
+          context: .
+          file: ./backend/Dockerfile.test
           load: true
           tags: indigopay-backend-test:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - run: docker compose -f docker-compose.test.yml up --abort-on-container-exit --exit-code-from backend
         working-directory: .
+      - name: Budget Check
+        if: always()
+        uses: ./.github/actions/budget-check
+        with:
+          start-time: ${{ env.START_TIME }}
+          max-seconds: "900"
+
+  mobile:
+    name: Mobile (jest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: mobile/package-lock.json
+      # --legacy-peer-deps tolerates the pre-existing Expo/React Navigation
+      # peer conflicts (@react-navigation/native-stack@7 needs native@7 while
+      # expo-router pins native@6; react-native-screens@4.25 needs
+      # react-native>=0.82 against the pinned react-native@0.74.1).
+      - run: npm ci --legacy-peer-deps
+      - run: npm test -- --ci --forceExit
 
   helm:
     name: Helm Chart Validation
@@ -53,6 +84,32 @@ jobs:
         # helm template validates Go template syntax and value rendering; no
         # cluster access is required, unlike kubectl apply --dry-run (which
         # needs a running K8s API server even with --validate=false).
+
+  monitoring-and-gitops-lint:
+    name: Alert Rules, Runbooks, and GitOps Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v3
+        with:
+          version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - name: Ensure npm uses POSIX shell on Linux
+        run: |
+          npm config delete script-shell || true
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Verify generated runbook index is committed
+        run: |
+          node scripts/generate-runbook-index.js
+          git diff --exit-code -- docs/runbooks/README.md
+      - name: Validate Alert Rule Linkages and Runbooks
+        run: node scripts/validate-alert-rules.js
+      - name: Validate GitOps and Helm Consistency
+        run: node scripts/validate-gitops.js
 
   gitleaks:
     name: Secret scanning
@@ -92,8 +149,38 @@ jobs:
       - name: Validate OpenAPI spec with Spectral (built-in OAS rules)
         run: npx @stoplight/spectral-cli@6.14.3 lint docs/api/openapi.yaml --ruleset .spectral.yaml
 
-      - name: Validate project-specific conventions (429, descriptions, summaries)
+      - name: Validate spec conventions + detect OpenAPI route drift
         run: node scripts/validate-openapi.js
+
+  chaos:
+    name: Backend Chaos Harness (worker crash-safety)
+    runs-on: ubuntu-latest
+    # Bounded at 10 minutes — all scenarios use testcontainers and
+    # deterministic fault points rather than sleeps, so this is generous.
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      # CHAOS_TEST=1 activates the FaultInjector and the harness tests.
+      # Never set this in any non-test job or in production.
+      - name: Run chaos harness
+        run: |
+          CHAOS_TEST=1 npx jest \
+            --testPathPatterns="test/chaos/workerChaos" \
+            --forceExit \
+            --ci \
+            --verbose
+        env:
+          CHAOS_TEST: "1"
+          NODE_ENV: test
 
   zap_scan:
     name: DAST Security Scan (OWASP ZAP)

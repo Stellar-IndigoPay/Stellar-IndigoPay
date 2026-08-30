@@ -28,6 +28,9 @@ const PgBoss = require("pg-boss");
 const pool = require("../db/pool");
 const logger = require("../logger");
 const { metrics } = require("./metrics");
+const { createDrainController } = require("./workerLifecycle");
+const { withSpan } = require("./tracing");
+const { ConsistentHashRing } = require("./consistentHash");
 const {
   computeEventId,
   sign,
@@ -38,8 +41,78 @@ const QUEUE = "webhook-deliveries";
 const RETRY_DELAYS_SECONDS = [30, 120, 600, 1800, 7200, 21600]; // 6 attempts
 const TIMEOUT_MS = 10_000;
 const USER_AGENT = "Stellar-IndigoPay-Webhook/1.0";
+const DRAIN_TIMEOUT_MS = 15_000;
+
+// ── Consistent-hash sharding ──────────────────────────────────────────────
+// Pin every delivery for a given receiver (endpoint) to a single worker so
+// that, when the backend scales to multiple instances, the same endpoint's
+// deliveries are never processed concurrently (which would otherwise risk
+// duplicate or out-of-order delivery). The ring is keyed by the project id
+// (one project maps to one webhook endpoint) and the resulting node name is
+// used as pg-boss's `singletonKey`, which serialises jobs sharing that key.
+const WORKER_COUNT = Number.parseInt(
+  process.env.WEBHOOK_WORKER_COUNT || "2",
+  10,
+);
+const WORKER_NODES = Array.from(
+  { length: WORKER_COUNT },
+  (_, i) => `webhook-worker-${i}`,
+);
+const hashRing = new ConsistentHashRing(WORKER_NODES);
+
+/**
+ * Return the stable worker node responsible for a receiver (endpoint).
+ * Falls back to the first worker when the ring is empty (shouldn't happen).
+ * @param {string} endpointKey - stable identifier for the endpoint (project id).
+ * @returns {string} worker node name
+ */
+function endpointWorkerKey(endpointKey) {
+  return hashRing.getNode(endpointKey) || WORKER_NODES[0];
+}
+
+// ── Jittered exponential backoff ──────────────────────────────────────────
+// delay = min(base * 2^attempt, maxDelay) * (0.5 + random() * 0.5) (full
+// jitter). Spreading retries across the backoff window avoids thundering
+// herds when many donors hit the same recovering receiver simultaneously.
+const BACKOFF_BASE_SECONDS = 30;
+const BACKOFF_MAX_SECONDS = 21600; // 6h
+const MAX_ATTEMPTS = RETRY_DELAYS_SECONDS.length; // 6 attempts
+const ENDPOINT_RETRY_BUDGET = 6; // max attempts per endpoint per window
+const ENDPOINT_RETRY_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * Compute a jittered backoff delay (seconds) for the given attempt index.
+ * @param {number} attempt - 0-based attempt index.
+ * @returns {number} delay in seconds
+ */
+function computeBackoffDelay(attempt) {
+  const base = Math.min(
+    BACKOFF_BASE_SECONDS * Math.pow(2, attempt),
+    BACKOFF_MAX_SECONDS,
+  );
+  return base * (0.5 + Math.random() * 0.5);
+}
+
+/**
+ * Check whether an endpoint has exhausted its per-window retry budget.
+ * @param {string} projectId - project owning the endpoint.
+ * @returns {Promise<boolean>} true if the budget is exceeded.
+ */
+async function isEndpointBudgetExceeded(projectId) {
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS cnt
+       FROM webhook_deliveries
+      WHERE project_id = $1
+        AND last_attempt_at >= NOW() - ($2 * interval '1 millisecond')`,
+    [projectId, ENDPOINT_RETRY_WINDOW_MS],
+  );
+  return (rows[0] && rows[0].cnt) >= ENDPOINT_RETRY_BUDGET;
+}
 
 let boss = null;
+const drain = createDrainController("webhook_dispatcher", {
+  gracePeriodMs: DRAIN_TIMEOUT_MS,
+});
 
 /**
  * Start the worker. Idempotent — safe to call more than once.
@@ -63,22 +136,24 @@ async function start() {
   await boss.work(
     QUEUE,
     {
-      teamSize: 2,
+      teamSize: WORKER_COUNT,
       teamConcurrency: 1,
       retryLimit: RETRY_DELAYS_SECONDS.length,
+      retryBackoff: true,
     },
-    async ([job]) => {
-      const { deliveryId } = job.data || {};
-      if (!deliveryId) {
-        // Defensive: malformed job. Don't retry.
-        logger.error(
-          { event: "webhook_delivery_malformed", jobId: job.id },
-          "missing deliveryId",
-        );
-        return;
-      }
-      await processDelivery(deliveryId);
-    },
+    async ([job]) =>
+      drain.trackJob(async () => {
+        const { deliveryId } = job.data || {};
+        if (!deliveryId) {
+          // Defensive: malformed job. Don't retry.
+          logger.error(
+            { event: "webhook_delivery_malformed", jobId: job.id },
+            "missing deliveryId",
+          );
+          return;
+        }
+        await processDelivery(deliveryId);
+      }),
   );
 }
 
@@ -152,7 +227,11 @@ async function enqueueWebhookDelivery({
   // (see processDelivery) so the worker doesn't auto-retry on throw —
   // instead, on failure we reschedule a new job with `startAfter` set to
   // the appropriate backoff.
-  await boss.send(QUEUE, { deliveryId, secret }, { retryLimit: 0 });
+  await boss.send(
+    QUEUE,
+    { deliveryId, secret },
+    { retryLimit: 0, singletonKey: endpointWorkerKey(projectId) },
+  );
 
   if (!wasInserted) {
     logger.info(
@@ -168,60 +247,61 @@ async function enqueueWebhookDelivery({
  * Exposed for the in-memory path used when pg-boss isn't started.
  */
 async function processDelivery(deliveryId, inMemoryOverrides) {
-  const { rows } = await pool.query(
-    `SELECT d.id, d.project_id, d.event_id, d.event_type, d.payload, d.attempts,
+  return withSpan("webhook.processDelivery", async () => {
+    const { rows } = await pool.query(
+      `SELECT d.id, d.project_id, d.event_id, d.event_type, d.payload, d.attempts,
             p.webhook_url, p.webhook_secret
        FROM webhook_deliveries d
        JOIN projects p ON p.id = d.project_id
       WHERE d.id = $1`,
-    [deliveryId],
-  );
-  const row = rows[0];
-  if (!row) {
-    logger.warn(
-      { event: "webhook_delivery_missing", deliveryId },
-      "delivery row vanished",
+      [deliveryId],
     );
-    return;
-  }
-  if (row.status === "delivered") {
-    return; // idempotent skip
-  }
+    const row = rows[0];
+    if (!row) {
+      logger.warn(
+        { event: "webhook_delivery_missing", deliveryId },
+        "delivery row vanished",
+      );
+      return;
+    }
+    if (row.status === "delivered") {
+      return; // idempotent skip
+    }
 
-  const secret =
+    const secret =
     (inMemoryOverrides && inMemoryOverrides.secret) || row.webhook_secret;
-  const url = row.webhook_url;
-  if (!url || !secret) {
-    await markTerminal(
+    const url = row.webhook_url;
+    if (!url || !secret) {
+      await markTerminal(
+        deliveryId,
+        "failed",
+        "missing webhook_url or webhook_secret",
+      );
+      metrics.webhookDeliveriesTotal.inc({ outcome: "skipped" });
+      return;
+    }
+
+    const body = JSON.stringify({
+      id: row.event_id,
+      type: row.event_type,
+      ...row.payload,
+    });
+    const timestamp = Math.floor(Date.now() / 1000);
+    const signature = sign(body, secret, timestamp);
+
+    metrics.webhookAttemptsTotal.inc({ event_type: row.event_type });
+    const result = await postSigned(url, body, {
+      eventId: row.event_id,
+      eventType: row.event_type,
       deliveryId,
-      "failed",
-      "missing webhook_url or webhook_secret",
-    );
-    metrics.webhookDeliveriesTotal.inc({ outcome: "skipped" });
-    return;
-  }
+      timestamp,
+      signature,
+      attempt: row.attempts + 1,
+    });
 
-  const body = JSON.stringify({
-    id: row.event_id,
-    type: row.event_type,
-    ...row.payload,
-  });
-  const timestamp = Math.floor(Date.now() / 1000);
-  const signature = sign(body, secret, timestamp);
-
-  metrics.webhookAttemptsTotal.inc({ event_type: row.event_type });
-  const result = await postSigned(url, body, {
-    eventId: row.event_id,
-    eventType: row.event_type,
-    deliveryId,
-    timestamp,
-    signature,
-    attempt: row.attempts + 1,
-  });
-
-  if (result.ok) {
-    await pool.query(
-      `UPDATE webhook_deliveries
+    if (result.ok) {
+      await pool.query(
+        `UPDATE webhook_deliveries
           SET status='delivered',
               attempts = attempts + 1,
               last_attempt_at = NOW(),
@@ -229,28 +309,35 @@ async function processDelivery(deliveryId, inMemoryOverrides) {
               next_attempt_at = NULL,
               updated_at = NOW()
         WHERE id = $1`,
-      [deliveryId],
-    );
-    metrics.webhookDeliveriesTotal.inc({ outcome: "delivered" });
-    logger.info(
-      {
-        event: "webhook_delivered",
-        deliveryId,
-        projectId: row.project_id,
-        status: result.statusCode,
-      },
-      "Webhook delivered",
-    );
-    return;
-  }
+        [deliveryId],
+      );
+      metrics.webhookDeliveriesTotal.inc({ outcome: "delivered" });
+      logger.info(
+        {
+          event: "webhook_delivered",
+          deliveryId,
+          projectId: row.project_id,
+          status: result.statusCode,
+        },
+        "Webhook delivered",
+      );
+      return;
+    }
 
-  const nextAttempt = row.attempts + 1;
-  const willRetry = nextAttempt < RETRY_DELAYS_SECONDS.length;
-  const nextDelay = willRetry ? RETRY_DELAYS_SECONDS[nextAttempt] : 0;
-  const nextStatus = willRetry ? "pending" : "dlq";
+    const nextAttempt = row.attempts + 1;
+    // Per-endpoint retry budget: if the endpoint has already consumed its
+    // window budget, DLQ instead of retrying so a single failing endpoint
+    // cannot consume all retry capacity.
+    const endpointBudgetExceeded = await isEndpointBudgetExceeded(
+      row.project_id,
+    );
+    const willRetry =
+      nextAttempt < MAX_ATTEMPTS && !endpointBudgetExceeded;
+    const nextDelay = willRetry ? computeBackoffDelay(nextAttempt) : 0;
+    const nextStatus = willRetry ? "pending" : "dlq";
 
-  await pool.query(
-    `UPDATE webhook_deliveries
+    await pool.query(
+      `UPDATE webhook_deliveries
         SET attempts = attempts + 1,
             last_attempt_at = NOW(),
             last_error = $2,
@@ -258,69 +345,73 @@ async function processDelivery(deliveryId, inMemoryOverrides) {
             next_attempt_at = $4,
             updated_at = NOW()
       WHERE id = $1`,
-    [
-      deliveryId,
-      result.error,
-      nextStatus,
-      willRetry ? new Date(Date.now() + nextDelay * 1000) : null,
-    ],
-  );
-
-  if (!willRetry) {
-    await pool.query(
-      `INSERT INTO webhook_dlq (id, delivery_id, project_id, event_id, payload, failure_reason, attempts)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
       [
-        crypto.randomUUID(),
         deliveryId,
-        row.project_id,
-        row.event_id,
-        JSON.stringify(row.payload),
         result.error,
-        nextAttempt,
+        nextStatus,
+        willRetry ? new Date(Date.now() + nextDelay * 1000) : null,
       ],
     );
-    metrics.webhookDeliveriesTotal.inc({ outcome: "dlq" });
-  } else {
-    metrics.webhookDeliveriesTotal.inc({ outcome: "retry" });
-    // Reschedule the next attempt with `startAfter` so the delay is
-    // honored even though pg-boss itself isn't doing retries. Without
-    // this, the delivery row would sit at status='pending' forever and
-    // the advertised 6-attempt backoff would never actually fire.
-    if (boss) {
-      try {
-        await boss.send(
-          QUEUE,
-          { deliveryId, secret: inMemoryOverrides ? secret : undefined },
-          {
-            retryLimit: 0,
-            startAfter: new Date(Date.now() + nextDelay * 1000),
-          },
-        );
-      } catch (err) {
-        logger.error(
-          { event: "webhook_reschedule_error", deliveryId, err: err.message },
-          "failed to reschedule retry — row left in pending state",
+
+    if (!willRetry) {
+      await pool.query(
+        `INSERT INTO webhook_dlq (id, delivery_id, project_id, event_id, payload, failure_reason, attempts)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+        [
+          crypto.randomUUID(),
+          deliveryId,
+          row.project_id,
+          row.event_id,
+          JSON.stringify(row.payload),
+          result.error,
+          nextAttempt,
+        ],
+      );
+      metrics.webhookDeliveriesTotal.inc({ outcome: "dlq" });
+    } else {
+      metrics.webhookDeliveriesTotal.inc({ outcome: "retry" });
+      metrics.webhookRetryCount.inc({ event_type: row.event_type });
+      metrics.webhookJitterSeconds.observe(nextDelay);
+      // Reschedule the next attempt with `startAfter` so the delay is
+      // honored even though pg-boss itself isn't doing retries. Without
+      // this, the delivery row would sit at status='pending' forever and
+      // the advertised 6-attempt backoff would never actually fire.
+      if (boss) {
+        try {
+          await boss.send(
+            QUEUE,
+            { deliveryId, secret: inMemoryOverrides ? secret : undefined },
+            {
+              retryLimit: 0,
+              singletonKey: endpointWorkerKey(row.project_id),
+              startAfter: new Date(Date.now() + nextDelay * 1000),
+            },
+          );
+        } catch (err) {
+          logger.error(
+            { event: "webhook_reschedule_error", deliveryId, err: err.message },
+            "failed to reschedule retry — row left in pending state",
+          );
+        }
+      } else {
+        logger.warn(
+          { event: "webhook_retry_unavailable", deliveryId },
+          "pg-boss not started; cannot reschedule retry, row left in pending state",
         );
       }
-    } else {
-      logger.warn(
-        { event: "webhook_retry_unavailable", deliveryId },
-        "pg-boss not started; cannot reschedule retry, row left in pending state",
-      );
     }
-  }
-  logger.warn(
-    {
-      event: "webhook_delivery_failed",
-      deliveryId,
-      attempt: nextAttempt,
-      willRetry,
-      err: result.error,
-      statusCode: result.statusCode,
-    },
-    "Webhook delivery failed",
-  );
+    logger.warn(
+      {
+        event: "webhook_delivery_failed",
+        deliveryId,
+        attempt: nextAttempt,
+        willRetry,
+        err: result.error,
+        statusCode: result.statusCode,
+      },
+      "Webhook delivery failed",
+    );
+  });
 }
 
 /**
@@ -417,7 +508,12 @@ function postSigned(urlString, body, headers) {
 
 async function stop() {
   if (!boss) return;
-  await boss.stop({ graceful: true, timeout: 15_000 });
+  // pg-boss's own `graceful: true` stop already stops claiming new jobs
+  // and waits (up to `timeout`) for active handlers to finish; we mark
+  // the drain state around it so the `worker_draining` metric and
+  // `getWorkerDrainStates()` reflect reality for the same window.
+  const bossStop = boss.stop({ graceful: true, timeout: DRAIN_TIMEOUT_MS });
+  await Promise.all([bossStop, drain.beginDrain()]);
   boss = null;
 }
 
@@ -433,4 +529,12 @@ module.exports = {
   sign,
   computeEventId,
   DEFAULT_REPLAY_WINDOW_SECONDS,
+  // Test-only: introspect drain state without a real SIGTERM.
+  _drain: drain,
+  // Test-only: backoff / sharding helpers.
+  computeBackoffDelay,
+  endpointWorkerKey,
+  isEndpointBudgetExceeded,
+  MAX_ATTEMPTS,
+  ENDPOINT_RETRY_BUDGET,
 };

@@ -44,9 +44,8 @@ module.exports = {
         ADD COLUMN IF NOT EXISTS provider_preference VARCHAR(20) DEFAULT 'auto'
     `);
 
-    // Add CHECK constraint on provider_preference (safe; existing NULLs pass).
-    // PostgreSQL has no ADD CONSTRAINT IF NOT EXISTS, so drop-then-add like
-    // the other migrations (existing NULLs and valid values pass the CHECK).
+    // PostgreSQL has no ADD CONSTRAINT IF NOT EXISTS. Drop and recreate the
+    // idempotent check so retries and fresh installs behave identically.
     await client.query(`
       ALTER TABLE push_notifications
         DROP CONSTRAINT IF EXISTS push_notifications_provider_pref_check

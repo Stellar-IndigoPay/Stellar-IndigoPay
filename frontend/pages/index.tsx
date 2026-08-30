@@ -2,7 +2,6 @@
  * pages/index.tsx — IndigoPay landing page
  */
 import Link from "next/link";
-import type { GetServerSideProps } from "next";
 import { useState, useRef, useEffect } from "react";
 import PageMeta from "@/components/PageMeta";
 import WalletConnect from "@/components/WalletConnect";
@@ -693,11 +692,3 @@ function ConnectWalletDialog({
   );
 }
 
-// Forces per-request SSR. Without a data-fetching method, Next.js applies
-// Automatic Static Optimization and pre-renders this page with no request
-// context, so `_document.tsx` never sees the CSP nonce set by middleware.ts
-// and every <script> tag gets rendered without one — the browser then
-// blocks all of them under the nonce-based CSP and the page never hydrates.
-export const getServerSideProps: GetServerSideProps = async () => {
-  return { props: {} };
-};

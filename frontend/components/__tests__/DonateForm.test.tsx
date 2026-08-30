@@ -11,17 +11,47 @@ import DonateForm from "../DonateForm";
 import type { ClimateProject } from "@/utils/types";
 
 jest.mock("@/lib/stellar", () => ({
-  buildDonationTransaction: jest.fn().mockResolvedValue({ toXDR: () => "mock-xdr" }),
+  buildDonationTransaction: jest.fn().mockResolvedValue({
+    toXDR: () => "mock-xdr",
+    hash: () => ({ toString: () => "abc123hash" }),
+    operations: [],
+    sequence: "123",
+  }),
   buildContractDonationTransaction: jest.fn().mockResolvedValue({ toXDR: () => "mock-xdr" }),
   buildCreateRecurringTransaction: jest.fn().mockResolvedValue({ toXDR: () => "mock-xdr" }),
   buildApproveTransaction: jest.fn().mockResolvedValue({ toXDR: () => "mock-xdr" }),
   submitTransaction: jest.fn().mockResolvedValue({ hash: "abc123hash" }),
   explorerUrl: jest.fn().mockReturnValue("https://stellar.expert/explorer/public/tx/abc123hash"),
-  getXLMBalance: jest.fn().mockResolvedValue("1000.0000000"),
+  getAccountSummary: jest.fn().mockResolvedValue({
+    balance: "1000.0000000",
+    subentries: 0,
+    numSponsoring: 0,
+    numSponsored: 0,
+  }),
+  getBaseReserveXLM: jest.fn().mockResolvedValue(2),
   getAssetBalance: jest.fn().mockResolvedValue("500.00"),
   getDonorStats: jest.fn().mockResolvedValue(null),
   hashMessage: jest.fn().mockReturnValue(12345),
   CONTRACT_ID: null,
+  NETWORK: "testnet",
+  shortenAddressForPreview: (a: string) => a,
+  estimateFeeStroops: () => 100,
+  calculateMaxDonation: () => "997.9999899",
+  calculateMinimumReserveXLM: (sub: number, sponsoring: number, base: number) =>
+    base * (2 + sub + sponsoring),
+  BASE_RESERVE_XLM: 2,
+  STROOPS_PER_XLM: 10_000_000,
+  formatFeeXLM: () => "0.0000100 XLM",
+  simulateDonation: jest.fn().mockResolvedValue({
+    destination: "GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRST",
+    amount: "10",
+    currency: "XLM",
+    feeStroops: 100,
+    feeXLM: "0.0000100",
+    totalDebited: "10.0000100",
+    sequence: "123",
+  }),
+  pollTransaction: jest.fn(),
 }));
 
 jest.mock("@/lib/wallet", () => ({
@@ -30,6 +60,7 @@ jest.mock("@/lib/wallet", () => ({
 
 jest.mock("@/lib/api", () => ({
   recordDonation: jest.fn().mockResolvedValue({}),
+  checkIdempotency: jest.fn().mockResolvedValue(false),
 }));
 
 jest.mock("@/hooks/queries", () => ({
@@ -43,6 +74,7 @@ jest.mock("@/hooks/useOnlineStatus", () => jest.fn().mockReturnValue(true));
 jest.mock("@/lib/offlineDonationQueue", () => ({
   queueDonation: jest.fn().mockResolvedValue(null),
   syncQueuedDonations: jest.fn().mockResolvedValue(undefined),
+  getQueuedCount: jest.fn().mockResolvedValue(0),
 }));
 
 jest.mock("@/lib/analytics", () => ({
