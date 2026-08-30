@@ -1602,35 +1602,6 @@ paths:
           $ref: "#/components/responses/NotFound"
         "429":
           $ref: "#/components/responses/RateLimitExceeded"
-  /api/donations/project/{projectId}/messages:
-    get:
-      tags: [Donations]
-      summary: List donation messages for a project
-      operationId: listDonationMessages
-      description: Retrieve donation messages left by donors for a specific project.
-      parameters:
-        - $ref: "#/components/parameters/ProjectIdParam"
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 50
-            default: 10
-      responses:
-        "200":
-          description: Donation messages.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  success:
-                    type: boolean
-                  data:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/Donation"
   /api/donations/project/{projectId}:
     get:
       tags: [Donations]
