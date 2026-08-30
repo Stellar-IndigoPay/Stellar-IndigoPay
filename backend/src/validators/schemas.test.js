@@ -268,3 +268,73 @@ describe("projectSubmissionSchema tags", () => {
     expect(result.success).toBe(false);
   });
 });
+
+describe("sanitization", () => {
+  const validPayload = {
+    name: "Amazon Reforestation",
+    category: "Reforestation",
+    description: "Restoring native tree cover across degraded land.",
+    location: "Brazil",
+    goalXLM: "10000",
+    walletAddress: VALID_STELLAR,
+    organization: {
+      name: "Rainforest Org",
+      contactEmail: "contact@rainforest.org",
+    },
+    co2Methodology: {
+      name: "Verra VCS",
+      annualTonnesCO2: "1200",
+    },
+  };
+
+  test("strips HTML tags from text fields", () => {
+    const result = projectSubmissionSchema.safeParse({
+      ...validPayload,
+      name: "Amazon <script>alert(1)</script>Reforestation",
+      description: "Restoring <b>native</b> tree cover.",
+    });
+    expect(result.success).toBe(true);
+    expect(result.data.name).toBe("Amazon Reforestation");
+    expect(result.data.description).toBe("Restoring native tree cover.");
+  });
+
+  test("strips bidirectional control characters", () => {
+    const result = projectSubmissionSchema.safeParse({
+      ...validPayload,
+      name: "Amazon\u202EReforestation",
+    });
+    expect(result.success).toBe(true);
+    expect(result.data.name).toBe("AmazonReforestation");
+  });
+
+  test("normalizes Unicode to NFC", () => {
+    // "é" as e + combining acute accent (NFD) → NFC "é"
+    const result = projectSubmissionSchema.safeParse({
+      ...validPayload,
+      name: "Cafe\u0301 Reforestation",
+    });
+    expect(result.success).toBe(true);
+    expect(result.data.name).toBe("Café Reforestation");
+  });
+
+  test("truncates at the schema-defined max length", () => {
+    const result = projectSubmissionSchema.safeParse({
+      ...validPayload,
+      name: "x".repeat(200),
+    });
+    expect(result.success).toBe(true);
+    expect(result.data.name.length).toBe(120);
+  });
+
+  test("sanitizes donation message", () => {
+    const result = donationSchema.safeParse({
+      projectId: VALID_UUID,
+      donorAddress: VALID_STELLAR,
+      transactionHash: VALID_TX_HASH,
+      amountXLM: "10",
+      message: "Thanks <script>alert(1)</script>!",
+    });
+    expect(result.success).toBe(true);
+    expect(result.data.message).toBe("Thanks !");
+  });
+});

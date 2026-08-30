@@ -61,6 +61,12 @@ function resetModule() {
   // Clear env so each test can set its own
   delete process.env.REDIS_URLS;
   delete process.env.REDIS_URL;
+  delete process.env.REDIS_SENTINELS;
+  delete process.env.REDIS_SENTINEL_MASTER_NAME;
+  delete process.env.REDIS_SENTINEL_PASSWORD;
+  delete process.env.REDIS_PASSWORD;
+  delete process.env.REDIS_PASSWORD_PREVIOUS;
+  delete process.env.CLIENTSIDE_REDIS_PASSWORD_PREVIOUS;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -232,5 +238,237 @@ describe("Sharded Redis service", () => {
 
     const client = redisService.getClient("any-key");
     expect(client).toBe(mockRedisInstances[0]);
+  });
+
+  // ── Dual-version AUTH fallback (WS3 / #1100) ───────────────────────────
+  test("WRONGPASS error triggers fallback to the previous password", () => {
+    process.env.REDIS_URL = "redis://host:6379";
+    process.env.REDIS_PASSWORD = "current-password";
+    process.env.REDIS_PASSWORD_PREVIOUS = "previous-password";
+    const RedisMock = require("ioredis");
+    redisService = require("./redis");
+    redisService.initRedis();
+
+    expect(mockRedisConstructorCallCount).toBe(1);
+
+    // Grab the "error" handler ioredis registered on the initial client.
+    const errHandler = mockRedisInstances[0].on.mock.calls.find(
+      (c) => c[0] === "error",
+    )?.[1];
+    expect(errHandler).toBeDefined();
+
+    // Redis 7 replies WRONGPASS for a bad AUTH credential.
+    errHandler(new Error("WRONGPASS invalid username-password pair or user is disabled"));
+
+    // A fallback client must have been constructed with the previous password.
+    expect(mockRedisConstructorCallCount).toBe(2);
+    // new Redis(url, options) — options are the 2nd constructor arg.
+    const fallbackOpts = RedisMock.mock.calls[1][1];
+    expect(fallbackOpts.password).toBe("previous-password");
+    // The box-level client must now point at the working fallback.
+    expect(redisService.getClient()).toBe(mockRedisInstances[1]);
+  });
+
+  test("WRONGPASS fallback keeps swapping to the newest working client", () => {
+    process.env.REDIS_URL = "redis://host:6379";
+    process.env.REDIS_PASSWORD = "current-password";
+    process.env.REDIS_PASSWORD_PREVIOUS = "previous-password";
+    redisService = require("./redis");
+    redisService.initRedis();
+
+    const errHandler = mockRedisInstances[0].on.mock.calls.find(
+      (c) => c[0] === "error",
+    )?.[1];
+    errHandler(new Error("WRONGPASS "));
+    expect(redisService.getClient()).toBe(mockRedisInstances[1]);
+
+    // A second auth failure on the initial client re-triggers the fallback and
+    // must not blow up or create an unbounded number of clients.
+    errHandler(new Error("WRONGPASS again"));
+    // At minimum the box-level client now references one of the fallbacks.
+    expect(redisService.getClient()).toBe(mockRedisInstances[1]);
+  });
+
+  test("NOAUTH error also triggers the previous-password fallback", () => {
+    process.env.REDIS_URL = "redis://host:6379";
+    process.env.REDIS_PASSWORD = "current-password";
+    process.env.REDIS_PASSWORD_PREVIOUS = "previous-password";
+    redisService = require("./redis");
+    redisService.initRedis();
+
+    const errHandler = mockRedisInstances[0].on.mock.calls.find(
+      (c) => c[0] === "error",
+    )?.[1];
+    errHandler(new Error("NOAUTH Authentication required."));
+
+    expect(mockRedisConstructorCallCount).toBe(2);
+    expect(redisService.getClient()).toBe(mockRedisInstances[1]);
+  });
+
+  test("non-auth errors do not trigger a password fallback", () => {
+    process.env.REDIS_URL = "redis://host:6379";
+    process.env.REDIS_PASSWORD = "current-password";
+    process.env.REDIS_PASSWORD_PREVIOUS = "previous-password";
+    redisService = require("./redis");
+    redisService.initRedis();
+
+    const errHandler = mockRedisInstances[0].on.mock.calls.find(
+      (c) => c[0] === "error",
+    )?.[1];
+    errHandler(new Error("ECONNREFUSED connection refused"));
+
+    expect(mockRedisConstructorCallCount).toBe(1);
+    expect(redisService.getClient()).toBe(mockRedisInstances[0]);
+  });
+});
+
+// ── Sentinel (failover) mode ──────────────────────────────────────────────
+
+describe("Redis Sentinel failover mode", () => {
+  let redisService;
+  let RedisMock;
+
+  beforeEach(() => {
+    resetModule();
+    RedisMock = require("ioredis");
+  });
+
+  afterEach(() => {
+    delete process.env.REDIS_SENTINELS;
+    delete process.env.REDIS_SENTINEL_MASTER_NAME;
+    delete process.env.REDIS_SENTINEL_PASSWORD;
+  });
+
+  test("parseSentinels parses comma-separated host:port pairs", () => {
+    redisService = require("./redis");
+    const parsed = redisService.parseSentinels(
+      "sentinel-0:26379, sentinel-1:26379, sentinel-2:26379",
+    );
+    expect(parsed).toEqual([
+      { host: "sentinel-0", port: 26379 },
+      { host: "sentinel-1", port: 26379 },
+      { host: "sentinel-2", port: 26379 },
+    ]);
+  });
+
+  test("parseSentinels defaults port to 26379 and trims whitespace", () => {
+    redisService = require("./redis");
+    const parsed = redisService.parseSentinels("sentinel-a, sentinel-b:26380");
+    expect(parsed).toEqual([
+      { host: "sentinel-a", port: 26379 },
+      { host: "sentinel-b", port: 26380 },
+    ]);
+  });
+
+  test("parseSentinels drops malformed/empty entries", () => {
+    redisService = require("./redis");
+    const parsed = redisService.parseSentinels(" , sentinel-0:26379, , :, ");
+    expect(parsed).toEqual([{ host: "sentinel-0", port: 26379 }]);
+  });
+
+  test("sentinelOptions returns null when sentinels are unset (backward compat)", () => {
+    delete process.env.REDIS_SENTINELS;
+    delete process.env.REDIS_SENTINEL_MASTER_NAME;
+    process.env.REDIS_URL = "redis://localhost:6379";
+    redisService = require("./redis");
+
+    expect(redisService.sentinelOptions()).toBeNull();
+  });
+
+  test("sentinelOptions returns null when master name is missing", () => {
+    process.env.REDIS_SENTINELS = "sentinel-0:26379";
+    delete process.env.REDIS_SENTINEL_MASTER_NAME;
+    redisService = require("./redis");
+
+    expect(redisService.sentinelOptions()).toBeNull();
+  });
+
+  test("sentinelOptions resolves a valid sentinel config", () => {
+    process.env.REDIS_SENTINELS = "sentinel-0:26379,sentinel-1:26379";
+    process.env.REDIS_SENTINEL_MASTER_NAME = "indigopay-master";
+    redisService = require("./redis");
+
+    const opts = redisService.sentinelOptions();
+    expect(opts).toEqual({
+      sentinels: [
+        { host: "sentinel-0", port: 26379 },
+        { host: "sentinel-1", port: 26379 },
+      ],
+      name: "indigopay-master",
+    });
+  });
+
+  test("initRedis creates a single sentinel-mode client", () => {
+    process.env.REDIS_SENTINELS = "sentinel-0:26379,sentinel-1:26379";
+    process.env.REDIS_SENTINEL_MASTER_NAME = "indigopay-master";
+    redisService = require("./redis");
+
+    redisService.initRedis();
+
+    expect(mockRedisConstructorCallCount).toBe(1);
+    expect(redisService.shardCount()).toBe(1);
+
+    // The ioredis constructor must receive a sentinel options object.
+    const constructorArg = RedisMock.mock.calls[0][0];
+    expect(constructorArg).toMatchObject({
+      sentinels: [
+        { host: "sentinel-0", port: 26379 },
+        { host: "sentinel-1", port: 26379 },
+      ],
+      name: "indigopay-master",
+      role: "master",
+    });
+  });
+
+  test("sentinel client attaches failover event handlers", () => {
+    process.env.REDIS_SENTINELS = "sentinel-0:26379";
+    process.env.REDIS_SENTINEL_MASTER_NAME = "indigopay-master";
+    redisService = require("./redis");
+
+    redisService.initRedis();
+
+    const client = mockRedisInstances[0];
+    // The mock's `.on()` records event names.
+    const events = client.on.mock.calls.map((c) => c[0]);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        "reconnecting",
+        "ready",
+        "failoverSubscribed",
+        "sentinelReconnecting",
+        "error",
+      ]),
+    );
+  });
+
+  test("sentinel failover event handlers emit metrics without throwing", () => {
+    process.env.REDIS_SENTINELS = "sentinel-0:26379";
+    process.env.REDIS_SENTINEL_MASTER_NAME = "indigopay-master";
+    redisService = require("./redis");
+
+    redisService.initRedis();
+
+    const client = mockRedisInstances[0];
+    // Invoke each registered handler; none should throw.
+    for (const [event, handler] of client.on.mock.calls) {
+      expect(() =>
+        handler(event === "error" ? new Error("boom") : event === "reconnecting" ? 500 : undefined),
+      ).not.toThrow();
+    }
+  });
+
+  test("single-instance mode is unchanged when sentinels are unset", () => {
+    delete process.env.REDIS_SENTINELS;
+    delete process.env.REDIS_SENTINEL_MASTER_NAME;
+    process.env.REDIS_URL = "redis://localhost:6379";
+    redisService = require("./redis");
+
+    const client = redisService.getClient();
+    expect(client).toBe(mockRedisInstances[0]);
+    expect(mockRedisConstructorCallCount).toBe(1);
+
+    // Single-instance mode must NOT attach sentinel-specific handlers.
+    const events = mockRedisInstances[0].on.mock.calls.map((c) => c[0]);
+    expect(events).not.toContain("failoverSubscribed");
   });
 });

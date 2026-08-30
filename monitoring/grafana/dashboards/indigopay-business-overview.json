@@ -1,0 +1,803 @@
+{
+  "annotations": { "list": [] },
+  "description": "Business-level KPIs for Stellar IndigoPay — donation volume, donor retention, project health, CO₂ offsets, AI cost, webhook reliability, and synthetic monitor status. Issue #1144 Part B.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "icon": "external link",
+      "tags": [],
+      "targetBlank": true,
+      "title": "Infrastructure Dashboard",
+      "type": "link",
+      "url": "/d/indigopay-backend/stellar-indigopay-backend"
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "row",
+      "title": "📊 Donation Volume",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "id": 1
+    },
+    {
+      "type": "stat",
+      "title": "Donations Today",
+      "description": "Total donation transactions recorded since UTC midnight today.",
+      "id": 2,
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "indigopay_business_daily_donations_total",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "green", "value": 10 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Donations This Month",
+      "description": "Total donation transactions in the current calendar month.",
+      "id": 3,
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "indigopay_business_monthly_donations_total",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "XLM Donated Today",
+      "description": "Total XLM donated today (in XLM, converted from stroops).",
+      "id": 4,
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "indigopay_business_daily_xlm_total / 1e7",
+          "legendFormat": "XLM",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "displayName": "XLM",
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "XLM Donated This Month",
+      "description": "Total XLM donated in the current calendar month.",
+      "id": 5,
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "indigopay_business_monthly_xlm_total / 1e7",
+          "legendFormat": "XLM",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "displayName": "XLM",
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Rolling 24h Donation Count (from HTTP metrics)",
+      "description": "Number of successful POST /api/donations in the rolling 24-hour window. Derived from Prometheus HTTP counters.",
+      "id": 6,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "business:donations:rolling_24h_count",
+          "legendFormat": "24h donations",
+          "refId": "A"
+        },
+        {
+          "expr": "business:donations:rolling_7d_count / 7",
+          "legendFormat": "7d avg/day",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Daily Donations (from business exporter)",
+      "description": "UTC-day donation count from the business-metrics-exporter. Resets at UTC midnight.",
+      "id": 7,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "indigopay_business_daily_donations_total",
+          "legendFormat": "Today",
+          "refId": "A"
+        },
+        {
+          "expr": "indigopay_business_monthly_donations_total",
+          "legendFormat": "This month",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+    {
+      "type": "row",
+      "title": "👥 Donor Activity & Retention",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "collapsed": false,
+      "id": 10
+    },
+    {
+      "type": "stat",
+      "title": "Active Donors (7d)",
+      "description": "Unique donor addresses that made at least one donation in the last 7 days.",
+      "id": 11,
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "indigopay_business_active_donors_7d", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "palette-classic" } }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Active Donors (30d)",
+      "description": "Unique donor addresses that made at least one donation in the last 30 days.",
+      "id": 12,
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "indigopay_business_active_donors_30d", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "palette-classic" } }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "gauge",
+      "title": "Donor Retention Rate (30d cohort)",
+      "description": "Fraction of donors who gave 30-60 days ago and also gave in the last 30 days. Higher is better.",
+      "id": 13,
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "business:donors:retention_rate_30d * 100",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 20 },
+              { "color": "green", "value": 40 }
+            ]
+          }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "gauge",
+      "title": "Wallet-Connect → Donation Conversion (30d)",
+      "description": "Ratio of unique donors to wallet-connect events in the last 30 days.",
+      "id": 14,
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "business:conversion:rate_30d * 100",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "green", "value": 25 }
+            ]
+          }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "stat",
+      "title": "Active Recurring Subscriptions",
+      "description": "Number of currently active recurring donation schedules.",
+      "id": 15,
+      "gridPos": { "h": 5, "w": 4, "x": 16, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "indigopay_business_recurring_donors_active", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "palette-classic" } }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Active Donors Over Time",
+      "description": "7-day and 30-day active donor counts over time.",
+      "id": 16,
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "business:donors:active_7d",
+          "legendFormat": "Active 7d",
+          "refId": "A"
+        },
+        {
+          "expr": "business:donors:active_30d",
+          "legendFormat": "Active 30d",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "type": "row",
+      "title": "🌱 Project Health & CO₂ Impact",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 },
+      "collapsed": false,
+      "id": 20
+    },
+    {
+      "type": "stat",
+      "title": "Total Projects",
+      "id": 21,
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 29 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "indigopay_business_projects_total", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "palette-classic" } }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Active Projects",
+      "id": 22,
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 29 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "indigopay_business_projects_active", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "green", "value": 3 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "CO₂ Offset (All Time)",
+      "description": "Total estimated CO₂ offset in tonnes across all donations.",
+      "id": 23,
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 29 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "business:co2:offset_kg_total / 1000",
+          "legendFormat": "tonnes",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "displayName": "tonnes CO₂",
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "CO₂ Offset (Last 30d)",
+      "description": "Estimated CO₂ offset in tonnes for donations in the last 30 days.",
+      "id": 24,
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 29 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "business:co2:offset_kg_30d / 1000",
+          "legendFormat": "tonnes",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "displayName": "tonnes CO₂",
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "barchart",
+      "title": "Top 5 Projects by XLM Raised",
+      "description": "Top 5 projects by total XLM donated (all time). Updated by the business-metrics-exporter.",
+      "id": 25,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "topk(5, indigopay_business_top_project_xlm_total / 1e7)",
+          "legendFormat": "{{project_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "displayName": "XLM"
+        }
+      },
+      "options": {
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "CO₂ Offset Over Time (30d)",
+      "description": "Rolling CO₂ offset in tonnes over the last 30 days.",
+      "id": 26,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 34 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "business:co2:offset_kg_30d / 1000",
+          "legendFormat": "CO₂ tonnes (30d)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "custom": { "lineWidth": 2, "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "⚙️ Platform Operations",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 },
+      "collapsed": false,
+      "id": 30
+    },
+    {
+      "type": "gauge",
+      "title": "Webhook Delivery Rate (24h)",
+      "description": "Fraction of webhook deliveries in the last 24h that succeeded.",
+      "id": 31,
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 43 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "business:webhooks:delivery_rate_24h * 100",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 90 },
+              { "color": "green", "value": 98 }
+            ]
+          }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "stat",
+      "title": "AI Summary Cost (30d)",
+      "description": "Estimated Anthropic API cost in USD for AI impact summaries generated in the last 30 days.",
+      "id": 32,
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 43 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "business:ai:summary_cost_usd_30d",
+          "legendFormat": "USD",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 50 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Webhook Delivery Rate Over Time",
+      "description": "24h webhook delivery success rate tracked over time.",
+      "id": 33,
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 43 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "business:webhooks:delivery_rate_24h * 100",
+          "legendFormat": "Delivery rate %",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 90 },
+              { "color": "green", "value": 98 }
+            ]
+          },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "🔬 Synthetic Monitor (Proactive Health)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 51 },
+      "collapsed": false,
+      "id": 40
+    },
+    {
+      "type": "stat",
+      "title": "Synthetic Check Status",
+      "description": "1 = last synthetic end-to-end donation check passed. 0 = failed. Alert fires after 10 consecutive minutes of failure.",
+      "id": 41,
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 52 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "synthetic_donation_success{job=\"synthetic-monitor\"}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "❌ FAILING", "color": "red" }, "1": { "text": "✅ PASSING", "color": "green" } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "textMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Synthetic 1h Success Rate",
+      "description": "Average synthetic check success rate over the last hour.",
+      "id": 42,
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 52 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "business:synthetic:success_rate_1h * 100",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 80 },
+              { "color": "green", "value": 95 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Synthetic Check Duration (p99)",
+      "description": "p99 end-to-end duration of synthetic donation checks. Alert fires when p99 > 30s.",
+      "id": 43,
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 52 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(synthetic_donation_duration_seconds_bucket{job=\"synthetic-monitor\"}[30m])))",
+          "legendFormat": "p99 duration",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(synthetic_donation_duration_seconds_bucket{job=\"synthetic-monitor\"}[30m])))",
+          "legendFormat": "p50 duration",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineWidth": 2 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 15 },
+              { "color": "red", "value": 30 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Synthetic Check Success Over Time",
+      "description": "Historical synthetic donation check pass/fail (1 = pass, 0 = fail).",
+      "id": 44,
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 52 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "synthetic_donation_success{job=\"synthetic-monitor\"}",
+          "legendFormat": "Success (1=ok, 0=fail)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "drawStyle": "line",
+            "lineInterpolation": "stepBefore"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "🔄 Exporter Health",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 60 },
+      "collapsed": false,
+      "id": 50
+    },
+    {
+      "type": "stat",
+      "title": "Business Metrics Last Refresh",
+      "description": "Unix timestamp of the last successful business metrics refresh from Postgres.",
+      "id": 51,
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 61 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "time() - indigopay_business_last_refresh_timestamp",
+          "legendFormat": "Seconds since refresh",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 120 },
+              { "color": "red", "value": 300 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "textMode": "value_and_name",
+        "graphMode": "none"
+      }
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": ["business", "indigopay", "donations", "synthetic-monitor"],
+  "time": { "from": "now-24h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "IndigoPay — Business Overview",
+  "uid": "indigopay-business-overview",
+  "version": 1
+}

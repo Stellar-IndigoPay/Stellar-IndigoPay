@@ -360,6 +360,25 @@ export async function deleteAdminMatch(matchId: string): Promise<AdminMatchPool>
 }
 
 // ── Donations ─────────────────────────────────────────────────────────────────
+export interface RecordDonationPayload {
+  projectId: string;
+  donorAddress: string;
+  amountXLM?: string;
+  amount?: string;
+  currency?: "XLM" | "USDC";
+  message?: string;
+  encrypted?: boolean;
+  transactionHash: string;
+  idempotencyKey: string;
+}
+
+class DonationProcessingError extends Error {
+  constructor() {
+    super("Donation recording is still processing");
+    this.name = "DonationProcessingError";
+  }
+}
+
 /**
  * Persist a completed donation in the backend after the on-chain transaction succeeds.
  *
@@ -377,27 +396,40 @@ export async function deleteAdminMatch(matchId: string): Promise<AdminMatchPool>
  *   transactionHash: "abc123deadbeef",
  * });
  */
-export async function recordDonation(payload: {
-  projectId: string;
-  donorAddress: string;
-  amountXLM?: string;
-  amount?: string;
-  currency?: "XLM" | "USDC";
-  message?: string;
-  transactionHash: string;
-  idempotencyKey?: string;
-}) {
+export async function recordDonation(payload: RecordDonationPayload) {
   const { idempotencyKey, ...body } = payload;
   const headers: Record<string, string> = {};
   if (idempotencyKey) {
     headers["Idempotency-Key"] = idempotencyKey;
   }
-  const { data } = await api.post<{ success: boolean; data: Donation }>(
+  const response = await api.post<{ success: boolean; data: Donation }>(
     "/api/donations",
     body,
     { headers },
   );
-  return data.data;
+  // A concurrent replay can receive the backend's processing placeholder.
+  // Do not let that response look like a completed donation to the caller.
+  if (response.status === 202) throw new DonationProcessingError();
+  return response.data.data;
+}
+
+/**
+ * Ask the backend whether an idempotency key was already processed within the
+ * 24-hour window.  Used by the offline queue (issue #1096, Workstream 2) to
+ * skip re-submitting a queued donation that another tab or a background-sync
+ * attempt already recorded — the server-side dedup guarantee.
+ *
+ * @param idempotencyKey - The UUID the donation was submitted with.
+ * @returns True when the server already recorded a response for this key.
+ * @throws When the request fails (callers treat this as "not sure", and fall
+ *         through to the normal processor path).
+ */
+export async function checkIdempotency(idempotencyKey: string): Promise<boolean> {
+  const { data } = await api.get<{
+    success: boolean;
+    data: { exists: boolean; status: number | null };
+  }>(`/api/donations/check-idempotency/${encodeURIComponent(idempotencyKey)}`);
+  return data.data.exists;
 }
 
 /**
@@ -451,6 +483,21 @@ export async function fetchProfile(publicKey: string) {
     `/api/profiles/${publicKey}`,
   );
   return data.data;
+}
+
+export interface PendingRating {
+  id: string;
+  name: string;
+}
+
+export async function fetchPendingRating(
+  donorAddress: string,
+): Promise<PendingRating | null> {
+  const { data } = await api.get<{
+    success: boolean;
+    data: PendingRating | null;
+  }>("/api/ratings/pending", { params: { donorAddress } });
+  return data.success ? data.data : null;
 }
 
 /**

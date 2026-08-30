@@ -85,6 +85,32 @@ jobs:
         # cluster access is required, unlike kubectl apply --dry-run (which
         # needs a running K8s API server even with --validate=false).
 
+  monitoring-and-gitops-lint:
+    name: Alert Rules, Runbooks, and GitOps Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v3
+        with:
+          version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - name: Ensure npm uses POSIX shell on Linux
+        run: |
+          npm config delete script-shell || true
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Verify generated runbook index is committed
+        run: |
+          node scripts/generate-runbook-index.js
+          git diff --exit-code -- docs/runbooks/README.md
+      - name: Validate Alert Rule Linkages and Runbooks
+        run: node scripts/validate-alert-rules.js
+      - name: Validate GitOps and Helm Consistency
+        run: node scripts/validate-gitops.js
+
   gitleaks:
     name: Secret scanning
     runs-on: ubuntu-latest
@@ -125,6 +151,36 @@ jobs:
 
       - name: Validate spec conventions + detect OpenAPI route drift
         run: node scripts/validate-openapi.js
+
+  chaos:
+    name: Backend Chaos Harness (worker crash-safety)
+    runs-on: ubuntu-latest
+    # Bounded at 10 minutes — all scenarios use testcontainers and
+    # deterministic fault points rather than sleeps, so this is generous.
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      # CHAOS_TEST=1 activates the FaultInjector and the harness tests.
+      # Never set this in any non-test job or in production.
+      - name: Run chaos harness
+        run: |
+          CHAOS_TEST=1 npx jest \
+            --testPathPatterns="test/chaos/workerChaos" \
+            --forceExit \
+            --ci \
+            --verbose
+        env:
+          CHAOS_TEST: "1"
+          NODE_ENV: test
 
   zap_scan:
     name: DAST Security Scan (OWASP ZAP)

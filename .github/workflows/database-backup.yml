@@ -117,7 +117,7 @@ jobs:
         with:
           node-version: '18'
 
-      - name: Run backup verification
+      - name: Run backup verification (incl. SHA-256 integrity)
         id: verify
         run: |
           BACKUP_FILE=$(ls /tmp/backups/*.sql.gz 2>/dev/null || ls /tmp/backups/*.sql 2>/dev/null || echo "")
@@ -128,6 +128,35 @@ jobs:
           echo "Verifying backup: $BACKUP_FILE"
           node backend/scripts/verify-backup.js --backup "$BACKUP_FILE" > /tmp/verification-report.json
           cat /tmp/verification-report.json
+
+      - name: Verify SHA-256 integrity sidecar (WS4 / #1100)
+        run: |
+          set -euo pipefail
+          # Reproduce the hash that backup-db.sh records next to the artifact and
+          # assert it is stable across download + verification cycles.
+          # Use find instead of ls so filenames with special characters are handled safely.
+          BACKUP_FILE=$(find /tmp/backups -maxdepth 1 -name '*.sql.gz' 2>/dev/null | head -1)
+          if [ -z "$BACKUP_FILE" ]; then
+            echo "::error::No gzip backup artifact found in /tmp/backups/"
+            exit 1
+          fi
+          HASH=$(sha256sum "$BACKUP_FILE" | awk '{print $1}')
+          echo "backup_sha256=$HASH" >> "$GITHUB_OUTPUT"
+          # A gzip backup produced by the hardened pipeline MUST ship with its
+          # .sha256 sidecar. A missing sidecar means the upload or
+          # artifact-publishing step failed, so fail the verification job rather
+          # than returning success without a byte-level integrity check.
+          SIDECAR=$(find /tmp/backups -maxdepth 1 -name '*.sha256' 2>/dev/null | head -1 || true)
+          if [ -z "$SIDECAR" ]; then
+            echo "::error::gzip backup has no .sha256 sidecar — upload integrity cannot be verified."
+            exit 1
+          fi
+          EXPECTED=$(awk '{print $1}' "$SIDECAR")
+          if [ "$EXPECTED" != "$HASH" ]; then
+            echo "::error::SHA-256 mismatch: expected $EXPECTED, got $HASH"
+            exit 1
+          fi
+          echo "✅ Backup SHA-256 verified against sidecar: $HASH"
 
       - name: Upload verification report
         if: always()

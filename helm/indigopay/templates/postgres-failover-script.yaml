@@ -38,8 +38,73 @@ data:
         -d "{\"outcome\":\"${outcome}\"}" 2>&1 || log_info "Metric push failed (non-fatal)"
     }
 
+    # ──────────────────────────────────────────────────────────────
+    # Split-brain prevention: a ConfigMap named postgres-failover-lock
+    # is the single "who may promote" token. Only one failover Job may
+    # hold it at a time. `kubectl create configmap` is atomic, so if two
+    # Jobs race (e.g. two healthcheck sidecars, or a manual Job running
+    # alongside the automatic one), exactly one wins and the loser aborts
+    # before it can promote — preventing two writable primaries.
+    #
+    # The lock carries a holder + acquire epoch so a crashed Job's stale
+    # lock can be reclaimed after LOCK_TTL_SECONDS instead of wedging
+    # failover forever.
+    LOCK_NAME="postgres-failover-lock"
+    LOCK_TTL_SECONDS=120
+
+    acquire_failover_lock() {
+      local now holder acquired stale_after
+      now=$(date +%s)
+
+      if kubectl get configmap "$LOCK_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
+        holder=$(kubectl get configmap "$LOCK_NAME" -n "$NAMESPACE" \
+          -o jsonpath='{.data.holder}' 2>/dev/null || echo "")
+        acquired=$(kubectl get configmap "$LOCK_NAME" -n "$NAMESPACE" \
+          -o jsonpath='{.data.acquired-at}' 2>/dev/null || echo "0")
+
+        if [ -n "$holder" ]; then
+          stale_after=$(( acquired + LOCK_TTL_SECONDS ))
+          if [ "$now" -lt "$stale_after" ]; then
+            log_err "Failover lock held by '$holder' (expires $stale_after) — aborting to prevent split-brain."
+            return 1
+          fi
+          log_info "Stale failover lock detected (holder=$holder) — reclaiming."
+        else
+          log_info "Empty failover lock detected — reclaiming."
+        fi
+
+        kubectl delete configmap "$LOCK_NAME" -n "$NAMESPACE" >/dev/null 2>&1 || {
+          log_err "Failed to reclaim stale lock."
+          return 1
+        }
+      fi
+
+      # Atomic acquisition — only one concurrent `create` can succeed.
+      if ! kubectl create configmap "$LOCK_NAME" -n "$NAMESPACE" \
+            --from-literal=holder="$STANDBY_POD" \
+            --from-literal=acquired-at="$now" >/dev/null 2>&1; then
+        log_err "Failover lock already acquired by another process — aborting to prevent split-brain."
+        return 1
+      fi
+
+      log_ok "Failover lock acquired by '$STANDBY_POD'."
+      return 0
+    }
+
+    release_failover_lock() {
+      kubectl delete configmap "$LOCK_NAME" -n "$NAMESPACE" >/dev/null 2>&1 || true
+      log_info "Failover lock released."
+    }
+
     log_info "=== Postgres automated failover started ==="
     push_metric "initiated"
+
+    if ! acquire_failover_lock; then
+      push_metric "failed"
+      exit 1
+    fi
+    # Release the lock no matter how the Job exits (success or failure).
+    trap release_failover_lock EXIT
 
     log_info "Step 1/7: Verifying standby pod is reachable..."
     if ! kubectl get pod -n "$NAMESPACE" "$STANDBY_POD" -o jsonpath='{.status.phase}' 2>/dev/null | grep -q Running; then

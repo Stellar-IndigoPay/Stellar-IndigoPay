@@ -14,6 +14,7 @@ const {
   server: stellarServer,
   NETWORK_PASSPHRASE,
   submitTransaction,
+  submitWithFeeBump,
   simulateTransactionWithRetry,
 } = require("./stellar");
 const {
@@ -209,9 +210,8 @@ async function executeSchedule(schedule, account, keypair) {
   const preparedTx = rpc.assembleTransaction(tx, sim).build();
   
   preparedTx.sign(keypair);
-  const xdrString = preparedTx.toXDR();
-  
-  const submitResult = await submitTransaction(xdrString);
+  // submitWithFeeBump replaces submitTransaction
+  const submitResult = await submitWithFeeBump(preparedTx, keypair);
 
   logger.info(
     {

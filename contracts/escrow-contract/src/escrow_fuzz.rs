@@ -809,7 +809,7 @@ mod fuzz {
                 signers.push_back(pool[i].clone());
             }
 
-            let actual = crate::count_distinct_admins(&admin_set, &signers);
+            let actual = crate::count_distinct_admins(&env, &admin_set, &signers);
 
             // Independent reference count: each pool index that is both an
             // admin and appears in `signers` counts exactly once.
@@ -831,7 +831,7 @@ mod fuzz {
             for &i in &signer_indices {
                 doubled_signers.push_back(pool[i].clone());
             }
-            let doubled = crate::count_distinct_admins(&admin_set, &doubled_signers);
+            let doubled = crate::count_distinct_admins(&env, &admin_set, &doubled_signers);
             prop_assert_eq!(doubled, actual, "duplicating signers must not change the distinct admin count");
         }
     }

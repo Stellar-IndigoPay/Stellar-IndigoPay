@@ -81,6 +81,23 @@ export async function mockBackendAPI(
       return json({ success: true, data: project });
     }
 
+    // Issue #1096 (WS2): the offline queue pre-checks idempotency before
+    // submitting a queued donation.  Track recorded idempotency keys so the
+    // "already processed" path is testable end-to-end.
+    const checkIdempotencyMatch = path.match(
+      /^\/api\/v1\/donations\/check-idempotency\/([^/]+)$/,
+    );
+    if (checkIdempotencyMatch && method === "GET") {
+      const key = decodeURIComponent(checkIdempotencyMatch[1]);
+      const alreadyRecorded = state.donations.some(
+        (d) => (d as Donation & { idempotencyKey?: string }).idempotencyKey === key,
+      );
+      return json({
+        success: true,
+        data: { exists: alreadyRecorded, status: alreadyRecorded ? 201 : null },
+      });
+    }
+
     if (path === "/api/v1/donations" && method === "POST") {
       const body = request.postDataJSON() as {
         projectId: string;
@@ -91,7 +108,7 @@ export async function mockBackendAPI(
         message?: string;
         transactionHash: string;
       };
-      const donation: Donation = {
+      const donation: Donation & { idempotencyKey?: string } = {
         id: `e2e-donation-${state.donations.length + 1}`,
         projectId: body.projectId,
         donorAddress: body.donorAddress,
@@ -102,6 +119,24 @@ export async function mockBackendAPI(
         transactionHash: body.transactionHash,
         createdAt: new Date().toISOString(),
       };
+      // Remember the idempotency key so check-idempotency can dedupe.
+      const idempotencyKey = request.headers()["idempotency-key"];
+      if (idempotencyKey) donation.idempotencyKey = idempotencyKey;
+
+      // Mirror the real backend's idempotency contract (primary-key
+      // constraint on idempotency key): a replay with the same key is a
+      // success that returns the original record instead of duplicating it.
+      // This makes the two-tab reconnect race deterministically exactly-once.
+      const existing = idempotencyKey
+        ? state.donations.find(
+            (d) =>
+              (d as Donation & { idempotencyKey?: string }).idempotencyKey ===
+              idempotencyKey,
+          )
+        : undefined;
+      if (existing) {
+        return json({ success: true, data: existing });
+      }
       state.donations.push(donation);
 
       const project = state.projects.find((p) => p.id === body.projectId);
