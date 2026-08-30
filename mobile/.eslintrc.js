@@ -20,7 +20,7 @@ module.exports = {
   rules: {
     // TS-aware version replaces the base rule.
     "no-unused-vars": "off",
-    "@typescript-eslint/no-unused-vars": "error",
+    "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
 
     // The codebase leans on `any` at Stellar SDK / native-module boundaries
     // (SDK response shapes, error catches, JSX ref escape hatches). Making

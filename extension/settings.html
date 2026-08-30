@@ -56,6 +56,74 @@
           </div>
 
           <div class="settings-field">
+            <label class="settings-label">Donation Presets</label>
+            <p class="settings-hint">
+              Configure the four Quick Donate amounts shown in the popup.
+            </p>
+            <div class="preset-settings-grid">
+              <label class="preset-setting" for="preset-1">
+                <span>Preset 1</span>
+                <div class="input-wrapper">
+                  <input
+                    type="number"
+                    id="preset-1"
+                    class="settings-input"
+                    min="0.1"
+                    step="0.1"
+                    autocomplete="off"
+                  />
+                  <span class="currency">XLM</span>
+                </div>
+              </label>
+              <label class="preset-setting" for="preset-2">
+                <span>Preset 2</span>
+                <div class="input-wrapper">
+                  <input
+                    type="number"
+                    id="preset-2"
+                    class="settings-input"
+                    min="0.1"
+                    step="0.1"
+                    autocomplete="off"
+                  />
+                  <span class="currency">XLM</span>
+                </div>
+              </label>
+              <label class="preset-setting" for="preset-3">
+                <span>Preset 3</span>
+                <div class="input-wrapper">
+                  <input
+                    type="number"
+                    id="preset-3"
+                    class="settings-input"
+                    min="0.1"
+                    step="0.1"
+                    autocomplete="off"
+                  />
+                  <span class="currency">XLM</span>
+                </div>
+              </label>
+              <label class="preset-setting" for="preset-4">
+                <span>Preset 4</span>
+                <div class="input-wrapper">
+                  <input
+                    type="number"
+                    id="preset-4"
+                    class="settings-input"
+                    min="0.1"
+                    step="0.1"
+                    autocomplete="off"
+                  />
+                  <span class="currency">XLM</span>
+                </div>
+              </label>
+            </div>
+            <span id="presets-error" class="settings-error hidden">
+              Enter four valid amounts of at least 0.1 XLM.
+            </span>
+          </div>
+
+          <div class="settings-field">
             <label class="settings-label">Stellar Network</label>
             <p class="settings-hint">
               Choose which Stellar network to use for transactions.

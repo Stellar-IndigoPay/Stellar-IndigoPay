@@ -287,7 +287,7 @@ export default function HomeScreen() {
           <ProjectCard
             project={item}
             colors={colors}
-            onPress={() => router.push(`/projects/${item.id}`)}
+            onPress={() => router.push(`/project/${item.id}`)}
           />
         )}
         contentContainerStyle={styles.listContent}

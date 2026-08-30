@@ -171,4 +171,92 @@ function verifyMerkleProof(leaf, proof, root, leafCount) {
   return committedRoot.equals(root);
 }
 
-module.exports = { buildMerkleTree, generateMerkleProof, verifyMerkleProof };
+/**
+ * A simple pinned Buffer pool to reduce temporary-object GC pressure during
+ * streaming tree construction. Buffers are reused across levels where possible.
+ */
+class BufferPool {
+  constructor() {
+    this._pool = [];
+  }
+
+  /**
+   * Acquire a Buffer of at least `size` bytes, reusing a pooled buffer if one
+   * of sufficient capacity is available.
+   * @param {number} size
+   * @returns {Buffer}
+   */
+  acquire(size) {
+    for (let i = 0; i < this._pool.length; i += 1) {
+      if (this._pool[i].length >= size) {
+        return this._pool.splice(i, 1)[0];
+      }
+    }
+    return Buffer.alloc(size);
+  }
+
+  /**
+   * Return a buffer to the pool for reuse.
+   * @param {Buffer} buf
+   */
+  release(buf) {
+    if (Buffer.isBuffer(buf)) {
+      this._pool.push(buf);
+    }
+  }
+}
+
+/**
+ * Build a Merkle tree from an async iterator of audit-style entries, streaming
+ * level-by-level. The input entries are consumed lazily from the iterator so
+ * the caller never needs to hold the full entry array in memory at once. The
+ * resulting tree is fully compatible with {@link generateMerkleProof}.
+ *
+ * @param {AsyncIterable<{id, prevHash, action, actor, resource, timestamp}>} entryIterator
+ * @returns {Promise<{root: Buffer, tree: Buffer[][], leafCount: number, height: number}>}
+ */
+async function buildMerkleTreeStreaming(entryIterator) {
+  const pool = new BufferPool();
+
+  // Stream the leaf hashes from the iterator, reusing pooled buffers where
+  // possible to reduce GC pressure.
+  const leaves = [];
+  for await (const entry of entryIterator) {
+    // Serialize into a pooled buffer to reduce temporary-object GC pressure.
+    const serialized = `${entry.id}${entry.prevHash}${entry.action}${entry.actor}${entry.resource}${entry.timestamp}`;
+    const serializedBuf = pool.acquire(Buffer.byteLength(serialized, "utf8"));
+    serializedBuf.write(serialized, 0, "utf8");
+    leaves.push(sha256([LEAF_PREFIX, serializedBuf]));
+    pool.release(serializedBuf);
+  }
+  if (leaves.length === 0) {
+    throw new Error("Cannot build a Merkle tree without entries");
+  }
+
+  const leafCount = leaves.length;
+  let level = leaves;
+  const tree = [level];
+
+  while (level.length > 1) {
+    const nextLevel = [];
+    for (let i = 0; i < level.length; i += 2) {
+      const left = level[i];
+      const right = i + 1 < level.length ? level[i + 1] : left;
+      const hash = nodeHash(left, right);
+      nextLevel.push(hash);
+    }
+    level = nextLevel;
+    tree.push(level);
+  }
+
+  const height = tree.length - 1;
+  const root = sha256([ROOT_PREFIX, uint32Buffer(leafCount), level[0]]);
+  return { root, tree, leafCount, height };
+}
+
+module.exports = {
+  buildMerkleTree,
+  buildMerkleTreeStreaming,
+  generateMerkleProof,
+  verifyMerkleProof,
+};

@@ -1,0 +1,176 @@
+# monitoring/tests/business-recording-rules-test.yml
+#
+# promtool test rules for the business recording rules added in
+# monitoring/recording-rules.yml (issue #1144 Part B).
+#
+# Run with:
+#   promtool test rules monitoring/tests/business-recording-rules-test.yml
+
+rule_files:
+  - ../recording-rules.yml
+
+evaluation_interval: 60s
+
+tests:
+  # ── business:conversion:rate_30d — passthrough from exporter gauge ─────
+  - name: conversion-rate-recording
+    interval: 60s
+    input_series:
+      - series: 'indigopay_business_conversion_rate'
+        values: '0.35+0x10'
+    promql_expr_test:
+      - expr: 'business:conversion:rate_30d'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{}'
+            value: 0.35
+
+  # ── business:donors:retention_rate_30d ──────────────────────────────────
+  - name: retention-rate-recording
+    interval: 60s
+    input_series:
+      - series: 'indigopay_business_retention_rate_30d'
+        values: '0.42+0x10'
+    promql_expr_test:
+      - expr: 'business:donors:retention_rate_30d'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{}'
+            value: 0.42
+
+  # ── business:donors:active_7d / active_30d ──────────────────────────────
+  - name: active-donors-recording
+    interval: 60s
+    input_series:
+      - series: 'indigopay_business_active_donors_7d'
+        values: '120+0x10'
+      - series: 'indigopay_business_active_donors_30d'
+        values: '450+0x10'
+    promql_expr_test:
+      - expr: 'business:donors:active_7d'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{}'
+            value: 120
+      - expr: 'business:donors:active_30d'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{}'
+            value: 450
+
+  # ── business:co2:offset_kg_total / _30d ────────────────────────────────
+  - name: co2-recording
+    interval: 60s
+    input_series:
+      - series: 'indigopay_business_co2_offset_kg_total'
+        values: '8200+0x10'
+      - series: 'indigopay_business_co2_offset_kg_30d'
+        values: '340+0x10'
+    promql_expr_test:
+      - expr: 'business:co2:offset_kg_total'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{}'
+            value: 8200
+      - expr: 'business:co2:offset_kg_30d'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{}'
+            value: 340
+
+  # ── business:projects:active_ratio ─────────────────────────────────────
+  - name: project-active-ratio
+    interval: 60s
+    input_series:
+      - series: 'indigopay_business_projects_total'
+        values: '20+0x10'
+      - series: 'indigopay_business_projects_active'
+        values: '17+0x10'
+    promql_expr_test:
+      - expr: 'business:projects:active_ratio'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{}'
+            value: 0.85
+
+  # ── business:projects:active_ratio — all active ─────────────────────────
+  - name: project-active-ratio-all
+    interval: 60s
+    input_series:
+      - series: 'indigopay_business_projects_total'
+        values: '5+0x10'
+      - series: 'indigopay_business_projects_active'
+        values: '5+0x10'
+    promql_expr_test:
+      - expr: 'business:projects:active_ratio'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{}'
+            value: 1.0
+
+  # ── business:webhooks:delivery_rate_24h ────────────────────────────────
+  - name: webhook-delivery-rate
+    interval: 60s
+    input_series:
+      - series: 'indigopay_business_webhook_delivery_rate_24h'
+        values: '0.97+0x10'
+    promql_expr_test:
+      - expr: 'business:webhooks:delivery_rate_24h'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{}'
+            value: 0.97
+
+  # ── business:ai:summary_cost_usd_30d ───────────────────────────────────
+  - name: ai-cost-recording
+    interval: 60s
+    input_series:
+      - series: 'indigopay_business_ai_summary_cost_usd_30d'
+        values: '3.14+0x10'
+    promql_expr_test:
+      - expr: 'business:ai:summary_cost_usd_30d'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{}'
+            value: 3.14
+
+  # ── business:recurring:active_subscriptions ────────────────────────────
+  - name: recurring-subscriptions
+    interval: 60s
+    input_series:
+      - series: 'indigopay_business_recurring_donors_active'
+        values: '88+0x10'
+    promql_expr_test:
+      - expr: 'business:recurring:active_subscriptions'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{}'
+            value: 88
+
+  # ── business:synthetic:success_rate_1h ─────────────────────────────────
+  # 12 passing checks in 1h window → avg_over_time = 1.0
+  - name: synthetic-success-rate-all-passing
+    interval: 60s
+    input_series:
+      - series: 'synthetic_donation_success{job="synthetic-monitor"}'
+        values: '1+0x65'
+    promql_expr_test:
+      - expr: 'business:synthetic:success_rate_1h'
+        eval_time: 60m
+        exp_samples:
+          - labels: '{job="synthetic-monitor"}'
+            value: 1.0
+
+  # 50% passing → avg_over_time = 0.5
+  - name: synthetic-success-rate-half-failing
+    interval: 60s
+    input_series:
+      - series: 'synthetic_donation_success{job="synthetic-monitor"}'
+        # Alternating 1/0 over 60 intervals → avg = 0.5
+        values: '1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0'
+    promql_expr_test:
+      - expr: 'business:synthetic:success_rate_1h'
+        eval_time: 60m
+        exp_samples:
+          - labels: '{job="synthetic-monitor"}'
+            value: 0.5

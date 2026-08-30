@@ -17,6 +17,7 @@ servers:
   - url: https://api.stellarindigopay.com
     description: Production server
 tags:
+  - name: Auth
   - name: Projects
   - name: Donations
   - name: Profiles
@@ -136,6 +137,12 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
     NotFound:
       description: The requested resource was not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: The request conflicts with the current resource state.
       content:
         application/json:
           schema:
@@ -752,6 +759,81 @@ components:
           type: string
         password:
           type: string
+    AdminAuthLoginRequest:
+      type: object
+      description: >-
+        First leg: send email + password. Second leg (MFA enabled): send the
+        mfaChallenge token from the first response plus the TOTP code.
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+        totpCode:
+          type: string
+          description: 6-digit TOTP code, required when MFA is enabled.
+          pattern: "^[0-9]{6}$"
+        mfaChallenge:
+          type: string
+          description: Short-lived challenge token from the first login leg.
+    AdminAuthLoginResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            token:
+              type: string
+              description: Access token. Present when MFA is not required.
+            expiresIn:
+              type: integer
+              description: Access token lifetime in seconds.
+            mfaRequired:
+              type: boolean
+              description: True when MFA is enabled and a TOTP code is still needed.
+            mfaChallenge:
+              type: string
+              description: Short-lived challenge token to exchange for the session.
+    AdminMfaSetupResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            secret:
+              type: string
+              description: Base32 TOTP secret. Store nothing; scan the QR instead.
+            otpauthUrl:
+              type: string
+              description: otpauth:// provisioning URL.
+            qrCode:
+              type: string
+              description: PNG QR code as a data URL for the authenticator app.
+    AdminMfaVerifyRequest:
+      type: object
+      required: [totpCode]
+      properties:
+        totpCode:
+          type: string
+          description: 6-digit TOTP code from the authenticator app.
+          pattern: "^[0-9]{6}$"
+    AdminMfaVerifyResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            mfaEnabled:
+              type: boolean
+              description: True once MFA is active for the admin.
     AdminStatusRequest:
       type: object
       properties:
@@ -968,6 +1050,39 @@ components:
           type: string
           format: date-time
 paths:
+  /api/auth/challenge:
+    get:
+      tags: [Auth]
+      summary: Issue donor-auth challenge nonce
+      operationId: getDonorAuthChallenge
+      description: |
+        Issues a single-use, expiring nonce for the challenge/response donor
+        authentication flow. The donor signs `nonce + method + path` with their
+        Stellar keypair and sends the result via the `X-Donor-Address`,
+        `X-Donor-Nonce` and `X-Donor-Signature` headers on every
+        donor-authenticated request (issue #1102 Part A).
+      responses:
+        "200":
+          description: A fresh nonce to sign.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    required: [nonce, expiresAt]
+                    properties:
+                      nonce:
+                        type: string
+                        description: Single-use nonce to include in the signed payload.
+                      expiresAt:
+                        type: string
+                        format: date-time
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
   /api/projects/featured:
     get:
       tags: [Projects]
@@ -2234,17 +2349,45 @@ paths:
                 $ref: "#/components/schemas/AdminSessionsResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
-  /api/admin/sessions/{id}/revoke:
-    post:
+    delete:
       tags: [Admin]
-      summary: Revoke an admin session
-      operationId: revokeAdminSession
+      summary: Revoke all admin sessions except the current one
+      operationId: revokeAllAdminSessions
+      description: >-
+        Revoke every active session for the authenticated admin except the
+        one identified by the refresh_token cookie. When no cookie is
+        present, every session is revoked.
+      responses:
+        "200":
+          description: Sessions revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      revoked:
+                        type: integer
+                        description: Number of session families revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+  /api/admin/sessions/{family}:
+    delete:
+      tags: [Admin]
+      summary: Revoke a single admin session
+      operationId: revokeAdminSessionFamily
       description: Revoke every refresh token in the given session family.
       parameters:
-        - name: id
+        - name: family
           in: path
           required: true
-          description: Session id (refresh token family).
+          description: Session family (refresh token family UUID) to revoke.
           schema:
             type: string
             format: uuid
@@ -2258,12 +2401,109 @@ paths:
                 properties:
                   success:
                     type: boolean
+                  data:
+                    type: object
+                    properties:
+                      revoked:
+                        type: integer
+                        description: Number of session families revoked.
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+  /api/admin/auth/login:
+    post:
+      tags: [Admin]
+      summary: Log in with email, password, and optional TOTP
+      operationId: adminPasswordLogin
+      description: >-
+        Authenticate an administrator from the admins table. With MFA
+        disabled, returns an access token and sets the rotating refresh
+        cookie. With MFA enabled and no code, returns mfaRequired with a
+        short-lived challenge token that is exchanged at this same endpoint
+        (alongside the TOTP code) for the session.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminAuthLoginRequest"
+      responses:
+        "200":
+          description: >-
+            Access token (with refresh cookie), or an MFA challenge payload
+            when mfaRequired is true.
+          headers:
+            Set-Cookie:
+              description: refresh_token=<opaque>; HttpOnly; SameSite=Strict; Path=/api; Max-Age=604800
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminAuthLoginResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+  /api/admin/auth/mfa/setup:
+    post:
+      tags: [Admin]
+      summary: Generate a TOTP secret and QR code
+      operationId: adminMfaSetup
+      description: >-
+        Generate a fresh base32 TOTP secret for the authenticated admin and
+        return it with an otpauth:// provisioning URL and a QR code data URL
+        for the authenticator app. MFA stays disabled until the first code
+        is verified at /api/admin/auth/mfa/verify.
+      responses:
+        "200":
+          description: TOTP secret, provisioning URL and QR code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminMfaSetupResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+  /api/admin/auth/mfa/verify:
+    post:
+      tags: [Admin]
+      summary: Verify a TOTP code and enable MFA
+      operationId: adminMfaVerify
+      description: >-
+        Verify the presented TOTP code against the pending secret and enable
+        MFA for the authenticated admin. Requires a secret generated by
+        /api/admin/auth/mfa/setup first.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminMfaVerifyRequest"
+      responses:
+        "200":
+          description: MFA enabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminMfaVerifyResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/RateLimitExceeded"
   /api/admin/me:
@@ -2279,6 +2519,58 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AdminMeResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/admin/secrets/status:
+    get:
+      tags: [Admin]
+      summary: Get secret rotation status
+      operationId: getAdminSecretsStatus
+      description: >-
+        Report the live rotation status of every secret the backend consumes:
+        current/previous/next key fingerprints (SHA-256), the last successful
+        rotation timestamp, and the next scheduled rotation. Returns fingerprints
+        only, never secret values. Requires admin authentication.
+      responses:
+        "200":
+          description: Secret rotation status for all configured secrets.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    description: One entry per configured secret.
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                          description: Canonical secret name.
+                        currentKid:
+                          type: string
+                          nullable: true
+                          description: Fingerprint of the current issuing key.
+                        previousKid:
+                          type: string
+                          nullable: true
+                          description: Fingerprint of the previous (verify-only) key, if any.
+                        nextKid:
+                          type: string
+                          nullable: true
+                          description: Fingerprint of the next (verify+promote) key, if any.
+                        lastRotatedAt:
+                          type: string
+                          format: date-time
+                          nullable: true
+                          description: When the last rotation completed.
+                        nextScheduledAt:
+                          type: string
+                          format: date-time
+                          description: When the next automated rotation is expected.
         "401":
           $ref: "#/components/responses/Unauthorized"
   /api/admin/audit-log:

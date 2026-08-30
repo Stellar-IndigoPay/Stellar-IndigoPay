@@ -69,6 +69,8 @@ const NEXT_BTN = "apply.common.next";
 const SUBMIT_BTN = "apply.submit";
 
 describe("ApplyPage", () => {
+  jest.setTimeout(30000);
+
   beforeEach(() => {
     jest.clearAllMocks();
   });

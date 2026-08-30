@@ -29,6 +29,8 @@ jest.mock("../services/redis", () => ({
     }),
     evalsha: jest.fn().mockResolvedValue([1, 10, 0]),
     script: jest.fn().mockResolvedValue("mock-sha"),
+    exists: jest.fn().mockResolvedValue(0),
+    set: jest.fn().mockResolvedValue("OK"),
   }),
   initRedis: jest.fn().mockReturnValue({ ring: null }),
 }));

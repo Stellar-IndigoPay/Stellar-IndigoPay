@@ -1,4 +1,4 @@
-﻿/**
+/**
  * lib/offlineQueue.ts
  *
  * Offline-first FIFO queue for operations that must be submitted when
@@ -344,3 +344,95 @@ export async function clearQueue(): Promise<void> {
     await AsyncStorage.removeItem(STORAGE_KEY);
   });
 }
+
+import { getConnectivity, onConnectivityChange } from "./connectivity";
+import { Horizon } from "@stellar/stellar-sdk";
+
+let isProcessorRunning = false;
+
+/**
+ * Process the queue items sequentially.
+ * We only process if we have internet reachability.
+ */
+export async function processQueue(): Promise<void> {
+  if (isProcessorRunning) return;
+  
+  const connectivity = await getConnectivity();
+  if (!connectivity.isOnline) return;
+
+  isProcessorRunning = true;
+  
+  try {
+    // Recover any items that were stuck in flight during a crash
+    await recoverInFlightItems();
+
+    const eligible = await getRetryEligible<{ xdr?: string; alias?: string }>();
+    if (eligible.length === 0) return;
+
+    // Use default public network server to submit transactions
+    const server = new Horizon.Server('https://horizon.stellar.org');
+
+    for (const item of eligible) {
+      if (item.type === 'submit_tx' && item.payload?.xdr) {
+        await markInFlight(item.id);
+        
+        try {
+          // Pre-submit check could be used if idempotency key is tracked on the server
+          // Submit to Stellar
+          const tx = await server.submitTransaction(item.payload.xdr as any);
+          await markCompleted(item.id, { hash: tx.hash });
+        } catch (err: any) {
+          const errMsg = err?.response?.data?.extras?.result_codes?.transaction || err.message || 'Unknown error';
+          
+          if (errMsg === 'tx_bad_seq' && item.payload.alias) {
+            try {
+              const { TransactionBuilder, Transaction, Networks, Account } = require('@stellar/stellar-sdk');
+              
+              const oldTx = new Transaction(item.payload.xdr, Networks.PUBLIC);
+              const sourceAccount = await server.loadAccount(oldTx.source);
+              
+              const newTx = new TransactionBuilder(
+                new Account(sourceAccount.id, sourceAccount.sequence),
+                {
+                  fee: oldTx.fee,
+                  networkPassphrase: Networks.PUBLIC,
+                  timebounds: oldTx.timeBounds,
+                  memo: oldTx.memo
+                }
+              );
+              
+              for (const op of oldTx.operations) {
+                newTx.addOperation(op);
+              }
+              
+              const builtTx = newTx.build();
+              const { sign } = require('./stellarSigner');
+              const signature = await sign(item.payload.alias, builtTx.hash(), "Re-sign transaction due to sequence mismatch");
+              builtTx.addSignature(sourceAccount.id, signature.toString('base64'));
+              
+              item.payload.xdr = builtTx.toXDR();
+              
+              const res = await server.submitTransaction(builtTx as any);
+              await markCompleted(item.id, { hash: res.hash });
+              continue;
+            } catch (retryErr: any) {
+              await markFailed(item.id, retryErr.message || 'Failed to re-sign during sequence refresh');
+              continue;
+            }
+          }
+          
+          await markFailed(item.id, errMsg);
+        }
+      }
+    }
+  } finally {
+    isProcessorRunning = false;
+  }
+}
+
+// Automatically register connectivity listener to process the queue when coming online
+onConnectivityChange((state) => {
+  if (state.isOnline) {
+    processQueue().catch(() => {});
+  }
+});

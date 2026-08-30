@@ -14,7 +14,30 @@
 const fs = require("fs");
 const path = require("path");
 const yaml = require("js-yaml");
-const { execSync } = require("child_process");
+const { execFileSync } = require("child_process");
+
+function resolveWithin(repoDir, candidatePath) {
+  const root = fs.realpathSync(repoDir);
+  const resolved = path.resolve(root, candidatePath);
+  const relative = path.relative(root, resolved);
+  if (relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) {
+    return null;
+  }
+  try {
+    const real = fs.realpathSync(resolved);
+    const realRelative = path.relative(root, real);
+    if (
+      realRelative.startsWith(`..${path.sep}`) ||
+      realRelative === ".." ||
+      path.isAbsolute(realRelative)
+    ) {
+      return null;
+    }
+    return real;
+  } catch {
+    return null;
+  }
+}
 
 function validateGitOps(repoDir) {
   const errors = [];
@@ -45,21 +68,23 @@ function validateGitOps(repoDir) {
   if (!chartPath) {
     errors.push(`${argocdAppPath} spec.source.path is missing.`);
   } else {
-    const fullChartPath = path.join(repoDir, chartPath);
-    if (!fs.existsSync(fullChartPath)) {
+    const fullChartPath = resolveWithin(repoDir, chartPath);
+    if (!fullChartPath || !fs.statSync(fullChartPath).isDirectory()) {
       errors.push(`Referenced Helm chart path "${chartPath}" does not exist.`);
     }
   }
 
   // If helm CLI is available, test rendering template
   try {
-    const helmChartDir = path.join(repoDir, chartPath || "helm/indigopay");
-    if (fs.existsSync(helmChartDir)) {
-      execSync(`helm template test-release "${helmChartDir}" > /dev/null 2>&1`);
+    const helmChartDir = resolveWithin(repoDir, chartPath || "helm/indigopay");
+    if (helmChartDir) {
+      execFileSync("helm", ["template", "test-release", helmChartDir], {
+        stdio: "ignore",
+      });
     }
   } catch (err) {
-    // If helm CLI is not installed in local env, log info; in CI helm is installed
-    if (process.env.CI) {
+    // If helm CLI is not installed in local env, skip; in CI with helm installed, report rendering failure
+    if (err.code !== "ENOENT" && process.env.CI) {
       errors.push(`Helm template rendering failed: ${err.message}`);
     }
   }
