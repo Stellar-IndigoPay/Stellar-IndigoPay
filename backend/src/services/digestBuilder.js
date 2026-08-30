@@ -3,6 +3,7 @@
 const crypto = require("crypto");
 const pool = require("../db/pool");
 const logger = require("../logger");
+const { scrubDigestPayload } = require("../config/pii");
 
 const UNSUBSCRIBE_SECRET =
   process.env.UNSUBSCRIBE_SECRET || process.env.JWT_SECRET || "";
@@ -223,21 +224,24 @@ async function buildDigests(type, now = new Date()) {
     [start.toISOString(), end.toISOString(), DIGEST_CHANNEL],
   );
 
-  const digests = (summaryResult.rows || []).map((row) => ({
-    donorAddress: row.donor_address,
-    email: row.email,
-    totalDonatedXLM: Number(row.total_donated_xlm || 0),
-    donationCount: Number(row.donation_count || 0),
-    projectsSupported: Number(row.projects_supported || 0),
-    co2OffsetKg: Number(row.total_co2_kg || 0),
-    projectNames: Array.isArray(row.project_names)
-      ? row.project_names.filter(Boolean)
-      : [],
-    unsubscribeToken: generateUnsubscribeToken({
-      walletAddress: row.donor_address,
-    }),
-    recentDonations: [],
-  }));
+  const digests = (summaryResult.rows || []).map((row) => {
+    const payload = {
+      donorAddress: row.donor_address,
+      email: row.email,
+      totalDonatedXLM: Number(row.total_donated_xlm || 0),
+      donationCount: Number(row.donation_count || 0),
+      projectsSupported: Number(row.projects_supported || 0),
+      co2OffsetKg: Number(row.total_co2_kg || 0),
+      projectNames: Array.isArray(row.project_names)
+        ? row.project_names.filter(Boolean)
+        : [],
+      unsubscribeToken: generateUnsubscribeToken({
+        walletAddress: row.donor_address,
+      }),
+      recentDonations: [],
+    };
+    return scrubDigestPayload(payload);
+  });
 
   if (digests.length === 0) {
     logger.info(

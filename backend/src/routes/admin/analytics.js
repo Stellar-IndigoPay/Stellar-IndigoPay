@@ -27,6 +27,7 @@ const {
 } = require("../../services/analyticsService");
 const logger = require("../../logger");
 const { sendAppError } = require("../../errors");
+const { scrubAnalyticsRow } = require("../../config/pii");
 
 router.use(adminRequired);
 
@@ -105,6 +106,14 @@ router.get("/export", async (req, res, next) => {
     const view = String(req.query.view || "trends");
     const format = String(req.query.type || "json");
     const range = parseDateRange(req);
+    const shouldMask = req.query.mask !== "false";
+
+    if (!shouldMask && !req.query.justification) {
+      return sendAppError(res, "VALIDATION_ERROR", {
+        field: "mask",
+        detail: "Unmasked exports require a justification query parameter.",
+      });
+    }
 
     let data;
     let filename;
@@ -135,6 +144,12 @@ router.get("/export", async (req, res, next) => {
         field: "view",
         detail: `Unknown view: ${view}`,
       });
+    }
+
+    if (shouldMask) {
+      const rows = Array.isArray(data) ? data : [data];
+      const maskedRows = rows.map((row) => scrubAnalyticsRow(row));
+      data = Array.isArray(data) ? maskedRows : maskedRows[0];
     }
 
     if (format === "csv") {

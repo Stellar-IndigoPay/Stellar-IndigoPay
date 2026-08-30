@@ -52,6 +52,7 @@ const ALLOWED_TABLES = new Set([
   "webhook_dlq",
   "pgboss.archive",
   "token_blacklist",
+  "digest_sends",
 ]);
 
 /**
@@ -70,6 +71,15 @@ const ALLOWED_COLUMNS = new Set([
   "anonymised_at",
   "retention_expires_at",
   "expires_at",
+  "digest_type",
+  "period_start",
+  "sent_at",
+  "claimed_at",
+  "last_error",
+  "attempts",
+  "channel",
+  "type",
+  "enabled",
 ]);
 
 function isIdentifier(value) {
@@ -111,6 +121,16 @@ const policies = [
     condition: "created_at < now() - ($1::int || ' months')::interval",
     description:
       "Delete device push tokens that have not been refreshed in 12 months.",
+  },
+  {
+    name: "digest-sends-delete",
+    table: "digest_sends",
+    strategy: "delete",
+    retentionPeriod: { value: 180, unit: "days" },
+    schedule: { cron: "0 4 2 * *", timezone: "UTC" },
+    condition: "sent_at < now() - ($1::int || ' days')::interval OR claimed_at < now() - ($1::int || ' days')::interval",
+    description:
+      "Delete stale digest-send audit rows older than 180 days to keep delivery history bounded.",
   },
   {
     name: "webhook-deliveries-delete",
