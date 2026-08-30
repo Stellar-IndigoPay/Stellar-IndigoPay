@@ -13,8 +13,21 @@ import es from "@/locales/es.json";
 import fr from "@/locales/fr.json";
 
 export type Locale = "en" | "es" | "fr";
-
+const supportedLocales: readonly Locale[] = ["en", "es", "fr"];
 const locales: Record<Locale, Record<string, any>> = { en, es, fr };
+
+export function normalizeLocale(locale?: string | null): Locale {
+  const candidate = locale?.trim().toLowerCase();
+  if (!candidate) return "en";
+
+  const base = candidate.split("-")[0];
+  return supportedLocales.includes(base as Locale) ? (base as Locale) : "en";
+}
+
+function getPluralSuffix(locale: Locale, count: number): "one" | "other" {
+  const rule = new Intl.PluralRules(locale).select(count);
+  return rule === "one" ? "one" : "other";
+}
 
 interface I18nContextValue {
   locale: Locale;
@@ -55,8 +68,7 @@ const defaultTPlural = (
   count: number,
   params?: Record<string, string | number>
 ): string => {
-  const suffix = count === 1 ? "one" : "other";
-  const pluralKey = `${key}.${suffix}`;
+  const pluralKey = `${key}.${getPluralSuffix("en", count)}`;
   return defaultT(pluralKey, { ...params, count });
 };
 
@@ -70,21 +82,26 @@ const I18nContext = createContext<I18nContextValue>({
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocale] = useState<Locale>(() => {
     if (typeof window !== "undefined") {
-      return (localStorage.getItem("locale") as Locale) || "en";
+      const stored = localStorage.getItem("locale");
+      const browserLocale = navigator.language;
+      return normalizeLocale(stored ?? browserLocale ?? "en");
     }
     return "en";
   });
 
   const handleSetLocale = useCallback((l: Locale) => {
-    setLocale(l);
+    const nextLocale = normalizeLocale(l);
+    setLocale(nextLocale);
     if (typeof window !== "undefined") {
-      localStorage.setItem("locale", l);
+      localStorage.setItem("locale", nextLocale);
     }
   }, []);
 
   const t = useCallback(
     (key: string, params?: Record<string, string | number>): string => {
-      let message = get(locales[locale], key) ?? get(locales["en"], key) ?? key;
+      const activeLocale = normalizeLocale(locale);
+      let message =
+        get(locales[activeLocale], key) ?? get(locales["en"], key) ?? key;
       if (typeof message !== "string") {
         message = key;
       }
@@ -107,11 +124,10 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       count: number,
       params?: Record<string, string | number>
     ): string => {
-      const suffix = count === 1 ? "one" : "other";
-      const pluralKey = `${key}.${suffix}`;
+      const pluralKey = `${key}.${getPluralSuffix(normalizeLocale(locale), count)}`;
       return t(pluralKey, { ...params, count });
     },
-    [t]
+    [locale, t]
   );
 
   return (

@@ -1,7 +1,7 @@
 import React from "react";
 import { render, screen, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { I18nProvider, useI18n } from "../i18n";
+import { I18nProvider, normalizeLocale, useI18n } from "../i18n";
 import { formatNumber, formatXLM } from "../../utils/format";
 
 function TestComponent() {
@@ -121,5 +121,22 @@ describe("i18n system tests", () => {
   test("8. formatXLM formats XLM amounts according to locale", () => {
     expect(formatXLM(1000, "en")).toBe("1,000 XLM");
     expect(formatXLM("500.5", 2, "es")).toMatch(/500,5 XLM|500\.5 XLM/);
+  });
+
+  test("9. normalizes locale tags and uses plural rules from the active locale", async () => {
+    expect(normalizeLocale("fr-CA")).toBe("fr");
+    expect(normalizeLocale("es-MX")).toBe("es");
+    expect(normalizeLocale("de-DE")).toBe("en");
+
+    const user = userEvent.setup();
+    render(
+      <I18nProvider>
+        <TestComponent />
+      </I18nProvider>
+    );
+
+    await user.click(screen.getByTestId("switch-fr"));
+    expect(screen.getByTestId("plural-other").textContent).toBe("5 donateurs");
+    expect(screen.getByTestId("nav-home").textContent).toBe("Accueil");
   });
 });

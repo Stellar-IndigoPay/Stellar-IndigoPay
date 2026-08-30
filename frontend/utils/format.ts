@@ -5,6 +5,18 @@
 import { formatDistanceToNow } from "date-fns";
 import type { ProjectStatus, BadgeTier } from "./types";
 
+export function normalizeFormatLocale(locale?: string | null): string {
+  const candidate = locale?.trim();
+  if (!candidate) return "en-US";
+
+  const normalized = candidate.toLowerCase();
+  if (normalized === "fr" || normalized.startsWith("fr-")) return "fr";
+  if (normalized === "es" || normalized.startsWith("es-")) return "es";
+  if (normalized === "en" || normalized.startsWith("en-")) return "en-US";
+
+  return "en-US";
+}
+
 /**
  * Locale pinned for all locale-aware formatting. Server-rendered and
  * client-hydrated output must never depend on the environment's default
@@ -35,7 +47,7 @@ export function formatNumber(
   locale: string = PINNED_LOCALE,
   options: Intl.NumberFormatOptions = {}
 ): string {
-  return new Intl.NumberFormat(locale, options).format(value);
+  return new Intl.NumberFormat(normalizeFormatLocale(locale), options).format(value);
 }
 
 /**
@@ -59,6 +71,7 @@ export function formatXLM(
   } else if (typeof decimalsOrLocale === "string") {
     loc = decimalsOrLocale;
   }
+  loc = normalizeFormatLocale(loc);
   const n = typeof amount === "string" ? parseFloat(amount) : amount;
   if (isNaN(n)) return "0 XLM";
   return (
