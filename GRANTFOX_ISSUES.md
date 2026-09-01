@@ -4191,3 +4191,346 @@ This second issue set targets additional real, verifiable gaps discovered throug
 Each issue includes the files/contracts/components to change, expected behavior, edge cases, acceptance criteria, and testing requirements, and each is objectively verifiable through code review, automated tests, CI, benchmarks, or demonstrable project behavior.
 
 To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)
+
+---
+
+# GrantFox OSS — Batch 3: 10 Additional High-Value Issues (#101–#110)
+
+> Continuing the deep-dive verification of the repository with a fresh batch of genuine engineering gaps across backend security, contract safety, frontend UX, mobile resilience, and devops reliability.
+
+---
+
+## Issue #101 — Backend: Refresh-token rotation with reuse detection and family revocation
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/security`, `priority/high`, `effort/medium`
+
+### Summary
+The backend JWT/refresh-token flow allows issuance and rotation but does not definitively detect refresh-token reuse across a family. A stolen refresh token can be replayed until its family is revoked, and the system may silently accept a token that has already been used once. This is particularly risky for admin and donor sessions when a browser or mobile device is compromised.
+
+### Problem Statement
+1. **Replay risk**: a refresh token can be replayed after rotation if the server does not atomically mark previously-issued tokens as consumed.
+2. **Family-level ambiguity**: a single compromised token family can bypass the entire rotation model.
+3. **No efficient revocation path**: operators must rotate all secret material rather than revoke one family.
+
+### Objectives
+- Add a `refresh_token_family`/`used_token` tracking model with a short TTL and immutable hash column
+- Detect reuse by comparing token hash to the latest valid token within the family
+- Revoke the entire family on reuse or suspicious pattern detection
+- Emit a security event and alert when token reuse is detected
+
+### Scope
+- `backend/src/middleware/auth.js` or equivalent token service
+- New migration for token-family tables or Redis-backed tracking
+- Admin route for family revocation if not already present
+
+### Acceptance Criteria
+- Replayed refresh token after rotation is rejected with 401 and the entire family is revoked
+- Token reuse event is recorded and exported to metrics/logging
+- Existing valid refresh flows still work for non-compromised sessions
+
+### References
+- `backend/src/middleware/auth.js`, `backend/src/routes/admin.js`, `backend/src/services/redis.js`
+
+---
+
+## Issue #102 — Backend: Column-level encryption for donor PII and sensitive project metadata
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/security`, `priority/high`, `effort/large`
+
+### Summary
+The backend stores donor contact data, project admin info, and potentially donation metadata in plaintext or in low-sensitivity JSON. There is no field-level encryption for highly sensitive data, so a database breach or SQL dump leak exposes personal information. The platform has audit and compliance requirements but lacks a consistent encryption pattern.
+
+### Problem Statement
+1. **Plaintext PII**: donor names, emails, phone numbers, and project metadata are readable in the database.
+2. **No rotation model**: no key versioning or envelope encryption for sensitive fields.
+3. **Partial encryption**: some fields are protected, others not, with no unified API.
+
+### Objectives
+- Implement an encrypted-field helper for `email`, `phone`, `donor_profile`, and sensitive project data
+- Use AES-GCM or a key-management abstraction with envelope encryption and key ID metadata
+- Add migration support for encrypted columns and decryption at read time
+- Ensure the system fails safely if the encryption key is missing or rotated incorrectly
+
+### Scope
+- New `backend/src/services/encryption.js` or equivalent
+- Database migrations affecting sensitive tables
+- Application-layer reads/writes for encrypted fields
+
+### Acceptance Criteria
+- Sensitive fields are stored encrypted at rest and decrypted only in authorized application paths
+- Key rotation support works without breaking old records
+- Unit tests cover decryptable roundtrips and failed-key cases
+
+### References
+- `backend/src/db/schema.sql`, `backend/src/services/analyticsService.js`, `backend/src/routes/donors.js`
+
+---
+
+## Issue #103 — Contracts: Add slippage and min-amount validation for `donate_asset` and DEX path-payment settlement
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/security`, `priority/high`, `effort/medium`
+
+### Summary
+The IndigoPay contract allows donors to contribute via token or asset path payments without a strong check against a malicious or stale DEX route, and it may accept extremely low or zero-value donations without adequate guardrails. If asset pricing shifts during the transaction or route-selection logic, a donor can be forced into a poor execution price or an empty settlement path without an explicit safety check.
+
+### Problem Statement
+1. **No slippage bound**: a path payment can be executed at a much worse rate than the donor expected.
+2. **Unbounded validity**: token donations may be accepted with zero or near-zero value even though the project expects a meaningful amount.
+3. **No quote drift guard**: price data and route execution are not reconciled against an acceptable range.
+
+### Objectives
+- Introduce minimum-donation and maximum-slippage checks on asset and path-payment donations
+- Require a quote hash or signed oracle reference when the donation amount is derived from a DEX route
+- Reject settlement if the actual price deviates beyond the configured tolerance
+- Emit a clear error for stale-price or underflow conditions
+
+### Scope
+- `contracts/indigopay-contract/src/lib.rs`
+- Any token or DEX integration path for asset-based donations
+- Unit tests covering low-value and slippage violations
+
+### Acceptance Criteria
+- A donation with path price outside allowed slippage is rejected
+- A near-zero amount is rejected with explicit validation error
+- Existing valid donation flows still pass
+
+### References
+- `contracts/indigopay-contract/src/lib.rs`, `docs/gas-optimization.md`, `contracts/README.md`
+
+---
+
+## Issue #104 — Frontend: Route-level prefetching and dynamic import budget to reduce TTI on deep project pages
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/performance`, `priority/medium`, `effort/medium`
+
+### Summary
+Project and donor pages are likely loading full libraries and charting components even when only a small subset of the page is needed. Long initial bundles, especially on mobile, create slow first paint and poor interaction times. The project has a large UI footprint but no explicit route budget or prefetch strategy.
+
+### Problem Statement
+1. **Large initial bundle**: page loads with unnecessary components and map/chart code.
+2. **No route-aware prefetching**: pages are fetched on demand but not preloaded when likely to be visited next.
+3. **No hydration budget**: expensive components mount immediately without user interaction.
+
+### Objectives
+- Implement route-based code splitting for heavy features (map, charts, donation modal, wallet flows)
+- Use prefetch on hover/idle for likely next pages (project detail, leaderboard, dashboard)
+- Define a per-route bundle budget and fail CI if exceeded
+- Lazy-load non-critical modals, chart libraries, and map components
+
+### Scope
+- `frontend/pages/**/*.tsx`, `frontend/components/**/*.tsx`, bundler config, CI rules
+
+### Acceptance Criteria
+- Heavy components do not load on first paint for landing pages
+- Prefetch is triggered for likely next-page navigation patterns
+- Bundle budget checks fail when a route exceeds the threshold
+
+### References
+- `frontend/next.config.mjs`, `frontend/pages/projects/[id].tsx`, `frontend/components/ProjectMap.tsx`
+
+---
+
+## Issue #105 — Mobile: Wallet recovery verification with QR code and public-key fingerprint checks
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/mobile`, `type/security`, `priority/high`, `effort/medium`
+
+### Summary
+The mobile app's wallet recovery and backup flows are not yet verified against a public-key fingerprint or a matching QR code. An attacker could trick a user into restoring a wallet from a tampered backup share or incomplete reconstruction. There is no integrity check between recovery shares and the wallet public key.
+
+### Problem Statement
+1. **No recovery integrity validation**: a user may reconstruct the wrong secret without noticing.
+2. **QR code spoofing**: recovery metadata may be tampered with
+3. **No public-key fingerprint binding**: shares are not tied to the actual wallet they are meant to recover
+
+### Objectives
+- Bind each recovery share to the wallet public key fingerprint
+- Require QR-code verification and fingerprint matching during recovery
+- Refuse restore if the reconstructed secret does not hash to the known public key
+- Add a recovery confirmation step before wallet activation
+
+### Scope
+- `mobile/lib/wallet/recovery.ts`, `mobile/app/settings/recovery.tsx`, `mobile/lib/secureStore.ts`
+
+### Acceptance Criteria
+- Recovering with tampered shares fails before wallet unlock
+- A valid reconstructed secret matches the expected public key fingerprint
+- Recovery completion requires explicit confirmation
+
+### References
+- `mobile/lib/wallet/`, `mobile/hooks/useBiometricAuth.ts`, `mobile/app/_layout.tsx`
+
+---
+
+## Issue #106 — DevOps: Kubernetes certificate rotation health checks and ingress validation
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/devops`, `type/reliability`, `priority/high`, `effort/medium`
+
+### Summary
+TLS certificates and ingress resources are likely managed with a platform tool or external issuer, but there is no explicit validation step that confirms a newly-issued cert actually matches the expected domain and is served by the live ingress without delay. A stale or partially-applied cert can break checkout and donation flows without immediate detection.
+
+### Problem Statement
+1. **No live validation**: certificates may be issued but not yet trusted by routing paths.
+2. **No domain match check**: a certificate may exist for the wrong CN/SAN set.
+3. **No ingress checkpoint**: endpoints may still serve stale TLS config.
+
+### Objectives
+- Add certificate health checks comparing the live certificate chain to the expected domain and expiry window
+- Validate ingress serves the correct certificate and TLS redirect policy
+- Alert when certificate expiry is under two weeks or when the DNS-to-ingress mapping is wrong
+- Add an automated rotation drill to confirm the new cert is live before old cert removal
+
+### Scope
+- `k8s/` manifests and any cert-manager or ingress config
+- Monitoring/alert rules for cert expiry and ingress validation
+- A scripted cert verification job
+
+### Acceptance Criteria
+- A live cert mismatch triggers alert + workflow failure
+- Rotation drill confirms domain continuity throughout certificate replacement
+- Existing ingress routes remain accessible during cert refresh
+
+### References
+- `helm/`, `k8s/`, `monitoring/alert-rules.yml`, `.github/workflows/`
+
+---
+
+## Issue #107 — Backend: Ledger checkpoint compaction and indexer retention policy for historical event windows
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/performance`, `priority/medium`, `effort/medium`
+
+### Summary
+The backend indexes ledger and event data in a way that may retain every historical checkpoint indefinitely, creating storage bloat and slow scans over older events. There is no retention policy or compaction step, so analytics queries and low-latency reads become more expensive over time.
+
+### Problem Statement
+1. **No compaction**: old ledger checkpoints accumulate indefinitely
+2. **No retention rule**: backend cannot bound storage growth for historical event windows
+3. **Slow scans**: replays and rescans become expensive as the ledger table grows
+
+### Objectives
+- Add a `checkpoint_compaction` or retention job that archives or deletes historical checkpoints beyond a configured window
+- Preserve the minimum required state for bounce-back recoverability and audit chains
+- Track the oldest retained ledger and the last compacted ledger by metric
+- Allow operator override for forensic or compliance windows
+
+### Scope
+- `backend/src/services/indexerService.js`, `backend/src/services/sorobanEventService.js`, migration or retention helper
+- Monitoring metrics for compaction lag
+
+### Acceptance Criteria
+- Historical checkpoints can be compacted without losing required replay continuity
+- Metrics show oldest retained ledger and compaction lag
+- Rescan from a retained checkpoint still works
+
+### References
+- `backend/src/services/indexerService.js`, `backend/src/services/sorobanEventService.js`, `backend/src/services/analyticsService.js`
+
+---
+
+## Issue #108 — Backend: AI summary cost attribution and cache invalidation for summarized projects
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/backend`, `type/observability`, `priority/medium`, `effort/medium`
+
+### Summary
+The backend includes AI summary generation but likely has no clear accountability for model cost, cache lifetime, or invalidation when project content changes. A summary may be stale or cost more than planned without any observability. This becomes especially costly when summaries are generated on large project updates or frequent donor events.
+
+### Problem Statement
+1. **No costing**: AI summary generation is not tracked per project or token count
+2. **No invalidation**: a project update can leave a stale summary in cache
+3. **Hidden spend**: no visibility into cost spikes from redundant generation
+
+### Objectives
+- Add per-summary generation metrics: token count, model name, cost estimate, latency, and status
+- Cache AI summaries with project version IDs and invalidate on content updates
+- Add a summarization budget threshold and alert when a project exceeds it
+- Emit structured logs linking the summary to the originating project update
+
+### Scope
+- `backend/src/services/aiSummary.js` or equivalent, cache layer, metrics service
+- Project update or donation event hooks that trigger summary refresh
+
+### Acceptance Criteria
+- Summary cache invalidates when project metadata changes
+- Cost metrics are emitted for each generation request
+- Repeated generation for unchanged content is prevented via versioned cache key
+
+### References
+- `backend/src/services/aiSummary.js`, `backend/src/services/cacheManager.js`, `backend/src/services/metrics.js`
+
+---
+
+## Issue #109 — Frontend: Pattern-based theme tokens for stable contrast and true dark-mode parity
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/frontend`, `type/accessibility`, `priority/medium`, `effort/medium`
+
+### Summary
+The frontend likely uses ad hoc color classes or `CSS variables` that drift between light and dark themes. This causes inconsistent contrast, especially for badges, metric cards, and donation callouts. Visual parity between themes is not enforced in CI and is easy to regress.
+
+### Problem Statement
+1. **Inconsistent contrast**: light/dark themes are not tokenized and often drift apart
+2. **No automated parity checks**: a visual regression can slip through without detection
+3. **Accessibility risk**: some surfaces may fail AA even when the app looks acceptable in a manual QA pass
+
+### Objectives
+- Introduce a semantic color-token system for surfaces, text, status colors, and focus states
+- Ensure all interactive components pass AA contrast in both modes
+- Add a theme parity test to CI that compares token values and key generated CSS rules
+- Update form controls, tables, and cards to use the shared tokens instead of ad hoc colors
+
+### Scope
+- `frontend/styles/**`, theme files, component style classes, CI accessibility checks
+
+### Acceptance Criteria
+- Theme tokens produce consistent contrast across all key surfaces
+- A contrast regression fails the frontend CI or axe suite
+- Light/dark rendering remains visually aligned with the design system
+
+### References
+- `frontend/components/ThemeToggle.tsx`, `frontend/styles/`, `frontend/components/**/*.tsx`
+
+---
+
+## Issue #110 — Contracts: Add admin quorum and role separation for emergency action execution
+
+**Labels:** `GrantFox OSS`, `Official Campaign`, `area/contracts`, `type/security`, `priority/high`, `effort/medium`
+
+### Summary
+The contract admin model may rely on a single threshold or a single admin set, which is not ideal for emergency actions such as contract pause, emergency token freeze, or upgrade execution. Critical actions should require separate role checks from operational admin actions and support explicit quorum confirmation from distinct admin groups.
+
+### Problem Statement
+1. **Single admin threshold**: one compromised or mistaken admin can trigger emergency actions
+2. **No role separation**: operational and emergency functions are not independently governed
+3. **No policy for emergency reversal**: actions are all treated equivalently under a single threshold
+
+### Objectives
+- Introduce distinct admin roles or affinity groups for operational vs emergency actions
+- Enforce different threshold and approval combinations for `pause`, `resume`, `upgrade`, and emergency settlement actions
+- Require distinct signers or an explicit emergency-committee quorum when the action has broad contract impact
+- Emit role-specific events for auditability
+
+### Scope
+- `contracts/indigopay-contract/src/lib.rs`, admin configuration and storage keys
+- Tests for role separation and threshold behavior
+
+### Acceptance Criteria
+- Operational admin action and emergency action require different signer combinations
+- A single-step permission failure is caught before state mutation
+- Existing non-emergency operations continue to work under standard thresholds
+
+### References
+- `contracts/indigopay-contract/src/lib.rs`, `docs/gas-optimization.md`, `contracts/EVENTS.md`
+
+---
+
+## Summary — Batch 3 (#101–#110)
+
+This third issue set continues the repository audit with additional, concrete gaps in:
+
+- **Backend security & policy** (#101, #102, #108, #110): token rotation, encryption, AI cost controls, and role separation
+- **Contract safety** (#103, #110): slippage validation and emergency governance separation
+- **Frontend performance & accessibility** (#104, #109): route budgets, prefetching, and theme parity
+- **Mobile security** (#105): wallet recovery verification
+- **DevOps & reliability** (#106, #107): certificate validation and ledger compaction
+
+Each addition follows the same verifiable pattern: direct code ownership, explicit file targets, crisp objectives, and acceptance criteria that can be validated by CI, unit tests, security review, or operational checks.
+
+To contribute more to the project, join our Telegram group - [https://t.me/StellarIndigoPay/4](https://t.me/StellarIndigoPay/4)

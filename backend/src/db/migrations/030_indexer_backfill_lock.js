@@ -32,6 +32,14 @@ module.exports = {
   phase: "expand",
 
   async up(client) {
+    // Migration 026 created donation_events before indexer operation
+    // identity was introduced. Add the column before creating indexes so
+    // fresh and already-migrated databases follow the same path.
+    await client.query(`
+      ALTER TABLE donation_events
+      ADD COLUMN IF NOT EXISTS indexer_operation_id TEXT
+    `);
+
     // Unique index on donation_events ensures that even if two concurrent
     // backfill/reconcile paths race past the advisory lock, the second
     // INSERT is rejected by the database constraint rather than creating a
