@@ -177,7 +177,10 @@ async function runReconciliation() {
           );
 
           try {
-            const result = await runBackfill({ force: false });
+            const result = await runBackfill({
+              force: false,
+              _lockClient: lockClient,
+            });
             report.backfillTriggered = true;
             report.backfillResult = result;
             indexerBackfillsTotal.inc({ outcome: result.processed > 0 ? "success" : "noop" });

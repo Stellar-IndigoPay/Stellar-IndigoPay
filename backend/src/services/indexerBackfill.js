@@ -77,22 +77,25 @@ const BACKFILL_LOCK_KEY = fnv1a64(BACKFILL_LOCK_NAME);
  * @returns {Promise<{ processed: number, errors: number, fromLedger: number, toLedger: number }>}
  */
 async function runBackfill(options = {}) {
-  const { fromLedger, toLedger, force } = options;
+  const { fromLedger, toLedger, force, _lockClient: inheritedLockClient } = options;
 
   // ── Acquire advisory lock (non-blocking) ────────────────────────────────
   // We check out a dedicated client so the advisory lock lifetime is exactly
   // the duration of this function call; the lock is released by either
   // pg_advisory_unlock (happy path) or the connection being returned to the
   // pool (unhappy path / error).
-  const lockClient = await pool.connect();
-  let lockAcquired = false;
+  const lockClient = inheritedLockClient || (await pool.connect());
+  const ownsLockClient = !inheritedLockClient;
+  let lockAcquired = Boolean(inheritedLockClient);
 
   try {
-    const lockResult = await lockClient.query(
-      "SELECT pg_try_advisory_lock($1) AS acquired",
-      [BACKFILL_LOCK_KEY],
-    );
-    lockAcquired = lockResult.rows[0]?.acquired === true;
+    if (ownsLockClient) {
+      const lockResult = await lockClient.query(
+        "SELECT pg_try_advisory_lock($1) AS acquired",
+        [BACKFILL_LOCK_KEY],
+      );
+      lockAcquired = lockResult.rows[0]?.acquired === true;
+    }
 
     if (!lockAcquired) {
       logger.warn(
@@ -256,7 +259,16 @@ async function runBackfill(options = {}) {
           // Update cursor for next page
           if (records.length > 0) {
             const last = records[records.length - 1];
-            cursor = last.paging_token || String(last.ledger_attr);
+            const nextCursor = last.paging_token || String(last.ledger_attr);
+            if (nextCursor === cursor) {
+              logger.error(
+                { event: "backfill_cursor_stalled", cursor },
+                "Backfill cursor did not advance; stopping to prevent an infinite replay loop",
+              );
+              hasMore = false;
+            } else {
+              cursor = nextCursor;
+            }
           }
 
           // Small pause between pages to avoid Horizon rate limiting
@@ -309,12 +321,12 @@ async function runBackfill(options = {}) {
     }
   } finally {
     // Always release the advisory lock before returning the client to the pool.
-    if (lockAcquired) {
+    if (lockAcquired && ownsLockClient) {
       await lockClient
         .query("SELECT pg_advisory_unlock($1)", [BACKFILL_LOCK_KEY])
         .catch(() => {});
     }
-    lockClient.release();
+    if (ownsLockClient) lockClient.release();
   }
 }
 

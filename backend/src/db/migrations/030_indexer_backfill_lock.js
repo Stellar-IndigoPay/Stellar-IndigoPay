@@ -22,8 +22,9 @@
  *      the advisory-lock guard is somehow bypassed, a duplicate insert is
  *      rejected by the database rather than silently stored.
  *
- * Phase: expand — only adds a new index and a row to indexer_state.
- *        Fully backward-compatible; no column is dropped or renamed.
+ * Phase: expand — adds an idempotency column/indexes and a row to
+ *        indexer_state. Fully backward-compatible; no column is dropped or
+ *        renamed.
  */
 "use strict";
 
@@ -32,6 +33,14 @@ module.exports = {
   phase: "expand",
 
   async up(client) {
+    // Migration 026 created donation_events before indexer operation
+    // identity was introduced. Add the column before creating indexes so
+    // fresh and already-migrated databases follow the same path.
+    await client.query(`
+      ALTER TABLE donation_events
+      ADD COLUMN IF NOT EXISTS indexer_operation_id TEXT
+    `);
+
     // Unique index on donation_events ensures that even if two concurrent
     // backfill/reconcile paths race past the advisory lock, the second
     // INSERT is rejected by the database constraint rather than creating a

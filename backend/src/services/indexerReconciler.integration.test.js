@@ -29,6 +29,7 @@ jest.mock("./stellar", () => {
     asset_code: null,
     asset_issuer: null,
   };
+  let operationPageCalls = 0;
 
   return {
     server: {
@@ -45,7 +46,12 @@ jest.mock("./stellar", () => {
             order: jest.fn(() => ({
               call: jest
                 .fn()
-                .mockResolvedValue({ records: [missingDonationOperation] }),
+                .mockImplementation(async () => {
+                  operationPageCalls += 1;
+                  return operationPageCalls === 1
+                    ? { records: [missingDonationOperation] }
+                    : { records: [] };
+                }),
             })),
           })),
         })),
@@ -172,6 +178,8 @@ describe("indexer reconciler integration", () => {
           key TEXT PRIMARY KEY,
           last_processed_ledger INTEGER NOT NULL DEFAULT 0,
           backfill_in_progress BOOLEAN NOT NULL DEFAULT false,
+          backfill_target_ledger INTEGER,
+          cursor_hash TEXT,
           reconciled_at TIMESTAMPTZ,
           last_processed_at TIMESTAMPTZ
         );
