@@ -6,6 +6,12 @@
 # a digest — a fake SHA breaks `docker build` immediately.
 FROM node:22-alpine AS test
 
+# scripts/deployContractScript.test.js spawns a real `git` to build an
+# isolated fake repo, and spawns the real deploy-contract.sh (`#!/usr/bin/env
+# bash`) for its deploy-contract.sh integration tests — Alpine's base image
+# ships neither by default.
+RUN apk add --no-cache git bash
+
 WORKDIR /app
 
 COPY package*.json ./

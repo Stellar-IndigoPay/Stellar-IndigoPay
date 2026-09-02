@@ -934,7 +934,6 @@ pub enum ContractError {
     EscrowFundingFailed = 63,
     EscrowReleaseFailed = 64,
     EscrowClaimFailed = 65,
-
     // ── Governance & voting (66–75) ─────────────────────────────────────────
     CannotDelegateToSelf = 66,
     AlreadyDelegatedToThisAddress = 67,
@@ -1019,22 +1018,20 @@ pub enum ContractError {
     // ── Attestation settlement configuration (136–137) ──────────────────────
     AttestationContractNotConfigured = 136,
     AttestationContractMismatch = 137,
-    // ── Escrow custody (138) ────────────────────────────────────────────────
+    // ── Escrow balance guard (138) ───────────────────────────────────────────
     InsufficientContractBalanceForEscrow = 138,
-    // ── Re-entrancy (WS1, 139–140) ─────────────────────────────────────────
-    ReentrancyDetected = 139,
-    // ── Arithmetic (WS2, 141–143) ──────────────────────────────────────────
-    ArithmeticOverflow = 141,
-    ArithmeticUnderflow = 142,
-    // ── Per-token pause (WS3, 144–146) ─────────────────────────────────────
-    TokenSuspended = 144,
-    TokenAlreadySuspended = 145,
-    TokenNotSuspended = 146,
-    // ── TTL (WS6, 147–148) ─────────────────────────────────────────────────
-    BatchTooLargeForBudget = 147,
-    TtlBeyondRange = 148,
-    // ── WS2: storage integrity (149) ───────────────────────────────────────
-    StorageMissing = 149,
+    // ── Storage & arithmetic guards (139–141) ────────────────────────────────
+    StorageMissing = 139,
+    ArithmeticOverflow = 140,
+    ArithmeticUnderflow = 141,
+    // ── Re-entrancy guard (142) ──────────────────────────────────────────────
+    ReentrancyDetected = 142,
+    // ── Per-token suspension (WS3) (143–145) ─────────────────────────────────
+    TokenSuspended = 143,
+    TokenAlreadySuspended = 144,
+    TokenNotSuspended = 145,
+    // ── TTL batch budget (WS6) (146) ─────────────────────────────────────────
+    BatchTooLargeForBudget = 146,
 }
 // 48 hours × 3600 s / 5 s per ledger = 34 560 ledgers. The minimum delay
 // between `propose_upgrade` and the earliest ledger at which

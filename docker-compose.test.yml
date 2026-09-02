@@ -78,6 +78,12 @@ services:
     # cannot reach the repo-root scripts/ and docs/ trees otherwise. The
     # script resolves these relative to its own location (/scripts), so it
     # also expects docs/ and backend/src as siblings at the container root.
+    #
+    # scripts/deployContractScript.test.js also spawns the real
+    # scripts/deploy-contract.sh via a `../../scripts` relative path from
+    # backend/scripts — that resolves to /scripts inside this container
+    # (WORKDIR /app == repo-root `backend/`), which the `./backend` build
+    # context never includes, so it's bind-mounted read-only here too.
     volumes:
       - ./scripts:/scripts:ro
       - ./docs:/docs:ro
