@@ -6,6 +6,34 @@ on:
   pull_request:
 
 jobs:
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    outputs:
+      helm: ${{ steps.filter.outputs.helm }}
+      gitops: ${{ steps.filter.outputs.gitops }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Push: compare against the previous commit; PR: against the base.
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            helm:
+              - 'helm/**'
+            gitops:
+              - 'helm/**'
+              - 'k8s/**'
+              - 'monitoring/**'
+              - 'docs/runbooks/**'
+              - 'scripts/validate-alert-rules.js'
+              - 'scripts/validate-gitops.js'
+              - 'scripts/generate-runbook-index.js'
+              - 'package.json'
+              - 'package-lock.json'
+
   backend:
     name: Backend (Node.js)
     runs-on: ubuntu-latest
@@ -70,6 +98,8 @@ jobs:
   helm:
     name: Helm Chart Validation
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.helm == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v3
@@ -88,6 +118,8 @@ jobs:
   monitoring-and-gitops-lint:
     name: Alert Rules, Runbooks, and GitOps Validation
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.gitops == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v3

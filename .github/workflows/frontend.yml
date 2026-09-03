@@ -95,38 +95,10 @@ jobs:
           start-time: ${{ env.START_TIME }}
           max-seconds: '600'
 
-  frontend-tests-smoke:
-    name: Frontend jest smoke (jest-axe resolves)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Start Timer
-        run: echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-node-cached
-        with:
-          node-version: "22"
-          working-directory: frontend
-          legacy-peer-deps: 'true'
-      - name: Verify jest-axe + axe-core resolve
-        working-directory: frontend
-        run: npm run test:smoke:install
-      - name: Run Tabs + MonthlyGivingSetup jest smoke
-        working-directory: frontend
-        run: npm run test:smoke
-      - name: Budget Check
-        if: always()
-        uses: ./.github/actions/budget-check
-        with:
-          start-time: ${{ env.START_TIME }}
-          max-seconds: '600'
-
   frontend-tests:
     name: Frontend Unit + Accessibility Tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [frontend-tests-smoke]
     steps:
       - name: Start Timer
         run: echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
