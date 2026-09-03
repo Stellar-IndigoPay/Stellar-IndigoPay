@@ -1,0 +1,372 @@
+# nightly-deep.yml — consolidated nightly test-amplification runs.
+#
+# Consolidates the former flake-detection / property-nightly / fuzz-nightly /
+# a11y-nightly / load-test-nightly workflows into a single scheduled workflow.
+# Each job keeps its original behavior. Jobs that need a live target URL
+# (fuzz live scan, k6 load test) skip cleanly when BASE_URL is not configured
+# instead of failing closed every night — the offline parts still run.
+
+name: Nightly Deep Checks
+
+on:
+  schedule:
+    # 02:30 UTC daily.
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Base PROPERTY_SEED (empty = fresh date-derived seed)"
+        required: false
+        default: ""
+      property_iterations:
+        description: "Iterations per property"
+        required: false
+        default: "2000"
+      iterations:
+        description: "Invalid iterations per endpoint (offline + live fuzz)"
+        required: false
+        default: "1000"
+      base_url:
+        description: "Live base URL override (otherwise BASE_URL env secret)"
+        required: false
+        default: ""
+      scenario:
+        description: "k6 scenario (sustained | pr | ramp-up | token-burst)"
+        required: false
+        default: "pr"
+      pr_number:
+        description: "Optional PR number to post the load comparison as a comment"
+        required: false
+        default: ""
+
+concurrency:
+  group: nightly-deep
+  cancel-in-progress: false
+
+jobs:
+  detect-flakes-backend:
+    name: Backend Flake Detection
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        run_id: [1, 2, 3, 4, 5]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-node-cached
+        with:
+          node-version: "22"
+          working-directory: backend
+      - name: Run Backend Tests
+        working-directory: backend
+        run: npm test
+        continue-on-error: true
+
+  detect-flakes-frontend:
+    name: Frontend Flake Detection
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        run_id: [1, 2, 3, 4, 5]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-node-cached
+        with:
+          node-version: "22"
+          working-directory: frontend
+          legacy-peer-deps: 'true'
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+      - name: Run Frontend Tests
+        working-directory: frontend
+        run: npm test
+        continue-on-error: true
+
+  properties:
+    name: Property suites (extended, fresh seed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Resolve seed
+        id: seed
+        run: |
+          SEED="${{ github.event.inputs.seed }}"
+          if [ -z "$SEED" ]; then
+            SEED=$(( $(date -u +%s) % 2147483647 ))
+          fi
+          echo "seed=$SEED" >> "$GITHUB_OUTPUT"
+          echo "::notice::Nightly property run base seed: $SEED"
+
+      - name: Run extended property suites
+        env:
+          PROPERTY_SEED: ${{ steps.seed.outputs.seed }}
+          PROPERTY_ITERATIONS: ${{ github.event.inputs.property_iterations || '2000' }}
+        run: |
+          echo "PROPERTY_SEED=$PROPERTY_SEED" | tee property-run-seed.txt
+          echo "PROPERTY_ITERATIONS=$PROPERTY_ITERATIONS" | tee -a property-run-seed.txt
+          npm run test:properties:extended
+
+      - name: Upload run metadata on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: property-failure-seed-${{ steps.seed.outputs.seed }}
+          path: backend/property-run-seed.txt
+          if-no-files-found: ignore
+
+  fuzz:
+    name: API Fuzz + OpenAPI Conformance
+    runs-on: ubuntu-latest
+    # BASE_URL is promoted to job-level env: GitHub Actions does not allow the
+    # `secrets` context in a step-level `if`, but job-level env can hold the
+    # secret, and `env` IS available in a step `if`.
+    env:
+      BASE_URL: ${{ github.event.inputs.base_url || secrets.BASE_URL || '' }}
+      ITER: ${{ github.event.inputs.iterations || '1000' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies (js-yaml for spec loading)
+        run: npm ci
+
+      - name: Offline generator self-test (full build)
+        id: offline
+        run: |
+          # ITER is an env value used as data; the CLI validates it is a
+          # positive integer before doing any work.
+          node scripts/validate-openapi.js --fuzz "$ITER" \
+            > reports-offline.txt 2>&1 || CODE=$?
+          echo "--- offline report ---"
+          tail -30 reports-offline.txt
+          echo "offline_exit=${CODE:-0}" >> "$GITHUB_OUTPUT"
+          exit "${CODE:-0}"
+
+      - name: Skip live scan when no target is configured
+        if: ${{ env.BASE_URL == '' }}
+        run: |
+          echo "::notice::BASE_URL not configured — live conformance scan skipped; offline generator self-test ran above."
+
+      - name: Live conformance scan
+        id: live
+        if: ${{ env.BASE_URL != '' }}
+        run: |
+          node scripts/validate-openapi.js --live "$BASE_URL" --iterations "$ITER" \
+            > reports-live.txt 2>&1 || CODE=$?
+          echo "--- live report (tail) ---"
+          tail -60 reports-live.txt
+          echo "live_exit=${CODE:-0}" >> "$GITHUB_OUTPUT"
+          exit "${CODE:-0}"
+
+      - name: Upload fuzz report artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-reports
+          path: |
+            reports-offline.txt
+            reports-live.txt
+          if-no-files-found: ignore
+
+      - name: Summarize outcome
+        if: ${{ always() }}
+        run: |
+          echo "offline_exit=${{ steps.offline.outputs.offline_exit || '0' }} live_exit=${{ steps.live.outputs.live_exit || '0' }}"
+
+  a11y-scan:
+    name: Axe DevTools AA scan (live pages)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Build Next.js production bundle
+        working-directory: frontend
+        run: npm run build
+        env:
+          NEXT_PUBLIC_STELLAR_NETWORK: testnet
+          NEXT_PUBLIC_HORIZON_URL: https://horizon-testnet.stellar.org
+          NEXT_PUBLIC_API_URL: http://localhost:4000
+
+      - name: Start Next.js server in background
+        working-directory: frontend
+        run: |
+          E2E_TESTING=true nohup npm run start > next-start.log 2>&1 &
+          # Wait up to 60s for the server to respond.
+          timeout 60 bash -c 'until curl -fs http://localhost:3000 > /dev/null; do sleep 2; done'
+          echo "Next.js server is up."
+
+      - name: Run axe-core scan (public pages)
+        working-directory: frontend
+        run: npm run a11y:scan
+
+      # The donation flow (wallet picker, amount form with validation errors,
+      # transaction preview, and post-donation confirmation) needs a connected
+      # wallet and mocked backend/Horizon, so it cannot be covered by the
+      # static `axe-scan.mjs` crawler. It is scanned by the dedicated
+      # e2e/a11y.spec.ts (self-mocking via page.route), which runs against the
+      # same production `next start` server above.
+      - name: Run donation-flow accessibility scan
+        working-directory: frontend
+        run: npx playwright test -c playwright.v2.config.ts e2e/a11y.spec.ts --reporter=line
+
+      - name: Upload a11y report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a11y-report
+          path: frontend/a11y-report.json
+          if-no-files-found: warn
+
+      - name: Upload server log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: next-start.log
+          path: frontend/next-start.log
+          if-no-files-found: ignore
+
+  loadtest:
+    name: k6 Load + Baseline Compare
+    runs-on: ubuntu-latest
+    # Manually supplied workflow values are carried as job-level env DATA — never
+    # interpolated into a shell assignment — so a crafted base_url/scenario can't
+    # inject commands. The CLI/script validate the values before any network or
+    # shell work.
+    env:
+      BASE_URL: ${{ github.event.inputs.base_url || secrets.BASE_URL || '' }}
+      SCENARIO: ${{ github.event.inputs.scenario || 'pr' }}
+      PR_NUMBER: ${{ github.event.inputs.pr_number || '' }}
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: grafana/setup-k6-action@v1
+        if: ${{ env.BASE_URL != '' }}
+        with:
+          k6-version: v0.55.0
+
+      - name: Skip load test when no target is configured
+        if: ${{ env.BASE_URL == '' }}
+        run: |
+          echo "::notice::BASE_URL not configured — nightly load test skipped."
+
+      - name: Validate target base URL
+        id: validate
+        if: ${{ env.BASE_URL != '' }}
+        run: |
+          if ! [[ "$BASE_URL" =~ ^https?://[^[:space:]]+$ ]]; then
+            echo "::error::BASE_URL must be a valid non-empty http(s) URL (got: ${BASE_URL})."
+            exit 1
+          fi
+          echo "Testing against: ${BASE_URL}"
+
+      - name: Run k6 load test
+        id: k6run
+        if: ${{ env.BASE_URL != '' }}
+        env:
+          BASE_URL: ${{ env.BASE_URL }}
+          SCENARIO: ${{ env.SCENARIO }}
+        run: |
+          mkdir -p /tmp/loadtest
+          k6 run --summary-export /tmp/loadtest/summary.json \
+            scripts/load-test.js \
+            > /tmp/loadtest/k6.out 2>&1 || CODE=$?
+          echo "--- k6 output (tail) ---"
+          tail -40 /tmp/loadtest/k6.out
+          echo "k6_exit=${CODE:-0}" >> "$GITHUB_OUTPUT"
+          # A k6 failure (incl. unknown SCENARIO, or the hard 500ms gate after
+          # the guard below) is fatal.
+          exit "${CODE:-0}"
+
+      - name: Compare against committed baseline
+        id: compare
+        if: ${{ always() && env.BASE_URL != '' }}
+        run: |
+          set +e
+          node scripts/load-test-compare.js \
+            --baseline scripts/load-test-baseline.json \
+            --current /tmp/loadtest/summary.json \
+            --comment-path /tmp/loadtest/comment.md \
+            >> /tmp/loadtest/compare.out 2>&1
+          CODE=$?
+          cat /tmp/loadtest/compare.out
+          echo "compare_exit=${CODE}" >> "$GITHUB_OUTPUT"
+          echo "blocked=$([ "$CODE" -eq 1 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          exit 0 # comparison report is informational; block decision reported below
+
+      - name: Upload load-test artifacts
+        if: ${{ always() && env.BASE_URL != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-test-artifacts
+          path: |
+            /tmp/loadtest/*.out
+            /tmp/loadtest/summary.json
+            /tmp/loadtest/comment.md
+          if-no-files-found: ignore
+
+      # Optional: post the comparison as a PR comment when a PR number is given.
+      - name: Post PR comparison comment
+        if: ${{ always() && env.PR_NUMBER != '' && env.BASE_URL != '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ env.PR_NUMBER }}
+          COMMENT_FILE: /tmp/loadtest/comment.md
+        run: |
+          node -e '
+            const fs = require("fs");
+            const body = fs.readFileSync(process.env.COMMENT_FILE, "utf8");
+            fetch(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/issues/${process.env.PR_NUMBER}/comments`, {
+              method: "POST",
+              headers: { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, "Content-Type": "application/json", "X-GitHub-Api-Version": "2022-11-28" },
+              body: JSON.stringify({ body }),
+            }).then((r) => { if (!r.ok) throw new Error("comment failed: " + r.status); console.log("comment posted"); });
+          '
+
+      - name: Fail if a blocking regression is detected
+        if: ${{ steps.compare.outputs.blocked == 'true' && env.BASE_URL != '' }}
+        run: |
+          echo "::error::Load-test detected a merge-blocking performance regression."
+          exit 1
