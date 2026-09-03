@@ -74,7 +74,7 @@ export default function DonationTicker() {
                 ? formatXLM(item.amount)
                 : `${parseFloat(item.amount).toFixed(2)} ${item.asset}`}
             </span>
-            <span className="text-[#64748B] text-xs">{item.time}</span>
+            <span className="text-[#94A3B8] text-xs">{item.time}</span>
           </div>
         ))}
       </div>

@@ -136,6 +136,12 @@ NET=$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{en
 # Partition dance (scenario 05): sever the docker-network link between the
 # backend and Redis (a stateful process that is unreachable — distinct from a
 # crash) and reconnect it once the driver finishes its mid-partition checks.
+#
+# NOTE: `docker network disconnect` drops the compose service aliases, so a
+# bare `docker network connect` re-attaches Redis with NO DNS names — the
+# backend could then never resolve `redis` again and later scenarios (06
+# cascading) fail with ENOTFOUND on reconnect. The aliases are therefore
+# captured before the sever and restored verbatim on the heal.
 partition_dance() {
   local id="$1"
   log "scenario $id: waiting for driver to arm the partition"
@@ -146,13 +152,24 @@ partition_dance() {
     log "could not determine the compose network — cannot partition Redis"
     return 1
   fi
-  log "scenario $id: partitioning Redis (disconnecting from network '$NET')"
+  # Capture the aliases (e.g. "stellar-indigopay-redis-1 redis") before the
+  # disconnect wipes them, so the heal can restore DNS for later scenarios.
+  local redis_aliases
+  redis_aliases=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$v.Aliases}}{{end}}' "$redis_cid" 2>/dev/null | tr -d '[]' | awk '{$1=$1};1')
+  log "scenario $id: partitioning Redis (disconnecting from network '$NET') — aliases: '$redis_aliases'"
   docker network disconnect "$NET" "$redis_cid"
   touch "$RUN_DIR/$id.faulted.marker"
   log "scenario $id: waiting for driver mid-partition assertions"
   wait_for_marker "$RUN_DIR/$id.during.marker" 600
   log "scenario $id: healing partition — reconnecting Redis"
-  docker network connect "$NET" "$redis_cid"
+  # Rebuild the connect command with every alias restored. Quote each alias
+  # so spaces (impossible in docker names, but defensive) can't split args.
+  local alias_args=()
+  local a
+  for a in $redis_aliases; do
+    [ -n "$a" ] && alias_args+=(--alias "$a")
+  done
+  docker network connect "${alias_args[@]}" "$NET" "$redis_cid"
   wait_healthy "redis"
   touch "$RUN_DIR/$id.recovered.marker"
   log "scenario $id: waiting for driver to finish"

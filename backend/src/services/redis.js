@@ -29,6 +29,23 @@ const { ConsistentHashRing } = require("./consistentHash");
 const logger = require("../logger");
 const { metrics } = require("./metrics");
 
+/**
+ * Per-command timeout for every ioredis client (ms).
+ *
+ * Guards against half-open connections: when a network partition silently
+ * drops the TCP link (no RST/FIN reaches the client), ioredis would otherwise
+ * wait forever for a reply that never arrives — turning a cache outage into
+ * hung requests. With a timeout, the command rejects, the cache layer returns
+ * a miss (null) and the rate limiter falls back to its in-memory gate, which
+ * is exactly the degraded-but-functional behavior the chaos suite asserts.
+ *
+ * 5000ms is comfortably above normal cache round-trips while keeping the
+ * money path responsive during a partition.
+ */
+const REDIS_COMMAND_TIMEOUT_MS = Number(
+  process.env.REDIS_COMMAND_TIMEOUT_MS || 5000,
+);
+
 /** @type {import("ioredis").Redis[]} */
 let clients = [];
 
@@ -189,6 +206,11 @@ function initRedis() {
       lazyConnect: true,
       enableOfflineQueue: false,
       maxRetriesPerRequest: 0,
+      // Bound every command so a silently partitioned (half-open) connection
+      // fails fast into the cache-miss path instead of hanging the request
+      // forever. Without this, a dropped TCP link with no traffic makes
+      // ioredis wait indefinitely for a reply that never arrives.
+      commandTimeout: REDIS_COMMAND_TIMEOUT_MS,
     });
 
     attachSentinelEventHandlers(client);
@@ -222,6 +244,11 @@ function initRedis() {
       lazyConnect: true,
       enableOfflineQueue: false,
       maxRetriesPerRequest: 0,
+      // Bound every command so a silently partitioned (half-open) connection
+      // fails fast into the cache-miss path instead of hanging the request
+      // forever. Without this, a dropped TCP link with no traffic makes
+      // ioredis wait indefinitely for a reply that never arrives.
+      commandTimeout: REDIS_COMMAND_TIMEOUT_MS,
       // When a separate REDIS_PASSWORD is configured, pass it explicitly so
       // ioredis authenticates with it before any command (dual-version safe).
       ...(urlCreds.password ? {} : authCandidates[0] ? { password: authCandidates[0] } : {}),
@@ -242,6 +269,7 @@ function initRedis() {
           lazyConnect: true,
           enableOfflineQueue: false,
           maxRetriesPerRequest: 0,
+          commandTimeout: REDIS_COMMAND_TIMEOUT_MS,
           password: authCandidates[1],
         });
         fallback.connect().catch(() => {

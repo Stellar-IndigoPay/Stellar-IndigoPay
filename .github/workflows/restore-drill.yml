@@ -23,11 +23,22 @@ jobs:
     steps:
       - run: exit 0
 
+  # The drill needs real AWS credentials to pull the latest backup. Skip it
+  # cleanly when they are not configured in this repository (same policy as
+  # the Database Backup workflow) so the monthly schedule stays green until
+  # the secrets are provided.
   restore-drill:
-    if: github.event_name != 'push'
+    if: >-
+      github.event_name != 'push' &&
+      secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != '' &&
+      secrets.S3_BUCKET != ''
     name: Restore latest backup and assert row counts
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      # github-script opens an issue on failure; without this the drill's
+      # failure notification itself failed (403) on top of the restore.
+      issues: write
     steps:
       - uses: actions/checkout@v4
 
