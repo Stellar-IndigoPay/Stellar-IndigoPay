@@ -46,6 +46,8 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     name: EAS OTA Update (Staging)
     runs-on: ubuntu-latest
+    env:
+      EXPO_TOKEN_SET: ${{ secrets.EXPO_TOKEN != '' }}
     defaults:
       run:
         working-directory: mobile
@@ -60,12 +62,15 @@ jobs:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
       - name: Staged Rollout (Staging)
+        if: env.EXPO_TOKEN_SET == 'true'
         run: eas update --branch staging --message "$(git log -1 --oneline)" --non-interactive
 
   promote-ota:
     if: github.event_name == 'workflow_dispatch'
     name: Promote OTA to Production
     runs-on: ubuntu-latest
+    env:
+      EXPO_TOKEN_SET: ${{ secrets.EXPO_TOKEN != '' }}
     defaults:
       run:
         working-directory: mobile
@@ -80,4 +85,5 @@ jobs:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
       - name: Promote to Production
+        if: env.EXPO_TOKEN_SET == 'true'
         run: eas update --branch production --message "Production Promotion" --non-interactive
