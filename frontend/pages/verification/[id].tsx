@@ -12,17 +12,29 @@ import type { VerificationRequest } from "@/utils/types";
 
 export const getServerSideProps: GetServerSideProps = async (context) => {
   const { id } = context.params as { id: string };
-  const res = await fetch(
-    `${process.env.NEXT_PUBLIC_API_URL || ""}/api/verification-requests/${id}/public`,
-  );
-  if (!res.ok) {
+  // This has to be an absolute URL. Falling back to "" produced a relative path,
+  // which Node's fetch rejects with "Failed to parse URL" before it ever opens a
+  // connection — that rejection used to escape this function as a 500.
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+
+  try {
+    const res = await fetch(
+      `${apiUrl}/api/verification-requests/${encodeURIComponent(id)}/public`,
+    );
+    if (!res.ok) {
+      return { notFound: true };
+    }
+    const json = await res.json();
+    const data: VerificationRequest = json.data;
+    // The public API already redacts reviewerNotes, but we strip again for safety.
+    const { reviewerNotes, ...publicData } = data;
+    return { props: { verification: publicData } };
+  } catch {
+    // No answer from the API means we have nothing to render. Fall back to the
+    // same 404 the caller already uses for unknown ids, rather than letting the
+    // rejected fetch surface as an internal error.
     return { notFound: true };
   }
-  const json = await res.json();
-  const data: VerificationRequest = json.data;
-  // The public API already redacts reviewerNotes, but we strip again for safety.
-  const { reviewerNotes, ...publicData } = data;
-  return { props: { verification: publicData } };
 };
 
 interface Props {
@@ -84,7 +96,7 @@ export default function VerificationPage({ verification }: Props) {
                 <span
                   className={`px-2 py-1 rounded-full text-sm font-medium ${verification.status === "approved" ? "bg-green-100 text-green-800" : verification.status === "rejected" ? "bg-red-100 text-red-800" : "bg-yellow-100 text-yellow-800"}`}
                 >
-                  {verification.status.replace("_", " ")}
+                  {(verification.status ?? "").replace("_", " ")}
                 </span>
               </dd>
             </div>

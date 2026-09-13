@@ -167,6 +167,10 @@
   - Update `backend/src/routes/readiness.js` to include `soroban_rpc` health check in `/api/readyz` response (reports `ok` or `degraded`)
   - Add 33-test suite `backend/src/services/circuitBreaker.test.js` covering state machine, `isRetryable` classification, retry logic, circuit breaker open/half-open/closed transitions, and Prometheus metrics
 
+### Bug Fixes
+
+* **frontend:** `/verification/[id]` returned HTTP 500 for every id when `NEXT_PUBLIC_API_URL` was unset or the API was unreachable — the page's `getServerSideProps` built a relative URL (`|| ""`) that Node's `fetch` rejects with "Failed to parse URL", and the unguarded call let the rejection escape. It now uses the absolute fallback + `try/catch` its sibling pages already use and returns `notFound`, with regression tests
+
 ---
 
 # 1.0.0 (2026-07-12)
