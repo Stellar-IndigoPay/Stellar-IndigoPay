@@ -59,6 +59,8 @@ CVE-2026-64649 # next 14.2.35; fixed only in next 15.5.21+/16.2.11; next 15/16 m
 GHSA-8h8q-6873-q5fj # next 14.2.35; fixed only in next 15.5.16+/16.2.5; next 15/16 migration (React 19) tracked in PR 1199 # LaPoshBaby # 2026-12-31
 GHSA-h25m-26qc-wcjf # next 14.2.35; fixed only in next 15.0.8+; next 15/16 migration (React 19) tracked in PR 1199 # LaPoshBaby # 2026-12-31
 GHSA-q4gf-8mx6-v5v3 # next 14.2.35; fixed only in next 15.5.15+; next 15/16 migration (React 19) tracked in PR 1199 # LaPoshBaby # 2026-12-31
+CVE-2026-75604 # next 14.2.35; fixed only in next 15.5.24+/16.3.3; no 14.x backport exists; next 15/16 migration (React 19) tracked in PR 1199 # LaPoshBaby # 2026-12-31
+GHSA-2xp9-vwfh-vxw4 # next 14.2.35; fixed only in next 15.5.24+/16.3.3; no 14.x backport exists; next 15/16 migration (React 19) tracked in PR 1199 # LaPoshBaby # 2026-12-31
 
 # ---------------------------------------------------------------------------
 # Frontend-only: postcss 8.4.31 nested inside next@14.2.35 (exact pin).
