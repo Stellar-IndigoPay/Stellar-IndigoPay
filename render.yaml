@@ -1,0 +1,72 @@
+# render.yaml — one-click deployment for the IndigoPay backend.
+#
+# The frontend stays on Vercel; this Blueprint covers the Express API only.
+# `backend/src/server.js` starts every pg-boss queue in-process and calls
+# runMigrations() at boot, so a single web service is enough: no separate
+# worker service and no pre-deploy migration step.
+#
+# To deploy: Render Dashboard → New → Blueprint → select this repo. Render
+# prompts for the DATABASE_URL value (see `sync: false` below) — paste it
+# there, never into a chat or a committed file.
+services:
+  - type: web
+    name: stellar-indigopay-api
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      # `backend/src/config/env.js` only hard-requires STELLAR_NETWORK once
+      # NODE_ENV=production, and exits(1) at boot if it is missing.
+      - key: NODE_ENV
+        value: production
+      - key: STELLAR_NETWORK
+        value: testnet
+
+      # Postgres — paste the Neon *direct* connection string when prompted.
+      # Not the pooled one: migrations take a Postgres advisory lock, and a
+      # transaction-mode pooler does not preserve session-scoped locks.
+      - key: DATABASE_URL
+        sync: false
+
+      # Stellar / contract config, mirroring frontend/vercel.json so the API
+      # and the web app agree on which contract and network they talk to.
+      - key: HORIZON_URL
+        value: https://horizon-testnet.stellar.org
+      - key: CONTRACT_ID
+        value: CCG3QSD7FWTZ5W7NG2N7UDYWYVXF3I2NY5JGT3QPTZ6KHOIKUHMMJ6BT
+
+      # CORS + the URLs the backend puts in emails and redirects.
+      - key: ALLOWED_ORIGINS
+        value: https://stellar-indigo-pay.vercel.app,http://localhost:3000
+      - key: APP_URL
+        value: https://stellar-indigo-pay.vercel.app
+
+      # No Redis on this plan. Blank is a supported configuration: the cache
+      # layer silently bypasses itself rather than failing.
+      - key: REDIS_URL
+        value: ""
+
+      # Neon can take longer than the 1s default to hand out the first
+      # connection after idling, which would flap /api/readyz. Keep the
+      # documented invariant intact:
+      #   READINESS_CHECK_TIMEOUT_MS > DB_POOL_CONNECT_TIMEOUT + DB_STATEMENT_TIMEOUT_MS
+      - key: DB_POOL_CONNECT_TIMEOUT
+        value: "5000"
+      - key: DB_STATEMENT_TIMEOUT_MS
+        value: "3000"
+      - key: READINESS_CHECK_TIMEOUT_MS
+        value: "10000"
+
+      # Secrets: Render generates 256-bit values at creation. Read them from
+      # the service's Environment tab; nothing secret is written to the repo.
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_PASSWORD
+        generateValue: true
+      # Without this, GET /metrics is unauthenticated in production.
+      - key: METRICS_BEARER_TOKEN
+        generateValue: true
