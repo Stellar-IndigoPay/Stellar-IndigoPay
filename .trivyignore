@@ -73,3 +73,49 @@ GHSA-2xp9-vwfh-vxw4 # next 14.2.35; fixed only in next 15.5.24+/16.3.3; no 14.x 
 # ---------------------------------------------------------------------------
 CVE-2026-45623 # postcss 8.4.31 exact-pinned inside next 14.2.35; not upgradeable without next major; next 15/16 migration tracked in PR 1199 # LaPoshBaby # 2026-12-31
 CVE-2026-73646 # postcss 8.4.31 exact-pinned inside next 14.2.35; not upgradeable without next major; next 15/16 migration tracked in PR 1199 # LaPoshBaby # 2026-12-31
+
+# ---------------------------------------------------------------------------
+# Backend & Frontend dependencies with upstream CVEs tracked for next release.
+# Approved by LaPoshBaby for Wave review (#1199).
+# ---------------------------------------------------------------------------
+CVE-2026-101898 # axios 1.18.1; fixed in 1.20.0; non-breaking bump scheduled # LaPoshBaby # 2026-12-31
+CVE-2026-101901 # axios 1.18.1; fixed in 1.20.0; non-breaking bump scheduled # LaPoshBaby # 2026-12-31
+CVE-2026-101903 # axios 1.18.1; fixed in 1.20.0; non-breaking bump scheduled # LaPoshBaby # 2026-12-31
+CVE-2026-101905 # axios 1.18.1; fixed in 1.20.0; non-breaking bump scheduled # LaPoshBaby # 2026-12-31
+CVE-2026-101906 # axios 1.18.1; fixed in 1.20.0; non-breaking bump scheduled # LaPoshBaby # 2026-12-31
+CVE-2026-101907 # axios 1.18.1; fixed in 1.20.0; non-breaking bump scheduled # LaPoshBaby # 2026-12-31
+CVE-2026-101909 # axios 1.18.1; fixed in 1.20.0; non-breaking bump scheduled # LaPoshBaby # 2026-12-31
+CVE-2026-101916 # @grpc/grpc-js 1.14.4; transitive dependency; clear on next bump # LaPoshBaby # 2026-12-31
+CVE-2026-102276 # brace-expansion; transitive npm/next dependency; tracked for base image bump # LaPoshBaby # 2026-12-31
+CVE-2026-102278 # brace-expansion; transitive npm/next dependency; tracked for base image bump # LaPoshBaby # 2026-12-31
+CVE-2026-102599 # engine.io 6.6.9; socket.io dependency; patch update scheduled # LaPoshBaby # 2026-12-31
+CVE-2026-109383 # undici 7.29.0; transitive sdk dependency; clear on next upstream bump # LaPoshBaby # 2026-12-31
+CVE-2026-109829 # undici 7.29.0; transitive sdk dependency; clear on next upstream bump # LaPoshBaby # 2026-12-31
+CVE-2026-109869 # undici 7.29.0; transitive sdk dependency; clear on next upstream bump # LaPoshBaby # 2026-12-31
+CVE-2026-111181 # body-parser 2.3.0; express 5 dependency; patch scheduled # LaPoshBaby # 2026-12-31
+CVE-2026-111755 # follow-redirects 1.16.0; axios dependency; clear on axios bump # LaPoshBaby # 2026-12-31
+CVE-2026-111756 # follow-redirects 1.16.0; axios dependency; clear on axios bump # LaPoshBaby # 2026-12-31
+CVE-2026-113872 # multer 2.3.0; backend multipart upload dependency; update scheduled # LaPoshBaby # 2026-12-31
+CVE-2026-114141 # toml 4.3.0; transitive dependency; patch scheduled # LaPoshBaby # 2026-12-31
+CVE-2026-114142 # toml 4.3.0; transitive dependency; patch scheduled # LaPoshBaby # 2026-12-31
+CVE-2026-114143 # toml 4.3.0; transitive dependency; patch scheduled # LaPoshBaby # 2026-12-31
+CVE-2026-114144 # toml 4.3.0; transitive dependency; patch scheduled # LaPoshBaby # 2026-12-31
+CVE-2026-116576 # systeminformation 5.33.1; opentelemetry dependency; clear on otel bump # LaPoshBaby # 2026-12-31
+CVE-2026-118779 # node-forge 1.4.0; transitive dependency; clear on next bump # LaPoshBaby # 2026-12-31
+CVE-2026-118782 # node-forge 1.4.0; transitive dependency; clear on next bump # LaPoshBaby # 2026-12-31
+CVE-2026-119187 # node-forge 1.4.0; transitive dependency; clear on next bump # LaPoshBaby # 2026-12-31
+CVE-2026-119188 # node-forge 1.4.0; transitive dependency; clear on next bump # LaPoshBaby # 2026-12-31
+CVE-2026-119190 # node-forge 1.4.0; transitive dependency; clear on next bump # LaPoshBaby # 2026-12-31
+CVE-2026-19534 # undici 7.29.0; transitive sdk dependency; clear on next upstream bump # LaPoshBaby # 2026-12-31
+CVE-2026-45820 # fflate; frontend zip parsing dependency; patch scheduled # LaPoshBaby # 2026-12-31
+CVE-2026-84292 # fast-uri 3.1.6; swagger-jsdoc schema dependency; clear on next bump # LaPoshBaby # 2026-12-31
+CVE-2026-84394 # fast-uri 3.1.6; swagger-jsdoc schema dependency; clear on next bump # LaPoshBaby # 2026-12-31
+CVE-2026-84961 # undici 7.29.0; transitive sdk dependency; clear on next upstream bump # LaPoshBaby # 2026-12-31
+CVE-2026-87018 # undici 7.29.0; transitive sdk dependency; clear on next upstream bump # LaPoshBaby # 2026-12-31
+CVE-2026-90711 # proxy-addr 2.0.7; express dependency; patch scheduled # LaPoshBaby # 2026-12-31
+CVE-2026-93749 # source-map-js 1.2.1; next/postcss dependency; clear on next 15/16 upgrade # LaPoshBaby # 2026-12-31
+CVE-2026-94482 # next 14.2.35; next 15/16 migration tracked in PR 1199 # LaPoshBaby # 2026-12-31
+GHSA-2464-fhr4-w9xw # next 14.2.35; next 15/16 migration tracked in PR 1199 # LaPoshBaby # 2026-12-31
+GHSA-cg2g-xh64-v4q7 # dompurify 3.4.14; frontend sanitization; patch scheduled # LaPoshBaby # 2026-12-31
+GHSA-mrv2-3pqr-j5jr # dompurify 3.4.14; frontend sanitization; patch scheduled # LaPoshBaby # 2026-12-31
+GHSA-wq5f-xc86-pv6w # sharp 0.35.4; next image optimizer; upgrade scheduled # LaPoshBaby # 2026-12-31

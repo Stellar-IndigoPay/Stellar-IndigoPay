@@ -25,11 +25,31 @@ jobs:
   # instead-of-fail-closed policy as the BASE_URL jobs in nightly-deep.yml):
   # verify-backup and notify-on-failure cascade to skipped via their needs
   # conditions, so scheduled runs stay green until the secrets are provided.
+  check-secrets:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - name: Check database and storage credentials
+        id: check
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          AWS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          GCS_KEY: ${{ secrets.GCS_SA_KEY }}
+        run: |
+          if [ -n "$DB_HOST" ] && [ -n "$DB_USER" ] && [ -n "$DB_PASSWORD" ] && ([ -n "$AWS_KEY" ] || [ -n "$GCS_KEY" ]); then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "Database and/or storage credentials not configured; skipping backup."
+          fi
+
   backup-database:
-    if: >-
-      github.event_name != 'push' &&
-      secrets.DB_HOST != '' && secrets.DB_USER != '' && secrets.DB_PASSWORD != '' &&
-      (secrets.AWS_ACCESS_KEY_ID != '' || secrets.GCS_SA_KEY != '')
+    needs: check-secrets
+    if: needs.check-secrets.outputs.configured == 'true'
     name: Backup PostgreSQL Database
     runs-on: ubuntu-latest
     env:

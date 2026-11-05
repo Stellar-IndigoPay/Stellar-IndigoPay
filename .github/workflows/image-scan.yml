@@ -48,6 +48,14 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build effective ignore list for scan
+        run: |
+          node scripts/trivyignore-gate.js .trivyignore > /tmp/trivy-ignore-bare.txt
+
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -58,7 +66,7 @@ jobs:
           exit-code: "0"
           ignore-unfixed: true
           vuln-type: "os,library"
-          trivyignores: ".trivyignore"
+          trivyignores: /tmp/trivy-ignore-bare.txt
 
       - name: Upload Trivy scan results to GitHub Security tab
         if: always()
@@ -111,6 +119,13 @@ jobs:
           ignore-unfixed: false
           vuln-type: "os,library"
           trivyignores: /tmp/trivy-ignore-bare.txt
+
+      - name: Show gate report on failure
+        if: failure()
+        run: |
+          if [ -f /tmp/trivy-${{ matrix.service }}-gate.json ]; then
+            cat /tmp/trivy-${{ matrix.service }}-gate.json
+          fi
 
       - name: Summarize gate result
         if: success()
