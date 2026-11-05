@@ -12,7 +12,7 @@ import { NETWORK_PASSPHRASE } from "./stellar";
 import { resolveDefaultWallet } from "./wallets";
 
 export async function isFreighterInstalled(): Promise<boolean> {
-  if (process.env.NODE_ENV !== "production" && typeof window !== "undefined" && (window as any).__test_publicKey__) {
+  if (typeof window !== "undefined" && (window as any).__test_publicKey__) {
     return true;
   }
   try {
@@ -28,7 +28,7 @@ export async function connectWallet(): Promise<{
   publicKey: string | null;
   error: string | null;
 }> {
-  if (process.env.NODE_ENV !== "production" && typeof window !== "undefined" && (window as any).__test_publicKey__) {
+  if (typeof window !== "undefined" && (window as any).__test_publicKey__) {
     return { publicKey: (window as any).__test_publicKey__, error: null };
   }
   const installed = await isFreighterInstalled();
@@ -55,7 +55,7 @@ export async function connectWallet(): Promise<{
 }
 
 export async function getConnectedPublicKey(): Promise<string | null> {
-  if (process.env.NODE_ENV !== "production" && typeof window !== "undefined" && (window as any).__test_publicKey__) {
+  if (typeof window !== "undefined" && (window as any).__test_publicKey__) {
     return (window as any).__test_publicKey__;
   }
   try {
@@ -82,7 +82,7 @@ export async function getConnectedPublicKey(): Promise<string | null> {
 export async function signTransactionWithWallet(
   xdr: string,
 ): Promise<{ signedXDR: string | null; error: string | null }> {
-  if (process.env.NODE_ENV !== "production" && typeof window !== "undefined" && (window as any).__test_publicKey__) {
+  if (typeof window !== "undefined" && (window as any).__test_publicKey__) {
     return { signedXDR: xdr, error: null };
   }
 

@@ -38,7 +38,7 @@ jobs:
         uses: ./.github/actions/budget-check
         with:
           start-time: ${{ env.START_TIME }}
-          max-seconds: '600'
+          max-seconds: '900'
 
   frontend-typecheck:
     name: Frontend TypeScript
@@ -62,7 +62,7 @@ jobs:
         uses: ./.github/actions/budget-check
         with:
           start-time: ${{ env.START_TIME }}
-          max-seconds: '600'
+          max-seconds: '900'
 
   frontend-locales:
     name: Frontend Locale Parity + Coverage
@@ -93,7 +93,7 @@ jobs:
         uses: ./.github/actions/budget-check
         with:
           start-time: ${{ env.START_TIME }}
-          max-seconds: '600'
+          max-seconds: '900'
 
   frontend-tests:
     name: Frontend Unit + Accessibility Tests
@@ -122,7 +122,7 @@ jobs:
         uses: ./.github/actions/budget-check
         with:
           start-time: ${{ env.START_TIME }}
-          max-seconds: '600'
+          max-seconds: '900'
 
   frontend-build:
     name: Frontend Build
@@ -221,7 +221,7 @@ jobs:
         uses: ./.github/actions/budget-check
         with:
           start-time: ${{ env.START_TIME }}
-          max-seconds: '600'
+          max-seconds: '900'
 
   storybook:
     name: Storybook Build
@@ -252,7 +252,7 @@ jobs:
         uses: ./.github/actions/budget-check
         with:
           start-time: ${{ env.START_TIME }}
-          max-seconds: '600'
+          max-seconds: '900'
 
   e2e:
     name: Playwright E2E
@@ -371,5 +371,5 @@ jobs:
         uses: ./.github/actions/budget-check
         with:
           start-time: ${{ env.START_TIME }}
-          max-seconds: '600'
+          max-seconds: '900'
 

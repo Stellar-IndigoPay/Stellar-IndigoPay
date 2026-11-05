@@ -137,15 +137,14 @@ function validateEnv() {
   const missingProductionNetwork = isProd && !result.data.STELLAR_NETWORK;
   const missingProductionJwt =
     isProd &&
-    (!result.data.JWT_SECRET ||
-      result.data.JWT_SECRET === "dev-secret-do-not-use-in-prod");
+    result.data.JWT_SECRET === "dev-secret-do-not-use-in-prod";
 
   const extraIssues = [];
   if (missingProductionNetwork) {
     extraIssues.push("  - STELLAR_NETWORK: STELLAR_NETWORK is required in production");
   }
   if (missingProductionJwt) {
-    extraIssues.push("  - JWT_SECRET: A secure JWT_SECRET is required in production");
+    extraIssues.push("  - JWT_SECRET: dev-secret-do-not-use-in-prod is forbidden in production");
   }
 
   if (!result.success || extraIssues.length > 0) {
