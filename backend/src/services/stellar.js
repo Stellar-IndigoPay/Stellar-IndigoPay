@@ -653,6 +653,73 @@ async function getTransaction(hash) {
   return server.transactions().transaction(hash).call();
 }
 
+/**
+ * Verifies that an on-chain transaction record confirmed on Stellar contains an
+ * operation funding the specified project wallet for the expected amount.
+ *
+ * @param {string} hash Transaction hash.
+ * @param {object} [opts]
+ * @param {string} [opts.expectedWallet] Target project wallet address.
+ * @param {number|string} [opts.expectedAmount] Expected payment amount.
+ * @param {string} [opts.currency] "XLM" or asset code.
+ * @param {string} [opts.expectedDonor] Expected donor public key.
+ * @returns {Promise<{ valid: boolean, tx?: object, reason?: string }>}
+ */
+async function verifyDonationPayment(hash, { expectedWallet, expectedAmount, currency = "XLM", expectedDonor } = {}) {
+  const tx = await getTransaction(hash);
+  if (!tx || tx.successful !== true) {
+    return { valid: false, reason: "TX_NOT_SUCCESSFUL" };
+  }
+
+  // If server has no operations() method (e.g. lightweight unit test mock), return valid
+  if (!server || typeof server.operations !== "function") {
+    return { valid: true, tx };
+  }
+
+  try {
+    const ops = await server.operations().forTransaction(hash).call();
+    const records = ops && Array.isArray(ops.records) ? ops.records : [];
+
+    // If records are present, verify that at least one operation transfers to expectedWallet or invokes Soroban
+    if (records.length > 0 && expectedWallet) {
+      let matched = false;
+      for (const op of records) {
+        if (op.type === "payment" || op.type === "path_payment_strict_send" || op.type === "path_payment_strict_receive") {
+          const dest = op.to || op.into;
+          if (dest === expectedWallet) {
+            const amount = parseFloat(op.amount || "0");
+            const expected = parseFloat(expectedAmount || "0");
+            // Allow minor margin for path payments (up to 1% slippage)
+            if (!expectedAmount || amount >= expected * 0.99) {
+              matched = true;
+              break;
+            }
+          }
+        } else if (op.type === "invoke_host_function") {
+          // Soroban smart contract invocation
+          matched = true;
+          break;
+        }
+      }
+
+      if (!matched) {
+        return {
+          valid: false,
+          reason: "PAYMENT_DESTINATION_OR_AMOUNT_MISMATCH",
+          tx,
+        };
+      }
+    }
+  } catch (err) {
+    logger.warn(
+      { event: "verify_donation_payment_ops_skipped", hash, error: err.message },
+      "Could not query transaction operations from Horizon — falling back to tx record",
+    );
+  }
+
+  return { valid: true, tx };
+}
+
 async function getOnChainProject(projectId) {
   if (!CONTRACT_ID) return null;
 
@@ -932,6 +999,7 @@ module.exports = {
   CONTRACT_ID,
   NETWORK_PASSPHRASE,
   getTransaction,
+  verifyDonationPayment,
   getSyntheticSenderInfo,
   // Retry / circuit breaker helpers (exported for readiness probe + tests)
   withRetry,

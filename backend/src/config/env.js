@@ -133,19 +133,30 @@ const envSchema = z.object({
 
 function validateEnv() {
   const result = envSchema.safeParse(process.env);
-  const missingProductionNetwork =
-    result.success &&
-    result.data.NODE_ENV === "production" &&
-    !result.data.STELLAR_NETWORK;
+  const isProd = result.success && result.data.NODE_ENV === "production";
+  const missingProductionNetwork = isProd && !result.data.STELLAR_NETWORK;
+  const missingProductionJwt =
+    isProd &&
+    (!result.data.JWT_SECRET ||
+      result.data.JWT_SECRET === "dev-secret-do-not-use-in-prod");
 
-  if (!result.success || missingProductionNetwork) {
+  const extraIssues = [];
+  if (missingProductionNetwork) {
+    extraIssues.push("  - STELLAR_NETWORK: STELLAR_NETWORK is required in production");
+  }
+  if (missingProductionJwt) {
+    extraIssues.push("  - JWT_SECRET: A secure JWT_SECRET is required in production");
+  }
+
+  if (!result.success || extraIssues.length > 0) {
     // zod v4 renamed `error.errors` to `error.issues`. Fall back to
     // `errors` for any v3 shim that still defines it.
-    const issues = missingProductionNetwork
-      ? "  - STELLAR_NETWORK: STELLAR_NETWORK is required in production"
-      : (result.error.issues || result.error.errors || [])
-        .map((e) => `  - ${(e.path || []).join(".")}: ${e.message}`)
-        .join("\n");
+    const issues = [
+      ...((result.error && (result.error.issues || result.error.errors)) || []).map(
+        (e) => `  - ${(e.path || []).join(".")}: ${e.message}`,
+      ),
+      ...extraIssues,
+    ].join("\n");
     console.error(`\n[Startup] Environment validation failed:\n${issues}\n`);
     process.exit(1);
   }

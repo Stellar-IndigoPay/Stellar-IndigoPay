@@ -559,7 +559,7 @@ router.get("/:id/verify", async (req, res) => {
  * @returns {Promise<void>} Sends the created campaign payload.
  * @throws {Error} If validation or database insertion fails.
  */
-router.post("/:id/campaigns", validate(campaignSchema), async (req, res, next) => {
+router.post("/:id/campaigns", adminRequired, validate(campaignSchema), async (req, res, next) => {
   try {
     const { title, goalXLM, deadline, description } = req.body || {};
     const trimmedTitle = title;
@@ -681,7 +681,7 @@ router.get("/:id/milestones", async (req, res, next) => {
  * @returns {Promise<void>} Sends the created milestone payload.
  * @throws {Error} If validation or insertion fails.
  */
-router.post("/:id/milestones", async (req, res, next) => {
+router.post("/:id/milestones", adminRequired, async (req, res, next) => {
   try {
     const { title, percentage } = req.body;
     if (!title || typeof percentage !== "number") {
@@ -725,7 +725,7 @@ router.post("/:id/milestones", async (req, res, next) => {
  * @returns {Promise<void>} Sends the updated milestone payload.
  * @throws {Error} If the milestone update fails.
  */
-router.post("/:id/milestones/:milestoneId/reach", async (req, res, next) => {
+router.post("/:id/milestones/:milestoneId/reach", adminRequired, async (req, res, next) => {
   try {
     const { transactionHash } = req.body;
     const result = await pool.query(
@@ -1202,7 +1202,7 @@ router.post("/:id/generate-summary", async (req, res, next) => {
  * @returns {Promise<void>} Sends the created matching offer payload.
  * @throws {Error} If validation or persistence fails.
  */
-router.post("/:id/matching", async (req, res, next) => {
+router.post("/:id/matching", adminRequired, async (req, res, next) => {
   try {
     const { matcherAddress, capXLM, multiplier, expiresAt } = req.body || {};
 
@@ -1347,7 +1347,7 @@ router.get("/:id/matching", async (req, res, next) => {
  * @returns {Promise<void>} Sends the updated project payload.
  * @throws {Error} If validation or persistence fails.
  */
-router.patch("/:id/status", async (req, res, next) => {
+router.patch("/:id/status", adminRequired, async (req, res, next) => {
   try {
     const { status, reason, adminAddress } = req.body || {};
     const validStatuses = ["active", "rejected", "paused"];

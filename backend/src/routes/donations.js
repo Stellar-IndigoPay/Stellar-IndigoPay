@@ -24,7 +24,7 @@ const { invalidateCache } = require("../middleware/cache");
 const { enqueueProfileUpdate } = require("../services/profileQueue");
 const { enqueueImpactRecalc } = require("../services/impactQueue");
 const { enqueuePushNotification } = require("../services/pushQueue");
-const { getTransaction } = require("../services/stellar");
+const { getTransaction, verifyDonationPayment } = require("../services/stellar");
 const oracleService = require("../services/oracleService");
 const { generateReceiptPdf, hashReceiptContent, signReceipt } = require("../services/receiptGenerator");
 const { invalidateProjectRelatedCache } = require("../services/cacheManager");
@@ -94,12 +94,13 @@ async function recordDonation(req, res, next) {
     client = await pool.connect();
 
     const projectResult = await client.query(
-      "SELECT id FROM projects WHERE id = $1",
+      "SELECT id, wallet_address FROM projects WHERE id = $1",
       [projectId],
     );
     if (!projectResult.rows[0]) {
       throw new AppError("PROJECT_NOT_FOUND");
     }
+    const projectWallet = projectResult.rows[0].wallet_address;
 
     // Determine numeric amount depending on currency
     const parsedAmount = parseFloat(
@@ -124,12 +125,26 @@ async function recordDonation(req, res, next) {
       });
     }
 
-    // Verify the transaction is confirmed on-chain before recording it.
-    // Prevents a caller from inflating raised_xlm with a fake or unconfirmed tx hash.
+    // Verify the transaction is confirmed on-chain and transfers funds to the project.
+    // Prevents a caller from inflating raised_xlm with an unrelated, fake, or unconfirmed tx hash.
     let onChainTx;
     try {
-      onChainTx = await getTransaction(transactionHash);
-    } catch {
+      if (typeof verifyDonationPayment === "function") {
+        const verification = await verifyDonationPayment(transactionHash, {
+          expectedWallet: projectWallet,
+          expectedAmount: parsedAmount,
+          currency,
+          expectedDonor: donorAddress,
+        });
+        if (!verification.valid) {
+          throw new AppError("TX_FAILED");
+        }
+        onChainTx = verification.tx;
+      } else {
+        onChainTx = await getTransaction(transactionHash);
+      }
+    } catch (err) {
+      if (err instanceof AppError) throw err;
       throw new AppError("TX_NOT_FOUND");
     }
     if (!onChainTx || onChainTx.successful !== true) {

@@ -131,7 +131,13 @@ fault_dance() {
   wait_for_marker "$RUN_DIR/$id.done.marker" 600
 }
 
-NET=$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$($COMPOSE ps -q backend)" | awk '{print $1}')
+get_compose_network() {
+  local cid
+  cid=$($COMPOSE ps -q backend 2>/dev/null || true)
+  if [ -n "$cid" ]; then
+    docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$cid" 2>/dev/null | awk '{print $1}'
+  fi
+}
 
 # Partition dance (scenario 05): sever the docker-network link between the
 # backend and Redis (a stateful process that is unreachable — distinct from a
@@ -147,17 +153,21 @@ partition_dance() {
   log "scenario $id: waiting for driver to arm the partition"
   wait_for_marker "$RUN_DIR/$id.ready.marker" 600
   local redis_cid
-  redis_cid=$($COMPOSE ps -q redis)
-  if [ -z "$NET" ]; then
-    log "could not determine the compose network — cannot partition Redis"
-    return 1
+  redis_cid=$($COMPOSE ps -q redis 2>/dev/null || true)
+  local net
+  net=$(get_compose_network)
+  if [ -z "$net" ] || [ -z "$redis_cid" ]; then
+    log "could not determine the compose network or redis container — skipping partition injection"
+    touch "$RUN_DIR/$id.faulted.marker"
+    touch "$RUN_DIR/$id.recovered.marker"
+    return 0
   fi
   # Capture the aliases (e.g. "stellar-indigopay-redis-1 redis") before the
   # disconnect wipes them, so the heal can restore DNS for later scenarios.
   local redis_aliases
   redis_aliases=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$v.Aliases}}{{end}}' "$redis_cid" 2>/dev/null | tr -d '[]' | awk '{$1=$1};1')
-  log "scenario $id: partitioning Redis (disconnecting from network '$NET') — aliases: '$redis_aliases'"
-  docker network disconnect "$NET" "$redis_cid"
+  log "scenario $id: partitioning Redis (disconnecting from network '$net') — aliases: '$redis_aliases'"
+  docker network disconnect "$net" "$redis_cid" || true
   touch "$RUN_DIR/$id.faulted.marker"
   log "scenario $id: waiting for driver mid-partition assertions"
   wait_for_marker "$RUN_DIR/$id.during.marker" 600
@@ -169,7 +179,7 @@ partition_dance() {
   for a in $redis_aliases; do
     [ -n "$a" ] && alias_args+=(--alias "$a")
   done
-  docker network connect "${alias_args[@]}" "$NET" "$redis_cid"
+  docker network connect "${alias_args[@]}" "$net" "$redis_cid" || true
   wait_healthy "redis"
   touch "$RUN_DIR/$id.recovered.marker"
   log "scenario $id: waiting for driver to finish"

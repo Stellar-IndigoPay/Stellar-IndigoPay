@@ -24,6 +24,9 @@ function getSecret() {
   try {
     return currentJwtSecret("JWT_SECRET");
   } catch {
+    if (process.env.NODE_ENV === "production" && !process.env.JWT_SECRET) {
+      throw new Error("JWT_SECRET is required in production environment");
+    }
     return process.env.JWT_SECRET || "dev-secret-do-not-use-in-prod";
   }
 }
@@ -48,10 +51,17 @@ function signToken(payload, expiresIn) {
  */
 function verifyToken(token) {
   const keys = jwtAcceptanceKeys("JWT_SECRET");
+  const fallback =
+    process.env.NODE_ENV === "production"
+      ? process.env.JWT_SECRET
+      : (process.env.JWT_SECRET || "dev-secret-do-not-use-in-prod");
   const candidates =
     keys.length > 0
       ? keys.map((k) => k.key)
-      : [process.env.JWT_SECRET || "dev-secret-do-not-use-in-prod"];
+      : (fallback ? [fallback] : []);
+  if (candidates.length === 0) {
+    throw new Error("jwt malformed or no secret configured");
+  }
   let lastError;
   for (const candidate of candidates) {
     try {
@@ -60,7 +70,7 @@ function verifyToken(token) {
       lastError = err;
     }
   }
-  throw lastError || new Error("jwt malformed or no secret configured");
+  throw lastError || new Error("jwt malformed or invalid secret");
 }
 
 function generateAccessToken(adminId, role = "admin") {

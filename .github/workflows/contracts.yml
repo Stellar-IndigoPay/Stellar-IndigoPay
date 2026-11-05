@@ -218,16 +218,22 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/cargo/bin/cargo-kani
-            ~/cargo/bin/kani
+            ~/.cargo/bin/cargo-kani
+            ~/.cargo/bin/kani
             ~/.kani
           key: kani-verifier-${{ runner.os }}-${{ hashFiles('.github/workflows/contracts.yml') }}
 
+      - name: Add Cargo bin to PATH
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
       - name: Install Kani Verifier
-        if: steps.kani-cache.outputs.cache-hit != 'true'
         run: |
-          cargo install --locked kani-verifier
-          cargo kani setup
+          if ! command -v cargo-kani >/dev/null 2>&1; then
+            cargo install --locked kani-verifier
+          fi
+          if [ ! -d "$HOME/.kani" ] || ! command -v kani >/dev/null 2>&1; then
+            cargo kani setup
+          fi
 
       - name: Run Kani verification
         run: cargo kani

@@ -35,6 +35,11 @@ function timingSafeStringEquals(a, b) {
 function metricsAuth(req, res, next) {
   const expected = process.env.METRICS_BEARER_TOKEN;
   if (!expected) {
+    if (process.env.NODE_ENV === "production") {
+      return res
+        .status(401)
+        .json({ error: "METRICS_BEARER_TOKEN must be configured in production" });
+    }
     return next(); // Dev mode: no token configured.
   }
   const auth = req.get("Authorization") || "";
