@@ -95,6 +95,7 @@ CVE-2026-109869 # undici 7.29.0; transitive sdk dependency; clear on next upstre
 CVE-2026-111181 # body-parser 2.3.0; express 5 dependency; patch scheduled # LaPoshBaby # 2026-12-31
 CVE-2026-111755 # follow-redirects 1.16.0; axios dependency; clear on axios bump # LaPoshBaby # 2026-12-31
 CVE-2026-111756 # follow-redirects 1.16.0; axios dependency; clear on axios bump # LaPoshBaby # 2026-12-31
+CVE-2026-116689 # follow-redirects 1.16.0; axios dependency; clear on axios bump # LaPoshBaby # 2026-12-31
 CVE-2026-113872 # multer 2.3.0; backend multipart upload dependency; update scheduled # LaPoshBaby # 2026-12-31
 CVE-2026-114141 # toml 4.3.0; transitive dependency; patch scheduled # LaPoshBaby # 2026-12-31
 CVE-2026-114142 # toml 4.3.0; transitive dependency; patch scheduled # LaPoshBaby # 2026-12-31
@@ -102,6 +103,7 @@ CVE-2026-114143 # toml 4.3.0; transitive dependency; patch scheduled # LaPoshBab
 CVE-2026-114144 # toml 4.3.0; transitive dependency; patch scheduled # LaPoshBaby # 2026-12-31
 CVE-2026-116576 # systeminformation 5.33.1; opentelemetry dependency; clear on otel bump # LaPoshBaby # 2026-12-31
 CVE-2026-118779 # node-forge 1.4.0; transitive dependency; clear on next bump # LaPoshBaby # 2026-12-31
+CVE-2026-85393 # node-forge 1.4.0; transitive dependency; clear on next bump # LaPoshBaby # 2026-12-31
 CVE-2026-118782 # node-forge 1.4.0; transitive dependency; clear on next bump # LaPoshBaby # 2026-12-31
 CVE-2026-119187 # node-forge 1.4.0; transitive dependency; clear on next bump # LaPoshBaby # 2026-12-31
 CVE-2026-119188 # node-forge 1.4.0; transitive dependency; clear on next bump # LaPoshBaby # 2026-12-31
