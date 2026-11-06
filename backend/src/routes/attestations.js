@@ -204,18 +204,15 @@ router.get("/:id", readLimiter, async (req, res, next) => {
  * unset (development), a deterministic dummy secret is used so the
  * endpoint is still callable for manual tests.
  */
-router.post(
-  "/build-proof",
-  readLimiter,
-  (req, res, next) => {
-    // In production, require admin credentials to prevent arbitrary signing oracle attacks.
-    // In test/dev environments, allow unauthenticated access for testing and local integration.
-    if (process.env.NODE_ENV === "production") {
-      return adminRequired(req, res, next);
-    }
-    next();
-  },
-  async (req, res, next) => {
+router.post("/build-proof", readLimiter, async (req, res, next) => {
+  if (process.env.NODE_ENV === "production") {
+    let authorized = false;
+    await adminRequired(req, res, () => {
+      authorized = true;
+    });
+    if (!authorized) return;
+  }
+
   try {
     const body = req.body || {};
     const sourceChain = attestationService.assertValidSourceChain(
