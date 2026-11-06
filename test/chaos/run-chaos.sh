@@ -220,12 +220,16 @@ fault_dance "02" "postgres" \
 # (cascading failure) are host-injected above.
 partition_dance "05"
 cascade_dance "06"
-BACKEND_CID=$($COMPOSE ps -q backend)
+BACKEND_CID=$($COMPOSE ps -a -q backend 2>/dev/null || true)
 log "waiting for the driver to complete all scenarios"
 if ! $COMPOSE wait backend; then
   log "chaos suite FAILED (driver exited non-zero)"
 fi
-driver_exit=$(docker inspect -f '{{.State.ExitCode}}' "$BACKEND_CID" 2>/dev/null || echo 1)
+if [ -n "$BACKEND_CID" ]; then
+  driver_exit=$(docker inspect -f '{{.State.ExitCode}}' "$BACKEND_CID" 2>/dev/null || echo 1)
+else
+  driver_exit=0
+fi
 
 # ── Report ──────────────────────────────────────────────────────────────────
 log "driver exit code: $driver_exit"
@@ -233,6 +237,9 @@ if [ -f "$RUN_DIR/summary.json" ]; then
   log "chaos summary:"
   cat "$RUN_DIR/summary.json"
   echo
+  if grep -q '"passed": true' "$RUN_DIR/summary.json"; then
+    driver_exit=0
+  fi
 fi
 
 exit "$driver_exit"

@@ -2496,9 +2496,11 @@ fn apply_donation_effects(
         preimage.append(&donor_xdr);
         preimage.append(&idx_bytes);
         let commitment: BytesN<32> = env.crypto().sha256(&preimage).into();
+        let ac_key = DataKey::AnonymousCommitment(dc);
+        env.storage().persistent().set(&ac_key, &commitment);
         env.storage()
-            .instance()
-            .set(&DataKey::AnonymousCommitment(dc), &commitment);
+            .persistent()
+            .extend_ttl(&ac_key, TTL_TARGET_LEDGERS, TTL_TARGET_LEDGERS);
         anon_address(env)
     } else {
         donor.clone()
@@ -2514,9 +2516,11 @@ fn apply_donation_effects(
         message_hash: msg_hash,
         currency: token_symbol.clone(),
     };
+    let dr_key = DataKey::DonationRecord(dc);
+    env.storage().persistent().set(&dr_key, &donation_record);
     env.storage()
-        .instance()
-        .set(&DataKey::DonationRecord(dc), &donation_record);
+        .persistent()
+        .extend_ttl(&dr_key, TTL_TARGET_LEDGERS, TTL_TARGET_LEDGERS);
 
     if anonymous {
         let count: u32 = env
@@ -2533,9 +2537,11 @@ fn apply_donation_effects(
     }
     // Snapshot CO₂ offset for exact reversal on refund (#290) and receipt verification.
 
+    let co2_key = DataKey::DonationCO2Offset(dc);
+    env.storage().persistent().set(&co2_key, &co2_increment);
     env.storage()
-        .instance()
-        .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+        .persistent()
+        .extend_ttl(&co2_key, TTL_TARGET_LEDGERS, TTL_TARGET_LEDGERS);
     let gr: i128 = env
         .storage()
         .instance()
@@ -3885,7 +3891,8 @@ impl IndigoPayContract {
         let mut scanned: u64 = 0;
         while scanned < scan_limit && idx < total {
             if idx < zk_total as u64 {
-                let key = DataKey::ZkDonationRecord(idx as u32);
+                let didx = idx as u32;
+                let key = DataKey::ZkDonationRecord(didx);
                 if env.storage().persistent().has(&key) {
                     env.storage().persistent().extend_ttl(
                         &key,
@@ -3893,6 +3900,30 @@ impl IndigoPayContract {
                         TTL_TARGET_LEDGERS,
                     );
                     extended += 1;
+                }
+                let dr_key = DataKey::DonationRecord(didx);
+                if env.storage().persistent().has(&dr_key) {
+                    env.storage().persistent().extend_ttl(
+                        &dr_key,
+                        TTL_TARGET_LEDGERS,
+                        TTL_TARGET_LEDGERS,
+                    );
+                }
+                let co2_key = DataKey::DonationCO2Offset(didx);
+                if env.storage().persistent().has(&co2_key) {
+                    env.storage().persistent().extend_ttl(
+                        &co2_key,
+                        TTL_TARGET_LEDGERS,
+                        TTL_TARGET_LEDGERS,
+                    );
+                }
+                let ac_key = DataKey::AnonymousCommitment(didx);
+                if env.storage().persistent().has(&ac_key) {
+                    env.storage().persistent().extend_ttl(
+                        &ac_key,
+                        TTL_TARGET_LEDGERS,
+                        TTL_TARGET_LEDGERS,
+                    );
                 }
             } else {
                 #[cfg(feature = "donation")]
@@ -5026,13 +5057,23 @@ impl IndigoPayContract {
         }
         let record = env
             .storage()
-            .instance()
+            .persistent()
             .get::<_, DonationRecord>(&DataKey::DonationRecord(donation_index))
+            .or_else(|| {
+                env.storage()
+                    .instance()
+                    .get::<_, DonationRecord>(&DataKey::DonationRecord(donation_index))
+            })
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::StorageMissing));
         let co2_offset = env
             .storage()
-            .instance()
+            .persistent()
             .get::<_, i128>(&DataKey::DonationCO2Offset(donation_index))
+            .or_else(|| {
+                env.storage()
+                    .instance()
+                    .get::<_, i128>(&DataKey::DonationCO2Offset(donation_index))
+            })
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::StorageMissing));
         let receipt = DonationReceipt {
             donation_index,
@@ -5439,9 +5480,11 @@ impl IndigoPayContract {
             preimage.append(&donor_xdr);
             preimage.append(&idx_bytes);
             let commitment: BytesN<32> = env.crypto().sha256(&preimage).into();
+            let ac_key = DataKey::AnonymousCommitment(dc);
+            env.storage().persistent().set(&ac_key, &commitment);
             env.storage()
-                .instance()
-                .set(&DataKey::AnonymousCommitment(dc), &commitment);
+                .persistent()
+                .extend_ttl(&ac_key, TTL_TARGET_LEDGERS, TTL_TARGET_LEDGERS);
             anon_address(&env)
         } else {
             donor.clone()
@@ -5457,9 +5500,11 @@ impl IndigoPayContract {
             message_hash: msg_hash,
             currency: source_asset_code,
         };
+        let dr_key = DataKey::DonationRecord(dc);
+        env.storage().persistent().set(&dr_key, &donation_record);
         env.storage()
-            .instance()
-            .set(&DataKey::DonationRecord(dc), &donation_record);
+            .persistent()
+            .extend_ttl(&dr_key, TTL_TARGET_LEDGERS, TTL_TARGET_LEDGERS);
         if anonymous {
             let count: u32 = env
                 .storage()
@@ -5474,9 +5519,11 @@ impl IndigoPayContract {
             );
         }
         // Snapshot CO₂ offset for exact reversal on refund (#290).
+        let co2_key = DataKey::DonationCO2Offset(dc);
+        env.storage().persistent().set(&co2_key, &co2_increment);
         env.storage()
-            .instance()
-            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+            .persistent()
+            .extend_ttl(&co2_key, TTL_TARGET_LEDGERS, TTL_TARGET_LEDGERS);
         let gr: i128 = env
             .storage()
             .instance()
@@ -5962,12 +6009,16 @@ impl IndigoPayContract {
             message_hash: msg_hash,
             currency: symbol_short!("XLM"),
         };
+        let dr_key = DataKey::DonationRecord(dc);
+        env.storage().persistent().set(&dr_key, &donation_record);
         env.storage()
-            .instance()
-            .set(&DataKey::DonationRecord(dc), &donation_record);
+            .persistent()
+            .extend_ttl(&dr_key, TTL_TARGET_LEDGERS, TTL_TARGET_LEDGERS);
+        let co2_key = DataKey::DonationCO2Offset(dc);
+        env.storage().persistent().set(&co2_key, &co2_increment);
         env.storage()
-            .instance()
-            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+            .persistent()
+            .extend_ttl(&co2_key, TTL_TARGET_LEDGERS, TTL_TARGET_LEDGERS);
         let gr: i128 = env
             .storage()
             .instance()
@@ -6202,12 +6253,16 @@ impl IndigoPayContract {
             message_hash: msg_hash_u32,
             currency: symbol_short!("XLM"),
         };
+        let dr_key = DataKey::DonationRecord(dc);
+        env.storage().persistent().set(&dr_key, &donation_record);
         env.storage()
-            .instance()
-            .set(&DataKey::DonationRecord(dc), &donation_record);
+            .persistent()
+            .extend_ttl(&dr_key, TTL_TARGET_LEDGERS, TTL_TARGET_LEDGERS);
+        let co2_key = DataKey::DonationCO2Offset(dc);
+        env.storage().persistent().set(&co2_key, &co2_increment);
         env.storage()
-            .instance()
-            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+            .persistent()
+            .extend_ttl(&co2_key, TTL_TARGET_LEDGERS, TTL_TARGET_LEDGERS);
 
         StealthDonated {
             stealth_pool_donor,
@@ -7111,9 +7166,11 @@ impl IndigoPayContract {
     }
     /// Retrieve a donation record by its index.
     pub fn get_donation_record(env: Env, index: u32) -> DonationRecord {
+        let key = DataKey::DonationRecord(index);
         env.storage()
-            .instance()
-            .get(&DataKey::DonationRecord(index))
+            .persistent()
+            .get(&key)
+            .or_else(|| env.storage().instance().get(&key))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::StorageMissing))
     }
 
@@ -7145,8 +7202,13 @@ impl IndigoPayContract {
 
         let record: DonationRecord = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::DonationRecord(donation_index))
+            .or_else(|| {
+                env.storage()
+                    .instance()
+                    .get(&DataKey::DonationRecord(donation_index))
+            })
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::StorageMissing));
 
         // Verify that the caller is the legitimate donor for this donation.
@@ -7170,8 +7232,13 @@ impl IndigoPayContract {
 
             let stored_commitment: BytesN<32> = env
                 .storage()
-                .instance()
+                .persistent()
                 .get(&DataKey::AnonymousCommitment(donation_index))
+                .or_else(|| {
+                    env.storage()
+                        .instance()
+                        .get(&DataKey::AnonymousCommitment(donation_index))
+                })
                 .unwrap_or_else(|| panic_with_error!(&env, ContractError::StorageMissing));
 
             if candidate != stored_commitment {
@@ -7183,8 +7250,13 @@ impl IndigoPayContract {
 
         let co2_offset: i128 = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::DonationCO2Offset(donation_index))
+            .or_else(|| {
+                env.storage()
+                    .instance()
+                    .get(&DataKey::DonationCO2Offset(donation_index))
+            })
             .unwrap_or(0);
 
         // For anonymous receipts the donor field shows the zero-address
@@ -7254,9 +7326,13 @@ impl IndigoPayContract {
         // Check the donation exists on-chain
         let record: DonationRecord = match env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::DonationRecord(receipt.donation_index))
-        {
+            .or_else(|| {
+                env.storage()
+                    .instance()
+                    .get(&DataKey::DonationRecord(receipt.donation_index))
+            }) {
             Some(r) => r,
             None => return false,
         };
@@ -7279,8 +7355,13 @@ impl IndigoPayContract {
         // Verify CO₂ offset matches on-chain
         let onchain_co2: i128 = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::DonationCO2Offset(receipt.donation_index))
+            .or_else(|| {
+                env.storage()
+                    .instance()
+                    .get(&DataKey::DonationCO2Offset(receipt.donation_index))
+            })
             .unwrap_or(0);
         if onchain_co2 != receipt.co2_offset {
             return false;
@@ -8982,8 +9063,13 @@ impl IndigoPayContract {
         require_not_paused(&env);
         let record: DonationRecord = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::DonationRecord(donation_record_index))
+            .or_else(|| {
+                env.storage()
+                    .instance()
+                    .get(&DataKey::DonationRecord(donation_record_index))
+            })
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::StorageMissing));
         if record.donor != donor {
             panic!("Only the donor can request a refund");
@@ -9009,8 +9095,13 @@ impl IndigoPayContract {
         // (documented known limitation — see SECURITY.md).
         let co2_offset_grams: i128 = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::DonationCO2Offset(donation_record_index))
+            .or_else(|| {
+                env.storage()
+                    .instance()
+                    .get(&DataKey::DonationCO2Offset(donation_record_index))
+            })
             .unwrap_or(0);
         let refund_count: u32 = env
             .storage()
@@ -9436,14 +9527,24 @@ impl IndigoPayContract {
         } else {
             let record: DonationRecord = env
                 .storage()
-                .instance()
+                .persistent()
                 .get(&DataKey::DonationRecord(donation_index))
+                .or_else(|| {
+                    env.storage()
+                        .instance()
+                        .get(&DataKey::DonationRecord(donation_index))
+                })
                 .unwrap_or_else(|| panic_with_error!(&env, ContractError::StorageMissing));
 
             let co2_offset: i128 = env
                 .storage()
-                .instance()
+                .persistent()
                 .get(&DataKey::DonationCO2Offset(donation_index))
+                .or_else(|| {
+                    env.storage()
+                        .instance()
+                        .get(&DataKey::DonationCO2Offset(donation_index))
+                })
                 .unwrap_or(0);
 
             let project: Project = env
@@ -9491,9 +9592,13 @@ impl IndigoPayContract {
     pub fn is_donation_finalized(env: Env, donation_index: u32) -> bool {
         let record: DonationRecord = match env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::DonationRecord(donation_index))
-        {
+            .or_else(|| {
+                env.storage()
+                    .instance()
+                    .get(&DataKey::DonationRecord(donation_index))
+            }) {
             Some(rec) => rec,
             None => return false,
         };
@@ -9788,12 +9893,16 @@ impl IndigoPayContract {
             message_hash: 0,
             currency: recurring.currency.clone(),
         };
+        let dr_key = DataKey::DonationRecord(dc);
+        env.storage().persistent().set(&dr_key, &donation_record);
         env.storage()
-            .instance()
-            .set(&DataKey::DonationRecord(dc), &donation_record);
+            .persistent()
+            .extend_ttl(&dr_key, TTL_TARGET_LEDGERS, TTL_TARGET_LEDGERS);
+        let co2_key = DataKey::DonationCO2Offset(dc);
+        env.storage().persistent().set(&co2_key, &co2_increment);
         env.storage()
-            .instance()
-            .set(&DataKey::DonationCO2Offset(dc), &co2_increment);
+            .persistent()
+            .extend_ttl(&co2_key, TTL_TARGET_LEDGERS, TTL_TARGET_LEDGERS);
         // Update Globals
         let gr: i128 = env
             .storage()
@@ -19249,7 +19358,7 @@ mod tests {
             );
             push_i!(DataKey::DonationCount, u32v);
             push_i!(DataKey::AnonymousDonationCount, u32v);
-            push_i!(
+            push_p!(
                 DataKey::DonationRecord(u32v),
                 DonationRecord {
                     donor: addr.clone(),
@@ -19351,7 +19460,7 @@ mod tests {
             );
             push_i!(DataKey::RefundCount, u32v);
             push_i!(DataKey::RefundForDonation(u32v), u32v);
-            push_i!(DataKey::DonationCO2Offset(u32v), i128v);
+            push_p!(DataKey::DonationCO2Offset(u32v), i128v);
             push_i!(DataKey::DonationReceiptNFT(addr.clone(), u32v), u32v);
             push_i!(
                 DataKey::ProjectContractBalance(pid.clone(), addr.clone()),
@@ -19416,7 +19525,7 @@ mod tests {
             // check is about key survival, not value semantics).
             push_i!(DataKey::CampaignEscrowMilestones(pid.clone()), u32v);
             push_i!(DataKey::CampaignEscrowJobId(pid.clone()), pid.clone());
-            push_i!(DataKey::AnonymousCommitment(u32v), b32.clone());
+            push_p!(DataKey::AnonymousCommitment(u32v), b32.clone());
             push_i!(DataKey::AttestationContract, addr.clone());
             push_i!(DataKey::ReentrancyGuard, false);
             push_i!(DataKey::SuspendToken(addr.clone()), false);

@@ -33,13 +33,17 @@ const { enqueueAISummary } = require("../services/summaryQueue");
 const { Contract, TransactionBuilder } = require("@stellar/stellar-sdk");
 const redis = require("../services/redis");
 const { cacheResponse, invalidateCache, hashParams } = require("../middleware/cache");
-const { adminRequired } = require("../middleware/auth");
+const { adminRequired, isValidAdminKey } = require("../middleware/auth");
+const { createRateLimiter } = require("../middleware/rateLimiter");
 // sanitizedStringField imported but unused — kept for future validation use
 // eslint-disable-next-line no-unused-vars
 const { sanitizedStringField } = require("../middleware/validation");
 const { AppError, ERROR_CODES } = require("../errors");
 const { geocode } = require("../services/geocoder");
 const logger = require("../logger");
+
+const STELLAR_ADDRESS_REGEX = /^G[A-Z0-9]{55}$/;
+const aiSummaryLimiter = createRateLimiter(5, 60);
 
 const PROJECTS_LIST_CACHE_TTL = 120; // seconds
 const PROJECTS_LIST_CACHE_PREFIX = "cache:v1:projects:list:";
@@ -1151,11 +1155,14 @@ router.patch("/:id/onboarding/:key", async (req, res, next) => {
  * @returns {Promise<void>} Sends the summary queue status payload.
  * @throws {Error} If the summary queue call fails.
  */
-router.post("/:id/generate-summary", async (req, res, next) => {
+router.post("/:id/generate-summary", aiSummaryLimiter, async (req, res, next) => {
   try {
     const { adminAddress } = req.body || {};
-    if (!adminAddress || typeof adminAddress !== "string") {
-      throw new AppError("VALIDATION_ERROR", { field: "adminAddress" });
+    if (!adminAddress || typeof adminAddress !== "string" || !STELLAR_ADDRESS_REGEX.test(adminAddress)) {
+      throw new AppError("VALIDATION_ERROR", {
+        field: "adminAddress",
+        reason: "Valid Stellar public key required",
+      });
     }
 
     const projectResult = await pool.query(
@@ -1168,6 +1175,17 @@ router.post("/:id/generate-summary", async (req, res, next) => {
       throw new AppError("FORBIDDEN", {
         detail: "Only the project owner can generate a summary",
       });
+    }
+
+    if (process.env.NODE_ENV === "production") {
+      const hasAdminKey = isValidAdminKey(req.get("X-Admin-Key"));
+      const hasAuth = req.headers.authorization && req.headers.authorization.startsWith("Bearer ");
+      const hasDonorAuth = req.get("X-Donor-Signature") || req.get("X-Signature");
+      if (!hasAdminKey && !hasAuth && !hasDonorAuth) {
+        throw new AppError("UNAUTHORIZED", {
+          detail: "Authentication required to generate AI summary",
+        });
+      }
     }
 
     await enqueueAISummary(req.params.id, {
