@@ -9442,8 +9442,13 @@ impl IndigoPayContract {
 
         let donation: DonationRecord = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::DonationRecord(donation_index))
+            .or_else(|| {
+                env.storage()
+                    .instance()
+                    .get(&DataKey::DonationRecord(donation_index))
+            })
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::StorageMissing));
 
         if challenger == donation.donor {
